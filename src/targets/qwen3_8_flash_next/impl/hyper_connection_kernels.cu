@@ -616,8 +616,8 @@ up_reduction_vectorized_kernel(
 }
 
 // Down & Up MMA Geometries and Schedules
-// Prefill down-projection is N=320 x T. A 32x32 tile yields only 40 CTAs at T=128 on 188 SMs.
-// Split-K=4 keeps that tile and launches 160 CTAs. Decode T<=8 stays on the fused path.
+// Prefill down-projection is N=320 x T. Ampere+ uses split-K MMA; Volta falls back to
+// the existing BF16 row-dot kernel below because the local MMA helper has no split-K API.
 using DownGeom    = ops::detail::Bf16GemvGeometry<320, 10240>;
 using DownSched   = ops::detail::Bf16MmaSchedule<32, 32, 256, 16, 16, 2, 2, ops::Cache::cg, ops::Cache::cg,
                                                  ops::detail::Bf16MmaFragmentPipeline::PingPong,
@@ -628,6 +628,34 @@ using UpSched     = ops::detail::Bf16MmaSchedule<64, 64, 64, 32, 32, 2, 2, ops::
                                                  ops::detail::Bf16MmaFragmentPipeline::PingPong,
                                                  ops::detail::Bf16MmaRaster::TokenFast>;
 
+#if defined(NINFER_VOLTA_BUILD)
+__global__ void __launch_bounds__(256)
+down_prefill_volta_kernel(const __nv_bfloat16* __restrict__ x,
+                          const __nv_bfloat16* __restrict__ weight,
+                          __nv_bfloat16* __restrict__ low_rank, int tokens) {
+    __shared__ float s_warp_sums[8];
+    const int row = static_cast<int>(blockIdx.x);
+    const int token = static_cast<int>(blockIdx.y);
+    const int tid = static_cast<int>(threadIdx.x);
+    if (row >= kLowRank || token >= tokens) { return; }
+    const auto* x_token = x + static_cast<std::int64_t>(token) * kConcat;
+    const auto* w_row = weight + static_cast<std::int64_t>(row) * kConcat;
+    float sum = 0.0F;
+    for (int chunk = tid; chunk < (kConcat / 8); chunk += 256) {
+        const int col = chunk * 8;
+        const auto w_raw = *reinterpret_cast<const ulonglong2*>(w_row + col);
+        const auto x_raw = *reinterpret_cast<const ulonglong2*>(x_token + col);
+        sum = hyper_dot_chunk(w_raw, x_raw, sum);
+    }
+    sum = ops::block_reduce_sum<256>(sum, s_warp_sums);
+    if (tid == 0) {
+        low_rank[static_cast<std::int64_t>(token) * kLowRank + row] =
+            __float2bfloat16_rn(ops::silu(sum * 0.25F));
+    }
+}
+#endif
+
+#if !defined(NINFER_VOLTA_BUILD)
 template <bool FullTokens>
 void launch_down_prefill(const __nv_bfloat16* x, const __nv_bfloat16* weight, float* partials,
                          __nv_bfloat16* low_rank, int tokens, cudaStream_t stream) {
@@ -651,15 +679,23 @@ void launch_down_prefill(const __nv_bfloat16* x, const __nv_bfloat16* weight, fl
         <<<reduce_blocks, kReduceThreads, 0, stream>>>(partials, low_rank, tokens);
     CUDA_CHECK(cudaGetLastError());
 }
+#endif
 
 void launch_down_prefill_dispatch(const __nv_bfloat16* x, const __nv_bfloat16* weight,
                                   float* partials, __nv_bfloat16* low_rank, int tokens,
                                   cudaStream_t stream) {
+#if defined(NINFER_VOLTA_BUILD)
+    (void)partials;
+    down_prefill_volta_kernel<<<dim3(kLowRank, tokens), 256, 0, stream>>>(x, weight, low_rank,
+                                                                          tokens);
+    CUDA_CHECK(cudaGetLastError());
+#else
     if ((tokens % DownSched::kBlockCols) == 0) {
         launch_down_prefill<true>(x, weight, partials, low_rank, tokens, stream);
     } else {
         launch_down_prefill<false>(x, weight, partials, low_rank, tokens, stream);
     }
+#endif
 }
 
 template <bool FullTokens>
