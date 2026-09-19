@@ -1,0 +1,38 @@
+name: sm70 compile
+
+on:
+  push:
+    branches: [backport/qwen3.8-flash-next]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-sm70:
+    runs-on: ubuntu-24.04
+    container:
+      image: nvidia/cuda:12.8.1-devel-ubuntu24.04
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates git cmake ninja-build pkg-config \
+            libavformat-dev libavcodec-dev libavutil-dev libswscale-dev
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Configure sm70 core build
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_APPS=OFF \
+            -DBUILD_TESTING=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF
+      - name: Compile Flash-Next target
+        run: cmake --build build --target ninfer_qwen3_8_flash_next --parallel 2
