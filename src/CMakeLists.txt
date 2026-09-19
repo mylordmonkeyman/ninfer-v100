@@ -432,6 +432,7 @@ add_library(ninfer_engine STATIC
 ninfer_internal_includes(ninfer_engine)
 target_include_directories(ninfer_engine PUBLIC ${PROJECT_SOURCE_DIR}/include)
 
+add_subdirectory(targets/qwen3_vision)
 add_subdirectory(targets/qwen3_8_flash_next)
 
 add_subdirectory(targets/qwen3_6)
