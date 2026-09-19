@@ -144,6 +144,11 @@ FlashNextTextExecutor::FlashNextTextExecutor(const TextModelView& model,
                       ? (allocation.plan().config.speculative_draft_tokens + 1U)
                       : 1U))))),
       round_completion_(device) {
+#if defined(NINFER_VOLTA_BUILD)
+    // Mapped expert staging currently performs host-visible route selection and H2D copies,
+    // which are not capture-safe. Keep Flash-Next SM70 decode eager until staging is device-side.
+    use_cuda_graph_ = false;
+#endif
     instantiate_graphs();
 }
 
