@@ -133,10 +133,12 @@ MoeWeights load_moe(const MoePlan& plan, const artifact::MaterializedArtifact& b
         .shared_gate        = bf16_weight(backing, plan.shared_gate, 640, 2'560),
         .shared_up          = bf16_weight(backing, plan.shared_up, 640, 2'560),
         .shared_gate_weight = bf16_weight(backing, plan.shared_gate_weight, 1, 2'560),
-        .expert_gate_up =
-            materialized_nvfp4_expert_bank_view(backing, plan.expert_gate_up, 512, 1'280, 2'560),
-        .expert_down =
-            materialized_nvfp4_expert_bank_view(backing, plan.expert_down, 512, 2'560, 640),
+        .expert_gate_up = plan.experts_mapped_host
+            ? mapped_nvfp4_expert_bank_view(backing, plan.expert_gate_up, 512, 1'280, 2'560)
+            : materialized_nvfp4_expert_bank_view(backing, plan.expert_gate_up, 512, 1'280, 2'560),
+        .expert_down = plan.experts_mapped_host
+            ? mapped_nvfp4_expert_bank_view(backing, plan.expert_down, 512, 2'560, 640)
+            : materialized_nvfp4_expert_bank_view(backing, plan.expert_down, 512, 2'560, 640),
     };
 }
 
