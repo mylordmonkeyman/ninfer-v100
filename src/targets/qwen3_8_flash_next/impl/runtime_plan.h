@@ -201,7 +201,11 @@ struct FlashNextRuntimeConfig {
     bool vision_enabled                    = false;
     std::uint32_t max_vision_tokens        = 4096;
     // Prefill QSA attention: GQA tiled MMA (12 query heads share each KV tile). Default off.
+    #if defined(NINFER_VOLTA_BUILD)
+    bool use_qsa_prefill_mma               = false;
+#else
     bool use_qsa_prefill_mma               = true;
+#endif
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     GdnStateStorage gdn_state_storage      = GdnStateStorage::FP32;
 };
