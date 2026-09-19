@@ -38,6 +38,21 @@ std::size_t checked_align_up_256(std::size_t bytes) {
     return (bytes + 255ULL) & ~255ULL;
 }
 
+std::size_t flash_next_expert_staging_bytes() {
+#if defined(NINFER_VOLTA_BUILD)
+    constexpr std::size_t kExpertSlots = 512;
+    const auto nvfp4_bank_bytes = [](std::size_t slots, std::size_t rows, std::size_t columns) {
+        const std::size_t elements = checked_mul<std::size_t>(checked_mul<std::size_t>(slots, rows), columns);
+        return checked_add(checked_add(elements / 2, elements / 16),
+                           checked_mul<std::size_t>(slots, sizeof(float)));
+    };
+    return checked_add(nvfp4_bank_bytes(kExpertSlots, 1'280, 2'560),
+                       nvfp4_bank_bytes(kExpertSlots, 2'560, 640));
+#else
+    return 0;
+#endif
+}
+
 void validate_config_invariants(const FlashNextRuntimeConfig& config,
                                 std::uint32_t& resolved_state_slots) {
     if (config.max_concurrency < 1 || config.max_concurrency > 8) {
@@ -243,17 +258,7 @@ flash_next_capacity_curve(const FlashNextRuntimeConfig& config) {
     const std::size_t stride_bytes = flash_next_physical_stride_bytes_per_group(config.kv_cache) /
         kFullAttentionLayers * (kFullAttentionLayers +
                                (config.speculative_draft_tokens > 0 ? 1ULL : 0ULL));
-    std::size_t expert_staging_bytes = 0;
-#if defined(NINFER_VOLTA_BUILD)
-    constexpr std::size_t kExpertSlots = 512;
-    const auto nvfp4_bank_bytes = [](std::size_t slots, std::size_t rows, std::size_t columns) {
-        const std::size_t elements = checked_mul<std::size_t>(checked_mul<std::size_t>(slots, rows), columns);
-        return checked_add(checked_add(elements / 2, elements / 16),
-                           checked_mul<std::size_t>(slots, sizeof(float)));
-    };
-    expert_staging_bytes = checked_add(nvfp4_bank_bytes(kExpertSlots, 1'280, 2'560),
-                                       nvfp4_bank_bytes(kExpertSlots, 2'560, 640));
-#endif
+    const std::size_t expert_staging_bytes = flash_next_expert_staging_bytes();
     ninfer::runtime::SequenceCapacityCurve curve{};
     curve.main_page_tokens                     = kMainPageGroupTokens;
     curve.minimum_main_page_groups             = min_groups;
@@ -342,21 +347,7 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
             : 0ULL;
     plan.cuda_graph_allowance_bytes = graph_allowance;
 
-    std::size_t volta_expert_staging_bytes = 0;
-#if defined(NINFER_VOLTA_BUILD)
-    // Prefill may touch every routed expert. Reserve one compact bank large enough for
-    // all 512 experts so mapped-host prompt ingestion can use the same fixed-address
-    // runtime storage as decode without an unplanned device allocation.
-    constexpr std::size_t kDecodeExpertSlots = 512;
-    const auto nvfp4_bank_bytes = [](std::size_t slots, std::size_t rows, std::size_t columns) {
-        const std::size_t elements = checked_mul<std::size_t>(checked_mul<std::size_t>(slots, rows), columns);
-        return checked_add(checked_add(elements / 2, elements / 16), checked_mul<std::size_t>(slots, sizeof(float)));
-    };
-    const std::size_t gate_bytes = nvfp4_bank_bytes(kDecodeExpertSlots, 1'280, 2'560);
-    const std::size_t gate_aligned = checked_add(gate_bytes, std::size_t{255}) & ~std::size_t{255};
-    volta_expert_staging_bytes = checked_add(
-        gate_aligned, nvfp4_bank_bytes(kDecodeExpertSlots, 2'560, 640));
-#endif
+    const std::size_t volta_expert_staging_bytes = flash_next_expert_staging_bytes();
     plan.expert_staging_bytes = volta_expert_staging_bytes;
     plan.total_device_bytes = checked_add(
         checked_add(plan.attention_kv_bytes, plan.indexer_block_keys_bytes),
