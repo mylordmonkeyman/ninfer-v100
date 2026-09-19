@@ -29,6 +29,8 @@ struct Nvfp4ExpertBankView {
     std::uint64_t code_bytes_per_expert;
     std::uint64_t scale_bytes_per_expert;
     bool mapped_host = false;
+    const std::byte* mapped_payload = nullptr;
+    std::uint64_t mapped_payload_bytes = 0;
 
     [[nodiscard]] Nvfp4ExpertMatrixView expert(std::int32_t index) const;
 };
