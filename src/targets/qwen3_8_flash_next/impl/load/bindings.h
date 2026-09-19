@@ -48,6 +48,7 @@ struct MoePlan {
     artifact::ObjectHandle expert_gate_up;
     artifact::ObjectHandle expert_down;
     bool experts_nvfp4 = true;
+    bool experts_mapped_host = false;
 };
 
 struct GdnPlan {
