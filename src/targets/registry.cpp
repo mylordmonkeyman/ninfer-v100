@@ -194,6 +194,19 @@ Qwen3_6_35BA3BInstance::Qwen3_6_35BA3BInstance(std::unique_ptr<LoadedQwen3_6_35B
 
 Qwen3_6_35BA3BInstance::~Qwen3_6_35BA3BInstance() = default;
 
+LoadedQwen3_8FlashNext::LoadedQwen3_8FlashNext(
+    std::unique_ptr<Qwen3_8FlashNext::LoadedModel> stable_model, const EngineOptions& options)
+    : model(std::move(stable_model)), frontend(Qwen3_8FlashNext::make_frontend(*model, options)) {}
+LoadedQwen3_8FlashNext::~LoadedQwen3_8FlashNext() = default;
+Qwen3_8FlashNextInstance::Qwen3_8FlashNextInstance(
+    std::unique_ptr<LoadedQwen3_8FlashNext> stable_loaded, runtime::KvCapacityResolution resolution,
+    Qwen3_8FlashNext::SequencePlan sequence_plan, DeviceContext& device,
+    const StartupObserver& startup_observer)
+    : loaded(std::move(stable_loaded)), kv_capacity_resolution(resolution), capacity(sequence_plan.capacity()),
+      program(Qwen3_8FlashNext::create_program(*loaded->model, std::move(sequence_plan), device,
+                                               startup_observer)) {}
+Qwen3_8FlashNextInstance::~Qwen3_8FlashNextInstance() = default;
+
 ConstructedTarget construct_target(const EngineOptions& options, DeviceContext& device) {
     validate_options(options);
     const auto load_start = Clock::now();
@@ -213,6 +226,11 @@ ConstructedTarget construct_target(const EngineOptions& options, DeviceContext& 
     if (identity.model_id == Qwen3_6_35BA3B::model_id) {
         return construct_registered<Qwen3_6_35BA3B, LoadedQwen3_6_35BA3B, Qwen3_6_35BA3BInstance>(
             options, device, reader, load_start, Qwen3_6_35BA3B::target_key);
+    }
+    if (identity.model_id == Qwen3_8FlashNext::model_id) {
+        return construct_registered<Qwen3_8FlashNext, LoadedQwen3_8FlashNext,
+                                    Qwen3_8FlashNextInstance>(
+            options, device, reader, load_start, Qwen3_8FlashNext::target_key);
     }
     throw std::runtime_error("artifact identity '" + identity.model_id + "/" + identity.weights_id +
                              "' has no registered target for this device");
