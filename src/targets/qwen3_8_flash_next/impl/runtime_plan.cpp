@@ -340,9 +340,10 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
         const std::size_t elements = checked_mul<std::size_t>(checked_mul<std::size_t>(slots, rows), columns);
         return checked_add(checked_add(elements / 2, elements / 16), checked_mul<std::size_t>(slots, sizeof(float)));
     };
+    const std::size_t gate_bytes = nvfp4_bank_bytes(kDecodeExpertSlots, 1'280, 2'560);
+    const std::size_t gate_aligned = checked_add(gate_bytes, std::size_t{255}) & ~std::size_t{255};
     volta_expert_staging_bytes = checked_add(
-        nvfp4_bank_bytes(kDecodeExpertSlots, 1'280, 2'560),
-        nvfp4_bank_bytes(kDecodeExpertSlots, 2'560, 640));
+        gate_aligned, nvfp4_bank_bytes(kDecodeExpertSlots, 2'560, 640));
 #endif
     plan.expert_staging_bytes = volta_expert_staging_bytes;
     plan.total_device_bytes = checked_add(
