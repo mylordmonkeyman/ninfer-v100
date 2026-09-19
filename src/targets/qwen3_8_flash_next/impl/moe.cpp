@@ -33,7 +33,7 @@ bool exact_bf16_weight(const Weight& weight, std::int32_t rows, std::int32_t col
 
 bool exact_expert_bank(const Nvfp4ExpertBankView& bank, std::int32_t rows, std::int32_t columns) {
     const std::uint64_t elements = static_cast<std::uint64_t>(rows) * columns;
-    return bank.experts == 512 && bank.rows == rows && bank.columns == columns &&
+    return bank.experts > 0 && bank.experts <= 512 && bank.rows == rows && bank.columns == columns &&
            bank.code_bytes_per_expert == elements / 2 &&
            bank.scale_bytes_per_expert == elements / 16 && aligned_to(bank.codes, 16) &&
            aligned_to(bank.scales, 16) && aligned_to(bank.weight_scale_divisors, 16);
