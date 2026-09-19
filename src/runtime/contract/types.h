@@ -556,6 +556,18 @@ struct PressureTargetGuidance {
     std::uint32_t dropped_checkpoints   = 0;
 };
 
+struct PressureConstructionOptionId {
+    std::uint32_t cursor_generation = 0;
+    std::uint32_t scan_generation   = 0;
+    std::uint32_t index             = 0;
+};
+
+struct PressureConstructionStep {
+    std::optional<PressureTargetGuidance> guidance;
+    PressureConstructionOptionId option;
+    bool exhausted = false;
+};
+
 // The spans are borrowed from a PressurePlanningSession scratch generation and remain valid only
 // until the next session mutation. The common planner folds them immediately into owning values.
 struct PressureTargetAssessment {

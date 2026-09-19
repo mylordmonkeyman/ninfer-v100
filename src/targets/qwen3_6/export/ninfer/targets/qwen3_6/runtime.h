@@ -420,6 +420,26 @@ private:
     friend class PressurePlanningSession;
 };
 
+class PressureConstructionCursor {
+public:
+    PressureConstructionCursor(PressureConstructionCursor&& other) noexcept
+        : session_(std::exchange(other.session_, nullptr)), slot_(other.slot_),
+          generation_(other.generation_), release_(other.release_) {}
+    PressureConstructionCursor& operator=(PressureConstructionCursor&&) = delete;
+    PressureConstructionCursor(const PressureConstructionCursor&) = delete;
+    PressureConstructionCursor& operator=(const PressureConstructionCursor&) = delete;
+    ~PressureConstructionCursor() { if (session_) { release_(session_, slot_, generation_); } }
+private:
+    PressureConstructionCursor(const void* session, std::uint32_t slot, std::uint32_t generation,
+                               void (*release)(const void*, std::uint32_t, std::uint32_t) noexcept)
+        : session_(session), slot_(slot), generation_(generation), release_(release) {}
+    const void* session_;
+    std::uint32_t slot_;
+    std::uint32_t generation_;
+    void (*release_)(const void*, std::uint32_t, std::uint32_t) noexcept;
+    template <class Variant> friend struct detail::PressurePlanningSessionImpl;
+};
+
 template <class Variant>
 class AssessedPressureTarget {
 public:

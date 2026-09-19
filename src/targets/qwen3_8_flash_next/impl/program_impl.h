@@ -22,6 +22,7 @@
 
 namespace ninfer::runtime {
 class CompiledOutputConstraint;
+class OutputConstraintState;
 }
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {

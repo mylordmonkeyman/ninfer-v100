@@ -171,6 +171,10 @@ struct EngineOptions {
     std::uint32_t media_preprocess_threads = 0;
     bool enable_vision                     = false;
     bool use_cuda_graph                    = true;
+    bool quantize_output_head_fp8           = false;
+    bool quantize_token_embedding_fp8       = false;
+    bool use_qsa_prefill_mma                = true;
+    GdnStateStorage gdn_state_storage       = GdnStateStorage::FP32;
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
     StartupObserver startup_observer;
