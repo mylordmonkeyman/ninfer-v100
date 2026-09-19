@@ -21,6 +21,12 @@ constexpr auto kFp8Layout    = StorageLayout::RowScaleF32V1;
 constexpr auto kExpertLayout = StorageLayout::ExpertBlockScaleK16M128x4V1;
 constexpr auto kPleLayout    = StorageLayout::PackedU4G16V1;
 
+#if defined(NINFER_VOLTA_BUILD)
+constexpr bool kRetainTextExpertsOnHost = true;
+#else
+constexpr bool kRetainTextExpertsOnHost = false;
+#endif
+
 ObjectHandle bind_device(artifact::Binder& binder, std::string_view name, NumericFormat format,
                          StorageLayout layout, std::initializer_list<std::uint64_t> shape) {
     const ObjectHandle handle = binder.require_tensor(name, format, layout, shape);
@@ -302,7 +308,8 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, LoadFeatures features) 
         const std::string prefix = "text/layers/" + std::to_string(layer) + "/";
         TextLayerPlan& target    = plan.text_layers[layer];
         target.attention_hyper   = bind_hyper(binder, prefix + "attention/hyper_connection/");
-        target.moe               = bind_moe(binder, prefix + "mlp/", NumericFormat::NVFP4);
+        target.moe = bind_moe(binder, prefix + "mlp/", NumericFormat::NVFP4, true,
+                              kRetainTextExpertsOnHost);
         target.mlp_hyper         = bind_hyper(binder, prefix + "mlp/hyper_connection/");
         target.is_full_attention = layer >= 3 && (layer - 3) % 4 == 0;
         if (target.is_full_attention) {
