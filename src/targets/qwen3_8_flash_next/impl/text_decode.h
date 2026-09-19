@@ -34,7 +34,9 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                                  const FlashNextDecodeStateSink* sink = nullptr,
                                  Tensor* out_hyper_hidden             = nullptr,
                                  bool aliased_recurrent_scan          = false,
-                                 const Tensor* mtp_token_ids          = nullptr);
+                                 const Tensor* mtp_token_ids          = nullptr,
+                                 void* expert_staging                 = nullptr,
+                                 std::size_t expert_staging_bytes     = 0);
 
 void flash_next_text_decode(const TextModelView& model, const Tensor& token_ids,
                             const Tensor& token_indices, const Tensor& mrope_positions,
@@ -56,6 +58,8 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                                    const FlashNextDecodeStateSink* sink = nullptr,
                                    bool use_qsa_prefill_mma            = false,
                                    Tensor* out_hyper_hidden            = nullptr,
-                                   const Tensor* mtp_token_ids         = nullptr);
+                                   const Tensor* mtp_token_ids         = nullptr,
+                                   void* expert_staging                = nullptr,
+                                   std::size_t expert_staging_bytes    = 0);
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail
