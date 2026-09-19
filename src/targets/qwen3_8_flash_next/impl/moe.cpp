@@ -85,16 +85,12 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
         throw std::runtime_error("Flash-Next Volta expert banks must use matching residency");
     }
     if (weights.expert_gate_up.mapped_host) {
-        if (tokens > 8) {
-            throw std::runtime_error(
-                "Flash-Next Volta mapped-expert prefill staging is not initialized");
-        }
-        std::array<std::int32_t, 80> host_ids{};
+        std::vector<std::int32_t> host_ids(static_cast<std::size_t>(tokens) * 10);
         CUDA_CHECK(cudaMemcpyAsync(host_ids.data(), scratch.ids.data,
                                    static_cast<std::size_t>(tokens) * 10 * sizeof(std::int32_t),
                                    cudaMemcpyDeviceToHost, stream));
         CUDA_CHECK(cudaStreamSynchronize(stream));
-        std::vector<std::int32_t> active(host_ids.begin(), host_ids.begin() + tokens * 10);
+        std::vector<std::int32_t> active(host_ids.begin(), host_ids.end());
         const int expert_count = weights.expert_gate_up.experts;
         if (expert_count <= 0 || weights.expert_down.experts != expert_count || expert_count > 512) {
             throw std::runtime_error("Flash-Next Volta expert banks have inconsistent expert counts");
@@ -106,8 +102,8 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
         }
         std::sort(active.begin(), active.end());
         active.erase(std::unique(active.begin(), active.end()), active.end());
-        if (active.empty() || active.size() > 80) {
-            throw std::runtime_error("Flash-Next Volta decode produced an invalid expert set");
+        if (active.empty() || active.size() > static_cast<std::size_t>(expert_count)) {
+            throw std::runtime_error("Flash-Next Volta routing produced an invalid expert set");
         }
         // Stage only selected experts into a compact bank and remap routed ids to slots.
         // Plane-wise copies preserve the NVFP4 bank encoding expected by make_nvfp4_expert_bank_view.
