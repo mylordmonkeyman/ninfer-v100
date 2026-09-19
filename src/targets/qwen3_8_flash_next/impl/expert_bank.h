@@ -28,6 +28,7 @@ struct Nvfp4ExpertBankView {
     std::int32_t columns;
     std::uint64_t code_bytes_per_expert;
     std::uint64_t scale_bytes_per_expert;
+    bool mapped_host = false;
 
     [[nodiscard]] Nvfp4ExpertMatrixView expert(std::int32_t index) const;
 };
