@@ -361,7 +361,8 @@ void flash_next_text_decode(const TextModelView& model, const Tensor& token_ids,
                             std::int32_t maximum_blocks, std::int32_t active_blocks,
                             FlashNextDecodeStateView state, WorkspaceArena& workspace,
                             Tensor& final_hidden, Tensor& logits, cudaStream_t stream,
-                            const FlashNextDecodeStateSink* sink) {
+                            const FlashNextDecodeStateSink* sink, void* expert_staging,
+                            std::size_t expert_staging_bytes) {
     const std::int32_t batch = token_ids.ne[0];
     if (batch <= 0 || batch > 8 || !exact_tensor(token_ids, DType::I32, batch) ||
         !exact_token_embedding(model.token_embedding)) {
@@ -373,7 +374,8 @@ void flash_next_text_decode(const TextModelView& model, const Tensor& token_ids,
     flash_next_text_decode_core(model, embedding, token_indices, mrope_positions, table_rows,
                                 source_slots, destination_slots, gathered_ple_embedding,
                                 maximum_blocks, active_blocks, state, workspace, final_hidden,
-                                logits, stream, sink);
+                                logits, stream, sink, nullptr, false, nullptr,
+                                expert_staging, expert_staging_bytes);
 }
 
 void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& embedding,
