@@ -9,11 +9,11 @@
 #include <cub/device/device_segmented_radix_sort.cuh>
 #if !defined(NINFER_VOLTA_BUILD)
 #include <cub/device/device_topk.cuh>
-#endif
 #include <cuda/__execution/determinism.h>
 #include <cuda/__execution/output_ordering.h>
 #include <cuda/__execution/require.h>
 #include <cuda/__stream/stream_ref.h>
+#endif
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
