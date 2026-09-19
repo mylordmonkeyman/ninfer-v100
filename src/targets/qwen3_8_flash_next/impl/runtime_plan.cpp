@@ -332,10 +332,10 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
 
     std::size_t volta_expert_staging_bytes = 0;
 #if defined(NINFER_VOLTA_BUILD)
-    // Decode can route to at most 8 * top-10 = 80 unique experts. Reserve the compact
-    // gate/up + down NVFP4 staging payloads so mapped expert offload is represented in
-    // runtime memory planning instead of allocating unbudgeted VRAM at first decode.
-    constexpr std::size_t kDecodeExpertSlots = 80;
+    // Prefill may touch every routed expert. Reserve one compact bank large enough for
+    // all 512 experts so mapped-host prompt ingestion can use the same fixed-address
+    // runtime storage as decode without an unplanned device allocation.
+    constexpr std::size_t kDecodeExpertSlots = 512;
     const auto nvfp4_bank_bytes = [](std::size_t slots, std::size_t rows, std::size_t columns) {
         const std::size_t elements = checked_mul<std::size_t>(checked_mul<std::size_t>(slots, rows), columns);
         return checked_add(checked_add(elements / 2, elements / 16), checked_mul<std::size_t>(slots, sizeof(float)));
