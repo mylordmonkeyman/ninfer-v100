@@ -42,3 +42,7 @@ target_include_directories(ninfer_qwen3_8_flash_next PUBLIC
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
 target_link_libraries(ninfer_qwen3_8_flash_next PUBLIC ninfer_artifact ninfer_ops ninfer_qwen3_vision ninfer_core)
 ninfer_cuda_archive(ninfer_qwen3_8_flash_next)
+
+if(CMAKE_CUDA_ARCHITECTURES STREQUAL "70")
+  target_compile_definitions(ninfer_qwen3_8_flash_next PRIVATE NINFER_VOLTA_BUILD=1)
+endif()
