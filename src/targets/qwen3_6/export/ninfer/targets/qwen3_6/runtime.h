@@ -717,8 +717,6 @@ enum class CaptureStatePlacement : std::uint8_t {
 };
 
 struct CaptureAssessment {
-    CaptureAssessment();
-
     // Program retains the physical assessment in this opaque package-private payload.
     std::shared_ptr<detail::CaptureAssessmentImpl> implementation;
     PrefixShortlistKey shortlist_key;

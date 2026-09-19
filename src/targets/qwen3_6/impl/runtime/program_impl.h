@@ -7455,6 +7455,7 @@ ProgramImplCore::inspect_capture(const CaptureOffer& offer, const SharedPrefixHa
                                 exact_shared == nullptr && shared_prefix_capacity != 0;
 
     CaptureAssessment assessment;
+    assessment.implementation  = std::make_shared<detail::CaptureAssessmentImpl>();
     assessment.shortlist_key   = group.identity->shortlist_key;
     assessment.shared_evidence = group.shared_evidence;
     assessment.protected_rebuild_work =
