@@ -70,7 +70,9 @@ Nvfp4ExpertBankView mapped_nvfp4_expert_bank_view(const artifact::MaterializedAr
                                                   artifact::ObjectHandle handle, std::int32_t experts,
                                                   std::int32_t rows, std::int32_t columns) {
     const auto payload = materialized.mapped_tensor_bytes(handle);
-    return make_nvfp4_expert_bank_view(payload.data(), payload.size(), experts, rows, columns);
+    auto view = make_nvfp4_expert_bank_view(payload.data(), payload.size(), experts, rows, columns);
+    view.mapped_host = true;
+    return view;
 }
 
 Bf16ExpertMatrixView Bf16ExpertBankView::expert(std::int32_t index) const {
