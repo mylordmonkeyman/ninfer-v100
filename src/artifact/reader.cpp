@@ -391,4 +391,4 @@ std::size_t Reader::read_direct(std::uint64_t absolute_offset,
     return impl_->file.read_direct(absolute_offset, destination);
 }
 
-} // namespace ninfer::artifact
+} // namespace ninfer::artifact\n\n
