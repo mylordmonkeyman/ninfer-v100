@@ -20,7 +20,7 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates git cmake ninja-build pkg-config \
+            ca-certificates git cmake ninja-build pkg-config python3 \
             libavformat-dev libavcodec-dev libavutil-dev libswscale-dev
       - name: Checkout
         uses: actions/checkout@v4
