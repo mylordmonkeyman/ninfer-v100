@@ -1865,11 +1865,31 @@ private:
             }
             phase.pause_range();
             ProgramCallScope program_call(*this);
-            const runtime::ExecutionTiming timing = instance_.program->append_forced_tokens(
-                membership.sequence_span(), membership.tokens, membership.row_stride,
-                std::span<const std::optional<std::uint32_t>>(prefix_execution_splits.data(),
-                                                              membership.size),
-                &program_call.failed_timing());
+            runtime::ExecutionTiming timing;
+            if constexpr (requires {
+                              instance_.program->append_forced_tokens(
+                                  membership.sequence_span(), membership.tokens,
+                                  membership.row_stride,
+                                  std::span<const std::optional<std::uint32_t>>(
+                                      prefix_execution_splits.data(), membership.size),
+                                  &program_call.failed_timing());
+                          }) {
+                timing = instance_.program->append_forced_tokens(
+                    membership.sequence_span(), membership.tokens, membership.row_stride,
+                    std::span<const std::optional<std::uint32_t>>(prefix_execution_splits.data(),
+                                                                  membership.size),
+                    &program_call.failed_timing());
+            } else {
+                for (std::size_t row = 0; row < membership.size; ++row) {
+                    if (prefix_execution_splits[row].has_value()) {
+                        throw std::logic_error(
+                            "target Program does not support forced-token execution splits");
+                    }
+                }
+                timing = instance_.program->append_forced_tokens(
+                    membership.sequence_span(), membership.tokens, membership.row_stride,
+                    &program_call.failed_timing());
+            }
             program_call.finish(timing);
             phase.resume_range();
         } catch (...) {

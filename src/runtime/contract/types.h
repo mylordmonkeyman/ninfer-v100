@@ -86,6 +86,12 @@ public:
 
     void include(ExecutionTiming timing) noexcept { timing_ += timing; }
 
+    void reclassify_submit_as_wait(std::uint64_t ns) noexcept {
+        const auto moved = std::min(ns, timing_.submit_host_ns);
+        timing_.submit_host_ns -= moved;
+        timing_.device_wait_ns += moved;
+    }
+
     [[nodiscard]] ExecutionTiming finish() noexcept {
         if (finished_) { return timing_; }
         accumulate(Clock::now());
@@ -542,6 +548,7 @@ struct PressurePhysicalGuidance {
     std::uint32_t unsatisfied_constraints   = 0;
     std::uint32_t estimated_remaining_steps = 0;
     std::uint64_t normalized_residual_q20   = 0;
+    bool requires_exact_feedback            = false;
 };
 
 // The spans are borrowed from a PressurePlanningSession scratch generation and remain valid only
@@ -554,6 +561,18 @@ struct PressureTargetGuidance {
     std::uint32_t stable_target_ordinal = 0;
     std::uint32_t degradation_units     = 0;
     std::uint32_t dropped_checkpoints   = 0;
+};
+
+struct PressureConstructionOptionId {
+    std::uint32_t cursor_generation = 0;
+    std::uint32_t scan_generation   = 0;
+    std::uint32_t index             = 0;
+};
+
+struct PressureConstructionStep {
+    std::optional<PressureTargetGuidance> guidance;
+    PressureConstructionOptionId option;
+    bool exhausted = false;
 };
 
 // The spans are borrowed from a PressurePlanningSession scratch generation and remain valid only

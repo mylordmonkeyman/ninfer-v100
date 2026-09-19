@@ -19,6 +19,7 @@ add_library(ninfer_core STATIC
   core/device.cu
   core/dtype.cpp
   core/host_worker_pool.cpp
+  core/host_memory.cpp
   core/gdn_replay_records.cpp
   core/cyclic_kv_cache.cpp
   core/host_kv_arena.cpp
@@ -115,6 +116,7 @@ add_library(ninfer_ops STATIC
   ops/softmax_attention/dense/context/launch.cu
   ops/softmax_attention/sliding_window/sliding_window_attention.cpp
   ops/softmax_attention/sliding_window/launch.cu
+  ops/softmax_attention/selected_block/selected_block_attention.cu
   ops/kv_cache/append/kv_cache_append.cpp
   ops/kv_cache/append/launch.cu
   ops/kv_cache/append/nvfp4_launch.cu
@@ -432,12 +434,16 @@ add_library(ninfer_engine STATIC
 ninfer_internal_includes(ninfer_engine)
 target_include_directories(ninfer_engine PUBLIC ${PROJECT_SOURCE_DIR}/include)
 
+add_subdirectory(targets/qwen3_vision)
+add_subdirectory(targets/qwen3_8_flash_next)
+
 add_subdirectory(targets/qwen3_6)
 add_subdirectory(targets/qwen3_6_27b)
 add_subdirectory(targets/qwen3_6_35b_a3b)
 
 target_link_libraries(ninfer_engine
   PRIVATE
+    ninfer_qwen3_8_flash_next
     ninfer_artifact
     ninfer_core
     ninfer_ops

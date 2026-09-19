@@ -35,6 +35,11 @@ enum class KvCacheStorage : std::uint8_t {
     Fp8KeyNvfp4Value,
 };
 
+enum class GdnStateStorage : std::uint8_t {
+    FP32,
+    BF16,
+};
+
 enum class EnginePurpose : std::uint8_t {
     Generation,
     CausalScoring,
@@ -166,6 +171,10 @@ struct EngineOptions {
     std::uint32_t media_preprocess_threads = 0;
     bool enable_vision                     = false;
     bool use_cuda_graph                    = true;
+    bool quantize_output_head_fp8           = false;
+    bool quantize_token_embedding_fp8       = false;
+    bool use_qsa_prefill_mma                = true;
+    GdnStateStorage gdn_state_storage       = GdnStateStorage::FP32;
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
     StartupObserver startup_observer;
@@ -216,6 +225,7 @@ struct ResolvedSamplingParameters {
     float min_p             = 0.0F;
     float presence_penalty  = 0.0F;
     float frequency_penalty = 0.0F;
+    float repetition_penalty = 1.0F;
     std::uint64_t seed      = 0;
 };
 

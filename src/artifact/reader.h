@@ -22,12 +22,15 @@ enum class NumericFormat {
     BF16,
     FP32,
     I32,
+    I64,
     Q4G64_F16S,
     Q5G64_F16S,
     Q6G64_F16S,
     W8G32_F16S,
     NVFP4,
     FP8_E4M3FN_ROW_BF16S,
+    FP8_E4M3FN_ROW_F32S,
+    U4Z8G16_F16S,
 };
 
 enum class StorageLayout {
@@ -35,6 +38,9 @@ enum class StorageLayout {
     RowSplitK128V1,
     BlockScaleK16M128x4V1,
     RowScaleV1,
+    RowScaleF32V1,
+    PackedU4G16V1,
+    ExpertBlockScaleK16M128x4V1,
 };
 
 enum class ResourceEncoding {
@@ -81,6 +87,35 @@ struct BlockScaleGeometry {
 };
 
 BlockScaleGeometry block_scale_geometry(NumericFormat format, std::span<const std::uint64_t> shape);
+
+struct BlockScaleBankGeometry {
+    std::uint64_t experts               = 0;
+    std::uint64_t rows                  = 0;
+    std::uint64_t columns               = 0;
+    std::uint64_t groups_per_row        = 0;
+    std::uint64_t k_tiles               = 0;
+    std::uint64_t code_plane_bytes      = 0;
+    std::uint64_t scale_plane_offset    = 0;
+    std::uint64_t scale_plane_bytes     = 0;
+    std::uint64_t weight_divisor_offset = 0;
+    std::uint64_t weight_divisor_bytes  = 0;
+    std::uint64_t encoded_bytes         = 0;
+};
+
+BlockScaleBankGeometry block_scale_bank_geometry(NumericFormat format,
+                                                 std::span<const std::uint64_t> shape);
+
+struct PackedU4Geometry {
+    std::uint64_t rows               = 0;
+    std::uint64_t columns            = 0;
+    std::uint64_t groups_per_row     = 0;
+    std::uint64_t code_plane_bytes   = 0;
+    std::uint64_t scale_plane_offset = 0;
+    std::uint64_t scale_plane_bytes  = 0;
+    std::uint64_t encoded_bytes      = 0;
+};
+
+PackedU4Geometry packed_u4_geometry(NumericFormat format, std::span<const std::uint64_t> shape);
 
 struct RowScaleGeometry {
     std::uint64_t rows               = 0;
@@ -148,10 +183,11 @@ public:
     PayloadSpan payload(const ObjectDescriptor& object) const;
     PayloadSpan payload(std::string_view name) const;
     std::size_t read_direct(std::uint64_t absolute_offset, std::span<std::byte> destination) const;
+    std::shared_ptr<const void> mapping_lease() const noexcept;
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> impl_;
+    std::shared_ptr<Impl> impl_;
 };
 
 } // namespace ninfer::artifact
