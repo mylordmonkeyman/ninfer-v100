@@ -10,6 +10,7 @@
 #include "targets/qwen3_8_flash_next/impl/gdn_workspace.h"
 #include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
@@ -215,21 +216,8 @@ void flash_next_gdn_prefill_chunk(const Tensor& input, const GdnWeights& weights
     Tensor ssm_in           = ssm_states.slice(3, source_slot, 1).view({128, 128, 48});
     Tensor ssm_out          = ssm_states.slice(3, destination_slot, 1).view({128, 128, 48});
 
-    ops::detail::gated_delta_net::chunked::GdnChunkedStageHook gdn_hook{};
-    if (FlashNextStageLedger::is_enabled()) {
-        gdn_hook.record_stage = [](void*, int stage_id, cudaStream_t s) {
-            if (stage_id == 0) {
-                stage_ledger_record(s, FlashNextStageId::GDN_Recurrence_PrepareWyWu);
-            } else if (stage_id == 1) {
-                stage_ledger_record(s, FlashNextStageId::GDN_Recurrence_StatePassing);
-            } else if (stage_id == 2) {
-                stage_ledger_record(s, FlashNextStageId::GDN_Recurrence_Output);
-            }
-        };
-    }
     ops::gated_delta_net(query, key, value, g, beta, 1.0F / std::sqrt(128.0F), true, workspace,
-                         ssm_in, ssm_out, recurrent_output, stream,
-                         FlashNextStageLedger::is_enabled() ? &gdn_hook : nullptr);
+                         ssm_in, ssm_out, recurrent_output, stream);
 
     // 5. Output gate & projection
     flash_next_gdn_output_gate_launch(scratch, weights.norm, stream);
