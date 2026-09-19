@@ -234,6 +234,7 @@ struct FlashNextRuntimePlan {
     std::size_t round_tensors_bytes        = 0;
     std::size_t workspace_bytes            = 0;
     std::size_t cuda_graph_allowance_bytes = 0;
+    std::size_t expert_staging_bytes        = 0;
     std::size_t total_device_bytes         = 0;
 
     std::optional<qwen3_vision::WorkspacePlan> vision_workspace;
