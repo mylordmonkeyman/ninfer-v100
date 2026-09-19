@@ -136,6 +136,7 @@ MoePlan bind_moe(artifact::Binder& binder, const std::string& prefix, NumericFor
         .expert_gate_up     = bind_expert("experts/gate_up", {512, 1'280, 2'560}),
         .expert_down        = bind_expert("experts/down", {512, 2'560, 640}),
         .experts_nvfp4      = (expert_format == NumericFormat::NVFP4),
+        .experts_mapped_host = retain_experts_on_host && enabled,
     };
 }
 
