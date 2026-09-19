@@ -78,6 +78,13 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
     flash_next_route(input, weights.router, weights.shared_gate_weight, scratch.scores, scratch.ids,
                      scratch.alpha, scratch.shared_scale, stream);
     stage_ledger_record(stream, FlashNextStageId::MoE_Router);
+#if defined(NINFER_VOLTA_BUILD)
+    if (weights.expert_gate_up.mapped_host || weights.expert_down.mapped_host) {
+        throw std::runtime_error(
+            "Flash-Next Volta routed experts are host-resident but the bounded device expert "
+            "staging cache is not initialized");
+    }
+#endif
     flash_next_moe_kernels_launch(input, weights, scratch, output, stream);
 
     // Diagnostic NINFER_FLASH_NEXT_TRACE_ROUTING only; not on the default prefill chunk path.
