@@ -29,6 +29,7 @@ void validate_plan_match(const FlashNextRuntimePlan& actual) {
         actual.round_tensors_bytes != expected.round_tensors_bytes ||
         actual.workspace_bytes != expected.workspace_bytes ||
         actual.cuda_graph_allowance_bytes != expected.cuda_graph_allowance_bytes ||
+        actual.expert_staging_bytes != expected.expert_staging_bytes ||
         actual.total_device_bytes != expected.total_device_bytes ||
         actual.capacity_curve.main_page_tokens != expected.capacity_curve.main_page_tokens ||
         actual.capacity_curve.minimum_main_page_groups !=
@@ -187,7 +188,12 @@ void FlashNextRuntimeAllocation::materialize_views() {
         cur += align_up_256(3ULL * plan_.state_slots * sizeof(std::int32_t));
     }
 
-    // 5. Round buffers (device ingress/egress structs, gathered PLE, final hidden, logits)
+    // 5. Volta mapped-expert staging reservation. The MoE path will consume this fixed-address
+    // storage instead of allocating unplanned VRAM once staging ownership is threaded through.
+    expert_staging_ = cur;
+    cur += align_up_256(plan_.expert_staging_bytes);
+
+    // 6. Round buffers (device ingress/egress structs, gathered PLE, final hidden, logits)
     device_ingress_ = cur;
     cur += align_up_256(sizeof(FlashNextDecodeIngress));
 
