@@ -1181,10 +1181,6 @@ PressurePlanningSessionImpl::guidance_for_node(const PressurePlanningTargetNode&
         .stable_target_ordinal = ordinal,
         .degradation_units = total_degradation,
         .dropped_checkpoints = total_dropped,
-        .source_mode = details.assessment.source_mode,
-        .checkpoint_changes = {},
-        .recovery_estimates = {},
-        .recovery_estimate_complete = true,
     };
 }
 
