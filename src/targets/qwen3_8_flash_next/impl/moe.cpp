@@ -138,6 +138,8 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
         staged.expert_gate_up = make_nvfp4_expert_bank_view(gate_staging->p, gate_bytes, slots, 1'280, 2'560);
         staged.expert_down = make_nvfp4_expert_bank_view(down_staging->p, down_bytes, slots, 2'560, 640);
         flash_next_moe_kernels_launch(input, staged, scratch, output, stream);
+        // DeviceBuffer destruction would otherwise free staged weights while kernels are in flight.
+        CUDA_CHECK(cudaStreamSynchronize(stream));
         return;
     }
 #endif
