@@ -194,7 +194,7 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
     // Diagnostic NINFER_FLASH_NEXT_TRACE_ROUTING only; not on the default prefill chunk path.
     static const char* trace_routing_env = std::getenv("NINFER_FLASH_NEXT_TRACE_ROUTING");
     if (trace_routing_env != nullptr && trace_routing_env[0] != '\0' &&
-        tokens >= kFlashNextMoeMmaPrefillThreshold) {
+        tokens >= 512) {
         static int s_route_call = 0;
         int h_active = 0;
         cudaMemcpyAsync(&h_active, scratch.active_count.data, sizeof(int), cudaMemcpyDeviceToHost, stream);
