@@ -563,6 +563,31 @@ __global__ void indexer_update_leftover_chunk_kernel(
     }
 }
 
+// Volta prefill scorer: same score definition as the MMA chunk kernel, but one CTA per
+// (block, token) and warp-reduced BF16 dot products. This keeps SM70 away from
+// cp.async/ldmatrix/mma.sync while preserving the prefill selection contract.
+__global__ void score_blocks_chunk_simt_kernel(const __nv_bfloat16* __restrict__ query,
+    const __nv_bfloat16* __restrict__ block_keys, const std::int32_t* __restrict__ block_tables,
+    int table_row, const std::int32_t* __restrict__ token_indices, int logical_pages,
+    int active_blocks, float* __restrict__ scores) {
+    __shared__ float head_scores[kQueryHeads];
+    const int block = static_cast<int>(blockIdx.x), token = static_cast<int>(blockIdx.y);
+    const int tid = static_cast<int>(threadIdx.x), head = tid >> 5, lane = tid & 31;
+    const int complete_blocks = (token_indices[token] + 1) / 4;
+    const std::int64_t out = static_cast<std::int64_t>(token) * active_blocks + block;
+    if (block >= complete_blocks) { if (tid == 0) scores[out] = -__int_as_float(0x7F800000); return; }
+    const int logical_page = block / kCompressedPage, page_offset = block % kCompressedPage;
+    const int physical_page = block_tables[table_row * logical_pages + logical_page];
+    const auto* key = block_keys + static_cast<std::int64_t>(physical_page) * kCompressedPage * kHeadDim + page_offset * kHeadDim;
+    const auto* q = query + static_cast<std::int64_t>(token) * kQueryHeads * kHeadDim + head * kHeadDim;
+    float dot = 0.0F;
+    for (int dim = lane; dim < kHeadDim; dim += 32) dot = fmaf(__bfloat162float(q[dim]), __bfloat162float(key[dim]), dot);
+    dot = ops::warp_reduce_sum(dot);
+    if (lane == 0) head_scores[head] = dot;
+    __syncthreads();
+    if (tid == 0) { float score = 0.0F; for (float v : head_scores) score += fmaxf(v, 0.0F); scores[out] = score * kIndexerScaling; }
+}
+
 // Prefill scoring GEMM. Reuses sparse_moe_prefill_router_mma_kernel mechanics
 // (gemm_swz64, ldmatrix, mma_bf16 m16n8k16, cp_async_zfill). A CTA owns a
 // (BM x BN) region of scores, stages BM paged block-keys once, and reuses them
@@ -795,6 +820,16 @@ void flash_next_qsa_indexer_prefill_launch(
             static_cast<std::int32_t*>(scratch.offsets.data), active_blocks, current_tile);
         CUDA_CHECK(cudaGetLastError());
 
+#if defined(NINFER_VOLTA_BUILD)
+        const dim3 score_grid(static_cast<unsigned>(active_blocks), static_cast<unsigned>(current_tile));
+        score_blocks_chunk_simt_kernel<<<score_grid, kQueryHeads * 32, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.query.data) +
+                static_cast<std::int64_t>(t_start) * kQueryHeads * kHeadDim,
+            static_cast<const __nv_bfloat16*>(cache.block_keys.data),
+            static_cast<const std::int32_t*>(cache.block_tables.data), table_row,
+            tile_token_indices, cache.block_tables.ne[0], active_blocks,
+            static_cast<float*>(scratch.scores.data));
+#else
         const dim3 score_grid((active_blocks + kScoreBM - 1) / kScoreBM,
                               (current_tile + kScoreBN - 1) / kScoreBN);
         score_blocks_chunk_kernel<<<score_grid, kScoreThreads, 0, stream>>>(
@@ -804,6 +839,7 @@ void flash_next_qsa_indexer_prefill_launch(
             static_cast<const std::int32_t*>(cache.block_tables.data), table_row,
             tile_token_indices, cache.block_tables.ne[0], active_blocks, current_tile,
             static_cast<float*>(scratch.scores.data));
+#endif
         CUDA_CHECK(cudaGetLastError());
 
         std::size_t temp_bytes = scratch.sort_temp.bytes;
