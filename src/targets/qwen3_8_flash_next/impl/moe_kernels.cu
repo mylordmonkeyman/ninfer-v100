@@ -1942,7 +1942,13 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
         }
         stage_ledger_record(stream, FlashNextStageId::MoE_Grouping);
 
-        if (tokens >= kFlashNextMoeMmaPrefillThreshold) {
+        const bool use_native_mma_prefill =
+#if defined(NINFER_VOLTA_BUILD)
+            false;
+#else
+            tokens >= kFlashNextMoeMmaPrefillThreshold;
+#endif
+        if (use_native_mma_prefill) {
             // Large tokens: Native NVFP4 Tensor Core MMA route
             // 2. Shared expert gate & up. Completely disjoint from routed MMA.
             if (flash_next_moe_shared_mma_enabled()) {
