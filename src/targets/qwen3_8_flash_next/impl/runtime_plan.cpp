@@ -141,7 +141,7 @@ compute_fixed_base_bytes(const FlashNextRuntimeConfig& config, std::uint32_t res
                                     (config.speculative_draft_tokens > 0 ? 1ULL : 0ULL);
 
     recurrent_state_bytes = checked_add(
-        checked_add(checked_mul(36ULL, single_gdn_conv), checked_mul(36ULL, single_gdn_ssm)),
+        checked_add(checked_mul<std::size_t>(36, single_gdn_conv), checked_mul<std::size_t>(36, single_gdn_ssm)),
         checked_add(ple_conv, checked_add(checked_mul(cache_layers, single_raw_keys),
                                           checked_mul(cache_layers, single_raw_pos))));
     if (config.speculative_draft_tokens > 0) {
@@ -172,10 +172,10 @@ compute_fixed_base_bytes(const FlashNextRuntimeConfig& config, std::uint32_t res
     if (config.speculative_draft_tokens > 0) {
         const auto rows = config.proposal_head == ProposalHead::Optimized
                               ? config.draft_head_rows : 248'320U;
-        round_tensors_bytes = checked_add(round_tensors_bytes,
+        round_tensors_bytes = checked_add<std::size_t>(round_tensors_bytes,
             checked_align_up_256(2'560ULL * sizeof(std::uint16_t)) +
             checked_align_up_256(10'240ULL * sizeof(std::uint16_t)) +
-            checked_align_up_256(rows * sizeof(std::uint16_t)) + 256ULL +
+            checked_align_up_256(rows * sizeof(std::uint16_t)) + std::size_t{256} +
             checked_align_up_256(sizeof(FlashNextMtpDraftIngress)));
     }
 
