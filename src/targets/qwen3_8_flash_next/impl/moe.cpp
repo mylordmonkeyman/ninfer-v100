@@ -80,9 +80,25 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
     stage_ledger_record(stream, FlashNextStageId::MoE_Router);
 #if defined(NINFER_VOLTA_BUILD)
     if (weights.expert_gate_up.mapped_host || weights.expert_down.mapped_host) {
+        if (tokens > 8) {
+            throw std::runtime_error(
+                "Flash-Next Volta mapped-expert prefill staging is not initialized");
+        }
+        std::array<std::int32_t, 80> host_ids{};
+        CUDA_CHECK(cudaMemcpyAsync(host_ids.data(), scratch.ids.data,
+                                   static_cast<std::size_t>(tokens) * 10 * sizeof(std::int32_t),
+                                   cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        std::vector<std::int32_t> active(host_ids.begin(), host_ids.begin() + tokens * 10);
+        std::sort(active.begin(), active.end());
+        active.erase(std::unique(active.begin(), active.end()), active.end());
+        if (active.empty() || active.size() > 80) {
+            throw std::runtime_error("Flash-Next Volta decode produced an invalid expert set");
+        }
+        // The route is now host-visible and bounded (<= 80 expert references for an 8-token
+        // decode batch). The next cache layer uses this exact set for H2D expert staging.
         throw std::runtime_error(
-            "Flash-Next Volta routed experts are host-resident but the bounded device expert "
-            "staging cache is not initialized");
+            "Flash-Next Volta decode expert selection is ready for bounded H2D staging");
     }
 #endif
     flash_next_moe_kernels_launch(input, weights, scratch, output, stream);
