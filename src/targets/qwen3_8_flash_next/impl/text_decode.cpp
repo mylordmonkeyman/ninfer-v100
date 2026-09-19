@@ -221,7 +221,8 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                                  WorkspaceArena& workspace, Tensor& final_hidden, Tensor& logits,
                                  cudaStream_t stream, const FlashNextDecodeStateSink* sink,
                                  Tensor* out_hyper_hidden, bool aliased_recurrent_scan,
-                                 const Tensor* mtp_token_ids) {
+                                 const Tensor* mtp_token_ids, void* expert_staging,
+                                 std::size_t expert_staging_bytes) {
     const std::int32_t batch       = embedding.ne[1];
     const std::int32_t state_slots = state.ple_convolution_states.ne[2];
     if (batch <= 0 || batch > 8 || maximum_blocks <= 0 || maximum_blocks > 65'536 ||
@@ -315,7 +316,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
 
         // MoE
         flash_next_moe(round_ws.block_input, model.layers[layer].moe, round_ws.block_output,
-                       workspace, stream);
+                       workspace, stream, expert_staging, expert_staging_bytes);
         emit_state(prefix + "mlp_block_output", round_ws.block_output);
 
         // MLP hyper inject
@@ -384,7 +385,8 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                                    WorkspaceArena& workspace, Tensor& final_hidden, Tensor& logits,
                                    cudaStream_t stream, const FlashNextDecodeStateSink* sink,
                                    bool use_qsa_prefill_mma, Tensor* out_hyper_hidden,
-                                   const Tensor* mtp_token_ids) {
+                                   const Tensor* mtp_token_ids, void* expert_staging,
+                                   std::size_t expert_staging_bytes) {
     const std::int32_t tokens      = embedding.ne[1];
     const std::int32_t state_slots = state.ple_convolution_states.ne[2];
     if (tokens <= 0 || maximum_blocks <= 0 || maximum_blocks > 65'536 || first_token_index < 0 ||
@@ -491,7 +493,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
 
         // MoE
         flash_next_moe(round_ws.block_input, model.layers[layer].moe, round_ws.block_output,
-                       workspace, stream);
+                       workspace, stream, expert_staging, expert_staging_bytes);
         emit_state(prefix + "mlp_block_output", round_ws.block_output);
 
         // MLP hyper inject
