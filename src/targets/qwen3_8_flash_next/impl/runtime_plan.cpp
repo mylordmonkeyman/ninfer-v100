@@ -330,9 +330,23 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
             : 0ULL;
     plan.cuda_graph_allowance_bytes = graph_allowance;
 
+    std::size_t volta_expert_staging_bytes = 0;
+#if defined(NINFER_VOLTA_BUILD)
+    // Decode can route to at most 8 * top-10 = 80 unique experts. Reserve the compact
+    // gate/up + down NVFP4 staging payloads so mapped expert offload is represented in
+    // runtime memory planning instead of allocating unbudgeted VRAM at first decode.
+    constexpr std::size_t kDecodeExpertSlots = 80;
+    const auto nvfp4_bank_bytes = [](std::size_t slots, std::size_t rows, std::size_t columns) {
+        const std::size_t elements = checked_mul<std::size_t>(checked_mul<std::size_t>(slots, rows), columns);
+        return checked_add(checked_add(elements / 2, elements / 16), checked_mul<std::size_t>(slots, sizeof(float)));
+    };
+    volta_expert_staging_bytes = checked_add(
+        nvfp4_bank_bytes(kDecodeExpertSlots, 1'280, 2'560),
+        nvfp4_bank_bytes(kDecodeExpertSlots, 2'560, 640));
+#endif
     plan.total_device_bytes = checked_add(
         checked_add(plan.attention_kv_bytes, plan.indexer_block_keys_bytes),
-        checked_add(fixed_base_bytes, graph_allowance));
+        checked_add(checked_add(fixed_base_bytes, graph_allowance), volta_expert_staging_bytes));
     plan.capacity_curve = curve;
 
     if (config.vision_enabled) {
