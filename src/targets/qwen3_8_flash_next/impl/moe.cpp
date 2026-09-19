@@ -138,13 +138,14 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
         };
         const std::size_t gate_required = bank_bytes(weights.expert_gate_up);
         const std::size_t down_required = bank_bytes(weights.expert_down);
-        if (gate_required > expert_staging_bytes ||
-            down_required > expert_staging_bytes - gate_required) {
+        const std::size_t down_offset = (gate_required + 255U) & ~std::size_t{255U};
+        if (down_offset > expert_staging_bytes ||
+            down_required > expert_staging_bytes - down_offset) {
             throw std::runtime_error("Flash-Next Volta expert staging reservation is too small");
         }
         auto* staging_base = static_cast<std::byte*>(expert_staging);
         void* gate_storage = staging_base;
-        void* down_storage = staging_base + gate_required;
+        void* down_storage = staging_base + down_offset;
 
         const bool cache_hit = cache.gate_source == weights.expert_gate_up.mapped_payload &&
                                cache.down_source == weights.expert_down.mapped_payload &&
