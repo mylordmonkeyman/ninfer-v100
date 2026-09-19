@@ -96,21 +96,47 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
         if (active.empty() || active.size() > 80) {
             throw std::runtime_error("Flash-Next Volta decode produced an invalid expert set");
         }
-        // Stage complete encoded banks for the first correctness path. This is intentionally
-        // bounded to decode and temporary: the follow-up cache narrows H2D traffic to active
-        // expert slices while preserving the artifact's plane layout and global expert ids.
-        const std::size_t gate_bytes = static_cast<std::size_t>(weights.expert_gate_up.mapped_payload_bytes);
-        const std::size_t down_bytes = static_cast<std::size_t>(weights.expert_down.mapped_payload_bytes);
-        if (gate_bytes == 0 || down_bytes == 0) {
-            throw std::runtime_error("Flash-Next Volta mapped expert payload metadata is missing");
-        }
-        DeviceBuffer gate_staging(gate_bytes);
-        DeviceBuffer down_staging(down_bytes);
-        gate_staging.copy_from_host(weights.expert_gate_up.mapped_payload, gate_bytes);
-        down_staging.copy_from_host(weights.expert_down.mapped_payload, down_bytes);
+        // Stage only selected experts into a compact bank and remap routed ids to slots.
+        // Plane-wise copies preserve the NVFP4 bank encoding expected by make_nvfp4_expert_bank_view.
+        const int slots = static_cast<int>(active.size());
+        const auto stage_bank = [&](const Nvfp4ExpertBankView& host_bank) {
+            const std::size_t code_bytes = static_cast<std::size_t>(host_bank.code_bytes_per_expert) * slots;
+            const std::size_t scale_bytes = static_cast<std::size_t>(host_bank.scale_bytes_per_expert) * slots;
+            const std::size_t divisor_bytes = sizeof(float) * slots;
+            auto storage = std::make_unique<DeviceBuffer>(code_bytes + scale_bytes + divisor_bytes);
+            auto* base = static_cast<std::byte*>(storage->p);
+            for (int slot = 0; slot < slots; ++slot) {
+                const int expert = active[slot];
+                CUDA_CHECK(cudaMemcpyAsync(base + static_cast<std::size_t>(slot) * host_bank.code_bytes_per_expert,
+                    host_bank.codes + static_cast<std::size_t>(expert) * host_bank.code_bytes_per_expert,
+                    host_bank.code_bytes_per_expert, cudaMemcpyHostToDevice, stream));
+                CUDA_CHECK(cudaMemcpyAsync(base + code_bytes + static_cast<std::size_t>(slot) * host_bank.scale_bytes_per_expert,
+                    host_bank.scales + static_cast<std::size_t>(expert) * host_bank.scale_bytes_per_expert,
+                    host_bank.scale_bytes_per_expert, cudaMemcpyHostToDevice, stream));
+                CUDA_CHECK(cudaMemcpyAsync(base + code_bytes + scale_bytes + static_cast<std::size_t>(slot) * sizeof(float),
+                    host_bank.weight_scale_divisors + expert, sizeof(float), cudaMemcpyHostToDevice, stream));
+            }
+            return storage;
+        };
+        auto gate_staging = stage_bank(weights.expert_gate_up);
+        auto down_staging = stage_bank(weights.expert_down);
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+
+        std::array<std::int32_t, 512> slot_of{};
+        slot_of.fill(-1);
+        for (int slot = 0; slot < slots; ++slot) slot_of[active[slot]] = slot;
+        for (int i = 0; i < tokens * 10; ++i) host_ids[i] = slot_of[host_ids[i]];
+        CUDA_CHECK(cudaMemcpyAsync(scratch.ids.data, host_ids.data(),
+                                   static_cast<std::size_t>(tokens) * 10 * sizeof(std::int32_t),
+                                   cudaMemcpyHostToDevice, stream));
+
+        const std::size_t gate_bytes = static_cast<std::size_t>(weights.expert_gate_up.code_bytes_per_expert +
+            weights.expert_gate_up.scale_bytes_per_expert) * slots + sizeof(float) * slots;
+        const std::size_t down_bytes = static_cast<std::size_t>(weights.expert_down.code_bytes_per_expert +
+            weights.expert_down.scale_bytes_per_expert) * slots + sizeof(float) * slots;
         MoeWeights staged = weights;
-        staged.expert_gate_up = make_nvfp4_expert_bank_view(gate_staging.p, gate_bytes, 512, 1'280, 2'560);
-        staged.expert_down = make_nvfp4_expert_bank_view(down_staging.p, down_bytes, 512, 2'560, 640);
+        staged.expert_gate_up = make_nvfp4_expert_bank_view(gate_staging->p, gate_bytes, slots, 1'280, 2'560);
+        staged.expert_down = make_nvfp4_expert_bank_view(down_staging->p, down_bytes, slots, 2'560, 640);
         flash_next_moe_kernels_launch(input, staged, scratch, output, stream);
         return;
     }
