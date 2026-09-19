@@ -21,7 +21,7 @@ jobs:
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ca-certificates git cmake ninja-build pkg-config python3 \
-            libavformat-dev libavcodec-dev libavutil-dev libswscale-dev
+            libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libcurl4-openssl-dev
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -31,8 +31,10 @@ jobs:
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_ARCHITECTURES=70 \
-            -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_APPS=ON \
             -DBUILD_TESTING=OFF \
             -DNINFER_BUILD_BENCHMARKS=OFF
       - name: Compile Flash-Next target
         run: cmake --build build --target ninfer_qwen3_8_flash_next --parallel 2
+      - name: Link CLI against SM70 engine
+        run: cmake --build build --target ninfer --parallel 2
