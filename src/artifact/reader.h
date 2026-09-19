@@ -165,7 +165,8 @@ public:
     std::uint64_t payload_offset() const noexcept;
     PayloadSpan payload(const ObjectDescriptor& object) const;
     PayloadSpan payload(std::string_view name) const;
-    std::size_t read_direct(std::uint64_t absolute_offset, std::span<std::byte> destination) const;\n    std::shared_ptr<const void> mapping_lease() const noexcept;
+    std::size_t read_direct(std::uint64_t absolute_offset, std::span<std::byte> destination) const;
+    std::shared_ptr<const void> mapping_lease() const noexcept;
 
 private:
     struct Impl;
