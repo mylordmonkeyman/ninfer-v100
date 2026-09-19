@@ -72,6 +72,8 @@ Nvfp4ExpertBankView mapped_nvfp4_expert_bank_view(const artifact::MaterializedAr
     const auto payload = materialized.mapped_tensor_bytes(handle);
     auto view = make_nvfp4_expert_bank_view(payload.data(), payload.size(), experts, rows, columns);
     view.mapped_host = true;
+    view.mapped_payload = payload.data();
+    view.mapped_payload_bytes = payload.size();
     return view;
 }
 
