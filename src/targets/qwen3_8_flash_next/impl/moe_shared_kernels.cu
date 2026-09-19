@@ -246,11 +246,16 @@ void launch_bf16_mma(const __nv_bfloat16* x, const __nv_bfloat16* weight, Output
 } // namespace
 
 bool flash_next_moe_shared_mma_enabled() {
+#if defined(NINFER_VOLTA_BUILD)
+    // Shared BF16 MMA uses Ampere+ ldmatrix/mma.sync.  Keep Volta on the existing
+    // SIMT router/shared-expert kernels regardless of environment overrides.
+    return false;
+#else
     const char* env = std::getenv("NINFER_FLASH_NEXT_MOE_SHARED_MMA");
     if (env == nullptr || env[0] == '\0') { return true; }
     return env[0] == '1' && env[1] == '\0';
+#endif
 }
-
 void flash_next_route_projection_mma(const Tensor& input, const Weight& router,
                                      const Weight& shared_gate, const Tensor& score_workspace,
                                      cudaStream_t stream) {
