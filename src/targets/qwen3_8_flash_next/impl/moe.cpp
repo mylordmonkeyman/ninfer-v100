@@ -7,6 +7,7 @@
 #include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <cstdint>
 #include <cstdio>
@@ -80,7 +81,10 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
                      scratch.alpha, scratch.shared_scale, stream);
     stage_ledger_record(stream, FlashNextStageId::MoE_Router);
 #if defined(NINFER_VOLTA_BUILD)
-    if (weights.expert_gate_up.mapped_host || weights.expert_down.mapped_host) {
+    if (weights.expert_gate_up.mapped_host != weights.expert_down.mapped_host) {
+        throw std::runtime_error("Flash-Next Volta expert banks must use matching residency");
+    }
+    if (weights.expert_gate_up.mapped_host) {
         if (tokens > 8) {
             throw std::runtime_error(
                 "Flash-Next Volta mapped-expert prefill staging is not initialized");
@@ -91,6 +95,15 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
                                    cudaMemcpyDeviceToHost, stream));
         CUDA_CHECK(cudaStreamSynchronize(stream));
         std::vector<std::int32_t> active(host_ids.begin(), host_ids.begin() + tokens * 10);
+        const int expert_count = weights.expert_gate_up.experts;
+        if (expert_count <= 0 || weights.expert_down.experts != expert_count || expert_count > 512) {
+            throw std::runtime_error("Flash-Next Volta expert banks have inconsistent expert counts");
+        }
+        for (const auto expert : active) {
+            if (expert < 0 || expert >= expert_count) {
+                throw std::runtime_error("Flash-Next Volta router produced an out-of-range expert id");
+            }
+        }
         std::sort(active.begin(), active.end());
         active.erase(std::unique(active.begin(), active.end()), active.end());
         if (active.empty() || active.size() > 80) {
