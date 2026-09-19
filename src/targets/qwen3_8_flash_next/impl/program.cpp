@@ -3230,9 +3230,6 @@ PhysicalUsageSnapshot Program::physical_usage() const noexcept {
             (impl_->plan_.main_page_groups - impl_->executor_.available_physical_groups()) * 4),
         .device_backend_kv_pages = 0,
         .host_kv_bytes           = 0,
-        .checkpoint_slots_occupied = catalogued_slots + reserved_slots,
-        .checkpoint_slots_capacity = static_cast<std::uint32_t>(impl_->continuation_slots_.size()),
-        .checkpoint_slots_reserved = reserved_slots,
     };
 }
 

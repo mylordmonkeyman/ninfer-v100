@@ -86,6 +86,12 @@ public:
 
     void include(ExecutionTiming timing) noexcept { timing_ += timing; }
 
+    void reclassify_submit_as_wait(std::uint64_t ns) noexcept {
+        const auto moved = std::min(ns, timing_.submit_host_ns);
+        timing_.submit_host_ns -= moved;
+        timing_.device_wait_ns += moved;
+    }
+
     [[nodiscard]] ExecutionTiming finish() noexcept {
         if (finished_) { return timing_; }
         accumulate(Clock::now());
