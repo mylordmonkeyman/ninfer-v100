@@ -589,6 +589,7 @@ constexpr int kHeadsPerKv   = 12;
 // G24: QK on all 4 warps (split 64-key N-tiles), PV as m16n8k16 over staged V.
 // BN stays 64 so the online-softmax tile and FP32 order match the G17 kernel.
 // P is rounded to BF16 after the FP32 rescale; that rounding is declared.
+#if !defined(NINFER_VOLTA_BUILD)
 template <typename StorageT>
 __global__ __launch_bounds__(kMmaThreads)
 void qsa_prefill_sparse_attention_mma_sched_kernel(
@@ -827,6 +828,7 @@ bool flash_next_qsa_mma_sched_new() {
     if (env == nullptr || env[0] == '\0') { return false; }
     return std::strcmp(env, "new") == 0 || (env[0] == '1' && env[1] == '\0');
 }
+#endif
 
 void flash_next_qsa_attention_store_launch(const Tensor& projected, const Tensor& token_indices,
                                            const Tensor& mrope_positions, const Tensor& table_rows,
@@ -911,7 +913,11 @@ void flash_next_qsa_attention_prefill_launch(
         Tensor{}, table_row, key_norm, cache, scratch.key, scratch.value, stream);
     const bool is_fp8 = (cache.key_pages.dtype == DType::FP8_E4M3FN);
     if (is_fp8) {
+        #if defined(NINFER_VOLTA_BUILD)
+        if (false) {
+#else
         if (use_mma) {
+#endif
             const auto* q_ptr  = static_cast<const __nv_bfloat16*>(scratch.query.data);
             const auto* ti_ptr = static_cast<const std::int32_t*>(token_indices.data);
             const auto* sb_ptr = static_cast<const std::int32_t*>(selected_blocks.data);
@@ -920,6 +926,7 @@ void flash_next_qsa_attention_prefill_launch(
             const auto* k_ptr  = static_cast<const __nv_fp8_e4m3*>(cache.key_pages.data);
             const auto* v_ptr  = static_cast<const __nv_fp8_e4m3*>(cache.value_pages.data);
             auto* att_ptr      = static_cast<__nv_bfloat16*>(scratch.attended.data);
+#if !defined(NINFER_VOLTA_BUILD)
             if (flash_next_qsa_mma_sched_new()) {
                 qsa_prefill_sparse_attention_mma_sched_kernel<__nv_fp8_e4m3><<<dim3(kKvHeads, tokens), kMmaThreads, 0,
                                                                 stream>>>(
@@ -930,6 +937,7 @@ void flash_next_qsa_attention_prefill_launch(
                     scratch.query, token_indices, table_row, selected_blocks, selected_counts,
                     {cache.key_pages, cache.value_pages, cache.block_tables}, scratch.attended, stream);
             }
+#endif
         } else {
             constexpr int kPrefillWarps   = 4;
             constexpr int kPrefillThreads = kPrefillWarps * 32;
@@ -946,7 +954,11 @@ void flash_next_qsa_attention_prefill_launch(
         }
         CUDA_CHECK(cudaGetLastError());
     } else {
+        #if defined(NINFER_VOLTA_BUILD)
+        if (false) {
+#else
         if (use_mma) {
+#endif
             const auto* q_ptr  = static_cast<const __nv_bfloat16*>(scratch.query.data);
             const auto* ti_ptr = static_cast<const std::int32_t*>(token_indices.data);
             const auto* sb_ptr = static_cast<const std::int32_t*>(selected_blocks.data);
@@ -955,6 +967,7 @@ void flash_next_qsa_attention_prefill_launch(
             const auto* k_ptr  = static_cast<const __nv_bfloat16*>(cache.key_pages.data);
             const auto* v_ptr  = static_cast<const __nv_bfloat16*>(cache.value_pages.data);
             auto* att_ptr      = static_cast<__nv_bfloat16*>(scratch.attended.data);
+#if !defined(NINFER_VOLTA_BUILD)
             if (flash_next_qsa_mma_sched_new()) {
                 qsa_prefill_sparse_attention_mma_sched_kernel<__nv_bfloat16><<<dim3(kKvHeads, tokens), kMmaThreads, 0,
                                                                 stream>>>(
@@ -965,6 +978,7 @@ void flash_next_qsa_attention_prefill_launch(
                     scratch.query, token_indices, table_row, selected_blocks, selected_counts,
                     {cache.key_pages, cache.value_pages, cache.block_tables}, scratch.attended, stream);
             }
+#endif
         } else {
             constexpr int kPrefillWarps   = 4;
             constexpr int kPrefillThreads = kPrefillWarps * 32;
