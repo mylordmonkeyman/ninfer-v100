@@ -7,6 +7,7 @@
 #include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
 
 #include <algorithm>
+#include <memory>
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
@@ -95,10 +96,23 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
         if (active.empty() || active.size() > 80) {
             throw std::runtime_error("Flash-Next Volta decode produced an invalid expert set");
         }
-        // The route is now host-visible and bounded (<= 80 expert references for an 8-token
-        // decode batch). The next cache layer uses this exact set for H2D expert staging.
-        throw std::runtime_error(
-            "Flash-Next Volta decode expert selection is ready for bounded H2D staging");
+        // Stage complete encoded banks for the first correctness path. This is intentionally
+        // bounded to decode and temporary: the follow-up cache narrows H2D traffic to active
+        // expert slices while preserving the artifact's plane layout and global expert ids.
+        const std::size_t gate_bytes = static_cast<std::size_t>(weights.expert_gate_up.mapped_payload_bytes);
+        const std::size_t down_bytes = static_cast<std::size_t>(weights.expert_down.mapped_payload_bytes);
+        if (gate_bytes == 0 || down_bytes == 0) {
+            throw std::runtime_error("Flash-Next Volta mapped expert payload metadata is missing");
+        }
+        DeviceBuffer gate_staging(gate_bytes);
+        DeviceBuffer down_staging(down_bytes);
+        gate_staging.copy_from_host(weights.expert_gate_up.mapped_payload, gate_bytes);
+        down_staging.copy_from_host(weights.expert_down.mapped_payload, down_bytes);
+        MoeWeights staged = weights;
+        staged.expert_gate_up = make_nvfp4_expert_bank_view(gate_staging.p, gate_bytes, 512, 1'280, 2'560);
+        staged.expert_down = make_nvfp4_expert_bank_view(down_staging.p, down_bytes, 512, 2'560, 640);
+        flash_next_moe_kernels_launch(input, staged, scratch, output, stream);
+        return;
     }
 #endif
     flash_next_moe_kernels_launch(input, weights, scratch, output, stream);
