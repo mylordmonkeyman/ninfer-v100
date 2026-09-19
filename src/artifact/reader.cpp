@@ -397,6 +397,10 @@ std::size_t Reader::read_direct(std::uint64_t absolute_offset,
     return impl_->file.read_direct(absolute_offset, destination);
 }
 
+std::shared_ptr<const void> Reader::mapping_lease() const noexcept {
+    return std::static_pointer_cast<const void>(impl_);
+}
+
 } // namespace ninfer::artifact
 
 
