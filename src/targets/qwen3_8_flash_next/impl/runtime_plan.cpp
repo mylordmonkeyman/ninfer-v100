@@ -344,6 +344,7 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
         nvfp4_bank_bytes(kDecodeExpertSlots, 1'280, 2'560),
         nvfp4_bank_bytes(kDecodeExpertSlots, 2'560, 640));
 #endif
+    plan.expert_staging_bytes = volta_expert_staging_bytes;
     plan.total_device_bytes = checked_add(
         checked_add(plan.attention_kv_bytes, plan.indexer_block_keys_bytes),
         checked_add(checked_add(fixed_base_bytes, graph_allowance), volta_expert_staging_bytes));
