@@ -710,7 +710,7 @@ __global__ __launch_bounds__(128, 4) void flash_next_moe_prefill_gate_up_mma_ker
     const int warp_n = warp & 1;  // 0 or 1 (tokens 0..7 or tokens 8..15)
     const int lane   = tid & 31;
 
-    extern __shared__ alignas(16) std::uint8_t s_dyn_mem[];
+    extern __shared__ std::uint8_t s_dyn_mem[];
     auto* s_w_codes    = s_dyn_mem;                          // 32 * 1280 = 40960 bytes
     auto* s_w_scales   = s_dyn_mem + 40960;                  // 32 * 164 = 5248 bytes
     auto* s_a_codes_0  = s_dyn_mem + 40960 + 5248;           // 16 * 1280 = 20480 bytes
