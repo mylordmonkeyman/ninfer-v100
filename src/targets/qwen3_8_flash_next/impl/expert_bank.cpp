@@ -66,6 +66,13 @@ materialized_nvfp4_expert_bank_view(const artifact::MaterializedArtifact& materi
                                        experts, rows, columns);
 }
 
+Nvfp4ExpertBankView mapped_nvfp4_expert_bank_view(const artifact::MaterializedArtifact& materialized,
+                                                  artifact::ObjectHandle handle, std::int32_t experts,
+                                                  std::int32_t rows, std::int32_t columns) {
+    const auto payload = materialized.mapped_tensor_bytes(handle);
+    return make_nvfp4_expert_bank_view(payload.data(), payload.size(), experts, rows, columns);
+}
+
 Bf16ExpertMatrixView Bf16ExpertBankView::expert(std::int32_t index) const {
     if (index < 0 || index >= experts) {
         throw std::out_of_range("BF16 expert index is outside the bank");
