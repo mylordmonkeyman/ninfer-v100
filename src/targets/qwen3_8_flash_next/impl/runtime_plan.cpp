@@ -243,14 +243,26 @@ flash_next_capacity_curve(const FlashNextRuntimeConfig& config) {
     const std::size_t stride_bytes = flash_next_physical_stride_bytes_per_group(config.kv_cache) /
         kFullAttentionLayers * (kFullAttentionLayers +
                                (config.speculative_draft_tokens > 0 ? 1ULL : 0ULL));
+    std::size_t expert_staging_bytes = 0;
+#if defined(NINFER_VOLTA_BUILD)
+    constexpr std::size_t kExpertSlots = 512;
+    const auto nvfp4_bank_bytes = [](std::size_t slots, std::size_t rows, std::size_t columns) {
+        const std::size_t elements = checked_mul<std::size_t>(checked_mul<std::size_t>(slots, rows), columns);
+        return checked_add(checked_add(elements / 2, elements / 16),
+                           checked_mul<std::size_t>(slots, sizeof(float)));
+    };
+    expert_staging_bytes = checked_add(nvfp4_bank_bytes(kExpertSlots, 1'280, 2'560),
+                                       nvfp4_bank_bytes(kExpertSlots, 2'560, 640));
+#endif
     ninfer::runtime::SequenceCapacityCurve curve{};
     curve.main_page_tokens                     = kMainPageGroupTokens;
     curve.minimum_main_page_groups             = min_groups;
     curve.maximum_main_page_groups             = max_groups;
     curve.bytes_per_additional_main_page_group = stride_bytes;
     curve.minimum_device_reservation_bytes     = checked_add(
-        checked_add(fixed_base_bytes, checked_mul<std::size_t>(min_groups, stride_bytes)),
-        graph_allowance);
+        checked_add(checked_add(fixed_base_bytes, checked_mul<std::size_t>(min_groups, stride_bytes)),
+                    graph_allowance),
+        expert_staging_bytes);
 
     return curve;
 }
