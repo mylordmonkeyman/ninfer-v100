@@ -60,7 +60,8 @@ std::size_t flash_next_moe_workspace_capacity_bytes(std::int32_t min_tokens,
 }
 
 void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& output,
-                    WorkspaceArena& workspace, cudaStream_t stream) {
+                    WorkspaceArena& workspace, cudaStream_t stream,
+                    void* expert_staging, std::size_t expert_staging_bytes) {
     const std::int32_t tokens = input.ne[1];
     if (input.dtype != DType::BF16 || output.dtype != DType::BF16 || input.ne[0] != 2'560 ||
         output.ne[0] != 2'560 || tokens < 1 || output.ne[1] != tokens ||
@@ -122,6 +123,9 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
             std::size_t down_bytes = 0;
         };
         static thread_local DecodeExpertCache cache;
+        if (expert_staging == nullptr || expert_staging_bytes == 0) {
+            throw std::runtime_error("Flash-Next Volta mapped experts require runtime-owned staging storage");
+        }
         const bool cache_hit = cache.gate_source == weights.expert_gate_up.mapped_payload &&
                                cache.down_source == weights.expert_down.mapped_payload &&
                                cache.experts == active;
