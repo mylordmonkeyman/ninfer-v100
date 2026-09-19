@@ -7,7 +7,9 @@
 #include "ops/common/warp.cuh"
 
 #include <cub/device/device_segmented_radix_sort.cuh>
+#if !defined(NINFER_VOLTA_BUILD)
 #include <cub/device/device_topk.cuh>
+#endif
 #include <cuda/__execution/determinism.h>
 #include <cuda/__execution/output_ordering.h>
 #include <cuda/__execution/require.h>
@@ -294,6 +296,7 @@ __global__ void publish_compact_selection_kernel(const std::int32_t* __restrict_
     }
 }
 
+#if !defined(NINFER_VOLTA_BUILD)
 auto topk_env(cudaStream_t stream) {
     return cuda::std::execution::env(
         cuda::stream_ref{stream},
@@ -341,6 +344,7 @@ void select_top512_topk(const float* scores, const std::int32_t* ids, std::uint6
     bitonic_sort_512_descending<<<batch, kSelectedBlocks, 0, stream>>>(packed_selected, topk_ids);
     CUDA_CHECK(cudaGetLastError());
 }
+#endif
 
 } // namespace
 
@@ -354,8 +358,12 @@ std::size_t flash_next_qsa_indexer_sort_temp_bytes(std::int32_t maximum_blocks,
     const auto* offsets    = reinterpret_cast<const std::int32_t*>(std::uintptr_t{0x5000});
     CUDA_CHECK(sort_pairs_descending(nullptr, sort_bytes, keys_in, keys_out, values_in, values_out,
                                      maximum_blocks * batch, batch, offsets, nullptr));
+#if defined(NINFER_VOLTA_BUILD)
+    return sort_bytes;
+#else
     const std::size_t topk_bytes = topk_temp_bytes(maximum_blocks, kSelectedBlocks);
     return std::max(sort_bytes, topk_bytes);
+#endif
 }
 
 void flash_next_qsa_indexer_store_launch(const Tensor& projected, const Tensor& token_indices,
@@ -442,6 +450,21 @@ void flash_next_qsa_indexer_launch(const Tensor& token_indices, const Tensor& mr
         static_cast<const std::int32_t*>(token_indices.data), cache.block_tables.ne[0],
         active_blocks, static_cast<float*>(scratch.scores.data));
     CUDA_CHECK(cudaGetLastError());
+#if defined(NINFER_VOLTA_BUILD)
+    std::size_t sort_bytes = scratch.sort_temp.bytes;
+    CUDA_CHECK(sort_pairs_descending(
+        scratch.sort_temp.data, sort_bytes, static_cast<const float*>(scratch.scores.data),
+        static_cast<float*>(scratch.sorted_scores.data),
+        static_cast<const std::int32_t*>(scratch.ids.data),
+        static_cast<std::int32_t*>(scratch.sorted_ids.data), items, batch,
+        static_cast<const std::int32_t*>(scratch.offsets.data), stream));
+    publish_compact_selection_kernel<<<batch, 256, 0, stream>>>(
+        static_cast<const std::int32_t*>(scratch.sorted_ids.data),
+        static_cast<const std::int32_t*>(token_indices.data),
+        static_cast<std::int32_t*>(selected_blocks.data),
+        static_cast<std::int32_t*>(selected_counts.data), active_blocks);
+    CUDA_CHECK(cudaGetLastError());
+#else
     select_top512_topk(
         static_cast<const float*>(scratch.scores.data),
         static_cast<const std::int32_t*>(scratch.ids.data),
@@ -449,6 +472,7 @@ void flash_next_qsa_indexer_launch(const Tensor& token_indices, const Tensor& mr
         static_cast<std::uint64_t*>(scratch.packed_selected.data),
         static_cast<std::int32_t*>(scratch.topk_ids.data), scratch.sort_temp.data,
         scratch.sort_temp.bytes, active_blocks, batch, stream);
+#endif
     publish_compact_selection_kernel<<<batch, 256, 0, stream>>>(
         static_cast<const std::int32_t*>(scratch.topk_ids.data),
         static_cast<const std::int32_t*>(token_indices.data),
