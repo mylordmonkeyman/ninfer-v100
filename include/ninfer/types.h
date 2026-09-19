@@ -35,6 +35,11 @@ enum class KvCacheStorage : std::uint8_t {
     Fp8KeyNvfp4Value,
 };
 
+enum class GdnStateStorage : std::uint8_t {
+    FP32,
+    BF16,
+};
+
 enum class EnginePurpose : std::uint8_t {
     Generation,
     CausalScoring,
