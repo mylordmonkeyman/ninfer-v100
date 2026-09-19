@@ -99,11 +99,15 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
         // Stage only selected experts into a compact bank and remap routed ids to slots.
         // Plane-wise copies preserve the NVFP4 bank encoding expected by make_nvfp4_expert_bank_view.
         const int slots = static_cast<int>(active.size());
-        const auto stage_bank = [&](const Nvfp4ExpertBankView& host_bank) {
+        static thread_local std::unique_ptr<DeviceBuffer> gate_cache;
+        static thread_local std::unique_ptr<DeviceBuffer> down_cache;
+        const auto stage_bank = [&](const Nvfp4ExpertBankView& host_bank,
+                                    std::unique_ptr<DeviceBuffer>& storage) {
             const std::size_t code_bytes = static_cast<std::size_t>(host_bank.code_bytes_per_expert) * slots;
             const std::size_t scale_bytes = static_cast<std::size_t>(host_bank.scale_bytes_per_expert) * slots;
             const std::size_t divisor_bytes = sizeof(float) * slots;
-            auto storage = std::make_unique<DeviceBuffer>(code_bytes + scale_bytes + divisor_bytes);
+            const std::size_t required = code_bytes + scale_bytes + divisor_bytes;
+            if (!storage || storage->bytes < required) storage = std::make_unique<DeviceBuffer>(required);
             auto* base = static_cast<std::byte*>(storage->p);
             for (int slot = 0; slot < slots; ++slot) {
                 const int expert = active[slot];
@@ -116,10 +120,10 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
                 CUDA_CHECK(cudaMemcpyAsync(base + code_bytes + scale_bytes + static_cast<std::size_t>(slot) * sizeof(float),
                     host_bank.weight_scale_divisors + expert, sizeof(float), cudaMemcpyHostToDevice, stream));
             }
-            return storage;
+            return required;
         };
-        auto gate_staging = stage_bank(weights.expert_gate_up);
-        auto down_staging = stage_bank(weights.expert_down);
+        const std::size_t gate_bytes = stage_bank(weights.expert_gate_up, gate_cache);
+        const std::size_t down_bytes = stage_bank(weights.expert_down, down_cache);
         CUDA_CHECK(cudaStreamSynchronize(stream));
 
         std::array<std::int32_t, 512> slot_of{};
@@ -130,16 +134,11 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
                                    static_cast<std::size_t>(tokens) * 10 * sizeof(std::int32_t),
                                    cudaMemcpyHostToDevice, stream));
 
-        const std::size_t gate_bytes = static_cast<std::size_t>(weights.expert_gate_up.code_bytes_per_expert +
-            weights.expert_gate_up.scale_bytes_per_expert) * slots + sizeof(float) * slots;
-        const std::size_t down_bytes = static_cast<std::size_t>(weights.expert_down.code_bytes_per_expert +
-            weights.expert_down.scale_bytes_per_expert) * slots + sizeof(float) * slots;
         MoeWeights staged = weights;
-        staged.expert_gate_up = make_nvfp4_expert_bank_view(gate_staging->p, gate_bytes, slots, 1'280, 2'560);
-        staged.expert_down = make_nvfp4_expert_bank_view(down_staging->p, down_bytes, slots, 2'560, 640);
+        staged.expert_gate_up = make_nvfp4_expert_bank_view(gate_cache->p, gate_bytes, slots, 1'280, 2'560);
+        staged.expert_down = make_nvfp4_expert_bank_view(down_cache->p, down_bytes, slots, 2'560, 640);
         flash_next_moe_kernels_launch(input, staged, scratch, output, stream);
-        // DeviceBuffer destruction would otherwise free staged weights while kernels are in flight.
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        // Cache storage persists across calls, so kernels may complete asynchronously.
         return;
     }
 #endif
