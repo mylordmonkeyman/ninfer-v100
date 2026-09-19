@@ -3,7 +3,8 @@
 #include <ninfer/targets/qwen3_8_flash_next/runtime.h>
 #include <ninfer/targets/qwen3_6/prepared_prompt.h>
 
-#include "runtime/contract/structured_output.h"\n#include "core/arena.h"
+#include "runtime/contract/structured_output.h"
+#include "core/arena.h"
 #include "core/device.h"
 #include "ninfer/ops/sampling.h"
 #include "targets/qwen3_8_flash_next/impl/load/materialized.h"

@@ -548,6 +548,7 @@ struct PressurePhysicalGuidance {
     std::uint32_t unsatisfied_constraints   = 0;
     std::uint32_t estimated_remaining_steps = 0;
     std::uint64_t normalized_residual_q20   = 0;
+    bool requires_exact_feedback            = false;
 };
 
 // The spans are borrowed from a PressurePlanningSession scratch generation and remain valid only

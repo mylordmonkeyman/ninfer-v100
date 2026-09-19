@@ -36,6 +36,7 @@ struct SamplingConfig {
     const std::int32_t* history_overlay = nullptr;
     std::int32_t history_overlay_size   = 0;
     const std::int32_t* allowed_tokens  = nullptr;
+    bool commit_token_counts            = true;
 };
 
 // Caller-owned transient capacity for every parallel sampling-lane count in the inclusive

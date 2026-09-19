@@ -225,6 +225,7 @@ struct ResolvedSamplingParameters {
     float min_p             = 0.0F;
     float presence_penalty  = 0.0F;
     float frequency_penalty = 0.0F;
+    float repetition_penalty = 1.0F;
     std::uint64_t seed      = 0;
 };
 
