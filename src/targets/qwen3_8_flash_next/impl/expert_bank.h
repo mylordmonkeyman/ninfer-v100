@@ -41,6 +41,11 @@ materialized_nvfp4_expert_bank_view(const artifact::MaterializedArtifact& materi
                                     artifact::ObjectHandle handle, std::int32_t experts,
                                     std::int32_t rows, std::int32_t columns);
 
+[[nodiscard]] Nvfp4ExpertBankView
+mapped_nvfp4_expert_bank_view(const artifact::MaterializedArtifact& materialized,
+                              artifact::ObjectHandle handle, std::int32_t experts,
+                              std::int32_t rows, std::int32_t columns);
+
 struct Bf16ExpertMatrixView {
     const std::byte* data;
     std::int32_t rows;
