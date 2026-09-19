@@ -45,7 +45,9 @@ void flash_next_text_decode(const TextModelView& model, const Tensor& token_ids,
                             std::int32_t maximum_blocks, std::int32_t active_blocks,
                             FlashNextDecodeStateView state, WorkspaceArena& workspace,
                             Tensor& final_hidden, Tensor& logits, cudaStream_t stream,
-                            const FlashNextDecodeStateSink* sink = nullptr);
+                            const FlashNextDecodeStateSink* sink = nullptr,
+                            void* expert_staging = nullptr,
+                            std::size_t expert_staging_bytes = 0);
 
 void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& embedding,
                                    const Tensor& token_indices, const Tensor& mrope_positions,
