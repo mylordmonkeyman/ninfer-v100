@@ -278,12 +278,19 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
     FlashNextRuntimePlan plan{};
     plan.config                     = config;
     plan.config.state_slot_capacity = resolved_state_slots;
+#if !defined(NINFER_VOLTA_BUILD)
     if (const char* env = std::getenv("NINFER_FLASH_NEXT_QSA_PREFILL_MMA");
         env != nullptr && env[0] != '\0') {
         plan.config.use_qsa_prefill_mma =
             !(std::strcmp(env, "0") == 0 || std::strcmp(env, "off") == 0 ||
               std::strcmp(env, "false") == 0);
     }
+#else
+    // The imported MMA schedule uses Ampere+ ldmatrix/mma.sync PTX.  Volta must stay on
+    // the existing sparse-attention SIMT kernel; do not allow an environment override
+    // to route a V100 into the guarded/trapping MMA helpers.
+    plan.config.use_qsa_prefill_mma = false;
+#endif
     std::fprintf(stderr, "qsa_prefill_mma=%s\n",
                  plan.config.use_qsa_prefill_mma ? "on" : "off");
     plan.main_page_groups           = selected_main_page_groups;
