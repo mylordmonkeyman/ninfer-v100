@@ -8,7 +8,6 @@
 
 #include <algorithm>
 #include <array>
-#include <memory>
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
@@ -124,6 +123,12 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
         static thread_local DecodeExpertCache cache;
         if (expert_staging == nullptr || expert_staging_bytes == 0) {
             throw std::runtime_error("Flash-Next Volta mapped experts require runtime-owned staging storage");
+        }
+        if (weights.expert_gate_up.mapped_payload == nullptr ||
+            weights.expert_down.mapped_payload == nullptr ||
+            weights.expert_gate_up.mapped_payload_bytes == 0 ||
+            weights.expert_down.mapped_payload_bytes == 0) {
+            throw std::runtime_error("Flash-Next Volta mapped expert payload is unavailable");
         }
 
         const auto bank_bytes = [slots](const Nvfp4ExpertBankView& bank) {
