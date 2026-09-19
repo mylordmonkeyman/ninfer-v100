@@ -1191,6 +1191,95 @@ void PressurePlanningSessionImpl::retain_assessment(PressureTargetHandle target)
     retained_target_idx_ = FlashNextPressureHandleHelper::get_index(target);
 }
 
+std::optional<PressureTargetHandle>
+PressurePlanningSessionImpl::guided_closure_target(
+    runtime::PlanningCandidateId candidate,
+    std::span<const runtime::PlanningOwnerId> preferred_owner_ids) {
+    if (scratch_live_) {
+        throw std::logic_error("guided pressure closure conflicts with expansion scratch");
+    }
+    const std::uint32_t cand_idx = candidate_index(candidate);
+    const auto& cand_impl        = *candidates_[cand_idx]->impl_;
+
+    PressurePlanningTargetNode target{
+        .candidate_index = cand_idx,
+        .owner_evicted = std::vector<std::uint8_t>(owners_.size(), 0),
+    };
+
+    std::uint32_t needed = cand_impl.required_page_groups;
+    if (cand_impl.has_source && cand_impl.reusable_tokens > 0) {
+        const std::uint32_t source_groups = (cand_impl.reusable_tokens + 256U - 1U) / 256U;
+        needed = needed > source_groups ? needed - source_groups : 0U;
+    }
+
+    const auto check_feasible = [&](const PressurePlanningTargetNode& node) {
+        std::uint32_t available =
+            static_cast<std::uint32_t>(program_->executor_.available_physical_groups());
+        const std::uint32_t reserved = program_->reserved_unowned_groups();
+        available = available > reserved ? available - reserved : 0U;
+
+        std::unordered_map<std::uint32_t, std::uint32_t> refs_in_target;
+        const auto add_slot = [&](std::size_t slot_index) {
+            if (slot_index >= program_->continuation_slots_.size()) { return; }
+            const auto& slot = program_->continuation_slots_[slot_index];
+            if (slot.role != ContinuationSlotRole::Catalogued) { return; }
+            for (const std::uint32_t group : slot.physical_groups) {
+                refs_in_target[group] += 1;
+            }
+        };
+        for (std::size_t owner_index = 0; owner_index < owners_.size(); ++owner_index) {
+            if (node.owner_evicted[owner_index] != 1) { continue; }
+            const std::size_t slot_index = owners_[owner_index].continuation_index;
+            add_slot(slot_index);
+            if (slot_index < program_->continuation_slots_.size()) {
+                const auto& slot = program_->continuation_slots_[slot_index];
+                if (slot.paired_rewrite_slot.has_value() &&
+                    *slot.paired_rewrite_slot < program_->continuation_slots_.size() &&
+                    program_->continuation_slots_[*slot.paired_rewrite_slot].generation ==
+                        slot.paired_rewrite_generation &&
+                    !program_->is_slot_protected(*slot.paired_rewrite_slot)) {
+                    add_slot(*slot.paired_rewrite_slot);
+                }
+            }
+        }
+        for (const auto& [group, refs] : refs_in_target) {
+            if (program_->executor_.group_refcount(group) == refs) { available += 1; }
+        }
+        return available >= needed;
+    };
+
+    if (check_feasible(target)) { return identity_target(candidate); }
+
+    std::vector<std::size_t> owner_order;
+    owner_order.reserve(owners_.size());
+    for (const runtime::PlanningOwnerId id : preferred_owner_ids) {
+        for (std::size_t owner_index = 0; owner_index < owners_.size(); ++owner_index) {
+            if (owners_[owner_index].owner_id == id &&
+                std::find(owner_order.begin(), owner_order.end(), owner_index) ==
+                    owner_order.end()) {
+                owner_order.push_back(owner_index);
+                break;
+            }
+        }
+    }
+    for (std::size_t owner_index = 0; owner_index < owners_.size(); ++owner_index) {
+        if (std::find(owner_order.begin(), owner_order.end(), owner_index) ==
+            owner_order.end()) {
+            owner_order.push_back(owner_index);
+        }
+    }
+
+    for (const std::size_t owner_index : owner_order) {
+        if (owner_protected(cand_idx, owner_index)) { continue; }
+        target.owner_evicted[owner_index] = 1;
+        if (!check_feasible(target)) { continue; }
+
+        const std::uint32_t target_index = intern_node(std::move(target));
+        return FlashNextPressureHandleHelper::make_handle(this, session_generation_, target_index);
+    }
+    return std::nullopt;
+}
+
 PreparedPressureExpansion PressurePlanningSessionImpl::prepare_expansion(PressureTargetHandle parent,
                                                                          std::uint32_t maximum_owners) {
     if (!valid(parent) || scratch_live_ || maximum_owners == 0) {
@@ -1342,6 +1431,14 @@ PressurePlanningSession::guidance(PressureTargetHandle target) {
 void PressurePlanningSession::retain_assessment(PressureTargetHandle target) {
     if (impl_ == nullptr) { throw std::logic_error("PressurePlanningSession: instance is empty"); }
     impl_->retain_assessment(target);
+}
+
+std::optional<PressureTargetHandle>
+PressurePlanningSession::guided_closure_target(
+    runtime::PlanningCandidateId candidate,
+    std::span<const runtime::PlanningOwnerId> preferred_owner_ids) {
+    if (impl_ == nullptr) { throw std::logic_error("PressurePlanningSession: instance is empty"); }
+    return impl_->guided_closure_target(candidate, preferred_owner_ids);
 }
 
 PressureTargetHandle
