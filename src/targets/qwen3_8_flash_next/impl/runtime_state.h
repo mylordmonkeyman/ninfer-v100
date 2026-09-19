@@ -62,6 +62,10 @@ public:
 
     [[nodiscard]] WorkspaceArena& workspace() noexcept { return *workspace_; }
 
+    [[nodiscard]] void* expert_staging_ptr() noexcept { return expert_staging_; }
+    [[nodiscard]] const void* expert_staging_ptr() const noexcept { return expert_staging_; }
+    [[nodiscard]] std::size_t expert_staging_bytes() const noexcept { return plan_.expert_staging_bytes; }
+
     [[nodiscard]] FlashNextDecodeIngress* host_ingress() noexcept {
         return static_cast<FlashNextDecodeIngress*>(host_ingress_.data());
     }
@@ -137,6 +141,7 @@ private:
     PinnedHostBuffer host_ingress_;
     PinnedHostBuffer host_egress_;
     std::unique_ptr<PinnedHostBuffer> host_mtp_draft_ingress_;
+    void* expert_staging_ = nullptr;
     void* device_ingress_ = nullptr;
     void* device_egress_  = nullptr;
     FlashNextMtpDraftIngress* device_mtp_draft_ingress_ = nullptr;
