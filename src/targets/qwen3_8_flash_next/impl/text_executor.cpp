@@ -419,7 +419,8 @@ void FlashNextTextExecutor::execute_round_body(std::uint32_t batch_size,
                                 source_slots, destination_slots, gathered_ple, max_blocks,
                                 active_blocks, alloc_.state_view(), alloc_.workspace(),
                                 final_hidden, logits, device_.stream, sink, &hyper_hidden,
-                                aliased_recurrent_scan, has_visual ? &token_ids : nullptr);
+                                aliased_recurrent_scan, has_visual ? &token_ids : nullptr,
+                                alloc_.expert_staging_ptr(), alloc_.expert_staging_bytes());
 
     // 5. Sampler
     Tensor sampled_tokens =
@@ -719,7 +720,8 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
             gathered_ple, static_cast<std::int32_t>(alloc_.plan().maximum_blocks),
             first_token_index, alloc_.state_view(), alloc_.workspace(), final_hidden, logits,
             device_.stream, effective_sink, alloc_.plan().config.use_qsa_prefill_mma,
-            &hyper_hidden, visual_embeddings != nullptr ? &dev_token_ids : nullptr);
+            &hyper_hidden, visual_embeddings != nullptr ? &dev_token_ids : nullptr,
+            alloc_.expert_staging_ptr(), alloc_.expert_staging_bytes());
 
         round_in_flight_ = true;
         return PendingRound(this, prepared.transaction_id, 1, logits, final_hidden, hyper_hidden);
