@@ -355,7 +355,7 @@ struct Reader::Impl {
     std::uint64_t payload_start = 0;
 };
 
-Reader::Reader(const std::filesystem::path& path) : impl_(std::make_unique<Impl>(path)) {}
+Reader::Reader(const std::filesystem::path& path) : impl_(std::make_shared<Impl>(path)) {}
 
 Reader::~Reader()                            = default;
 Reader::Reader(Reader&&) noexcept            = default;
