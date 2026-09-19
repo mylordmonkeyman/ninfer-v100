@@ -6,7 +6,6 @@
 #include "core/arena.h"
 #include "core/device.h"
 #include "ninfer/ops/sampling.h"
-#include "runtime/contract/structured_output.h"
 #include "targets/qwen3_8_flash_next/impl/load/materialized.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_state.h"
@@ -20,6 +19,10 @@
 #include <span>
 #include "targets/qwen3_6/impl/runtime/prefix_identity.h"
 #include "targets/qwen3_8_flash_next/impl/vision_execute.h"
+
+namespace ninfer::runtime {
+class CompiledOutputConstraint;
+}
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
