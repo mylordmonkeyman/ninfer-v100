@@ -1565,7 +1565,7 @@ Program::plan_request(const qwen3_6::PreparedPrompt& prompt,
     base->sampling_config.repetition_penalty = options.sampling.repetition_penalty;
     base->sampling_config.seed              = options.sampling.seed;
     base->sampling_config.token_counts      = nullptr;
-    base->output_constraint = options.output_constraint;
+    // Structured-output constraints are not exposed by the V100 branch request contract.\n    base->output_constraint.reset();
 
     if (prompt_data.has_media()) {
         auto control_plan         = qwen3_6::plan_vision_control(prompt_data);
