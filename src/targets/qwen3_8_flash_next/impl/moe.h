@@ -10,6 +10,19 @@
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
+
+// Phase-11 vertical-slice proof that the correctness-first host path actually ran.
+// Counters are process-local diagnostics; they do not participate in scheduling.
+struct FlashNextHostExpertExecutionStats {
+    std::uint64_t completed_layer_calls = 0;
+    std::uint64_t routed_tokens = 0;
+    std::uint64_t expert_pairs = 0;
+};
+
+void reset_flash_next_host_expert_execution_stats() noexcept;
+[[nodiscard]] FlashNextHostExpertExecutionStats
+flash_next_host_expert_execution_stats() noexcept;
+
 [[nodiscard]] std::size_t flash_next_moe_workspace_capacity_bytes(std::int32_t min_tokens,
                                                                   std::int32_t max_tokens);
 
