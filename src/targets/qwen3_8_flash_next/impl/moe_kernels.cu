@@ -1639,6 +1639,19 @@ __global__ __launch_bounds__(128, 4) void flash_next_moe_prefill_shared_down_ker
     }
 }
 
+
+// Phase-10 host-backed routed-expert merge. The shared branch has already initialized
+// output in BF16; routed contains the CPU-computed top-10 weighted sum in FP32.
+__global__ void flash_next_moe_host_routed_merge_kernel(
+    const float* __restrict__ routed, __nv_bfloat16* __restrict__ output, int elements) {
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) +
+                      static_cast<int>(threadIdx.x);
+    if (index < elements) {
+        output[index] =
+            __float2bfloat16_rn(__bfloat162float(output[index]) + routed[index]);
+    }
+}
+
 // Step 6: Fused Fixed-Order FP32 Warp-Tile Reduction Kernel
 // Sums SharedDown base + 10 routed paths in strictly fixed sequential order p = 0..9
 // Grid: (kHidden / 64, (tokens + 15) / 16)
@@ -2195,6 +2208,46 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
             stage_ledger_record(stream, FlashNextStageId::MoE_Reduce);
         }
     }
+}
+
+void flash_next_moe_host_shared_launch(const Tensor& input, const MoeWeights& weights,
+                                       const FlashNextMoeWorkspace& workspace, Tensor& output,
+                                       cudaStream_t stream) {
+    const int tokens = static_cast<int>(input.ne[1]);
+
+    // Keep the Phase-10 bring-up path independent of the inherited shared-MMA backend.
+    const dim3 gate_grid(kIntermediate / 8, (static_cast<unsigned>(tokens) + 7U) / 8U);
+    flash_next_moe_prefill_shared_gate_up_kernel<<<gate_grid, 256, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(input.data),
+        static_cast<const __nv_bfloat16*>(weights.shared_gate.qdata),
+        static_cast<const __nv_bfloat16*>(weights.shared_up.qdata),
+        static_cast<__nv_bfloat16*>(workspace.activations.data), tokens);
+    CUDA_CHECK(cudaGetLastError());
+    stage_ledger_record(stream, FlashNextStageId::MoE_SharedGateUp);
+
+    const dim3 down_grid(kHidden / 64, (static_cast<unsigned>(tokens) + 15U) / 16U);
+    flash_next_moe_prefill_shared_down_kernel<<<down_grid, 128, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(weights.shared_down.qdata),
+        static_cast<const __nv_bfloat16*>(workspace.activations.data),
+        static_cast<const float*>(workspace.shared_scale.data),
+        static_cast<__nv_bfloat16*>(output.data), tokens);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void flash_next_moe_host_routed_merge_launch(const FlashNextMoeWorkspace& workspace,
+                                             Tensor& output, int tokens,
+                                             cudaStream_t stream) {
+    if (tokens <= 0) {
+        throw std::invalid_argument("Flash-Next host routed merge requires positive tokens");
+    }
+    constexpr int kThreads = 256;
+    const int elements = tokens * kHidden;
+    const int blocks = (elements + kThreads - 1) / kThreads;
+    flash_next_moe_host_routed_merge_kernel<<<blocks, kThreads, 0, stream>>>(
+        reinterpret_cast<const float*>(workspace.activations.data),
+        static_cast<__nv_bfloat16*>(output.data), elements);
+    CUDA_CHECK(cudaGetLastError());
+    stage_ledger_record(stream, FlashNextStageId::MoE_Reduce);
 }
 
 void flash_next_moe_bf16_kernels_launch(const Tensor& input, const MoeBf16Weights& weights,
