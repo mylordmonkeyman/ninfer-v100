@@ -89,13 +89,13 @@ jobs:
       - name: Run host-only Phase 11 contract test
         shell: bash
         run: |
-          # The CUDA devel image has the driver link stub but GitHub-hosted runners
-          # have no NVIDIA driver installation. This test exercises only host-side
-          # Phase-11 contract/oracle/ledger arithmetic, so expose the stub under the
-          # runtime SONAME solely for this no-GPU test process.
-          mkdir -p build-sm70/cuda-driver-stub
-          ln -sf /usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so \
-            build-sm70/cuda-driver-stub/libcuda.so.1
-          LD_LIBRARY_PATH="$PWD/build-sm70/cuda-driver-stub:${LD_LIBRARY_PATH:-}" \
+          # GitHub-hosted runners have the CUDA toolkit but no NVIDIA driver.
+          # This test is CPU-only; expose CUDA's link stub under the runtime SONAME
+          # so the executable can start without requiring physical GPU hardware.
+          stub_src=/usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so
+          stub_dir="$PWD/build-sm70/cuda-driver-stub"
+          mkdir -p "$stub_dir"
+          ln -sf "$stub_src" "$stub_dir/libcuda.so.1"
+          LD_LIBRARY_PATH="$stub_dir:${LD_LIBRARY_PATH:-}" \
             ctest --test-dir build-sm70 --output-on-failure \
-              -R '^ninfer_qwen3_8_flash_next_vertical_slice_test
+              -R '^ninfer_qwen3_8_flash_next_vertical_slice_test$'
