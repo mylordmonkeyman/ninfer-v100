@@ -18,6 +18,14 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& output,
                     WorkspaceArena& workspace, cudaStream_t stream);
 
+// Phase-10 correctness path for main-text layers whose routed NVFP4 experts remain
+// in the artifact mmap. Routing and the shared expert execute on the GPU; the ten
+// routed expert pairs execute synchronously on the CPU reference path and are merged
+// back into the BF16 output. Performance is intentionally not a goal here.
+void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_weights,
+                                const HostNvfp4ExpertLayerView& host_experts, Tensor& output,
+                                WorkspaceArena& workspace, cudaStream_t stream);
+
 void flash_next_moe_bf16(const Tensor& input, const MoeBf16Weights& weights, Tensor& output,
                          WorkspaceArena& workspace, cudaStream_t stream);
 
