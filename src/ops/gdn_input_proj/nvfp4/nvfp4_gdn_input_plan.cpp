@@ -16,9 +16,14 @@ enum class Nvfp4GdnInputRoute : std::uint8_t {
 
 Nvfp4GdnInputRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
     if (tokens <= 0) { throw std::invalid_argument("nvfp4 gdn_input_proj: T must be positive"); }
+#if defined(NINFER_VOLTA_BUILD)
+    (void)policy;
+    return Nvfp4GdnInputRoute::A16;
+#else
     if (policy == LinearPolicy::A16Only) { return Nvfp4GdnInputRoute::A16; }
     if (policy == LinearPolicy::AllowA4) { return Nvfp4GdnInputRoute::W4A4; }
     throw std::invalid_argument("nvfp4 gdn_input_proj: unsupported policy");
+#endif
 }
 
 void launch_a16(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
@@ -54,13 +59,23 @@ std::size_t nvfp4_gdn_input_workspace_capacity_bytes(LinearPolicy policy, std::i
         throw std::invalid_argument("nvfp4 gdn_input_proj workspace: invalid token interval");
     }
     (void)resolve_route(policy, min_tokens);
+#if defined(NINFER_VOLTA_BUILD)
+    (void)resolve_route(policy, max_tokens);
+    return 0;
+#else
     return resolve_route(policy, max_tokens) == Nvfp4GdnInputRoute::W4A4
                ? nvfp4_w4a4_workspace_capacity_bytes(max_tokens, Nvfp4GdnInputGeometry::kInputRows)
                : 0;
+#endif
 }
 
 void nvfp4_gdn_input_dispatch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
                               LinearPolicy policy, WorkspaceArena* workspace, cudaStream_t stream) {
+#if defined(NINFER_VOLTA_BUILD)
+    (void)workspace;
+    (void)resolve_route(policy, x.ne[1]);
+    launch_a16(x, weight, qkv, z, stream);
+#else
     if (resolve_route(policy, x.ne[1]) == Nvfp4GdnInputRoute::A16) {
         launch_a16(x, weight, qkv, z, stream);
         return;
@@ -71,6 +86,7 @@ void nvfp4_gdn_input_dispatch(const Tensor& x, const Weight& weight, Tensor& qkv
     auto scope                       = workspace->scope();
     const Nvfp4W4a4Workspace scratch = allocate_nvfp4_w4a4_workspace(*workspace, x.ne[1], weight.k);
     nvfp4_gdn_input_w4a4_launch(x, weight, qkv, z, scratch, stream);
+#endif
 }
 
 } // namespace ninfer::ops::detail
