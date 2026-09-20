@@ -254,6 +254,17 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
                      const detail::gated_delta_net::chunked::GdnChunkedStageHook* hook) {
     validate_chunked(q, k, v, g, beta, scale, ssm_state_in, ssm_state_out, out);
 
+#if defined(NINFER_VOLTA_BUILD)
+    // Correctness-first Volta fallback: the recurrent kernel already implements the
+    // exact sequential GDN transition for an arbitrary token width. Avoid the
+    // Ampere+ chunked path (cp.async/ldmatrix/TF32/BF16 MMA) while preserving
+    // distinct input/output state and Q/K normalization semantics.
+    (void)ws;
+    (void)hook;
+    detail::gated_delta_net::launch_recurrent_inout(
+        q, k, v, g, beta, scale, normalize_qk, ssm_state_in, ssm_state_out, out, stream);
+    return;
+#else
     auto scratch_scope   = ws.scope();
     const std::int32_t T = q.ne[2];
     const std::int32_t T_full =
@@ -298,6 +309,7 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
                                                         scale, recurrent_normalize, tail_in,
                                                         ssm_state_out, out_tail, stream);
     }
+#endif
 }
 
 } // namespace ninfer::ops
