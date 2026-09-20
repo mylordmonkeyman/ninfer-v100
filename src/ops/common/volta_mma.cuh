@@ -100,4 +100,18 @@ volta_mma884_f16_f32(VoltaMma884Accumulator& c, VoltaMma884Operand a,
         : "r"(a.x0), "r"(a.x1), "r"(b.x0), "r"(b.x1));
 }
 
+// Register-level bridge for streamed software-dequant kernels. It deliberately
+// reuses the same typed m8n8k4 primitive so QPN backends do not carry their own
+// inline PTX or fragment contract.
+__device__ __forceinline__ void
+volta_mma884_f16_f32_raw(float (&accum)[8], std::uint32_t a0, std::uint32_t a1,
+                         std::uint32_t b0, std::uint32_t b1) {
+    VoltaMma884Accumulator c{};
+#pragma unroll
+    for (int i = 0; i < 8; ++i) { c.x[i] = accum[i]; }
+    volta_mma884_f16_f32(c, VoltaMma884Operand{a0, a1}, VoltaMma884Operand{b0, b1});
+#pragma unroll
+    for (int i = 0; i < 8; ++i) { accum[i] = c.x[i]; }
+}
+
 } // namespace ninfer::ops
