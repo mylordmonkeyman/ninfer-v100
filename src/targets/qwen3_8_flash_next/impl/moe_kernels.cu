@@ -1640,15 +1640,32 @@ __global__ __launch_bounds__(128, 4) void flash_next_moe_prefill_shared_down_ker
 }
 
 
-// Phase-10 host-backed routed-expert merge. The shared branch has already initialized
-// output in BF16; routed contains the CPU-computed top-10 weighted sum in FP32.
+// Phase-10 host-backed routed-expert merge. The first 2,560 FP32 values of each
+// token's activation slab hold the CPU-computed routed sum. The shared activation
+// remains at path 10, so the shared down dot and routed contribution can be combined
+// in FP32 and rounded only once, matching the production MoE boundary.
 __global__ void flash_next_moe_host_routed_merge_kernel(
-    const float* __restrict__ routed, __nv_bfloat16* __restrict__ output, int elements) {
-    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) +
-                      static_cast<int>(threadIdx.x);
-    if (index < elements) {
-        output[index] =
-            __float2bfloat16_rn(__bfloat162float(output[index]) + routed[index]);
+    const float* __restrict__ shared_scale,
+    const __nv_bfloat16* __restrict__ activations,
+    const __nv_bfloat16* __restrict__ shared_down,
+    __nv_bfloat16* __restrict__ output) {
+    const int token = static_cast<int>(blockIdx.y);
+    const int tid   = static_cast<int>(threadIdx.x);
+    const int warp  = tid >> 5;
+    const int lane  = tid & 31;
+    const int row   = static_cast<int>(blockIdx.x) * kDownWarps + warp;
+    if (row >= kHidden) { return; }
+
+    const auto* token_activations =
+        activations + static_cast<std::int64_t>(token) * kPaths * kIntermediate;
+    const float shared_value =
+        down_shared_path_value(shared_down, token_activations, row, lane);
+
+    if (lane == 0) {
+        const float routed =
+            reinterpret_cast<const float*>(token_activations)[row];
+        output[static_cast<std::int64_t>(token) * kHidden + row] =
+            __float2bfloat16_rn(fmaf(shared_scale[token], shared_value, routed));
     }
 }
 
@@ -2211,7 +2228,7 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
 }
 
 void flash_next_moe_host_shared_launch(const Tensor& input, const MoeWeights& weights,
-                                       const FlashNextMoeWorkspace& workspace, Tensor& output,
+                                       const FlashNextMoeWorkspace& workspace,
                                        cudaStream_t stream) {
     const int tokens = static_cast<int>(input.ne[1]);
 
@@ -2224,28 +2241,21 @@ void flash_next_moe_host_shared_launch(const Tensor& input, const MoeWeights& we
         static_cast<__nv_bfloat16*>(workspace.activations.data), tokens);
     CUDA_CHECK(cudaGetLastError());
     stage_ledger_record(stream, FlashNextStageId::MoE_SharedGateUp);
-
-    const dim3 down_grid(kHidden / 64, (static_cast<unsigned>(tokens) + 15U) / 16U);
-    flash_next_moe_prefill_shared_down_kernel<<<down_grid, 128, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(weights.shared_down.qdata),
-        static_cast<const __nv_bfloat16*>(workspace.activations.data),
-        static_cast<const float*>(workspace.shared_scale.data),
-        static_cast<__nv_bfloat16*>(output.data), tokens);
-    CUDA_CHECK(cudaGetLastError());
 }
 
-void flash_next_moe_host_routed_merge_launch(const FlashNextMoeWorkspace& workspace,
+void flash_next_moe_host_routed_merge_launch(const MoeWeights& weights,
+                                             const FlashNextMoeWorkspace& workspace,
                                              Tensor& output, int tokens,
                                              cudaStream_t stream) {
     if (tokens <= 0) {
         throw std::invalid_argument("Flash-Next host routed merge requires positive tokens");
     }
-    constexpr int kThreads = 256;
-    const int elements = tokens * kHidden;
-    const int blocks = (elements + kThreads - 1) / kThreads;
-    flash_next_moe_host_routed_merge_kernel<<<blocks, kThreads, 0, stream>>>(
-        reinterpret_cast<const float*>(workspace.activations.data),
-        static_cast<__nv_bfloat16*>(output.data), elements);
+    const dim3 grid(kHidden / kDownWarps, static_cast<unsigned>(tokens));
+    flash_next_moe_host_routed_merge_kernel<<<grid, kDownWarps * 32, 0, stream>>>(
+        static_cast<const float*>(workspace.shared_scale.data),
+        static_cast<const __nv_bfloat16*>(workspace.activations.data),
+        static_cast<const __nv_bfloat16*>(weights.shared_down.qdata),
+        static_cast<__nv_bfloat16*>(output.data));
     CUDA_CHECK(cudaGetLastError());
     stage_ledger_record(stream, FlashNextStageId::MoE_Reduce);
 }
