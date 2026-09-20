@@ -1,0 +1,59 @@
+name: SM70 Phase 11 Compile
+
+on:
+  push:
+    branches:
+      - forwardport/v100-flash-next
+  workflow_dispatch:
+
+concurrency:
+  group: sm70-phase11-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile-phase11:
+    runs-on: ubuntu-24.04
+    container:
+      image: nvidia/cuda:12.8.1-devel-ubuntu24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Install build tools
+        shell: bash
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git \
+            ca-certificates \
+            python3 \
+            python3-pip \
+            pkg-config
+          python3 -m pip install --break-system-packages 'cmake>=3.28,<4' ninja
+
+      - uses: actions/checkout@v4
+
+      - name: Configure CUDA 12.8 SM70
+        shell: bash
+        run: |
+          cmake -S . -B build-sm70 -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF \
+            -DBUILD_TESTING=ON
+
+      - name: Build Phase 11 targets
+        shell: bash
+        run: |
+          cmake --build build-sm70 --parallel 2 --target \
+            ninfer_qwen3_8_flash_next_vertical_slice_test \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            ninfer_qwen3_8_flash_next_text_executor_test \
+            ninfer_qwen3_8_flash_next_load_plan_test
+
+      - name: Run host-only Phase 11 contract test
+        shell: bash
+        run: |
+          ctest --test-dir build-sm70 --output-on-failure \
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_test$'
