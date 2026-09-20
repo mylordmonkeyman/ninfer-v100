@@ -24,6 +24,9 @@ struct LoadFeatures {
     // cost 608 MiB of VRAM rather than saving it (bench/d17 server logs, 2026-09-05).
     bool quantize_output_head_fp8          = false;
     bool quantize_token_embedding_fp8      = false;
+    // Main text routed-expert banks remain exact compact NVFP4 in the artifact mapping.
+    // This is the Phase-10 placement switch; MTP has its own later policy.
+    bool host_backed_experts                = false;
 };
 
 struct HyperConnectionPlan {
@@ -47,7 +50,8 @@ struct MoePlan {
     artifact::ObjectHandle shared_gate_weight;
     artifact::ObjectHandle expert_gate_up;
     artifact::ObjectHandle expert_down;
-    bool experts_nvfp4 = true;
+    bool experts_nvfp4      = true;
+    bool experts_host_mapped = false;
 };
 
 struct GdnPlan {
