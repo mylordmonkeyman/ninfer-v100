@@ -22,6 +22,10 @@ Nvfp4LinearRoute resolve_route(std::int32_t output_rows, std::int32_t input_rows
     if (tokens <= 0 || !is_nvfp4_linear_problem(output_rows, input_rows)) {
         throw std::invalid_argument("nvfp4 linear: unsupported shape");
     }
+#if defined(NINFER_VOLTA_BUILD)
+    (void)policy;
+    return Nvfp4LinearRoute::A16;
+#else
     if (policy == LinearPolicy::A16Only) { return Nvfp4LinearRoute::A16; }
     if (policy != LinearPolicy::AllowA4) {
         throw std::invalid_argument("nvfp4 linear: unsupported policy");
@@ -39,6 +43,7 @@ Nvfp4LinearRoute resolve_route(std::int32_t output_rows, std::int32_t input_rows
         return tokens >= 8 ? Nvfp4LinearRoute::W4A4 : Nvfp4LinearRoute::A16;
     }
     throw std::logic_error("unreachable NVFP4 linear problem");
+#endif
 }
 
 void launch_a16(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
@@ -67,10 +72,16 @@ std::size_t nvfp4_linear_workspace_capacity_bytes(std::int32_t output_rows, std:
     if (min_tokens <= 0 || max_tokens < min_tokens) {
         throw std::invalid_argument("nvfp4 linear workspace: invalid token interval");
     }
+#if defined(NINFER_VOLTA_BUILD)
+    (void)resolve_route(output_rows, input_rows, policy, min_tokens);
+    (void)resolve_route(output_rows, input_rows, policy, max_tokens);
+    return 0;
+#else
     (void)resolve_route(output_rows, input_rows, policy, min_tokens);
     return resolve_route(output_rows, input_rows, policy, max_tokens) == Nvfp4LinearRoute::W4A4
                ? nvfp4_w4a4_workspace_capacity_bytes(max_tokens, input_rows)
                : 0;
+#endif
 }
 
 void nvfp4_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
@@ -79,7 +90,11 @@ void nvfp4_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPo
     if (!is_nvfp4_linear_problem(weight.n, weight.k) || x.ne[1] <= 0) {
         throw std::invalid_argument("nvfp4 linear: unsupported shape");
     }
-
+#if defined(NINFER_VOLTA_BUILD)
+    (void)workspace;
+    (void)resolve_route(weight.n, weight.k, policy, x.ne[1]);
+    launch_a16(x, weight, out, stream);
+#else
     if (resolve_route(weight.n, weight.k, policy, x.ne[1]) == Nvfp4LinearRoute::A16) {
         launch_a16(x, weight, out, stream);
         return;
@@ -90,6 +105,7 @@ void nvfp4_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPo
     auto scope                       = workspace->scope();
     const Nvfp4W4a4Workspace scratch = allocate_nvfp4_w4a4_workspace(*workspace, x.ne[1], weight.k);
     launch_nvfp4_w4a4(x, weight, out, scratch, stream);
+#endif
 }
 
 } // namespace ninfer::ops::detail
