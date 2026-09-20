@@ -141,9 +141,10 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                      scratch.scores, scratch.ids, scratch.alpha, scratch.shared_scale, stream);
     stage_ledger_record(stream, FlashNextStageId::MoE_Router);
 
-    // The shared expert remains resident on device. Compute it before the host rendezvous so
-    // the same stream synchronization also makes the shared output complete.
-    flash_next_moe_host_shared_launch(input, resident_weights, scratch, output, stream);
+    // The shared expert remains resident on device. Compute its BF16 activation before the
+    // host rendezvous. The shared down projection is deferred until the routed FP32 sum returns
+    // so both branches can be combined before the final BF16 rounding.
+    flash_next_moe_host_shared_launch(input, resident_weights, scratch, stream);
 
     const std::size_t input_words =
         static_cast<std::size_t>(tokens) * kFlashNextExpertHidden;
@@ -193,14 +194,21 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         }
     }
 
-    // activations is 640 * 11 BF16 values/token (14,080 B/token), which is larger than
-    // the 2,560 FP32 routed vector (10,240 B/token). The shared branch is already complete,
-    // so this storage can be safely reused as a temporary upload without enlarging the
-    // Phase-2 workspace/VRAM ledger.
-    const std::size_t routed_bytes = routed_sum.size() * sizeof(float);
-    CUDA_CHECK(cudaMemcpyAsync(scratch.activations.data, routed_sum.data(), routed_bytes,
-                               cudaMemcpyHostToDevice, stream));
-    flash_next_moe_host_routed_merge_launch(scratch, output, tokens, stream);
+    // Each token owns 640 * 11 BF16 values (14,080 B). Store the 2,560 FP32 routed
+    // values in the first 10,240 B of that token's slab and preserve the shared path at
+    // BF16 path 10 (offset 12,800 B). A pitched copy keeps token slabs independent.
+    constexpr std::size_t kActivationPitchBytes =
+        kFlashNextExpertIntermediate * 11ULL * sizeof(std::uint16_t);
+    constexpr std::size_t kRoutedBytesPerToken =
+        kFlashNextExpertHidden * sizeof(float);
+    static_assert(kActivationPitchBytes >= kRoutedBytesPerToken);
+    CUDA_CHECK(cudaMemcpy2DAsync(
+        scratch.activations.data, kActivationPitchBytes,
+        routed_sum.data(), kRoutedBytesPerToken,
+        kRoutedBytesPerToken, static_cast<std::size_t>(tokens),
+        cudaMemcpyHostToDevice, stream));
+    flash_next_moe_host_routed_merge_launch(
+        resident_weights, scratch, output, tokens, stream);
 }
 
 void flash_next_moe_bf16(const Tensor& input, const MoeBf16Weights& weights, Tensor& output,
