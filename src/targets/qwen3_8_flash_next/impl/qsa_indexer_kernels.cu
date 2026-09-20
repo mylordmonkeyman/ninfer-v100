@@ -7,11 +7,13 @@
 #include "ops/common/warp.cuh"
 
 #include <cub/device/device_segmented_radix_sort.cuh>
+#if !defined(NINFER_VOLTA_BUILD)
 #include <cub/device/device_topk.cuh>
 #include <cuda/__execution/determinism.h>
 #include <cuda/__execution/output_ordering.h>
 #include <cuda/__execution/require.h>
 #include <cuda/__stream/stream_ref.h>
+#endif
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
@@ -227,6 +229,17 @@ cudaError_t sort_pairs_descending(void* temp, std::size_t& temp_bytes, const flo
         offsets + 1, 0, static_cast<int>(sizeof(float) * 8), stream);
 }
 
+cudaError_t sort_packed_pairs_descending(void* temp, std::size_t& temp_bytes,
+                                         const std::uint64_t* keys_in,
+                                         std::uint64_t* keys_out,
+                                         const std::int32_t* values_in,
+                                         std::int32_t* values_out, int items, int segments,
+                                         const std::int32_t* offsets, cudaStream_t stream) {
+    return cub::DeviceSegmentedRadixSort::SortPairsDescending(
+        temp, temp_bytes, keys_in, keys_out, values_in, values_out, items, segments, offsets,
+        offsets + 1, 0, static_cast<int>(sizeof(std::uint64_t) * 8), stream);
+}
+
 __device__ __forceinline__ std::uint32_t float_ascending_bits(float value) {
     const std::uint32_t bits = __float_as_uint(value);
     const std::uint32_t mask =
@@ -294,6 +307,7 @@ __global__ void publish_compact_selection_kernel(const std::int32_t* __restrict_
     }
 }
 
+#if !defined(NINFER_VOLTA_BUILD)
 auto topk_env(cudaStream_t stream) {
     return cuda::std::execution::env(
         cuda::stream_ref{stream},
@@ -342,6 +356,41 @@ void select_top512_topk(const float* scores, const std::int32_t* ids, std::uint6
     CUDA_CHECK(cudaGetLastError());
 }
 
+
+#else
+std::size_t packed_radix_temp_bytes(int num_items, int segments) {
+    std::size_t bytes = 0;
+    const auto* keys_in =
+        reinterpret_cast<const std::uint64_t*>(std::uintptr_t{0x1000});
+    auto* keys_out = reinterpret_cast<std::uint64_t*>(std::uintptr_t{0x2000});
+    const auto* values_in =
+        reinterpret_cast<const std::int32_t*>(std::uintptr_t{0x3000});
+    auto* values_out = reinterpret_cast<std::int32_t*>(std::uintptr_t{0x4000});
+    const auto* offsets =
+        reinterpret_cast<const std::int32_t*>(std::uintptr_t{0x5000});
+    CUDA_CHECK(sort_packed_pairs_descending(nullptr, bytes, keys_in, keys_out, values_in,
+                                            values_out, num_items, segments, offsets, nullptr));
+    return bytes;
+}
+
+void select_top512_radix(const float* scores, const std::int32_t* ids,
+                         std::uint64_t* packed_keys, std::uint64_t* packed_sorted,
+                         std::int32_t* sorted_ids, const std::int32_t* offsets, void* temp,
+                         std::size_t temp_capacity, int active_blocks, int batch,
+                         cudaStream_t stream) {
+    constexpr int threads = 256;
+    const int items = active_blocks * batch;
+    pack_topk_keys_kernel<<<(items + threads - 1) / threads, threads, 0, stream>>>(
+        scores, ids, packed_keys, items);
+    CUDA_CHECK(cudaGetLastError());
+
+    std::size_t temp_bytes = temp_capacity;
+    CUDA_CHECK(sort_packed_pairs_descending(
+        temp, temp_bytes, packed_keys, packed_sorted, ids, sorted_ids, items, batch, offsets,
+        stream));
+}
+#endif
+
 } // namespace
 
 std::size_t flash_next_qsa_indexer_sort_temp_bytes(std::int32_t maximum_blocks,
@@ -354,8 +403,14 @@ std::size_t flash_next_qsa_indexer_sort_temp_bytes(std::int32_t maximum_blocks,
     const auto* offsets    = reinterpret_cast<const std::int32_t*>(std::uintptr_t{0x5000});
     CUDA_CHECK(sort_pairs_descending(nullptr, sort_bytes, keys_in, keys_out, values_in, values_out,
                                      maximum_blocks * batch, batch, offsets, nullptr));
+#if defined(NINFER_VOLTA_BUILD)
+    const std::size_t packed_sort_bytes =
+        packed_radix_temp_bytes(maximum_blocks * batch, batch);
+    return std::max(sort_bytes, packed_sort_bytes);
+#else
     const std::size_t topk_bytes = topk_temp_bytes(maximum_blocks, kSelectedBlocks);
     return std::max(sort_bytes, topk_bytes);
+#endif
 }
 
 void flash_next_qsa_indexer_store_launch(const Tensor& projected, const Tensor& token_indices,
@@ -442,6 +497,21 @@ void flash_next_qsa_indexer_launch(const Tensor& token_indices, const Tensor& mr
         static_cast<const std::int32_t*>(token_indices.data), cache.block_tables.ne[0],
         active_blocks, static_cast<float*>(scratch.scores.data));
     CUDA_CHECK(cudaGetLastError());
+#if defined(NINFER_VOLTA_BUILD)
+    select_top512_radix(
+        static_cast<const float*>(scratch.scores.data),
+        static_cast<const std::int32_t*>(scratch.ids.data),
+        static_cast<std::uint64_t*>(scratch.packed_keys.data),
+        static_cast<std::uint64_t*>(scratch.packed_selected.data),
+        static_cast<std::int32_t*>(scratch.sorted_ids.data),
+        static_cast<const std::int32_t*>(scratch.offsets.data), scratch.sort_temp.data,
+        scratch.sort_temp.bytes, active_blocks, batch, stream);
+    publish_compact_selection_kernel<<<batch, 256, 0, stream>>>(
+        static_cast<const std::int32_t*>(scratch.sorted_ids.data),
+        static_cast<const std::int32_t*>(token_indices.data),
+        static_cast<std::int32_t*>(selected_blocks.data),
+        static_cast<std::int32_t*>(selected_counts.data), active_blocks);
+#else
     select_top512_topk(
         static_cast<const float*>(scratch.scores.data),
         static_cast<const std::int32_t*>(scratch.ids.data),
@@ -454,6 +524,7 @@ void flash_next_qsa_indexer_launch(const Tensor& token_indices, const Tensor& mr
         static_cast<const std::int32_t*>(token_indices.data),
         static_cast<std::int32_t*>(selected_blocks.data),
         static_cast<std::int32_t*>(selected_counts.data), kSelectedBlocks);
+#endif
     CUDA_CHECK(cudaGetLastError());
 }
 
