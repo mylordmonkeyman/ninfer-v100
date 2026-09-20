@@ -188,9 +188,10 @@ add_library(ninfer_ops STATIC
   ops/dynamic_grouped_conv/w8/w8_dynamic_grouped_conv_add_materialized.cu
   ops/dynamic_grouped_conv/w8/w8_dynamic_grouped_conv_add_plan.cpp
   ops/linear/bf16/bf16_gemv.cu
-  ops/linear/bf16/bf16_gemm_mma.cu
-  ops/linear/bf16/bf16_n256_k5120.cu
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear/bf16/bf16_gemm_mma.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear/bf16/bf16_n256_k5120.cu>
   ops/linear/bf16/bf16_small_t.cu
+  $<$<BOOL:${NINFER_VOLTA_BUILD}>:ops/linear/bf16/bf16_volta_simt.cu>
   ops/linear/bf16/bf16_dispatch.cpp
   ops/linear/fp8/fp8_format.cpp
   ops/linear/fp8/fp8_gemv.cu
