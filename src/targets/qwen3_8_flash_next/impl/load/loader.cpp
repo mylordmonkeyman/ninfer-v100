@@ -53,6 +53,7 @@ FlashNextStaticVramLedger make_static_vram_ledger(
     out.planned_device_weight_arena_bytes = materialization.device_capacity_bytes;
 
     std::array<std::uint64_t, kTextLayerCount> expert_layer_bytes{};
+    std::array<std::uint64_t, kTextLayerCount> host_expert_layer_bytes{};
     std::uint64_t previous_end = 0;
     for (const artifact::DeviceMaterialization& placement : materialization.device_objects) {
         if (placement.offset < previous_end) {
@@ -97,14 +98,47 @@ FlashNextStaticVramLedger make_static_vram_ledger(
         throw std::logic_error("Flash-Next device payload ledger does not reconcile");
     }
 
-    for (std::uint64_t bytes : expert_layer_bytes) {
-        if (bytes == 0) { continue; }
-        if (out.routed_expert_layer_payload_bytes == 0) {
-            out.routed_expert_layer_payload_bytes = bytes;
-        } else if (bytes != out.routed_expert_layer_payload_bytes) {
-            throw std::logic_error("Flash-Next routed expert layers have unequal payload sizes");
+    for (const artifact::MappedTensorMaterialization& placement :
+         materialization.mapped_tensor_objects) {
+        const auto& descriptor = reader.objects().at(placement.object.index);
+        const auto* tensor = std::get_if<artifact::TensorDescriptor>(&descriptor);
+        if (tensor == nullptr) {
+            throw std::logic_error("Flash-Next mapped tensor placement is not a tensor");
         }
-        ++out.routed_expert_layers;
+        const std::string_view name = tensor->name;
+        if (!text_routed_expert_name(name)) { continue; }
+        out.host_backed_expert_payload_bytes =
+            checked_add_ledger(out.host_backed_expert_payload_bytes, tensor->bytes);
+        const std::size_t layer = text_layer_index(name);
+        host_expert_layer_bytes[layer] =
+            checked_add_ledger(host_expert_layer_bytes[layer], tensor->bytes);
+    }
+
+    for (std::size_t layer = 0; layer < kTextLayerCount; ++layer) {
+        const std::uint64_t resident_bytes = expert_layer_bytes[layer];
+        const std::uint64_t host_bytes = host_expert_layer_bytes[layer];
+        if (resident_bytes != 0 && host_bytes != 0) {
+            throw std::logic_error(
+                "Flash-Next routed expert layer is split across device and host placement");
+        }
+        if (resident_bytes != 0) {
+            if (out.routed_expert_layer_payload_bytes == 0) {
+                out.routed_expert_layer_payload_bytes = resident_bytes;
+            } else if (resident_bytes != out.routed_expert_layer_payload_bytes) {
+                throw std::logic_error(
+                    "Flash-Next resident routed expert layers have unequal payload sizes");
+            }
+            ++out.routed_expert_layers;
+        }
+        if (host_bytes != 0) {
+            if (out.host_backed_expert_layer_payload_bytes == 0) {
+                out.host_backed_expert_layer_payload_bytes = host_bytes;
+            } else if (host_bytes != out.host_backed_expert_layer_payload_bytes) {
+                throw std::logic_error(
+                    "Flash-Next host-backed routed expert layers have unequal payload sizes");
+            }
+            ++out.host_backed_expert_layers;
+        }
     }
 
     out.full_attention_kv_bytes       = runtime_plan.attention_kv_bytes;

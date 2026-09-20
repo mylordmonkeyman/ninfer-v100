@@ -324,13 +324,24 @@ int test_real_artifact_preflight_if_available() {
                       << report.file_bytes << "\n";
             return 1;
         }
-        if (report.planned_device_weights_bytes != 75'172'951'040ULL) {
-            std::cerr << "Preflight planned_device_weights_bytes mismatch: expected 75172951040 got "
+#if defined(NINFER_VOLTA_BUILD)
+        constexpr std::uint64_t kExpectedDeviceWeights = 7'225'029'632ULL;
+        constexpr std::size_t kExpectedDeviceTensors = 971;
+        constexpr std::size_t kExpectedMappedTensors = 227; // 131 baseline + 96 main expert banks
+#else
+        constexpr std::uint64_t kExpectedDeviceWeights = 75'172'951'040ULL;
+        constexpr std::size_t kExpectedDeviceTensors = 1067;
+        constexpr std::size_t kExpectedMappedTensors = 131;
+#endif
+        if (report.planned_device_weights_bytes != kExpectedDeviceWeights) {
+            std::cerr << "Preflight planned_device_weights_bytes mismatch: expected "
+                      << kExpectedDeviceWeights << " got "
                       << report.planned_device_weights_bytes << "\n";
             return 1;
         }
-        if (report.planned_device_tensors_count != 1067) {
-            std::cerr << "Preflight planned_device_tensors_count mismatch: expected 1067 got "
+        if (report.planned_device_tensors_count != kExpectedDeviceTensors) {
+            std::cerr << "Preflight planned_device_tensors_count mismatch: expected "
+                      << kExpectedDeviceTensors << " got "
                       << report.planned_device_tensors_count << "\n";
             return 1;
         }
@@ -339,8 +350,9 @@ int test_real_artifact_preflight_if_available() {
                       << report.planned_retained_resources_count << "\n";
             return 1;
         }
-        if (report.planned_mapped_tensors_count != 131) { // 128 shards + 3 embedding metadata tensors
-            std::cerr << "Preflight planned_mapped_tensors_count mismatch: expected 131 got "
+        if (report.planned_mapped_tensors_count != kExpectedMappedTensors) {
+            std::cerr << "Preflight planned_mapped_tensors_count mismatch: expected "
+                      << kExpectedMappedTensors << " got "
                       << report.planned_mapped_tensors_count << "\n";
             return 1;
         }
@@ -368,10 +380,23 @@ int test_real_artifact_preflight_if_available() {
         constexpr std::uint64_t kExpertLayerBytes = 1'415'581'696ULL;
         constexpr std::uint64_t kAllTextExpertsBytes = kExpertLayerBytes * 48ULL;
         constexpr std::uint64_t kEmbeddingBytes = 1'271'398'400ULL;
+#if defined(NINFER_VOLTA_BUILD)
+        const bool expert_placement_ok =
+            ledger.routed_expert_layers == 0 &&
+            ledger.routed_expert_payload_bytes == 0 &&
+            ledger.host_backed_expert_layers == 48 &&
+            ledger.host_backed_expert_layer_payload_bytes == kExpertLayerBytes &&
+            ledger.host_backed_expert_payload_bytes == kAllTextExpertsBytes;
+#else
+        const bool expert_placement_ok =
+            ledger.routed_expert_layers == 48 &&
+            ledger.routed_expert_layer_payload_bytes == kExpertLayerBytes &&
+            ledger.routed_expert_payload_bytes == kAllTextExpertsBytes &&
+            ledger.host_backed_expert_layers == 0 &&
+            ledger.host_backed_expert_payload_bytes == 0;
+#endif
         if (ledger.planned_device_weight_arena_bytes != report.planned_device_weights_bytes ||
-            ledger.routed_expert_layers != 48 ||
-            ledger.routed_expert_layer_payload_bytes != kExpertLayerBytes ||
-            ledger.routed_expert_payload_bytes != kAllTextExpertsBytes ||
+            !expert_placement_ok ||
             ledger.token_embedding_payload_bytes != kEmbeddingBytes ||
             ledger.output_head_payload_bytes != kEmbeddingBytes ||
             ledger.runtime_plan_device_bytes != report.runtime_plan.total_device_bytes ||
@@ -530,10 +555,25 @@ int test_synthetic_static_vram_ledger() {
         const auto report = preflight_text_artifact(reader, cfg);
         const auto& ledger = report.vram_ledger;
 
-        if (ledger.routed_expert_layers != 48 ||
-            ledger.routed_expert_layer_payload_bytes != 1'415'581'696ULL ||
-            ledger.routed_expert_payload_bytes !=
-                ledger.routed_expert_layer_payload_bytes * ledger.routed_expert_layers ||
+#if defined(NINFER_VOLTA_BUILD)
+        const bool synthetic_expert_placement_ok =
+            ledger.routed_expert_layers == 0 &&
+            ledger.routed_expert_payload_bytes == 0 &&
+            ledger.host_backed_expert_layers == 48 &&
+            ledger.host_backed_expert_layer_payload_bytes == 1'415'581'696ULL &&
+            ledger.host_backed_expert_payload_bytes ==
+                ledger.host_backed_expert_layer_payload_bytes *
+                    ledger.host_backed_expert_layers;
+#else
+        const bool synthetic_expert_placement_ok =
+            ledger.routed_expert_layers == 48 &&
+            ledger.routed_expert_layer_payload_bytes == 1'415'581'696ULL &&
+            ledger.routed_expert_payload_bytes ==
+                ledger.routed_expert_layer_payload_bytes * ledger.routed_expert_layers &&
+            ledger.host_backed_expert_layers == 0 &&
+            ledger.host_backed_expert_payload_bytes == 0;
+#endif
+        if (!synthetic_expert_placement_ok ||
             ledger.planned_device_weight_arena_bytes != report.planned_device_weights_bytes ||
             ledger.device_weight_payload_bytes +
                     ledger.device_weight_alignment_padding_bytes !=

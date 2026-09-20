@@ -46,6 +46,12 @@ struct FlashNextStaticVramLedger {
     std::uint64_t routed_expert_layer_payload_bytes = 0;
     std::uint32_t routed_expert_layers              = 0;
 
+    // Canonical pageable/mmap expert storage. These bytes are deliberately not
+    // included in the device VRAM total.
+    std::uint64_t host_backed_expert_payload_bytes       = 0;
+    std::uint64_t host_backed_expert_layer_payload_bytes = 0;
+    std::uint32_t host_backed_expert_layers              = 0;
+
     // Exact runtime-plan device allocations.
     std::uint64_t full_attention_kv_bytes        = 0;
     std::uint64_t qsa_block_indexer_bytes        = 0;
