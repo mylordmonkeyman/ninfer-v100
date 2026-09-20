@@ -314,8 +314,14 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         emit_state(prefix + "mlp_block_input", round_ws.block_input);
 
         // MoE
-        flash_next_moe(round_ws.block_input, model.layers[layer].moe, round_ws.block_output,
-                       workspace, stream);
+        if (model.host_experts.has_value()) {
+            flash_next_moe_host_backed(round_ws.block_input, model.layers[layer].moe,
+                                       model.host_experts->layers[layer],
+                                       round_ws.block_output, workspace, stream);
+        } else {
+            flash_next_moe(round_ws.block_input, model.layers[layer].moe,
+                           round_ws.block_output, workspace, stream);
+        }
         emit_state(prefix + "mlp_block_output", round_ws.block_output);
 
         // MLP hyper inject
@@ -490,8 +496,14 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
         emit_state(prefix + "mlp_block_input", round_ws.block_input);
 
         // MoE
-        flash_next_moe(round_ws.block_input, model.layers[layer].moe, round_ws.block_output,
-                       workspace, stream);
+        if (model.host_experts.has_value()) {
+            flash_next_moe_host_backed(round_ws.block_input, model.layers[layer].moe,
+                                       model.host_experts->layers[layer],
+                                       round_ws.block_output, workspace, stream);
+        } else {
+            flash_next_moe(round_ws.block_input, model.layers[layer].moe,
+                           round_ws.block_output, workspace, stream);
+        }
         emit_state(prefix + "mlp_block_output", round_ws.block_output);
 
         // MLP hyper inject
