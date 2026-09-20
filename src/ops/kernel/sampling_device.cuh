@@ -59,6 +59,19 @@ struct SamplingUintGreater {
     }
 };
 
+__device__ __forceinline__ unsigned int sampling_tile_warp_max(unsigned int value) {
+    static_assert(kSamplingTileWarps > 0 && kSamplingTileWarps <= 32);
+    static_assert((kSamplingTileWarps & (kSamplingTileWarps - 1)) == 0);
+    constexpr unsigned int kMask = (1u << kSamplingTileWarps) - 1u;
+#pragma unroll
+    for (int offset = kSamplingTileWarps / 2; offset > 0; offset >>= 1) {
+        const unsigned int other =
+            __shfl_xor_sync(kMask, value, offset, kSamplingTileWarps);
+        value = value > other ? value : other;
+    }
+    return value;
+}
+
 __device__ inline unsigned long long sampling_block_max_key(unsigned long long key,
                                                             unsigned long long* warp_keys) {
     constexpr unsigned int kMask = 0xffffffffu;
@@ -181,9 +194,9 @@ __device__ inline void sampling_store_tile_topk(unsigned long long (&keys)[kSamp
             const unsigned long long key =
                 storage.candidates[lane * kSamplerCandidateCap + position];
             const unsigned int high     = static_cast<unsigned int>(key >> 32);
-            const unsigned int max_high = __reduce_max_sync(kMergeMask, high);
+            const unsigned int max_high = sampling_tile_warp_max(high);
             const unsigned int low      = high == max_high ? static_cast<unsigned int>(key) : 0u;
-            const unsigned int max_low  = __reduce_max_sync(kMergeMask, low);
+            const unsigned int max_low  = sampling_tile_warp_max(low);
             const unsigned int winners =
                 __ballot_sync(kMergeMask, high == max_high && low == max_low);
             const int source = __ffs(static_cast<int>(winners)) - 1;
@@ -220,7 +233,7 @@ __device__ inline void sampling_store_bf16_tile_topk(unsigned int (&keys)[kSampl
         int position                      = 0;
         for (int rank = 0; rank < cap; ++rank) {
             const unsigned int key     = storage.candidates[lane * kSamplerCandidateCap + position];
-            const unsigned int best    = __reduce_max_sync(kMergeMask, key);
+            const unsigned int best    = sampling_tile_warp_max(key);
             const unsigned int winners = __ballot_sync(kMergeMask, key == best);
             const int source           = __ffs(static_cast<int>(winners)) - 1;
             if (lane == 0) {
