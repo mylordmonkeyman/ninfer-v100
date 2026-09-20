@@ -144,7 +144,8 @@ compute_fixed_base_bytes(const FlashNextRuntimeConfig& config, std::uint32_t res
         checked_mul<std::size_t>(128ULL * 128ULL * 48ULL * gdn_ssm_elem_size,
                                  resolved_state_slots));
     out.gdn_recurrent_state_bytes =
-        checked_add(checked_mul(36ULL, single_gdn_conv), checked_mul(36ULL, single_gdn_ssm));
+        checked_add(checked_mul<std::size_t>(36, single_gdn_conv),
+                    checked_mul<std::size_t>(36, single_gdn_ssm));
 
     out.ple_state_bytes = checked_align_up_256(
         checked_mul<std::size_t>(10'240ULL * 9ULL * sizeof(std::uint16_t), resolved_state_slots));
@@ -227,7 +228,7 @@ compute_fixed_base_bytes(const FlashNextRuntimeConfig& config, std::uint32_t res
         ops::sampling_workspace_capacity_bytes(
             248'320, 1, static_cast<std::int32_t>(config.max_concurrency)));
     const std::size_t sampling_arrays_bytes = checked_align_up_256(
-        config.max_concurrency * (sizeof(ops::SamplingConfig) + 2 * sizeof(std::int32_t))) +
+        config.max_concurrency * (sizeof(ops::SamplingConfig) + 2 * sizeof(std::int32_t)) +
         config.max_concurrency * (6 * ((248077 + 31) / 32) + 248077 + 5) *
             sizeof(std::int32_t));
     out.sampling_runtime_bytes =
