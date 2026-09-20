@@ -50,6 +50,7 @@
 #include <cuda_fp16.h>
 
 #include <cstdint>
+#include <type_traits>
 
 namespace ninfer::ops::detail {
 
@@ -85,12 +86,12 @@ __device__ __forceinline__ void fp8_decode_quad(std::uint32_t word, half2& lo, h
 // nvfp4_volta_qpn_gemm.cuh, which got them first; this is the same pattern applied to the
 // simpler single-projection kernel. The shared reduce buffer is SPLITK * kTiles * 256 floats, so
 // SPLITK=16 at kTiles=4 is never instantiated (64 KB, over Volta's 48 KB static limit).
-template <int kTiles, int SPLITK, int NACC, class OutputPolicy>
+template <int kTiles, int SPLITK, int NACC, class Scale, class OutputPolicy>
 __global__ __launch_bounds__(
     SPLITK * 32, (kTiles == 1 ? 32 : kTiles == 2 ? 16 : 4) / SPLITK < 1
         ? 1
         : (kTiles == 1 ? 32 : kTiles == 2 ? 16 : 4) / SPLITK) void fp8_volta_qpn_gemm_kernel(
-    const std::uint8_t* __restrict__ codes, const __nv_bfloat16* __restrict__ scales,
+    const std::uint8_t* __restrict__ codes, const Scale* __restrict__ scales,
     const __nv_bfloat16* __restrict__ x, int n, int k, int t, OutputPolicy output) {
     using S = Fp8VoltaQpnSchedule;
 
@@ -208,7 +209,12 @@ __global__ __launch_bounds__(
             // through the caller's policy so the fused attention projections can scatter straight
             // into their q/gate/k/v (or qkv/z) planes instead of a contiguous buffer they would
             // then have to split.
-            const float scale = __bfloat162float(scales[ocol]) * 256.0f;
+            float scale = 0.0F;
+            if constexpr (std::is_same_v<Scale, float>) {
+                scale = scales[ocol] * 256.0F;
+            } else {
+                scale = __bfloat162float(scales[ocol]) * 256.0F;
+            }
             output.store(ocol, row, v * scale);
         }
     }
@@ -217,41 +223,44 @@ __global__ __launch_bounds__(
 // Shared launcher. Every FP8 consumer -- plain Linear, the attention projections, the GDN input
 // projection -- differs only in where the epilogue puts its results, so they share one kernel and
 // supply their own output policy.
-template <class OutputPolicy>
-void launch_fp8_volta_qpn_with_output(const Tensor& x, const Weight& w, OutputPolicy output,
-                                      std::int32_t n, cudaStream_t stream) {
+template <class Scale, class OutputPolicy>
+void launch_fp8_volta_qpn_typed(const Tensor& x, const Weight& w, OutputPolicy output,
+                                std::int32_t n, cudaStream_t stream) {
     using S              = Fp8VoltaQpnSchedule;
     const std::int32_t k = x.ne[0];
     const std::int32_t t = x.ne[1];
 
     const dim3 grid(static_cast<unsigned>((n + S::kColsPerCta - 1) / S::kColsPerCta));
     const auto* codes  = static_cast<const std::uint8_t*>(w.qdata);
-    const auto* scales = static_cast<const __nv_bfloat16*>(w.scales);
+    const auto* scales = static_cast<const Scale*>(w.scales);
     const auto* xd     = static_cast<const __nv_bfloat16*>(x.data);
-    // Generation-2 winners from a private sweep (bench/ops/fp8_qpn8_splitk_sweep.cu, deleted):
-    // SPLITK8 NACC1 wins at every kTiles on attn input, GDN input, and the 17408-K residual shape
-    // (1.08-1.55x over SPLITK4). The 6144-K residual shape is the one exception -- SPLITK16 wins
-    // there at kTiles=1 (458.6 vs 404.2 GB/s at T=4) because k/128=48 leaves it more headroom than
-    // the 5120/17408-K shapes, where k/128=40/136 aren't even divisible by 16. NACC=2 loses
-    // everywhere, matching the NVFP4 SwiGLU kernel's finding: extra accumulator chains just cost
-    // registers on a kernel that is already issue/DRAM-bound, not dependency-bound.
     const bool wide_k_headroom = k == 6144;
     if (t <= S::kRowsPerTile) {
         if (wide_k_headroom) {
-            fp8_volta_qpn_gemm_kernel<1, 16, 1><<<grid, 16 * 32, 0, stream>>>(codes, scales, xd, n,
-                                                                              k, t, output);
+            fp8_volta_qpn_gemm_kernel<1, 16, 1, Scale>
+                <<<grid, 16 * 32, 0, stream>>>(codes, scales, xd, n, k, t, output);
         } else {
-            fp8_volta_qpn_gemm_kernel<1, 8, 1><<<grid, 8 * 32, 0, stream>>>(codes, scales, xd, n, k,
-                                                                            t, output);
+            fp8_volta_qpn_gemm_kernel<1, 8, 1, Scale>
+                <<<grid, 8 * 32, 0, stream>>>(codes, scales, xd, n, k, t, output);
         }
     } else if (t <= 2 * S::kRowsPerTile) {
-        fp8_volta_qpn_gemm_kernel<2, 8, 1><<<grid, 8 * 32, 0, stream>>>(codes, scales, xd, n, k, t,
-                                                                        output);
+        fp8_volta_qpn_gemm_kernel<2, 8, 1, Scale>
+            <<<grid, 8 * 32, 0, stream>>>(codes, scales, xd, n, k, t, output);
     } else {
-        fp8_volta_qpn_gemm_kernel<4, 8, 1><<<grid, 8 * 32, 0, stream>>>(codes, scales, xd, n, k, t,
-                                                                        output);
+        fp8_volta_qpn_gemm_kernel<4, 8, 1, Scale>
+            <<<grid, 8 * 32, 0, stream>>>(codes, scales, xd, n, k, t, output);
     }
     CUDA_CHECK(cudaGetLastError());
+}
+
+template <class OutputPolicy>
+void launch_fp8_volta_qpn_with_output(const Tensor& x, const Weight& w, OutputPolicy output,
+                                      std::int32_t n, cudaStream_t stream) {
+    if (w.scale_dtype == DType::FP32) {
+        launch_fp8_volta_qpn_typed<float>(x, w, output, n, stream);
+    } else {
+        launch_fp8_volta_qpn_typed<__nv_bfloat16>(x, w, output, n, stream);
+    }
 }
 
 #endif // NINFER_VOLTA_BUILD && sm_70
