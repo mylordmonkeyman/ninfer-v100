@@ -27,5 +27,32 @@ int main() {
         std::cerr << "NVFP4 expert bank view has the wrong plane geometry\n";
         return 1;
     }
+
+    HostNvfp4ExpertLayerView layer{.gate_up = bank, .down = bank};
+    HostNvfp4ExpertTableView table{};
+    table.layers[7] = layer;
+    const HostNvfp4ExpertPairView pair = table.expert(7, 1);
+    if (pair.gate_up.codes != second.codes || pair.gate_up.scales != second.scales ||
+        pair.down.codes != second.codes || pair.down.scales != second.scales) {
+        std::cerr << "host NVFP4 (layer, expert) addressing disagreed with bank addressing\n";
+        return 1;
+    }
+
+    const std::array<std::uint64_t, 3> gate_shape = {512, 1'280, 2'560};
+    const std::array<std::uint64_t, 3> down_shape = {512, 2'560, 640};
+    const auto gate_geometry = ninfer::artifact::block_scale_bank_geometry(
+        ninfer::artifact::NumericFormat::NVFP4, gate_shape);
+    const auto down_geometry = ninfer::artifact::block_scale_bank_geometry(
+        ninfer::artifact::NumericFormat::NVFP4, down_shape);
+    const std::uint64_t pair_bytes =
+        gate_geometry.code_plane_bytes / 512 + gate_geometry.scale_plane_bytes / 512 +
+        sizeof(float) + down_geometry.code_plane_bytes / 512 +
+        down_geometry.scale_plane_bytes / 512 + sizeof(float);
+    if (pair_bytes != 2'764'808ULL) {
+        std::cerr << "Flash-Next compact host expert pair byte contract changed: "
+                  << pair_bytes << "\n";
+        return 1;
+    }
+
     return 0;
 }

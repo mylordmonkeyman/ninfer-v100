@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -40,6 +41,33 @@ make_nvfp4_expert_bank_view(const void* payload, std::uint64_t payload_bytes, st
 materialized_nvfp4_expert_bank_view(const artifact::MaterializedArtifact& materialized,
                                     artifact::ObjectHandle handle, std::int32_t experts,
                                     std::int32_t rows, std::int32_t columns);
+
+[[nodiscard]] Nvfp4ExpertBankView
+mapped_nvfp4_expert_bank_view(const artifact::MaterializedArtifact& materialized,
+                              artifact::ObjectHandle handle, std::int32_t experts,
+                              std::int32_t rows, std::int32_t columns);
+
+struct HostNvfp4ExpertPairView {
+    Nvfp4ExpertMatrixView gate_up;
+    Nvfp4ExpertMatrixView down;
+};
+
+struct HostNvfp4ExpertLayerView {
+    Nvfp4ExpertBankView gate_up;
+    Nvfp4ExpertBankView down;
+
+    [[nodiscard]] HostNvfp4ExpertPairView expert(std::int32_t index) const;
+    [[nodiscard]] std::uint64_t compact_bytes_per_expert_pair() const;
+};
+
+inline constexpr std::size_t kFlashNextRoutedExpertLayers = 48;
+
+struct HostNvfp4ExpertTableView {
+    std::array<HostNvfp4ExpertLayerView, kFlashNextRoutedExpertLayers> layers{};
+
+    [[nodiscard]] HostNvfp4ExpertPairView expert(std::int32_t layer,
+                                                  std::int32_t index) const;
+};
 
 struct Bf16ExpertMatrixView {
     const std::byte* data;

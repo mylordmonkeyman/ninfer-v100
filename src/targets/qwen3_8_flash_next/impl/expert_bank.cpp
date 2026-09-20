@@ -4,6 +4,7 @@
 #include "artifact/reader.h"
 
 #include <array>
+#include <span>
 #include <stdexcept>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
@@ -64,6 +65,40 @@ materialized_nvfp4_expert_bank_view(const artifact::MaterializedArtifact& materi
         artifact::block_scale_bank_geometry(artifact::NumericFormat::NVFP4, shape);
     return make_nvfp4_expert_bank_view(materialized.device_data(handle), geometry.encoded_bytes,
                                        experts, rows, columns);
+}
+
+Nvfp4ExpertBankView
+mapped_nvfp4_expert_bank_view(const artifact::MaterializedArtifact& materialized,
+                              artifact::ObjectHandle handle, std::int32_t experts,
+                              std::int32_t rows, std::int32_t columns) {
+    const std::span<const std::byte> bytes = materialized.mapped_tensor_bytes(handle);
+    return make_nvfp4_expert_bank_view(bytes.data(), bytes.size(), experts, rows, columns);
+}
+
+HostNvfp4ExpertPairView HostNvfp4ExpertLayerView::expert(std::int32_t index) const {
+    if (gate_up.experts != down.experts) {
+        throw std::logic_error("host NVFP4 gate/up and down banks disagree on expert count");
+    }
+    return {
+        .gate_up = gate_up.expert(index),
+        .down    = down.expert(index),
+    };
+}
+
+std::uint64_t HostNvfp4ExpertLayerView::compact_bytes_per_expert_pair() const {
+    if (gate_up.experts <= 0 || gate_up.experts != down.experts) {
+        throw std::logic_error("host NVFP4 expert layer has inconsistent bank geometry");
+    }
+    return gate_up.code_bytes_per_expert + gate_up.scale_bytes_per_expert + sizeof(float) +
+           down.code_bytes_per_expert + down.scale_bytes_per_expert + sizeof(float);
+}
+
+HostNvfp4ExpertPairView HostNvfp4ExpertTableView::expert(std::int32_t layer,
+                                                         std::int32_t index) const {
+    if (layer < 0 || layer >= static_cast<std::int32_t>(layers.size())) {
+        throw std::out_of_range("Flash-Next host expert layer index is outside the model");
+    }
+    return layers[static_cast<std::size_t>(layer)].expert(index);
 }
 
 Bf16ExpertMatrixView Bf16ExpertBankView::expert(std::int32_t index) const {
