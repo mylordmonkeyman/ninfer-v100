@@ -1,18 +1,30 @@
 cmake_minimum_required(VERSION 3.28)
 
-# The current implementation is compiled only for sm_120a. Set and validate the
-# architecture before CUDA compiler detection so CMake never injects a generic
-# host-toolchain default or accepts an unsupported target.
+# NInfer has two explicit CUDA build contracts. Keep architecture selection
+# single-valued: target-private source ownership and host dispatch depend on one
+# coherent ISA contract per binary.
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 120a CACHE STRING "CUDA architectures to build")
+  set(CMAKE_CUDA_ARCHITECTURES 120a CACHE STRING "CUDA architecture to build")
 endif()
-if(NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
+if(NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "120a" AND
+   NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "70")
   message(FATAL_ERROR
-    "NInfer supports only CMAKE_CUDA_ARCHITECTURES=120a; got "
+    "NInfer supports only CMAKE_CUDA_ARCHITECTURES=120a or 70; got "
     "'${CMAKE_CUDA_ARCHITECTURES}'")
 endif()
 
+set(NINFER_VOLTA_BUILD OFF)
+if(CMAKE_CUDA_ARCHITECTURES STREQUAL "70")
+  set(NINFER_VOLTA_BUILD ON)
+endif()
+
 project(ninfer LANGUAGES C CXX CUDA)
+
+# __CUDA_ARCH__ exists only during device compilation. Host-side target dispatch
+# therefore uses this build definition as the authoritative SM70 signal.
+if(NINFER_VOLTA_BUILD)
+  add_compile_definitions(NINFER_VOLTA_BUILD=1)
+endif()
 
 # --- Global settings ---------------------------------------------------------
 option(NINFER_BUILD_APPS "Build the NInfer CLI and server" ON)
@@ -34,10 +46,22 @@ if(CMAKE_GENERATOR MATCHES "Ninja")
   set(CMAKE_JOB_POOL_LINK cuda_link)
 endif()
 
-if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 13.1)
-  message(FATAL_ERROR
-    "NInfer requires CUDA 13.1 or newer; found CUDA compiler "
-    "${CMAKE_CUDA_COMPILER_VERSION}")
+if(NINFER_VOLTA_BUILD)
+  # CUDA 12.8 is the pinned Volta toolchain. CUDA 13 removed sm_70 support, and
+  # accepting a different 12.x release would make the compatibility audit
+  # non-reproducible.
+  if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.8 OR
+     NOT CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.9)
+    message(FATAL_ERROR
+      "The sm_70 Volta build requires CUDA 12.8.x; found CUDA compiler "
+      "${CMAKE_CUDA_COMPILER_VERSION}")
+  endif()
+else()
+  if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 13.1)
+    message(FATAL_ERROR
+      "The sm_120a build requires CUDA 13.1 or newer; found CUDA compiler "
+      "${CMAKE_CUDA_COMPILER_VERSION}")
+  endif()
 endif()
 
 # CUDA 13's CCCL headers require MSVC's standard-conforming preprocessor.
