@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 namespace {
