@@ -236,9 +236,15 @@ struct FlashNextRuntimePlan {
     std::size_t attention_kv_bytes         = 0;
     std::size_t indexer_block_keys_bytes   = 0;
     std::size_t block_tables_bytes         = 0;
+    std::size_t gdn_recurrent_state_bytes  = 0;
+    std::size_t qsa_raw_state_bytes        = 0;
+    std::size_t ple_state_bytes            = 0;
+    std::size_t mtp_persistent_state_bytes = 0;
     std::size_t recurrent_state_bytes      = 0;
     std::size_t round_tensors_bytes        = 0;
+    std::size_t mtp_round_tensors_bytes    = 0;
     std::size_t workspace_bytes            = 0;
+    std::size_t sampling_runtime_bytes     = 0;
     std::size_t cuda_graph_allowance_bytes = 0;
     std::size_t total_device_bytes         = 0;
 

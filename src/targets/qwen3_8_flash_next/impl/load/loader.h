@@ -33,6 +33,45 @@ struct LoadQuantization {
     bool output_head_fp8 = false;
 };
 
+struct FlashNextStaticVramLedger {
+    // Exact current materialization plan. Category payloads exclude alignment gaps;
+    // planned_device_weight_arena_bytes includes them.
+    std::uint64_t planned_device_weight_arena_bytes = 0;
+    std::uint64_t device_weight_payload_bytes       = 0;
+    std::uint64_t device_weight_alignment_padding_bytes = 0;
+    std::uint64_t token_embedding_payload_bytes     = 0;
+    std::uint64_t output_head_payload_bytes         = 0;
+    std::uint64_t routed_expert_payload_bytes       = 0;
+    std::uint64_t nonexpert_model_payload_bytes     = 0;
+    std::uint64_t routed_expert_layer_payload_bytes = 0;
+    std::uint32_t routed_expert_layers              = 0;
+
+    // Exact runtime-plan device allocations.
+    std::uint64_t full_attention_kv_bytes        = 0;
+    std::uint64_t qsa_block_indexer_bytes        = 0;
+    std::uint64_t block_tables_bytes             = 0;
+    std::uint64_t gdn_recurrent_state_bytes      = 0;
+    std::uint64_t qsa_raw_state_bytes            = 0;
+    std::uint64_t ple_state_bytes                = 0;
+    std::uint64_t mtp_persistent_state_bytes     = 0;
+    std::uint64_t round_tensors_bytes            = 0;
+    std::uint64_t mtp_round_tensors_bytes        = 0;
+    std::uint64_t shared_kernel_workspace_bytes  = 0;
+    std::uint64_t sampling_runtime_bytes         = 0;
+    std::uint64_t cuda_graph_bytes               = 0;
+    std::uint64_t runtime_plan_device_bytes      = 0;
+
+    // The generic artifact loader stages through pinned host memory, not a
+    // temporary device buffer. CUDA context/driver overhead and allocator
+    // external fragmentation are runtime measurements and therefore excluded
+    // from this exact dry-run total.
+    std::uint64_t temporary_load_device_bytes    = 0;
+    bool cuda_runtime_context_measured            = false;
+    bool allocator_fragmentation_measured         = false;
+
+    std::uint64_t total_planned_device_bytes      = 0;
+};
+
 struct FlashNextPreflightReport {
     artifact::ArtifactIdentity identity;
     std::uint64_t file_bytes                     = 0;
@@ -41,6 +80,7 @@ struct FlashNextPreflightReport {
     std::size_t planned_retained_resources_count = 0;
     std::size_t planned_mapped_tensors_count     = 0;
     FlashNextRuntimePlan runtime_plan;
+    FlashNextStaticVramLedger vram_ledger;
 };
 
 // Inspects artifact without allocating device memory for weights.

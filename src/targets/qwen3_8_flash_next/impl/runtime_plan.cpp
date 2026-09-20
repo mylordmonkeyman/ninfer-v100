@@ -93,55 +93,85 @@ void validate_config_invariants(const FlashNextRuntimeConfig& config,
     }
 }
 
-std::size_t
+struct FixedBaseBreakdown {
+    std::size_t block_tables_bytes         = 0;
+    std::size_t gdn_recurrent_state_bytes  = 0;
+    std::size_t qsa_raw_state_bytes        = 0;
+    std::size_t ple_state_bytes            = 0;
+    std::size_t mtp_persistent_state_bytes = 0;
+    std::size_t round_tensors_bytes        = 0;
+    std::size_t mtp_round_tensors_bytes    = 0;
+    std::size_t workspace_bytes            = 0;
+    std::size_t sampling_runtime_bytes     = 0;
+
+    [[nodiscard]] std::size_t recurrent_state_bytes() const {
+        return checked_add(
+            checked_add(gdn_recurrent_state_bytes, qsa_raw_state_bytes),
+            checked_add(ple_state_bytes, mtp_persistent_state_bytes));
+    }
+
+    [[nodiscard]] std::size_t total_bytes() const {
+        return checked_add(
+            block_tables_bytes,
+            checked_add(recurrent_state_bytes(),
+                        checked_add(round_tensors_bytes,
+                                    checked_add(workspace_bytes, sampling_runtime_bytes))));
+    }
+};
+
+FixedBaseBreakdown
 compute_fixed_base_bytes(const FlashNextRuntimeConfig& config, std::uint32_t resolved_state_slots,
                          std::uint32_t attention_logical_pages, std::uint32_t indexer_logical_pages,
-                         std::uint32_t maximum_blocks, std::size_t& block_tables_bytes,
-                         std::size_t& recurrent_state_bytes, std::size_t& round_tensors_bytes,
-                         std::size_t& workspace_bytes) {
-    // 1. Shared Single Block tables
+                         std::uint32_t maximum_blocks) {
+    FixedBaseBreakdown out{};
+
+    // 1. Shared block tables.
     const std::size_t single_att_table_plane = checked_align_up_256(checked_mul<std::size_t>(
         static_cast<std::size_t>(attention_logical_pages) * config.max_concurrency,
         sizeof(std::int32_t)));
     const std::size_t single_idx_table_plane = checked_align_up_256(checked_mul<std::size_t>(
         static_cast<std::size_t>(indexer_logical_pages) * config.max_concurrency,
         sizeof(std::int32_t)));
-    block_tables_bytes = checked_add(single_att_table_plane, single_idx_table_plane);
+    out.block_tables_bytes = checked_add(single_att_table_plane, single_idx_table_plane);
 
-    // 2. Recurrent states
+    // 2. Persistent recurrent state, split by subsystem so the static ledger is additive.
     const std::size_t single_gdn_conv = checked_align_up_256(
         checked_mul<std::size_t>(10'240ULL * 3ULL * sizeof(std::uint16_t), resolved_state_slots));
     const std::size_t gdn_ssm_elem_size = (config.gdn_state_storage == GdnStateStorage::BF16)
                                               ? sizeof(std::uint16_t)
                                               : sizeof(float);
     const std::size_t single_gdn_ssm = checked_align_up_256(
-        checked_mul<std::size_t>(128ULL * 128ULL * 48ULL * gdn_ssm_elem_size, resolved_state_slots));
-    const std::size_t ple_conv = checked_align_up_256(
+        checked_mul<std::size_t>(128ULL * 128ULL * 48ULL * gdn_ssm_elem_size,
+                                 resolved_state_slots));
+    out.gdn_recurrent_state_bytes =
+        checked_add(checked_mul(36ULL, single_gdn_conv), checked_mul(36ULL, single_gdn_ssm));
+
+    out.ple_state_bytes = checked_align_up_256(
         checked_mul<std::size_t>(10'240ULL * 9ULL * sizeof(std::uint16_t), resolved_state_slots));
+
     const std::size_t single_raw_keys = checked_align_up_256(
         checked_mul<std::size_t>(128ULL * 4ULL * sizeof(std::uint16_t), resolved_state_slots));
     const std::size_t single_raw_pos = checked_align_up_256(
         checked_mul<std::size_t>(3ULL * 4ULL * sizeof(std::int32_t), resolved_state_slots));
     const std::size_t cache_layers = kFullAttentionLayers +
-                                    (config.speculative_draft_tokens > 0 ? 1ULL : 0ULL);
+                                     (config.speculative_draft_tokens > 0 ? 1ULL : 0ULL);
+    out.qsa_raw_state_bytes =
+        checked_add(checked_mul(cache_layers, single_raw_keys),
+                    checked_mul(cache_layers, single_raw_pos));
 
-    recurrent_state_bytes = checked_add(
-        checked_add(checked_mul(36ULL, single_gdn_conv), checked_mul(36ULL, single_gdn_ssm)),
-        checked_add(ple_conv, checked_add(checked_mul(cache_layers, single_raw_keys),
-                                          checked_mul(cache_layers, single_raw_pos))));
     if (config.speculative_draft_tokens > 0) {
-        recurrent_state_bytes = checked_add(recurrent_state_bytes, checked_align_up_256(
-            10'240ULL * sizeof(std::uint16_t) * resolved_state_slots));
-        recurrent_state_bytes = checked_add(recurrent_state_bytes, checked_align_up_256(
-            3ULL * sizeof(std::int32_t) * resolved_state_slots));
+        out.mtp_persistent_state_bytes = checked_add(
+            checked_align_up_256(10'240ULL * sizeof(std::uint16_t) * resolved_state_slots),
+            checked_align_up_256(3ULL * sizeof(std::int32_t) * resolved_state_slots));
     }
 
-    // 3. Round buffers (pinned/device ingress & egress, plus gathered PLE, hidden, logits)
+    // 3. Round buffers. MTP-owned round storage is tracked as a subcomponent of the
+    // shared persistent allocation rather than double-counted as a second allocation.
     const std::uint32_t round_batch_tokens =
         std::max(config.max_concurrency,
                  config.speculative_draft_tokens > 0 ? (config.speculative_draft_tokens + 1U) : 1U);
 
-    round_tensors_bytes = checked_add(
+    out.round_tensors_bytes = checked_add(
         checked_align_up_256(sizeof(FlashNextDecodeIngress)),
         checked_add(
             checked_align_up_256(sizeof(FlashNextDecodeEgress)),
@@ -157,32 +187,39 @@ compute_fixed_base_bytes(const FlashNextRuntimeConfig& config, std::uint32_t res
     if (config.speculative_draft_tokens > 0) {
         const auto rows = config.proposal_head == ProposalHead::Optimized
                               ? config.draft_head_rows : 248'320U;
-        round_tensors_bytes = checked_add(round_tensors_bytes,
+        out.mtp_round_tensors_bytes =
             checked_align_up_256(2'560ULL * sizeof(std::uint16_t)) +
             checked_align_up_256(10'240ULL * sizeof(std::uint16_t)) +
             checked_align_up_256(rows * sizeof(std::uint16_t)) + 256ULL +
-            checked_align_up_256(sizeof(FlashNextMtpDraftIngress)));
+            checked_align_up_256(sizeof(FlashNextMtpDraftIngress));
+        out.round_tensors_bytes =
+            checked_add(out.round_tensors_bytes, out.mtp_round_tensors_bytes);
     }
 
-    // 4. Text decode and prefill workspace peak
+    // 4. One shared kernel workspace reserve. Hyper, MoE, QSA, output and MTP
+    // kernels reuse this arena, so their individual maxima must not be summed.
     const std::uint32_t decode_batch_capacity = std::max(
         config.max_concurrency,
         config.speculative_draft_tokens > 0 ? (config.speculative_draft_tokens + 1U) : 1U);
     const std::size_t decode_workspace =
-        flash_next_text_decode_workspace_capacity_bytes(maximum_blocks, decode_batch_capacity, config.speculative_draft_tokens > 0);
+        flash_next_text_decode_workspace_capacity_bytes(
+            maximum_blocks, decode_batch_capacity, config.speculative_draft_tokens > 0);
     const std::size_t prefill_workspace =
-        flash_next_text_prefill_workspace_capacity_bytes(maximum_blocks, config.prefill_chunk, config.speculative_draft_tokens > 0);
-    const std::size_t general_workspace = std::max({decode_workspace, prefill_workspace,
-        config.speculative_draft_tokens > 0
-            ? flash_next_mtp_workspace_capacity_bytes(maximum_blocks, 1) : std::size_t{0}});
-    workspace_bytes                     = general_workspace;
+        flash_next_text_prefill_workspace_capacity_bytes(
+            maximum_blocks, config.prefill_chunk, config.speculative_draft_tokens > 0);
+    const std::size_t general_workspace =
+        std::max({decode_workspace, prefill_workspace,
+                  config.speculative_draft_tokens > 0
+                      ? flash_next_mtp_workspace_capacity_bytes(maximum_blocks, 1)
+                      : std::size_t{0}});
+    out.workspace_bytes = general_workspace;
 
     if (config.vision_enabled) {
         const std::uint32_t merged =
             config.max_vision_tokens > 0 ? config.max_vision_tokens : 4096U;
         const auto vision_plan =
             qwen3_vision::Encoder::plan_workspace(merged, general_workspace, 2560);
-        workspace_bytes = std::max(general_workspace, vision_plan.capacity_bytes);
+        out.workspace_bytes = std::max(general_workspace, vision_plan.capacity_bytes);
     }
 
     const std::size_t sampling_workspace_bytes = std::max<std::size_t>(
@@ -191,15 +228,12 @@ compute_fixed_base_bytes(const FlashNextRuntimeConfig& config, std::uint32_t res
             248'320, 1, static_cast<std::int32_t>(config.max_concurrency)));
     const std::size_t sampling_arrays_bytes = checked_align_up_256(
         config.max_concurrency * (sizeof(ops::SamplingConfig) + 2 * sizeof(std::int32_t))) +
-        config.max_concurrency * (6 * ((248077 + 31) / 32) + 248077 + 5) * sizeof(std::int32_t);
+        config.max_concurrency * (6 * ((248077 + 31) / 32) + 248077 + 5) *
+            sizeof(std::int32_t));
+    out.sampling_runtime_bytes =
+        checked_add(sampling_workspace_bytes, sampling_arrays_bytes);
 
-    return checked_add(
-        block_tables_bytes,
-        checked_add(
-            recurrent_state_bytes,
-            checked_add(round_tensors_bytes,
-                        checked_add(workspace_bytes,
-                                    checked_add(sampling_workspace_bytes, sampling_arrays_bytes)))));
+    return out;
 }
 
 } // namespace
@@ -223,14 +257,10 @@ flash_next_capacity_curve(const FlashNextRuntimeConfig& config) {
     const std::uint32_t maximum_blocks =
         std::min<std::uint32_t>(65'536U, (config.max_context + kBlockTokens - 1U) / kBlockTokens);
 
-    std::size_t block_tables_bytes    = 0;
-    std::size_t recurrent_state_bytes = 0;
-    std::size_t round_tensors_bytes   = 0;
-    std::size_t workspace_bytes       = 0;
-    const std::size_t fixed_base_bytes =
+    const FixedBaseBreakdown fixed =
         compute_fixed_base_bytes(config, resolved_state_slots, attention_logical_pages,
-                                 indexer_logical_pages, maximum_blocks, block_tables_bytes,
-                                 recurrent_state_bytes, round_tensors_bytes, workspace_bytes);
+                                 indexer_logical_pages, maximum_blocks);
+    const std::size_t fixed_base_bytes = fixed.total_bytes();
 
     const std::size_t graph_allowance =
         flash_next_cuda_graph_enabled(config.use_cuda_graph)
@@ -277,6 +307,7 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
 
     FlashNextRuntimePlan plan{};
     plan.config                     = config;
+    plan.config.use_cuda_graph      = flash_next_cuda_graph_enabled(config.use_cuda_graph);
     plan.config.state_slot_capacity = resolved_state_slots;
     if (const char* env = std::getenv("NINFER_FLASH_NEXT_QSA_PREFILL_MMA");
         env != nullptr && env[0] != '\0') {
@@ -309,10 +340,20 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
         128ULL * 64ULL * sizeof(std::uint16_t), plan.indexer_physical_pages));
     plan.indexer_block_keys_bytes = checked_mul<std::size_t>(plan.qsa_cache_layers(), single_indexer_keys_plane);
 
-    const std::size_t fixed_base_bytes = compute_fixed_base_bytes(
-        config, resolved_state_slots, plan.attention_logical_pages, plan.indexer_logical_pages,
-        plan.maximum_blocks, plan.block_tables_bytes, plan.recurrent_state_bytes,
-        plan.round_tensors_bytes, plan.workspace_bytes);
+    const FixedBaseBreakdown fixed =
+        compute_fixed_base_bytes(config, resolved_state_slots, plan.attention_logical_pages,
+                                 plan.indexer_logical_pages, plan.maximum_blocks);
+    const std::size_t fixed_base_bytes = fixed.total_bytes();
+    plan.block_tables_bytes            = fixed.block_tables_bytes;
+    plan.gdn_recurrent_state_bytes     = fixed.gdn_recurrent_state_bytes;
+    plan.qsa_raw_state_bytes           = fixed.qsa_raw_state_bytes;
+    plan.ple_state_bytes               = fixed.ple_state_bytes;
+    plan.mtp_persistent_state_bytes    = fixed.mtp_persistent_state_bytes;
+    plan.recurrent_state_bytes         = fixed.recurrent_state_bytes();
+    plan.round_tensors_bytes           = fixed.round_tensors_bytes;
+    plan.mtp_round_tensors_bytes       = fixed.mtp_round_tensors_bytes;
+    plan.workspace_bytes               = fixed.workspace_bytes;
+    plan.sampling_runtime_bytes        = fixed.sampling_runtime_bytes;
 
     const std::size_t graph_allowance =
         flash_next_cuda_graph_enabled(config.use_cuda_graph)

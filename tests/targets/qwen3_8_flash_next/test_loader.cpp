@@ -352,9 +352,50 @@ int test_real_artifact_preflight_if_available() {
                       << report.runtime_plan.workspace_bytes << " expected 319055616\n";
             return 1;
         }
-        if (report.runtime_plan.total_device_bytes != 705'037'568ULL) {
-            std::cerr << "Preflight runtime total_device_bytes mismatch: expected 705037568 got "
-                      << report.runtime_plan.total_device_bytes << "\n";
+        const std::uint64_t expected_graph_bytes =
+            flash_next_cuda_graph_enabled(true) ? 50'331'648ULL : 0ULL;
+        const std::uint64_t expected_runtime_total =
+            654'705'920ULL + expected_graph_bytes;
+        if (report.runtime_plan.cuda_graph_allowance_bytes != expected_graph_bytes ||
+            report.runtime_plan.total_device_bytes != expected_runtime_total) {
+            std::cerr << "Preflight runtime total_device_bytes mismatch: graph="
+                      << report.runtime_plan.cuda_graph_allowance_bytes
+                      << " total=" << report.runtime_plan.total_device_bytes << "\n";
+            return 1;
+        }
+
+        const auto& ledger = report.vram_ledger;
+        constexpr std::uint64_t kExpertLayerBytes = 1'415'581'696ULL;
+        constexpr std::uint64_t kAllTextExpertsBytes = kExpertLayerBytes * 48ULL;
+        constexpr std::uint64_t kEmbeddingBytes = 1'271'398'400ULL;
+        if (ledger.planned_device_weight_arena_bytes != report.planned_device_weights_bytes ||
+            ledger.routed_expert_layers != 48 ||
+            ledger.routed_expert_layer_payload_bytes != kExpertLayerBytes ||
+            ledger.routed_expert_payload_bytes != kAllTextExpertsBytes ||
+            ledger.token_embedding_payload_bytes != kEmbeddingBytes ||
+            ledger.output_head_payload_bytes != kEmbeddingBytes ||
+            ledger.runtime_plan_device_bytes != report.runtime_plan.total_device_bytes ||
+            ledger.cuda_graph_bytes != report.runtime_plan.cuda_graph_allowance_bytes ||
+            ledger.total_planned_device_bytes !=
+                report.planned_device_weights_bytes + report.runtime_plan.total_device_bytes) {
+            std::cerr << "Static VRAM ledger failed to reconcile\n";
+            return 1;
+        }
+        const std::uint64_t runtime_subtotal =
+            ledger.full_attention_kv_bytes + ledger.qsa_block_indexer_bytes +
+            ledger.block_tables_bytes + ledger.gdn_recurrent_state_bytes +
+            ledger.qsa_raw_state_bytes + ledger.ple_state_bytes +
+            ledger.mtp_persistent_state_bytes + ledger.round_tensors_bytes +
+            ledger.shared_kernel_workspace_bytes + ledger.sampling_runtime_bytes +
+            ledger.cuda_graph_bytes;
+        if (runtime_subtotal != ledger.runtime_plan_device_bytes ||
+            ledger.device_weight_payload_bytes +
+                    ledger.device_weight_alignment_padding_bytes !=
+                ledger.planned_device_weight_arena_bytes ||
+            ledger.temporary_load_device_bytes != 0 ||
+            ledger.cuda_runtime_context_measured ||
+            ledger.allocator_fragmentation_measured) {
+            std::cerr << "Static VRAM ledger component sum mismatch\n";
             return 1;
         }
 

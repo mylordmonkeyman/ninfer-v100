@@ -25,9 +25,15 @@ void validate_plan_match(const FlashNextRuntimePlan& actual) {
         actual.attention_kv_bytes != expected.attention_kv_bytes ||
         actual.indexer_block_keys_bytes != expected.indexer_block_keys_bytes ||
         actual.block_tables_bytes != expected.block_tables_bytes ||
+        actual.gdn_recurrent_state_bytes != expected.gdn_recurrent_state_bytes ||
+        actual.qsa_raw_state_bytes != expected.qsa_raw_state_bytes ||
+        actual.ple_state_bytes != expected.ple_state_bytes ||
+        actual.mtp_persistent_state_bytes != expected.mtp_persistent_state_bytes ||
         actual.recurrent_state_bytes != expected.recurrent_state_bytes ||
         actual.round_tensors_bytes != expected.round_tensors_bytes ||
+        actual.mtp_round_tensors_bytes != expected.mtp_round_tensors_bytes ||
         actual.workspace_bytes != expected.workspace_bytes ||
+        actual.sampling_runtime_bytes != expected.sampling_runtime_bytes ||
         actual.cuda_graph_allowance_bytes != expected.cuda_graph_allowance_bytes ||
         actual.total_device_bytes != expected.total_device_bytes ||
         actual.capacity_curve.main_page_tokens != expected.capacity_curve.main_page_tokens ||
