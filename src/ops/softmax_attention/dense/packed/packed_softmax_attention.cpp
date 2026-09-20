@@ -97,8 +97,16 @@ void softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
                        AttentionHeadGeometry geometry, float scale, WorkspaceArena& workspace,
                        Tensor& out, cudaStream_t stream) {
     const std::int32_t tokens = validate_qkv(q, k, v, out, geometry, scale, "softmax_attention");
-    auto scope                = workspace.scope();
+#if defined(NINFER_VOLTA_BUILD)
+    (void)tokens;
+    (void)workspace;
+    (void)stream;
+    throw std::invalid_argument(
+        "packed dense softmax attention is unavailable on Volta");
+#else
+    auto scope = workspace.scope();
     detail::packed_attention_uniform_launch(q, k, v, tokens, out, stream);
+#endif
 }
 
 void packed_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
@@ -113,10 +121,17 @@ void packed_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
         throw std::invalid_argument(
             "packed_softmax_attention: cu_seqlens must be contiguous I32 [S+1]");
     }
+#if defined(NINFER_VOLTA_BUILD)
+    (void)workspace;
+    (void)stream;
+    throw std::invalid_argument(
+        "packed segmented softmax attention is unavailable on Volta");
+#else
     auto scratch_scope = workspace.scope();
     Tensor tiles       = allocate_workspace(workspace, tokens, segments);
     Tensor* tiles_ptr  = tiles.data == nullptr ? nullptr : &tiles;
     detail::packed_attention_launch(q, k, v, cu_seqlens, tiles_ptr, out, stream);
+#endif
 }
 
 void packed_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
@@ -127,7 +142,13 @@ void packed_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
     if (segment_length <= 0 || tokens % segment_length != 0) {
         throw std::invalid_argument("packed_softmax_attention: invalid uniform segment length");
     }
+#if defined(NINFER_VOLTA_BUILD)
+    (void)stream;
+    throw std::invalid_argument(
+        "packed uniform softmax attention is unavailable on Volta");
+#else
     detail::packed_attention_uniform_launch(q, k, v, segment_length, out, stream);
+#endif
 }
 
 } // namespace ninfer::ops
