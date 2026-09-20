@@ -255,7 +255,7 @@ ninfer_add_test(ninfer_qwen3_8_flash_next_vertical_slice_test
   LIBRARIES ninfer_qwen3_8_flash_next)
 ninfer_add_test(ninfer_qwen3_8_flash_next_vertical_slice_real_test
   SOURCES targets/qwen3_8_flash_next/test_vertical_slice_real.cpp
-  LIBRARIES ninfer_qwen3_8_flash_next)
+  LIBRARIES ninfer_qwen3_8_flash_next ninfer_engine)
 set_tests_properties(ninfer_qwen3_8_flash_next_vertical_slice_real_test
   PROPERTIES SKIP_RETURN_CODE 77)
 ninfer_add_test(ninfer_qwen3_8_flash_next_ple_pipeline_test
