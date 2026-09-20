@@ -6,6 +6,7 @@
 #include "ops/common/mma.cuh"
 #include "ops/common/rowsplit_mma.cuh"
 #include "ops/common/warp.cuh"
+#include "ops/linear/nvfp4/nvfp4_codec.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
@@ -29,7 +30,13 @@ __device__ __forceinline__ __nv_bfloat16 to_storage<__nv_bfloat16>(__nv_bfloat16
 
 template <>
 __device__ __forceinline__ __nv_fp8_e4m3 to_storage<__nv_fp8_e4m3>(__nv_bfloat16 x) {
+#if defined(NINFER_VOLTA_BUILD)
+    __nv_fp8_e4m3 out;
+    out.__x = ops::detail::encode_nvfp4_e4m3_satfinite(__bfloat162float(x));
+    return out;
+#else
     return __nv_fp8_e4m3(__bfloat162float(x));
+#endif
 }
 
 
@@ -55,11 +62,16 @@ struct VectorKV<__nv_fp8_e4m3> {
         const auto* fp8 = reinterpret_cast<const __nv_fp8_e4m3*>(&vec);
         #pragma unroll
         for (int i = 0; i < 8; ++i) {
+#if defined(NINFER_VOLTA_BUILD)
+            out[i] = ops::detail::decode_nvfp4_e4m3(fp8[i].__x);
+#else
             out[i] = static_cast<float>(fp8[i]);
+#endif
         }
     }
 };
 
+#if !defined(NINFER_VOLTA_BUILD)
 template <typename StorageT>
 __device__ __forceinline__ void stage_kv_vector(
     __nv_bfloat16* dst, const StorageT* src, bool valid) {
@@ -81,6 +93,7 @@ __device__ __forceinline__ void stage_kv_vector(
         }
     }
 }
+#endif
 
 constexpr int kHeadDim         = 256;
 constexpr int kQueryHeads      = 24;
@@ -577,6 +590,7 @@ __global__ void qsa_prefill_sparse_attention_kernel(
     }
 }
 
+#if !defined(NINFER_VOLTA_BUILD)
 // GQA tiled MMA: one CTA per (kv_head, query token). The 12 query heads that share a KV head
 // stage each K/V tile once and run m16n8k16 over it. Online softmax stays FP32.
 constexpr int kMmaHeads     = 16; // 12 real heads, 4 padded
@@ -821,11 +835,16 @@ void qsa_prefill_sparse_attention_mma_sched_kernel(
         store(r1, d1, oc[nt][3]);
     }
 }
+#endif // !NINFER_VOLTA_BUILD
 
 bool flash_next_qsa_mma_sched_new() {
+#if defined(NINFER_VOLTA_BUILD)
+    return false;
+#else
     const char* env = std::getenv("NINFER_FLASH_NEXT_QSA_MMA_SCHED");
     if (env == nullptr || env[0] == '\0') { return false; }
     return std::strcmp(env, "new") == 0 || (env[0] == '1' && env[1] == '\0');
+#endif
 }
 
 void flash_next_qsa_attention_store_launch(const Tensor& projected, const Tensor& token_indices,
@@ -909,9 +928,16 @@ void flash_next_qsa_attention_prefill_launch(
     CUDA_CHECK(cudaGetLastError());
     flash_next_qsa_attention_store_launch(scratch.projected, token_indices, mrope_positions,
         Tensor{}, table_row, key_norm, cache, scratch.key, scratch.value, stream);
+#if defined(NINFER_VOLTA_BUILD)
+    (void)use_mma;
+    constexpr bool kAllowMmaPrefill = false;
+#else
+    const bool kAllowMmaPrefill = use_mma;
+#endif
     const bool is_fp8 = (cache.key_pages.dtype == DType::FP8_E4M3FN);
     if (is_fp8) {
-        if (use_mma) {
+#if !defined(NINFER_VOLTA_BUILD)
+        if (kAllowMmaPrefill) {
             const auto* q_ptr  = static_cast<const __nv_bfloat16*>(scratch.query.data);
             const auto* ti_ptr = static_cast<const std::int32_t*>(token_indices.data);
             const auto* sb_ptr = static_cast<const std::int32_t*>(selected_blocks.data);
@@ -930,7 +956,7 @@ void flash_next_qsa_attention_prefill_launch(
                     scratch.query, token_indices, table_row, selected_blocks, selected_counts,
                     {cache.key_pages, cache.value_pages, cache.block_tables}, scratch.attended, stream);
             }
-        } else {
+        }} else {
             constexpr int kPrefillWarps   = 4;
             constexpr int kPrefillThreads = kPrefillWarps * 32;
             qsa_prefill_sparse_attention_kernel<kPrefillWarps, __nv_fp8_e4m3>
@@ -944,9 +970,25 @@ void flash_next_qsa_attention_prefill_launch(
                     static_cast<const __nv_fp8_e4m3*>(cache.value_pages.data),
                     static_cast<__nv_bfloat16*>(scratch.attended.data));
         }
+#else
+            constexpr int kPrefillWarps   = 4;
+            constexpr int kPrefillThreads = kPrefillWarps * 32;
+            qsa_prefill_sparse_attention_kernel<kPrefillWarps, __nv_fp8_e4m3>
+                <<<dim3(kQueryHeads, tokens), kPrefillThreads, 0, stream>>>(
+                    static_cast<const __nv_bfloat16*>(scratch.query.data),
+                    static_cast<const std::int32_t*>(token_indices.data), table_row,
+                    static_cast<const std::int32_t*>(selected_blocks.data),
+                    static_cast<const std::int32_t*>(selected_counts.data),
+                    static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
+                    static_cast<const __nv_fp8_e4m3*>(cache.key_pages.data),
+                    static_cast<const __nv_fp8_e4m3*>(cache.value_pages.data),
+                    static_cast<__nv_bfloat16*>(scratch.attended.data));
+        
+#endif
         CUDA_CHECK(cudaGetLastError());
     } else {
-        if (use_mma) {
+#if !defined(NINFER_VOLTA_BUILD)
+        if (kAllowMmaPrefill) {
             const auto* q_ptr  = static_cast<const __nv_bfloat16*>(scratch.query.data);
             const auto* ti_ptr = static_cast<const std::int32_t*>(token_indices.data);
             const auto* sb_ptr = static_cast<const std::int32_t*>(selected_blocks.data);
@@ -965,7 +1007,7 @@ void flash_next_qsa_attention_prefill_launch(
                     scratch.query, token_indices, table_row, selected_blocks, selected_counts,
                     {cache.key_pages, cache.value_pages, cache.block_tables}, scratch.attended, stream);
             }
-        } else {
+        }} else {
             constexpr int kPrefillWarps   = 4;
             constexpr int kPrefillThreads = kPrefillWarps * 32;
             qsa_prefill_sparse_attention_kernel<kPrefillWarps, __nv_bfloat16>
@@ -979,6 +1021,21 @@ void flash_next_qsa_attention_prefill_launch(
                     static_cast<const __nv_bfloat16*>(cache.value_pages.data),
                     static_cast<__nv_bfloat16*>(scratch.attended.data));
         }
+#else
+            constexpr int kPrefillWarps   = 4;
+            constexpr int kPrefillThreads = kPrefillWarps * 32;
+            qsa_prefill_sparse_attention_kernel<kPrefillWarps, __nv_bfloat16>
+                <<<dim3(kQueryHeads, tokens), kPrefillThreads, 0, stream>>>(
+                    static_cast<const __nv_bfloat16*>(scratch.query.data),
+                    static_cast<const std::int32_t*>(token_indices.data), table_row,
+                    static_cast<const std::int32_t*>(selected_blocks.data),
+                    static_cast<const std::int32_t*>(selected_counts.data),
+                    static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
+                    static_cast<const __nv_bfloat16*>(cache.key_pages.data),
+                    static_cast<const __nv_bfloat16*>(cache.value_pages.data),
+                    static_cast<__nv_bfloat16*>(scratch.attended.data));
+        
+#endif
         CUDA_CHECK(cudaGetLastError());
     }
     const int elements    = kQueryHeads * kHeadDim * tokens;
