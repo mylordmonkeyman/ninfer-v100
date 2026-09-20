@@ -1,0 +1,50 @@
+name: SM70 Phase 10 Compile
+
+on:
+  push:
+    branches:
+      - forwardport/v100-flash-next
+  workflow_dispatch:
+
+jobs:
+  compile-phase10:
+    runs-on: ubuntu-24.04
+    container:
+      image: nvidia/cuda:12.8.1-devel-ubuntu24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Install build tools
+        shell: bash
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git \
+            ca-certificates \
+            python3 \
+            python3-pip \
+            pkg-config
+          python3 -m pip install --break-system-packages 'cmake>=3.28,<4' ninja
+
+      - uses: actions/checkout@v4
+
+      - name: Configure CUDA 12.8 SM70
+        shell: bash
+        run: |
+          cmake -S . -B build-sm70 -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF \
+            -DBUILD_TESTING=ON
+
+      - name: Build Phase 10 targets
+        shell: bash
+        run: |
+          cmake --build build-sm70 --parallel 2 --target \
+            ninfer_qwen3_8_flash_next_expert_bank_test \
+            ninfer_qwen3_8_flash_next_cpu_expert_reference_test \
+            ninfer_qwen3_8_flash_next_moe_test \
+            ninfer_qwen3_8_flash_next_text_decode_test \
+            ninfer_qwen3_8_flash_next_loader_test
