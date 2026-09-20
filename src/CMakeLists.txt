@@ -119,9 +119,9 @@ add_library(ninfer_ops STATIC
   ops/softmax_attention/dense/causal_cache/small_t_k8v4.cu
   ops/softmax_attention/dense/causal_cache/prompt.cu
   ops/softmax_attention/dense/causal_cache/prompt_fp8.cu
-  ops/softmax_attention/dense/causal_cache/prompt_k8v4.cu
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/softmax_attention/dense/causal_cache/prompt_k8v4.cu>
   ops/softmax_attention/dense/packed/packed_softmax_attention.cpp
-  ops/softmax_attention/dense/packed/launch.cu
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/softmax_attention/dense/packed/launch.cu>
   ops/softmax_attention/dense/context/context_softmax_attention.cpp
   ops/softmax_attention/dense/context/launch.cu
   ops/softmax_attention/sliding_window/sliding_window_attention.cpp
