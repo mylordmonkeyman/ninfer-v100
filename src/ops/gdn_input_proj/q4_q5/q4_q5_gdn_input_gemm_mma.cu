@@ -1,5 +1,21 @@
 #include "ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_kernels.h"
 
+#if defined(NINFER_VOLTA_BUILD)
+
+#include <stdexcept>
+
+namespace ninfer::ops::detail {
+
+void q4_q5_gdn_input_grouped_mma_launch(const Tensor&, const Weight&, const Weight&, Tensor&,
+                                        Tensor&, cudaStream_t) {
+    throw std::logic_error(
+        "Q4/Q5 GDN grouped-MMA backend is unavailable on Volta");
+}
+
+} // namespace ninfer::ops::detail
+
+#else
+
 #include "core/device.h"
 #include "ops/common/math.h"
 #include "ops/common/rowsplit_grouped_mma.cuh"
@@ -78,3 +94,5 @@ void q4_q5_gdn_input_grouped_mma_launch(const Tensor& x, const Weight& qk_weight
 }
 
 } // namespace ninfer::ops::detail
+
+#endif // NINFER_VOLTA_BUILD
