@@ -40,6 +40,16 @@ flash_next_floor_slots(std::uint32_t max_concurrency,
     return flash_next_slots_per_lane(speculative_draft_tokens) * max_concurrency;
 }
 
+[[nodiscard]] inline constexpr bool
+flash_next_cuda_graph_enabled(bool requested) noexcept {
+#if defined(NINFER_VOLTA_BUILD)
+    (void)requested;
+    return false;
+#else
+    return requested;
+#endif
+}
+
 // Per 256-token group strides across all 12 QSA layers
 // Attention K + V (BF16): 12 layers * 4 pages/group * (256 * 64 * 2 heads * 2 bytes * 2 K/V) = 6,291,456 bytes
 inline constexpr std::size_t kAttentionKvBytesPerGroupBf16 =
@@ -197,7 +207,7 @@ struct FlashNextRuntimeConfig {
     std::uint32_t speculative_draft_tokens = 0;    // 0 -> speculative decoding off; K in [1, 4]
     ProposalHead proposal_head             = ProposalHead::Full;
     std::uint32_t draft_head_rows          = 32'768; // Used when proposal_head == ProposalHead::Optimized
-    bool use_cuda_graph                    = true;
+    bool use_cuda_graph                    = flash_next_cuda_graph_enabled(true);
     bool vision_enabled                    = false;
     std::uint32_t max_vision_tokens        = 4096;
     // Prefill QSA attention: GQA tiled MMA (12 query heads share each KV tile). Default off.

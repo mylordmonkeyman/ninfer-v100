@@ -196,7 +196,7 @@ Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,
         .speculative_draft_tokens = draft_tokens,
         .proposal_head            = options.speculative.proposal_head,
         .draft_head_rows          = draft_rows,
-        .use_cuda_graph           = options.use_cuda_graph,
+        .use_cuda_graph           = detail::flash_next_cuda_graph_enabled(options.use_cuda_graph),
         .vision_enabled           = options.enable_vision,
         .max_vision_tokens        = 4096,
         .use_qsa_prefill_mma      = options.use_qsa_prefill_mma, // G18 serve flag; dropped by the upstream merge e650ee62, restored after window 6

@@ -242,6 +242,38 @@ int test_continuation_capacity_clamping() {
     return failures;
 }
 
+int test_volta_cuda_graph_policy() {
+#if defined(NINFER_VOLTA_BUILD)
+    using Package = ninfer::targets::qwen3_8_flash_next::Package;
+    ninfer::EngineOptions options{};
+    options.max_context     = 4096;
+    options.max_concurrency = 1;
+    options.use_cuda_graph  = true;
+
+    ninfer::DeviceContext dummy_device{};
+    auto planner = Package::make_sequence_planner(
+        dummy_device, options, Package::WeightsProfile::MixedNvfp4Fp8PleInt4);
+    const auto curve = planner.capacity_curve();
+    auto plan = std::move(planner).finalize(curve.minimum_main_page_groups);
+
+    // The public option may request graphing, but initial SM70 bring-up is
+    // architecture-forced eager and reserves no graph memory.
+    ninfer::targets::qwen3_8_flash_next::detail::FlashNextRuntimeConfig direct{};
+    direct.use_cuda_graph = true;
+    const auto direct_curve =
+        ninfer::targets::qwen3_8_flash_next::detail::flash_next_capacity_curve(direct);
+    const auto direct_plan =
+        ninfer::targets::qwen3_8_flash_next::detail::finalize_flash_next_runtime_plan(
+            direct, direct_curve.minimum_main_page_groups);
+    if (direct_plan.config.use_cuda_graph || direct_plan.cuda_graph_allowance_bytes != 0) {
+        std::cerr << "FAIL: SM70 runtime plan must force eager execution with zero graph allowance\n";
+        return 1;
+    }
+    (void)plan;
+#endif
+    return 0;
+}
+
 int test_make_sequence_planner_draft_tokens() {
     using Package = ninfer::targets::qwen3_8_flash_next::Package;
 
@@ -319,6 +351,7 @@ int main() {
         failures += test_sequence_plan_curve_consistency();
         failures += test_sequence_plan_fp8_curve_consistency();
         failures += test_continuation_capacity_clamping();
+        failures += test_volta_cuda_graph_policy();
         failures += test_make_sequence_planner_draft_tokens();
 
         if (failures == 0) {
