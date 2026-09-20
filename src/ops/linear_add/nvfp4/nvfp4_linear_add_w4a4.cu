@@ -3,7 +3,9 @@
 #include "core/device.h"
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_w4a4_mma.cuh"
+#if !defined(NINFER_VOLTA_BUILD)
 #include "ops/linear/nvfp4/nvfp4_w4a4_tma_launch.h"
+#endif
 #include "ops/linear_add/nvfp4/nvfp4_linear_add_epilogue.cuh"
 
 #include <stdexcept>
@@ -16,7 +18,9 @@ using M32N128                     = Nvfp4W4a4MmaSchedule<32, 128, 256, 2, 4, 2, 
 using M64N128                     = Nvfp4W4a4MmaSchedule<64, 128, 256, 4, 2, 2, 1>;
 using M128N128Pipelined           = Nvfp4W4a4MmaSchedule<128, 128, 256, 4, 2, 2, 1>;
 using M128N128Resident            = Nvfp4W4a4MmaSchedule<128, 128, 256, 4, 2, 1, 2>;
+#if !defined(NINFER_VOLTA_BUILD)
 constexpr std::int32_t kTmaBlockM = 256;
+#endif
 
 template <class Geometry, class Schedule>
 void launch_gemm(const Weight& weight, Tensor& residual, Nvfp4W4a4Workspace workspace,
@@ -59,6 +63,7 @@ void nvfp4_linear_add_w4a4_launch(const Tensor& x, const Weight& weight, Tensor&
     launch_nvfp4_w4a4_quantize(x, weight, workspace, stream);
     const std::int32_t tokens  = x.ne[1];
     const Nvfp4Problem problem = resolve_nvfp4_problem(weight.n, weight.k);
+#if !defined(NINFER_VOLTA_BUILD)
     if (tokens >= 1024 && (tokens % kTmaBlockM) == 0) {
         const float alpha = 1.0F / (weight.input_scale_divisor * weight.weight_scale_divisor);
         launch_nvfp4_w4a4_tma_linear_add(problem, workspace.codes, workspace.scales,
@@ -68,6 +73,7 @@ void nvfp4_linear_add_w4a4_launch(const Tensor& x, const Weight& weight, Tensor&
                                          stream);
         return;
     }
+#endif
     switch (problem) {
     case Nvfp4Problem::Residual6144:
         launch_problem<Nvfp4Residual6144Geometry>(weight, residual, workspace, tokens, stream);

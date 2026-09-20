@@ -2,7 +2,9 @@
 
 #include "core/device.h"
 #include "ops/linear/nvfp4/nvfp4_w4a4_mma.cuh"
+#if !defined(NINFER_VOLTA_BUILD)
 #include "ops/linear/nvfp4/nvfp4_w4a4_tma_launch.h"
+#endif
 
 #include <cuda_bf16.h>
 
@@ -18,7 +20,9 @@ using M32N128                     = Nvfp4W4a4MmaSchedule<32, 128, 256, 2, 4, 2, 
 using M64N128                     = Nvfp4W4a4MmaSchedule<64, 128, 256, 4, 2, 2, 1>;
 using M128N128Pipelined           = Nvfp4W4a4MmaSchedule<128, 128, 256, 4, 2, 2, 1>;
 using M128N128Resident            = Nvfp4W4a4MmaSchedule<128, 128, 256, 4, 2, 1, 2>;
+#if !defined(NINFER_VOLTA_BUILD)
 constexpr std::int32_t kTmaBlockM = 256;
+#endif
 
 template <class Geometry, class Schedule>
 void launch_gemm(const Weight& weight, Tensor& out, Nvfp4W4a4Workspace workspace,
@@ -54,6 +58,7 @@ void launch_problem(const Weight& weight, Tensor& out, Nvfp4W4a4Workspace worksp
                     std::int32_t tokens, cudaStream_t stream) {
     constexpr bool kResidualGeometry = std::is_same_v<Geometry, Nvfp4Residual6144Geometry> ||
                                        std::is_same_v<Geometry, Nvfp4Residual17408Geometry>;
+#if !defined(NINFER_VOLTA_BUILD)
     if (tokens >= 1024 && (tokens % kTmaBlockM) == 0) {
         const float alpha = 1.0F / (weight.input_scale_divisor * weight.weight_scale_divisor);
         launch_nvfp4_w4a4_tma_linear(
@@ -61,7 +66,9 @@ void launch_problem(const Weight& weight, Tensor& out, Nvfp4W4a4Workspace worksp
             workspace.scales, static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(out.data),
             tokens, alpha, stream);
-    } else if (tokens <= 64) {
+    } else
+#endif
+    if (tokens <= 64) {
         launch_gemm<Geometry, M32N64>(weight, out, workspace, tokens, stream);
     } else if (tokens <= 96) {
         launch_gemm<Geometry, M32N128>(weight, out, workspace, tokens, stream);

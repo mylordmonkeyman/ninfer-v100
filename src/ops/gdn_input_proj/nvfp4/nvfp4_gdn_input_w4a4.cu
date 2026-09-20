@@ -4,7 +4,9 @@
 #include "ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_output.cuh"
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_w4a4_mma.cuh"
+#if !defined(NINFER_VOLTA_BUILD)
 #include "ops/linear/nvfp4/nvfp4_w4a4_tma_launch.h"
+#endif
 
 namespace ninfer::ops::detail {
 namespace {
@@ -16,7 +18,9 @@ using M32N128                     = Nvfp4W4a4MmaSchedule<32, 128, 256, 2, 4, 2, 
 using M64N128                     = Nvfp4W4a4MmaSchedule<64, 128, 256, 4, 2, 2, 1>;
 using M128N128Pipelined           = Nvfp4W4a4MmaSchedule<128, 128, 256, 4, 2, 2, 1>;
 using M128N128Resident            = Nvfp4W4a4MmaSchedule<128, 128, 256, 4, 2, 1, 2>;
+#if !defined(NINFER_VOLTA_BUILD)
 constexpr std::int32_t kTmaBlockM = 256;
+#endif
 
 template <class Schedule>
 void launch_gemm(const Weight& weight, Tensor& qkv, Tensor& z, Nvfp4W4a4Workspace workspace,
@@ -39,13 +43,16 @@ void nvfp4_gdn_input_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& 
                                  Nvfp4W4a4Workspace workspace, cudaStream_t stream) {
     launch_nvfp4_w4a4_quantize(x, weight, workspace, stream);
     const std::int32_t tokens = x.ne[1];
+#if !defined(NINFER_VOLTA_BUILD)
     if (tokens >= 1024 && (tokens % kTmaBlockM) == 0) {
         const float alpha = 1.0F / (weight.input_scale_divisor * weight.weight_scale_divisor);
         launch_nvfp4_w4a4_tma_gdn(
             workspace.codes, workspace.scales, static_cast<const std::uint8_t*>(weight.qdata),
             static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(qkv.data),
             static_cast<__nv_bfloat16*>(z.data), tokens, alpha, stream);
-    } else if (tokens <= 64) {
+    } else
+#endif
+    if (tokens <= 64) {
         launch_gemm<M32N64>(weight, qkv, z, workspace, tokens, stream);
     } else if (tokens <= 96) {
         launch_gemm<M32N128>(weight, qkv, z, workspace, tokens, stream);

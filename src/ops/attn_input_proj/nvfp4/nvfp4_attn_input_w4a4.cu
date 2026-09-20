@@ -3,7 +3,9 @@
 #include "core/device.h"
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_w4a4_mma.cuh"
+#if !defined(NINFER_VOLTA_BUILD)
 #include "ops/linear/nvfp4/nvfp4_w4a4_tma_launch.h"
+#endif
 
 #include <cuda_bf16.h>
 
@@ -56,7 +58,9 @@ using M32N128                     = Nvfp4W4a4MmaSchedule<32, 128, 256, 2, 4, 2, 
 using M64N128                     = Nvfp4W4a4MmaSchedule<64, 128, 256, 4, 2, 2, 1>;
 using M128N128Pipelined           = Nvfp4W4a4MmaSchedule<128, 128, 256, 4, 2, 2, 1>;
 using M128N128Resident            = Nvfp4W4a4MmaSchedule<128, 128, 256, 4, 2, 1, 2>;
+#if !defined(NINFER_VOLTA_BUILD)
 constexpr std::int32_t kTmaBlockM = 256;
+#endif
 
 template <class Schedule>
 void launch_gemm(const Weight& weight, Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
@@ -85,6 +89,7 @@ void nvfp4_attn_input_w4a4_launch(const Tensor& x, const Weight& weight, Tensor&
                                   cudaStream_t stream) {
     launch_nvfp4_w4a4_quantize(x, weight, workspace, stream);
     const std::int32_t tokens = x.ne[1];
+#if !defined(NINFER_VOLTA_BUILD)
     if (tokens >= 1024 && (tokens % kTmaBlockM) == 0) {
         const float alpha = 1.0F / (weight.input_scale_divisor * weight.weight_scale_divisor);
         launch_nvfp4_w4a4_tma_attention(
@@ -92,7 +97,9 @@ void nvfp4_attn_input_w4a4_launch(const Tensor& x, const Weight& weight, Tensor&
             static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(q.data),
             static_cast<__nv_bfloat16*>(gate.data), static_cast<__nv_bfloat16*>(k.data),
             static_cast<__nv_bfloat16*>(v.data), tokens, alpha, stream);
-    } else if (tokens <= 64) {
+    } else
+#endif
+    if (tokens <= 64) {
         launch_gemm<M32N64>(weight, q, gate, k, v, workspace, tokens, stream);
     } else if (tokens <= 96) {
         launch_gemm<M32N128>(weight, q, gate, k, v, workspace, tokens, stream);

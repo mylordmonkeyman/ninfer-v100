@@ -4,7 +4,9 @@
 #include "ninfer/ops/silu_mul.h"
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_w4a4_plan.h"
+#if !defined(NINFER_VOLTA_BUILD)
 #include "ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4_tma_launch.h"
+#endif
 
 #include <algorithm>
 #include <cstddef>
@@ -21,7 +23,9 @@ enum class Nvfp4LinearSwiGluRoute {
     TmaFusedW4A4,
 };
 
+#if !defined(NINFER_VOLTA_BUILD)
 constexpr std::int32_t kTmaBlockM = 256;
+#endif
 constexpr std::int32_t kFusedMaxTokens = 128;
 
 Nvfp4LinearSwiGluRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
@@ -37,9 +41,11 @@ Nvfp4LinearSwiGluRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
     if (tokens == 1) { return Nvfp4LinearSwiGluRoute::DecodeFusedA16; }
     if (tokens <= 4) { return Nvfp4LinearSwiGluRoute::SmallTFusedA16; }
     if (tokens <= kFusedMaxTokens) { return Nvfp4LinearSwiGluRoute::FusedW4A4; }
+#if !defined(NINFER_VOLTA_BUILD)
     if (tokens >= kTmaBlockM && (tokens % kTmaBlockM) == 0) {
         return Nvfp4LinearSwiGluRoute::TmaFusedW4A4;
     }
+#endif
     return Nvfp4LinearSwiGluRoute::LinearW4A4Post;
 }
 
@@ -93,17 +99,21 @@ std::size_t nvfp4_linear_swiglu_workspace_capacity_bytes(LinearPolicy policy,
     if (min_tokens <= kFusedMaxTokens && max_tokens >= 5) {
         maximum = fused_workspace_bytes(std::min(max_tokens, kFusedMaxTokens));
     }
+#if !defined(NINFER_VOLTA_BUILD)
     if (max_tokens >= kTmaBlockM) {
         const std::int32_t largest_fused = max_tokens - (max_tokens % kTmaBlockM);
         if (largest_fused >= std::max(min_tokens, kTmaBlockM)) {
             maximum = std::max(maximum, fused_workspace_bytes(largest_fused));
         }
     }
+#endif
 
     std::int32_t last_baseline = max_tokens;
+#if !defined(NINFER_VOLTA_BUILD)
     if (resolve_route(policy, last_baseline) == Nvfp4LinearSwiGluRoute::TmaFusedW4A4) {
         --last_baseline;
     }
+#endif
     if (last_baseline >= std::max(min_tokens, kFusedMaxTokens + 1)) {
         maximum = std::max(maximum, baseline_workspace_bytes(last_baseline));
     }
@@ -123,6 +133,7 @@ void nvfp4_linear_swiglu_dispatch(const Tensor& x, const Weight& weight, Tensor&
     case Nvfp4LinearSwiGluRoute::FusedW4A4:
         nvfp4_linear_swiglu_w4a4_launch(x, weight, out, workspace, stream);
         return;
+#if !defined(NINFER_VOLTA_BUILD)
     case Nvfp4LinearSwiGluRoute::TmaFusedW4A4: {
         auto scope                       = workspace.scope();
         const Nvfp4W4a4Workspace scratch = allocate_fused_workspace(workspace, x.ne[1]);
@@ -134,6 +145,7 @@ void nvfp4_linear_swiglu_dispatch(const Tensor& x, const Weight& weight, Tensor&
             x.ne[1], alpha, stream);
         return;
     }
+#endif
     case Nvfp4LinearSwiGluRoute::LinearW4A4Post:
         break;
     }

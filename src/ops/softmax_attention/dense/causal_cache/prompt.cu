@@ -9,6 +9,7 @@
 #include "core/device.h" // CUDA_CHECK
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -69,8 +70,12 @@ void causal_attention_prompt_attention_launch(const Tensor& q, const Tensor& pos
         return;
     }
     if (cache.storage == KvCacheStorage::Nvfp4Group16) {
+#if defined(NINFER_VOLTA_BUILD)
+        throw std::invalid_argument("NVFP4 prompt KV attention is unavailable on SM70");
+#else
         causal_attention_prompt_nvfp4_attention_launch(q, positions, scale, cache, out, stream);
         return;
+#endif
     }
     if (cache.storage == KvCacheStorage::Fp8E4M3Row256) {
         causal_attention_prompt_fp8_attention_launch(q, positions, scale, cache, out, stream);
@@ -96,9 +101,13 @@ void causal_attention_prompt_launch(const Tensor& q, const Tensor& k, const Tens
         return;
     }
     if (cache.storage == KvCacheStorage::Nvfp4Group16) {
+#if defined(NINFER_VOLTA_BUILD)
+        throw std::invalid_argument("NVFP4 prompt KV attention is unavailable on SM70");
+#else
         causal_attention_prompt_nvfp4_launch(q, k, v, positions, valid_columns, table_rows, scale,
                                              cache, out, stream);
         return;
+#endif
     }
     if (cache.storage == KvCacheStorage::Fp8E4M3Row256) {
         causal_attention_prompt_fp8_launch(q, k, v, positions, valid_columns, table_rows, scale,
