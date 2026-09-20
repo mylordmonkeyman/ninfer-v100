@@ -1,5 +1,9 @@
 name: SM70 Phase 9 Compile
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches:
