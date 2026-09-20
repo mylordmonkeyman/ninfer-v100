@@ -1,4 +1,20 @@
 #include "ops/dynamic_grouped_conv/bf16/bf16_dynamic_grouped_conv_prepare_kernels.h"
+
+#if defined(NINFER_VOLTA_BUILD)
+
+#include <stdexcept>
+
+namespace ninfer::ops::detail {
+
+void bf16_dynamic_grouped_conv_prepare_partial_launch(
+    DynamicConvPrepareRoute, const Tensor&, const Weight&, float*, cudaStream_t) {
+    throw std::logic_error(
+        "generic BF16 dynamic grouped-conv prepare backend is unavailable on Volta");
+}
+
+} // namespace ninfer::ops::detail
+
+#else
 #include "core/device.h"
 #include "ops/common/memory.cuh"
 #include "ops/common/mma.cuh"
@@ -134,3 +150,5 @@ void bf16_dynamic_grouped_conv_prepare_partial_launch(DynamicConvPrepareRoute ro
     throw std::logic_error("dynamic grouped conv prepare: invalid production tile");
 }
 } // namespace ninfer::ops::detail
+
+#endif // NINFER_VOLTA_BUILD
