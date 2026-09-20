@@ -6,6 +6,10 @@ on:
       - forwardport/v100-flash-next
   workflow_dispatch:
 
+concurrency:
+  group: sm70-phase10-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   compile-phase10:
     runs-on: ubuntu-24.04
