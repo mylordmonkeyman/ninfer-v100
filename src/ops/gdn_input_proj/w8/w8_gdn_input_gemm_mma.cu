@@ -1,5 +1,21 @@
 #include "ops/gdn_input_proj/w8/w8_gdn_input_kernels.h"
 
+#if defined(NINFER_VOLTA_BUILD)
+
+#include <stdexcept>
+
+namespace ninfer::ops::detail {
+
+void w8_gdn_input_mma_r64_c128_launch(const Tensor&, const Weight&, Tensor&, Tensor&,
+                                      cudaStream_t) {
+    throw std::logic_error(
+        "W8 GDN MMA backend is unavailable on Volta");
+}
+
+} // namespace ninfer::ops::detail
+
+#else
+
 #include "core/device.h"
 #include "ops/common/math.h"
 #include "ops/linear/w8/w8_rowsplit_gemm_mma.cuh"
@@ -38,3 +54,5 @@ void w8_gdn_input_mma_r64_c128_launch(const Tensor& x, const Weight& weight, Ten
 }
 
 } // namespace ninfer::ops::detail
+
+#endif // NINFER_VOLTA_BUILD
