@@ -3,9 +3,12 @@
 #include "core/device.h"
 #include "ops/common/math.cuh"
 #include "ops/common/warp.cuh"
+#include "ops/linear/nvfp4/nvfp4_codec.cuh"
 
 #include <cuda_bf16.h>
+#if !defined(NINFER_VOLTA_BUILD)
 #include <cuda_fp8.h>
+#endif
 
 #include <algorithm>
 #include <cstddef>
@@ -67,7 +70,14 @@ __global__ __launch_bounds__(kThreads, 2) void quantize_row_kernel(
     for (int pair = tid; pair < pairs; pair += kThreads) {
         const float2 value  = ops::bf16x2_bits_to_float2(input_pairs[pair]);
         const float2 scaled = make_float2(value.x * inverse, value.y * inverse);
-        output_pairs[pair]  = __nv_cvt_float2_to_fp8x2(scaled, __NV_SATFINITE, __NV_E4M3);
+#if defined(NINFER_VOLTA_BUILD)
+        const std::uint8_t lo = ops::detail::encode_nvfp4_e4m3_satfinite(scaled.x);
+        const std::uint8_t hi = ops::detail::encode_nvfp4_e4m3_satfinite(scaled.y);
+        output_pairs[pair] = static_cast<std::uint16_t>(lo) |
+                             (static_cast<std::uint16_t>(hi) << 8);
+#else
+        output_pairs[pair] = __nv_cvt_float2_to_fp8x2(scaled, __NV_SATFINITE, __NV_E4M3);
+#endif
     }
     if (tid == 0) { scales[row] = scale; }
 }
