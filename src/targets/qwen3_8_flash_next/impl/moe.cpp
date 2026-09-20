@@ -8,6 +8,7 @@
 #include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -19,6 +20,11 @@
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 namespace {
+
+std::atomic<std::uint64_t> s_host_expert_layer_calls{0};
+std::atomic<std::uint64_t> s_host_expert_routed_tokens{0};
+std::atomic<std::uint64_t> s_host_expert_pairs{0};
+
 
 bool aligned_to(const void* pointer, std::uintptr_t alignment) {
     return pointer != nullptr && (reinterpret_cast<std::uintptr_t>(pointer) & (alignment - 1)) == 0;
@@ -49,6 +55,24 @@ bool exact_bf16_expert_bank(const Bf16ExpertBankView& bank, std::int32_t rows, s
 }
 
 } // namespace
+
+void reset_flash_next_host_expert_execution_stats() noexcept {
+    s_host_expert_layer_calls.store(0, std::memory_order_relaxed);
+    s_host_expert_routed_tokens.store(0, std::memory_order_relaxed);
+    s_host_expert_pairs.store(0, std::memory_order_relaxed);
+}
+
+FlashNextHostExpertExecutionStats
+flash_next_host_expert_execution_stats() noexcept {
+    return FlashNextHostExpertExecutionStats{
+        .completed_layer_calls =
+            s_host_expert_layer_calls.load(std::memory_order_relaxed),
+        .routed_tokens =
+            s_host_expert_routed_tokens.load(std::memory_order_relaxed),
+        .expert_pairs =
+            s_host_expert_pairs.load(std::memory_order_relaxed),
+    };
+}
 
 std::size_t flash_next_moe_workspace_capacity_bytes(std::int32_t min_tokens,
                                                     std::int32_t max_tokens) {
@@ -193,6 +217,12 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
             }
         }
     }
+
+    s_host_expert_layer_calls.fetch_add(1, std::memory_order_relaxed);
+    s_host_expert_routed_tokens.fetch_add(
+        static_cast<std::uint64_t>(tokens), std::memory_order_relaxed);
+    s_host_expert_pairs.fetch_add(
+        static_cast<std::uint64_t>(tokens) * 10ULL, std::memory_order_relaxed);
 
     // Each token owns 640 * 11 BF16 values (14,080 B). Store the 2,560 FP32 routed
     // values in the first 10,240 B of that token's slab and preserve the shared path at
