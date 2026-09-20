@@ -58,10 +58,7 @@ jobs:
               'ops/softmax_attention/dense/causal_cache/small_t.cu',
               'ops/softmax_attention/dense/causal_cache/small_t_fp8.cu',
           ):
-              text = text.replace(
-                  f'  {source}\n',
-                  f'  $<$<NOT:$<BOOL:${{NINFER_VOLTA_BUILD}}>>:{source}>\n',
-              )
+              text = text.replace(f'  {source}\n', '')
           cmake.write_text(text)
           PY
 
