@@ -8,7 +8,9 @@
 #include "ops/linear/nvfp4/nvfp4_codec.cuh"
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_gemv.cuh"
+#if !defined(NINFER_VOLTA_BUILD)
 #include "ops/linear/nvfp4/nvfp4_w4a4_mma.cuh"
+#endif
 #include "targets/qwen3_8_flash_next/impl/moe_shared_kernels.h"
 #include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
 
@@ -25,8 +27,10 @@
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 namespace {
 
+#if !defined(NINFER_VOLTA_BUILD)
 using Activation2560Geometry = ops::detail::Nvfp4ActivationGeometry<2'560>;
 using Activation640Geometry  = ops::detail::Nvfp4ActivationGeometry<640>;
+#endif
 
 using GateGeometry = ops::detail::Nvfp4GemvGeometry<1'280, 2'560>;
 using GateSchedule =
@@ -671,6 +675,7 @@ __global__ __launch_bounds__(256, 4) void flash_next_moe_prefill_gate_up_kernel(
     }
 }
 
+#if !defined(NINFER_VOLTA_BUILD)
 // Step 2b: Grouped Expert Gate & Up Projection (Native NVFP4 Tensor Core MMA)
 // Tile: 32 rows (16 Gate + 16 Up intermediate pairs) x 16 tokens per CTA (2 warps along M x 2 warps along N)
 // CTA: 128 threads (4 warps). Warps (0,1) compute pairs 0..7; Warps (2,3) compute pairs 8..15.
@@ -1137,6 +1142,8 @@ __global__ __launch_bounds__(256, 2) void flash_next_moe_prefill_gate_up_mma_v2_
     }
 }
 
+#endif // !NINFER_VOLTA_BUILD
+
 // Step 3: Shared Expert Gate & Up Projection (Vectorized 128-bit loads)
 // CTA: 256 threads (8 warps). Each warp processes 1 pair -> 8 pairs per CTA.
 // Grid.x = 640 / 8 = 80, Grid.y = (tokens + 7) / 8.
@@ -1350,6 +1357,7 @@ __global__ __launch_bounds__(256, 4) void flash_next_moe_prefill_down_kernel(
     }
 }
 
+#if !defined(NINFER_VOLTA_BUILD)
 // Step 4b: Grouped Expert Down GEMM (Native NVFP4 Tensor Core MMA with Fused Routing Alpha Epilogue)
 // Tile: 64 output rows x 16 tokens per CTA (2 warps along M x 2 warps along N, 2 sub-tiles along M)
 // CTA: 128 threads (4 warps).
@@ -1528,6 +1536,8 @@ __global__ __launch_bounds__(128, 4) void flash_next_moe_prefill_down_mma_kernel
         __syncthreads();
     }
 }
+
+#endif // !NINFER_VOLTA_BUILD
 
 // Step 5: Prefill Shared Expert Down Kernel (BF16 SIMT FMA, not a tensor-core MMA)
 // Computes SharedDown(2560 x 640) * activations_shared(640 x tokens) and scales by shared_scale[token],
@@ -1942,6 +1952,7 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
         }
         stage_ledger_record(stream, FlashNextStageId::MoE_Grouping);
 
+#if !defined(NINFER_VOLTA_BUILD)
         if (tokens >= kFlashNextMoeMmaPrefillThreshold) {
             // Large tokens: Native NVFP4 Tensor Core MMA route
             // 2. Shared expert gate & up. Completely disjoint from routed MMA.
@@ -2107,8 +2118,11 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                 tokens);
             CUDA_CHECK(cudaGetLastError());
             stage_ledger_record(stream, FlashNextStageId::MoE_Reduce);
-        } else {
-            // Small-token SIMT W4A16 route avoids activation quantization overhead.
+        } else
+#endif
+        {
+            // Software W4A16 prefill route. On Volta this is the only routed-expert
+            // prefill backend; native W4A4 activation quantization/MMA is not compiled.
             // 2. Grouped Expert Gate & Up (SIMT W4A16)
             constexpr int kGridY = 16;
             const dim3 gate_grid(kIntermediate / 8, kGridY);
