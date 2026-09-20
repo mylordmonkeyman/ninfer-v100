@@ -1,5 +1,35 @@
 #include "ops/gdn_input_proj/w8/w8_gdn_input_kernels.h"
 
+#if defined(NINFER_VOLTA_BUILD)
+
+#include <stdexcept>
+
+namespace ninfer::ops::detail {
+
+void w8_gdn_input_splitk_mma_launch(const Tensor&, const Weight&, Tensor&, Tensor&,
+                                    cudaStream_t) {
+    throw std::logic_error(
+        "W8 GDN split-K MMA backend is unavailable on Volta");
+}
+
+void w8_gdn_input_splitk_conv_snapshot_launch(
+    const Tensor&, const Weight&, const Tensor&, Tensor&, const Tensor&, const Tensor&,
+    const Tensor&, Tensor&, Tensor&, Tensor&, Tensor&, cudaStream_t) {
+    throw std::logic_error(
+        "W8 GDN split-K convolution snapshot backend is unavailable on Volta");
+}
+
+void w8_gdn_input_splitk_conv_record_launch(
+    const Tensor&, const Weight&, const Tensor&, const Tensor&, const Tensor&, const Tensor&,
+    Tensor&, Tensor&, Tensor&, Tensor&, Tensor&, cudaStream_t) {
+    throw std::logic_error(
+        "W8 GDN split-K convolution record backend is unavailable on Volta");
+}
+
+} // namespace ninfer::ops::detail
+
+#else
+
 #include "core/device.h"
 #include "ops/common/mma.cuh"
 #include "ops/common/memory.cuh"
@@ -447,3 +477,5 @@ void w8_gdn_input_splitk_conv_record_launch(const Tensor& x, const Weight& weigh
 }
 
 } // namespace ninfer::ops::detail
+
+#endif // NINFER_VOLTA_BUILD
