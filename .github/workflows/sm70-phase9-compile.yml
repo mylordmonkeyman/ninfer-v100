@@ -42,6 +42,6 @@ jobs:
       - name: Build Phase 9 MoE targets
         shell: bash
         run: |
-          cmake --build build-sm70 --parallel 2 --target \
+          ninja -C build-sm70 -j2 -k 0 \
             ninfer_qwen3_8_flash_next_moe_route_test \
             ninfer_qwen3_8_flash_next_moe_test
