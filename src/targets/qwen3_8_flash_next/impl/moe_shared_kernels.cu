@@ -1,19 +1,24 @@
 #include "targets/qwen3_8_flash_next/impl/moe_shared_kernels.h"
 
 #include "core/device.h"
+#if !defined(NINFER_VOLTA_BUILD)
 #include "ops/common/math.cuh"
 #include "ops/common/memory.cuh"
 #include "ops/linear/bf16/bf16_config.h"
 #include "ops/linear/bf16/bf16_gemm_mma.cuh"
 #include "ops/linear/bf16/bf16_gemm_mma_config.h"
+#endif
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
 #include <cstdint>
 #include <cstdlib>
+#include <stdexcept>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
+
+#if !defined(NINFER_VOLTA_BUILD)
 namespace {
 
 constexpr int kExperts      = 512;
@@ -347,5 +352,37 @@ void flash_next_moe_prefill_shared_down_mma(const Weight& shared_down, const Ten
                                                                       stream);
     }
 }
+
+#else
+
+bool flash_next_moe_shared_mma_enabled() { return false; }
+
+[[noreturn]] void volta_shared_mma_unavailable() {
+    throw std::logic_error(
+        "Flash-Next shared BF16 MMA backend is unavailable on Volta; use the scalar/reference path");
+}
+
+void flash_next_route_projection_mma(const Tensor&, const Weight&, const Weight&, const Tensor&,
+                                     cudaStream_t) {
+    volta_shared_mma_unavailable();
+}
+
+void flash_next_moe_prefill_build_groups_mma(
+    const Tensor&, const Tensor&, const Tensor&, const Tensor&, const Tensor&, const Tensor&,
+    const Tensor&, const Tensor&, const Tensor&, const Tensor&, int, cudaStream_t) {
+    volta_shared_mma_unavailable();
+}
+
+void flash_next_moe_prefill_shared_gate_up_mma(const Tensor&, const Weight&, const Weight&,
+                                               const Tensor&, const Tensor&, int, cudaStream_t) {
+    volta_shared_mma_unavailable();
+}
+
+void flash_next_moe_prefill_shared_down_mma(const Weight&, const Tensor&, const Tensor&,
+                                            const Tensor&, int, cudaStream_t) {
+    volta_shared_mma_unavailable();
+}
+
+#endif // NINFER_VOLTA_BUILD
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail
