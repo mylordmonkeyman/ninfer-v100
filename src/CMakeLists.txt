@@ -54,20 +54,21 @@ add_library(ninfer_artifact STATIC
 ninfer_internal_includes(ninfer_artifact)
 target_link_libraries(ninfer_artifact PUBLIC ninfer_core)
 
-# Warp-specialized SM120 NVFP4 kernels use setmaxnreg to transfer registers from producer
-# warpgroups to consumer warpgroups. Relocatable device code makes ptxas discard that contract, so
-# these self-contained kernels are intentionally compiled in a non-RDC archive and called through
-# host launchers from ninfer_ops.
-add_library(ninfer_nvfp4_non_rdc STATIC
-  ops/linear/nvfp4/nvfp4_w4a4_tma.cu
-  ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4_tma.cu
-  ops/softmax_attention/dense/causal_cache/prompt_nvfp4_non_rdc.cu)
-ninfer_internal_includes(ninfer_nvfp4_non_rdc)
-set_target_properties(ninfer_nvfp4_non_rdc PROPERTIES
-  CUDA_SEPARABLE_COMPILATION OFF
-  CUDA_RESOLVE_DEVICE_SYMBOLS OFF)
-target_compile_options(ninfer_nvfp4_non_rdc PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
-target_link_libraries(ninfer_nvfp4_non_rdc PRIVATE ninfer_core CUDA::cudart CUDA::cuda_driver)
+# Warp-specialized SM120 NVFP4 kernels use setmaxnreg/TMA contracts that do not
+# exist on Volta. Keep this archive entirely outside the SM70 source graph rather
+# than relying on dead-code elimination of unsupported device code.
+if(NOT NINFER_VOLTA_BUILD)
+  add_library(ninfer_nvfp4_non_rdc STATIC
+    ops/linear/nvfp4/nvfp4_w4a4_tma.cu
+    ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4_tma.cu
+    ops/softmax_attention/dense/causal_cache/prompt_nvfp4_non_rdc.cu)
+  ninfer_internal_includes(ninfer_nvfp4_non_rdc)
+  set_target_properties(ninfer_nvfp4_non_rdc PROPERTIES
+    CUDA_SEPARABLE_COMPILATION OFF
+    CUDA_RESOLVE_DEVICE_SYMBOLS OFF)
+  target_compile_options(ninfer_nvfp4_non_rdc PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
+  target_link_libraries(ninfer_nvfp4_non_rdc PRIVATE ninfer_core CUDA::cudart CUDA::cuda_driver)
+endif()
 
 # Shared mathematical Ops. The list is intentionally explicit: adding a
 # source is a build-boundary decision, not an accidental recursive-glob side effect.
@@ -113,7 +114,6 @@ add_library(ninfer_ops STATIC
   ops/softmax_attention/dense/causal_cache/small_t_k8v4.cu
   ops/softmax_attention/dense/causal_cache/prompt.cu
   ops/softmax_attention/dense/causal_cache/prompt_fp8.cu
-  ops/softmax_attention/dense/causal_cache/prompt_nvfp4.cu
   ops/softmax_attention/dense/causal_cache/prompt_k8v4.cu
   ops/softmax_attention/dense/packed/packed_softmax_attention.cpp
   ops/softmax_attention/dense/packed/launch.cu
@@ -315,9 +315,17 @@ add_library(ninfer_ops STATIC
   ops/wrapper/sparse_moe.cpp
   ops/wrapper/target_logprobs.cpp
   ops/wrapper/vision_pos_embed.cpp)
+if(NOT NINFER_VOLTA_BUILD)
+  target_sources(ninfer_ops PRIVATE
+    ops/softmax_attention/dense/causal_cache/prompt_nvfp4.cu)
+endif()
+
 ninfer_internal_includes(ninfer_ops)
 ninfer_cuda_archive(ninfer_ops)
-target_link_libraries(ninfer_ops PUBLIC ninfer_core PRIVATE ninfer_nvfp4_non_rdc)
+target_link_libraries(ninfer_ops PUBLIC ninfer_core)
+if(NOT NINFER_VOLTA_BUILD)
+  target_link_libraries(ninfer_ops PRIVATE ninfer_nvfp4_non_rdc)
+endif()
 
 # Product-independent text and media mechanisms.
 add_library(ninfer_text STATIC
