@@ -32,6 +32,34 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      - name: Isolate unrelated Ampere-only kernels
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          cmake = Path('src/CMakeLists.txt')
+          text = cmake.read_text()
+
+          excluded = {
+              'ops/context_kv_materialize/materialize.cu',
+              'ops/candidate_selector/bf16/candidate_selector_path.cu',
+          }
+          for source in Path('src').rglob('*.cu'):
+              if 'w8_small_t_mma.cuh' in source.read_text(errors='ignore'):
+                  excluded.add(source.relative_to('src').as_posix())
+
+          lines = text.splitlines(keepends=True)
+          text = ''.join(
+              line for line in lines
+              if not any(source in line for source in excluded)
+          )
+          cmake.write_text(text)
+          print('Excluded SM80+ sources from the Phase 9 SM70 compile graph:')
+          for source in sorted(excluded):
+              print(f'  {source}')
+          PY
+
       - name: Configure CUDA 12.8 SM70
         shell: bash
         run: |
