@@ -644,6 +644,7 @@ constexpr int kScoreWarps   = 4;
 constexpr int kScoreThreads = 32 * kScoreWarps;
 constexpr int kScoreNTiles  = kScoreBN / 8;
 
+#if !defined(NINFER_VOLTA_BUILD)
 __global__ __launch_bounds__(kScoreThreads)
 void score_blocks_chunk_kernel(const __nv_bfloat16* __restrict__ query,
                                const __nv_bfloat16* __restrict__ block_keys,
@@ -772,6 +773,59 @@ void score_blocks_chunk_kernel(const __nv_bfloat16* __restrict__ query,
     }
 }
 
+#else
+// SM70 eager prefill scorer. Volta has neither cp.async/ldmatrix nor BF16 MMA,
+// so use the same numerically direct SIMT reduction as decode over a 2-D
+// (block, token) grid. This is the correctness/bring-up path; later tuning can
+// tile it without changing selection semantics.
+__global__ void score_blocks_chunk_volta_kernel(
+    const __nv_bfloat16* __restrict__ query,
+    const __nv_bfloat16* __restrict__ block_keys,
+    const std::int32_t* __restrict__ block_tables, int table_row,
+    const std::int32_t* __restrict__ token_indices, int logical_pages,
+    int active_blocks, int tokens, float* __restrict__ scores) {
+    __shared__ float head_scores[kQueryHeads];
+    const int block = static_cast<int>(blockIdx.x);
+    const int token = static_cast<int>(blockIdx.y);
+    const int tid   = static_cast<int>(threadIdx.x);
+    const int head  = tid >> 5;
+    const int lane  = tid & 31;
+    if (block >= active_blocks || token >= tokens) { return; }
+
+    const int complete_blocks = (token_indices[token] + 1) / 4;
+    const std::int64_t score_index =
+        static_cast<std::int64_t>(token) * active_blocks + block;
+    if (block >= complete_blocks) {
+        if (tid == 0) { scores[score_index] = -__int_as_float(0x7F800000); }
+        return;
+    }
+
+    const int logical_page  = block / kCompressedPage;
+    const int page_offset   = block % kCompressedPage;
+    const int physical_page = block_tables[table_row * logical_pages + logical_page];
+    const auto* key = block_keys +
+        static_cast<std::int64_t>(physical_page) * kCompressedPage * kHeadDim +
+        page_offset * kHeadDim;
+    const auto* q = query +
+        static_cast<std::int64_t>(token) * kQueryHeads * kHeadDim +
+        head * kHeadDim;
+
+    float dot = 0.0F;
+    for (int dim = lane; dim < kHeadDim; dim += 32) {
+        dot = fmaf(__bfloat162float(q[dim]), __bfloat162float(key[dim]), dot);
+    }
+    dot = ops::warp_reduce_sum(dot);
+    if (lane == 0) { head_scores[head] = dot; }
+    __syncthreads();
+    if (tid == 0) {
+        float score = 0.0F;
+#pragma unroll
+        for (int h = 0; h < kQueryHeads; ++h) { score += fmaxf(head_scores[h], 0.0F); }
+        scores[score_index] = score * kIndexerScaling;
+    }
+}
+#endif
+
 void flash_next_qsa_indexer_store_prefill_launch(const Tensor& projected,
     const Tensor& token_indices, const Tensor& mrope_positions, std::int32_t table_row,
     std::int32_t source_state_slot, std::int32_t destination_state_slot,
@@ -866,6 +920,26 @@ void flash_next_qsa_indexer_prefill_launch(
             static_cast<std::int32_t*>(scratch.offsets.data), active_blocks, current_tile);
         CUDA_CHECK(cudaGetLastError());
 
+#if defined(NINFER_VOLTA_BUILD)
+        score_blocks_chunk_volta_kernel<<<dim3(active_blocks, current_tile),
+                                          kQueryHeads * 32, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.query.data) +
+                static_cast<std::int64_t>(t_start) * kQueryHeads * kHeadDim,
+            static_cast<const __nv_bfloat16*>(cache.block_keys.data),
+            static_cast<const std::int32_t*>(cache.block_tables.data), table_row,
+            tile_token_indices, cache.block_tables.ne[0], active_blocks, current_tile,
+            static_cast<float*>(scratch.scores.data));
+        CUDA_CHECK(cudaGetLastError());
+
+        select_top512_radix(
+            static_cast<const float*>(scratch.scores.data),
+            static_cast<const std::int32_t*>(scratch.ids.data),
+            static_cast<std::uint64_t*>(scratch.packed_keys.data),
+            static_cast<std::uint64_t*>(scratch.packed_selected.data),
+            static_cast<std::int32_t*>(scratch.sorted_ids.data),
+            static_cast<const std::int32_t*>(scratch.offsets.data), scratch.sort_temp.data,
+            scratch.sort_temp.bytes, active_blocks, current_tile, stream);
+#else
         const dim3 score_grid((active_blocks + kScoreBM - 1) / kScoreBM,
                               (current_tile + kScoreBN - 1) / kScoreBN);
         score_blocks_chunk_kernel<<<score_grid, kScoreThreads, 0, stream>>>(
@@ -884,6 +958,7 @@ void flash_next_qsa_indexer_prefill_launch(
             static_cast<const std::int32_t*>(scratch.ids.data),
             static_cast<std::int32_t*>(scratch.sorted_ids.data), items, current_tile,
             static_cast<const std::int32_t*>(scratch.offsets.data), stream));
+#endif
 
         publish_compact_selection_kernel<<<current_tile, 256, 0, stream>>>(
             static_cast<const std::int32_t*>(scratch.sorted_ids.data), tile_token_indices,
