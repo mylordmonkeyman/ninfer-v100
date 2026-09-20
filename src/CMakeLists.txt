@@ -139,13 +139,13 @@ add_library(ninfer_ops STATIC
   ops/attn_input_proj/bf16/bf16_attn_input_plan.cpp
   ops/attn_input_proj/fp8/fp8_attn_input_decode.cu
   ops/attn_input_proj/fp8/fp8_attn_input_small_t.cu
-  ops/attn_input_proj/fp8/fp8_attn_input_a16_small_t.cu
-  ops/attn_input_proj/fp8/fp8_attn_input_a16_gemm.cu
-  ops/attn_input_proj/fp8/fp8_attn_input_a8.cu
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/attn_input_proj/fp8/fp8_attn_input_a16_small_t.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/attn_input_proj/fp8/fp8_attn_input_a16_gemm.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/attn_input_proj/fp8/fp8_attn_input_a8.cu>
   ops/attn_input_proj/fp8/fp8_attn_input_plan.cpp
   ops/attn_input_proj/nvfp4/nvfp4_attn_input_decode.cu
   ops/attn_input_proj/nvfp4/nvfp4_attn_input_small_t.cu
-  ops/attn_input_proj/nvfp4/nvfp4_attn_input_w4a4.cu
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/attn_input_proj/nvfp4/nvfp4_attn_input_w4a4.cu>
   ops/attn_input_proj/nvfp4/nvfp4_attn_input_plan.cpp
   ops/attn_input_proj/q4_q5/q4_q5_attn_input_gemm_mma.cu
   ops/attn_input_proj/q4_q5/q4_q5_attn_input_small_t.cu
@@ -158,13 +158,13 @@ add_library(ninfer_ops STATIC
   ops/attn_input_proj/w8/w8_attn_input_plan.cpp
   ops/gdn_input_proj/fp8/fp8_gdn_input_decode.cu
   ops/gdn_input_proj/fp8/fp8_gdn_input_matrix.cu
-  ops/gdn_input_proj/fp8/fp8_gdn_input_a8.cu
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/gdn_input_proj/fp8/fp8_gdn_input_a8.cu>
   ops/gdn_input_proj/fp8/fp8_gdn_input_plan.cpp
   ops/gdn_input_proj/fp8/fp8_gdn_conv_fused.cu
   ops/gdn_input_proj/fp8/fp8_gdn_conv_plan.cpp
   ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_decode.cu
   ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_small_t.cu
-  ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_w4a4.cu
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_w4a4.cu>
   ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_plan.cpp
   ops/gdn_input_proj/nvfp4/nvfp4_gdn_snapshot_decode.cu
   ops/gdn_input_proj/nvfp4/nvfp4_gdn_snapshot_small_t.cu
