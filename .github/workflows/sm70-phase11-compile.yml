@@ -51,11 +51,19 @@ jobs:
           body = text[start:end]
           text = text[:start] + '#if !defined(NINFER_VOLTA_BUILD)\n' + body + '\n#endif\n' + text[end:]
           path.write_text(text)
+
+          cmake = Path('src/CMakeLists.txt')
+          text = cmake.read_text()
+          for source in (
+              'ops/softmax_attention/dense/causal_cache/small_t.cu',
+              'ops/softmax_attention/dense/causal_cache/small_t_fp8.cu',
+          ):
+              text = text.replace(
+                  f'  {source}\n',
+                  f'  $<$<NOT:$<BOOL:${{NINFER_VOLTA_BUILD}}>>:{source}>\n',
+              )
+          cmake.write_text(text)
           PY
-          mv src/ops/softmax_attention/dense/causal_cache/small_t.cu \
-             src/ops/softmax_attention/dense/causal_cache/small_t.cu.ampere-only
-          mv src/ops/softmax_attention/dense/causal_cache/small_t_fp8.cu \
-             src/ops/softmax_attention/dense/causal_cache/small_t_fp8.cu.ampere-only
 
       - name: Configure CUDA 12.8 SM70
         shell: bash
