@@ -4,8 +4,10 @@
 #include "ops/gdn_input_proj/fp8/fp8_gdn_input_output.cuh"
 #include "ops/linear/fp8/fp8_config.h"
 #include "ops/linear/fp8/fp8_small_t.cuh"
+#if !defined(NINFER_VOLTA_BUILD)
 #include "ops/linear/fp8/fp8_a16_small_t_mma.cuh"
 #include "ops/linear/fp8/fp8_a16_gemm_mma.cuh"
+#endif
 
 
 namespace ninfer::ops::detail {
@@ -29,6 +31,7 @@ void launch_exact(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
     CUDA_CHECK(cudaGetLastError());
 }
 
+#if !defined(NINFER_VOLTA_BUILD)
 template <int Capacity>
 void launch_small_mma(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
                       cudaStream_t stream) {
@@ -60,6 +63,7 @@ void launch_gemm(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z, 
             static_cast<const __nv_bfloat16*>(weight.scales), output, x.ne[1]);
     CUDA_CHECK(cudaGetLastError());
 }
+#endif
 
 } // namespace
 
@@ -70,6 +74,9 @@ void fp8_gdn_input_matrix_launch(const Tensor& x, const Weight& weight, Tensor& 
     if (columns == 2) return launch_exact<2>(x, weight, qkv, z, stream);
     if (columns == 3) return launch_exact<3>(x, weight, qkv, z, stream);
     if (columns == 4) return launch_exact<4>(x, weight, qkv, z, stream);
+#if defined(NINFER_VOLTA_BUILD)
+    throw std::invalid_argument("fp8 gdn_input_proj Volta matrix tile requires T in [2,4]");
+#else
     if (columns <= 8) return launch_small_mma<8>(x, weight, qkv, z, stream);
     if (columns <= 16) return launch_small_mma<16>(x, weight, qkv, z, stream);
     if (columns <= 24) return launch_small_mma<24>(x, weight, qkv, z, stream);
@@ -79,6 +86,7 @@ void fp8_gdn_input_matrix_launch(const Tensor& x, const Weight& weight, Tensor& 
     if (columns <= 96)
         return launch_gemm<Fp8A16GemmSchedule<64, 96, 128, 64, 16, 1, 2>>(x, weight, qkv, z, stream);
     return launch_gemm<Fp8A16GemmSchedule<64, 128, 64, 32, 16, 2, 2>>(x, weight, qkv, z, stream);
+#endif
 }
 
 } // namespace ninfer::ops::detail
