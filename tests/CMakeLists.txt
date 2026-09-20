@@ -250,6 +250,9 @@ ninfer_add_test(ninfer_qwen3_8_flash_next_expert_bank_test
 ninfer_add_test(ninfer_qwen3_8_flash_next_cpu_expert_reference_test
   SOURCES targets/qwen3_8_flash_next/test_cpu_expert_reference.cpp
   LIBRARIES ninfer_qwen3_8_flash_next)
+ninfer_add_test(ninfer_qwen3_8_flash_next_vertical_slice_test
+  SOURCES targets/qwen3_8_flash_next/test_vertical_slice.cpp
+  LIBRARIES ninfer_qwen3_8_flash_next)
 ninfer_add_test(ninfer_qwen3_8_flash_next_ple_pipeline_test
   SOURCES targets/qwen3_8_flash_next/test_ple_pipeline.cpp
   LIBRARIES ninfer_qwen3_8_flash_next)
