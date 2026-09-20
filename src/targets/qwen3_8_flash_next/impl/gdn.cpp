@@ -10,6 +10,7 @@
 #include "targets/qwen3_8_flash_next/impl/gdn_workspace.h"
 #include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
