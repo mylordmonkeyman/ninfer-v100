@@ -142,7 +142,11 @@ FlashNextPreflightReport preflight_text_artifact(const artifact::Reader& reader,
     validate_identity(reader.identity());
 
     artifact::Binder binder(reader);
-    const auto load_plan = bind_artifact(binder, LoadFeatures{.vision = false, .mtp = false});
+    LoadFeatures load_features{.vision = false, .mtp = false};
+#if defined(NINFER_VOLTA_BUILD)
+    load_features.host_backed_experts = true;
+#endif
+    const auto load_plan = bind_artifact(binder, load_features);
 
     const auto curve = flash_next_capacity_curve(config);
     const std::uint32_t resolved_groups =

@@ -126,18 +126,37 @@ HyperMixerWeights load_mixer(const HyperMixerPlan& plan,
     };
 }
 
-MoeWeights load_moe(const MoePlan& plan, const artifact::MaterializedArtifact& backing) {
-    return {
+MoeWeights load_moe(const MoePlan& plan, const artifact::MaterializedArtifact& backing,
+                    HostNvfp4ExpertLayerView* host_experts = nullptr) {
+    MoeWeights out{
         .router             = bf16_weight(backing, plan.router, 512, 2'560),
         .shared_down        = bf16_weight(backing, plan.shared_down, 2'560, 640),
         .shared_gate        = bf16_weight(backing, plan.shared_gate, 640, 2'560),
         .shared_up          = bf16_weight(backing, plan.shared_up, 640, 2'560),
         .shared_gate_weight = bf16_weight(backing, plan.shared_gate_weight, 1, 2'560),
-        .expert_gate_up =
-            materialized_nvfp4_expert_bank_view(backing, plan.expert_gate_up, 512, 1'280, 2'560),
-        .expert_down =
-            materialized_nvfp4_expert_bank_view(backing, plan.expert_down, 512, 2'560, 640),
+        .expert_gate_up     = {},
+        .expert_down        = {},
     };
+    if (plan.experts_host_mapped) {
+        if (!plan.experts_nvfp4 || host_experts == nullptr) {
+            throw std::logic_error(
+                "Flash-Next host-backed experts require an NVFP4 host layer destination");
+        }
+        host_experts->gate_up =
+            mapped_nvfp4_expert_bank_view(backing, plan.expert_gate_up, 512, 1'280, 2'560);
+        host_experts->down =
+            mapped_nvfp4_expert_bank_view(backing, plan.expert_down, 512, 2'560, 640);
+    } else {
+        if (host_experts != nullptr) {
+            throw std::logic_error(
+                "Flash-Next resident expert plan cannot populate a host expert layer");
+        }
+        out.expert_gate_up =
+            materialized_nvfp4_expert_bank_view(backing, plan.expert_gate_up, 512, 1'280, 2'560);
+        out.expert_down =
+            materialized_nvfp4_expert_bank_view(backing, plan.expert_down, 512, 2'560, 640);
+    }
+    return out;
 }
 
 GdnWeights load_gdn(const GdnPlan& plan, const artifact::MaterializedArtifact& backing) {
@@ -298,11 +317,14 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
     }
     std::size_t full_index = 0;
     std::size_t gdn_index  = 0;
+    if (plan.features.host_backed_experts) { text.host_experts.emplace(); }
     for (std::size_t layer = 0; layer < plan.text_layers.size(); ++layer) {
         const TextLayerPlan& source = plan.text_layers[layer];
         TextLayerWeights& target    = text.layers[layer];
         target.attention_hyper      = load_hyper(source.attention_hyper, backing);
-        target.moe                  = load_moe(source.moe, backing);
+        HostNvfp4ExpertLayerView* host_layer =
+            text.host_experts.has_value() ? &text.host_experts->layers[layer] : nullptr;
+        target.moe                  = load_moe(source.moe, backing, host_layer);
         target.mlp_hyper            = load_hyper(source.mlp_hyper, backing);
         if (source.is_full_attention) {
             text.full_attention.at(full_index++) = load_attention(source.attention, backing);

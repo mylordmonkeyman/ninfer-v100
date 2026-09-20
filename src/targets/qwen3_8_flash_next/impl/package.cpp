@@ -109,8 +109,13 @@ Package::LoadPlan Package::plan_load(artifact::Binder& binder, const EngineOptio
     if (const char* env = std::getenv("NINFER_FLASH_NEXT_DRAFT_HEAD_ROWS"); env && env[0] != '\0') {
         draft_rows = static_cast<std::uint32_t>(std::strtoul(env, nullptr, 10));
     }
-    // The quantize flags have to reach the binder, not just the materializer: they decide whether
-    // the BF16 head/embedding is uploaded into the artifact arena or left in the file mapping.
+#if defined(NINFER_VOLTA_BUILD)
+    constexpr bool kHostBackedExperts = true;
+#else
+    constexpr bool kHostBackedExperts = false;
+#endif
+    // The quantize flags and host-backed expert choice have to reach the binder:
+    // they decide whether artifact tensors consume the device arena or remain mapped.
     auto target_plan = detail::bind_artifact(
         binder, detail::LoadFeatures{
                     .vision                       = options.enable_vision,
@@ -119,6 +124,7 @@ Package::LoadPlan Package::plan_load(artifact::Binder& binder, const EngineOptio
                     .draft_head_rows              = draft_rows,
                     .quantize_output_head_fp8     = options.quantize_output_head_fp8,
                     .quantize_token_embedding_fp8 = options.quantize_token_embedding_fp8,
+                    .host_backed_experts           = kHostBackedExperts,
                 });
     return LoadPlan(std::make_unique<LoadPlan::Impl>(
         weights_profile, std::move(target_plan), options.quantize_output_head_fp8,
