@@ -213,9 +213,16 @@ std::size_t gated_delta_net_workspace_capacity_bytes(std::int32_t qk_heads,
         max_tokens < min_tokens) {
         throw std::invalid_argument("gated_delta_net workspace: invalid profile or interval");
     }
+#if defined(NINFER_VOLTA_BUILD)
+    // Volta uses the sequential recurrent fallback for every token width, which
+    // allocates no chunked staging workspace.
+    (void)normalize_qk;
+    return 0;
+#else
     WorkspaceLayoutBuilder layout;
     (void)allocate_chunked_workspace(layout, qk_heads, value_heads, max_tokens, normalize_qk);
     return layout.peak_bytes(1);
+#endif
 }
 
 void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
