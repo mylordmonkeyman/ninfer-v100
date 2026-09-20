@@ -12,6 +12,8 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 
 namespace {
 
+inline constexpr std::size_t kTextLayerCount = 48;
+
 std::uint64_t checked_add_ledger(std::uint64_t a, std::uint64_t b) {
     if (b > std::numeric_limits<std::uint64_t>::max() - a) {
         throw std::overflow_error("Flash-Next static VRAM ledger overflow");
@@ -38,7 +40,7 @@ std::size_t text_layer_index(std::string_view name) {
         }
         value = value * 10 + static_cast<std::size_t>(ch - '0');
     }
-    if (value >= kTextLayers) {
+    if (value >= kTextLayerCount) {
         throw std::logic_error("Flash-Next routed expert tensor layer is out of range");
     }
     return value;
@@ -50,7 +52,7 @@ FlashNextStaticVramLedger make_static_vram_ledger(
     FlashNextStaticVramLedger out{};
     out.planned_device_weight_arena_bytes = materialization.device_capacity_bytes;
 
-    std::array<std::uint64_t, kTextLayers> expert_layer_bytes{};
+    std::array<std::uint64_t, kTextLayerCount> expert_layer_bytes{};
     std::uint64_t previous_end = 0;
     for (const artifact::DeviceMaterialization& placement : materialization.device_objects) {
         if (placement.offset < previous_end) {

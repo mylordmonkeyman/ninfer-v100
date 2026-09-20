@@ -516,6 +516,61 @@ int test_real_artifact_text_and_vision_plan_if_available() {
     }
 }
 
+int test_synthetic_static_vram_ledger() {
+    try {
+        const auto fixture =
+            ninfer::test::flash_next_fixture::create_flash_next_synthetic_artifact(
+                "loader_static_vram_ledger");
+        const ninfer::artifact::Reader reader(fixture.path);
+        FlashNextRuntimeConfig cfg{
+            .max_concurrency     = 1,
+            .max_context         = 4096,
+            .state_slot_capacity = 2,
+        };
+        const auto report = preflight_text_artifact(reader, cfg);
+        const auto& ledger = report.vram_ledger;
+
+        if (ledger.routed_expert_layers != 48 ||
+            ledger.routed_expert_layer_payload_bytes != 1'415'581'696ULL ||
+            ledger.routed_expert_payload_bytes !=
+                ledger.routed_expert_layer_payload_bytes * ledger.routed_expert_layers ||
+            ledger.planned_device_weight_arena_bytes != report.planned_device_weights_bytes ||
+            ledger.device_weight_payload_bytes +
+                    ledger.device_weight_alignment_padding_bytes !=
+                ledger.planned_device_weight_arena_bytes ||
+            ledger.runtime_plan_device_bytes != report.runtime_plan.total_device_bytes ||
+            ledger.total_planned_device_bytes !=
+                ledger.planned_device_weight_arena_bytes + ledger.runtime_plan_device_bytes) {
+            std::cerr << "Synthetic static VRAM ledger failed to reconcile\n";
+            return 1;
+        }
+
+        const std::uint64_t runtime_subtotal =
+            ledger.full_attention_kv_bytes + ledger.qsa_block_indexer_bytes +
+            ledger.block_tables_bytes + ledger.gdn_recurrent_state_bytes +
+            ledger.qsa_raw_state_bytes + ledger.ple_state_bytes +
+            ledger.mtp_persistent_state_bytes + ledger.round_tensors_bytes +
+            ledger.shared_kernel_workspace_bytes + ledger.sampling_runtime_bytes +
+            ledger.cuda_graph_bytes;
+        if (runtime_subtotal != ledger.runtime_plan_device_bytes) {
+            std::cerr << "Synthetic runtime VRAM ledger failed to reconcile\n";
+            return 1;
+        }
+#if defined(NINFER_VOLTA_BUILD)
+        if (report.runtime_plan.config.use_cuda_graph ||
+            ledger.cuda_graph_bytes != 0) {
+            std::cerr << "SM70 preflight must remain eager with zero graph allowance\n";
+            return 1;
+        }
+#endif
+        std::cout << "PASS: test_synthetic_static_vram_ledger\n";
+        return 0;
+    } catch (const std::exception& ex) {
+        std::cerr << "FAILED test_synthetic_static_vram_ledger: " << ex.what() << "\n";
+        return 1;
+    }
+}
+
 int test_synthetic_artifact_plan_mtp_features() {
     try {
         const auto fixture =
@@ -608,6 +663,7 @@ int main() {
     if (test_ple_metadata_observable_behavior() != 0) return 1;
     if (test_preflight_memory_accounting() != 0) return 1;
     if (test_options_parser_validation() != 0) return 1;
+    if (test_synthetic_static_vram_ledger() != 0) return 1;
     if (test_synthetic_artifact_plan_mtp_features() != 0) return 1;
 
     try {
