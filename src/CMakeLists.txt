@@ -195,6 +195,7 @@ add_library(ninfer_ops STATIC
   ops/linear/fp8/fp8_format.cpp
   ops/linear/fp8/fp8_gemv.cu
   ops/linear/fp8/fp8_small_t.cu
+  $<$<BOOL:${NINFER_VOLTA_BUILD}>:ops/linear/fp8/fp8_volta_qpn_gemm.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear/fp8/fp8_a16_small_t_mma.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear/fp8/fp8_a16_gemm_mma.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear/fp8/fp8_a8.cu>
