@@ -13,6 +13,17 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
                                    const FlashNextMoeWorkspace& workspace, Tensor& output,
                                    cudaStream_t stream);
 
+// Phase-10 correctness path for host-backed routed experts. The shared expert remains
+// resident on the GPU. This first launcher computes only the shared gate/up/down branch
+// into output. After the CPU routed sum is copied into workspace.activations as FP32,
+// the merge launcher adds it and rounds the final result to BF16.
+void flash_next_moe_host_shared_launch(const Tensor& input, const MoeWeights& weights,
+                                       const FlashNextMoeWorkspace& workspace, Tensor& output,
+                                       cudaStream_t stream);
+void flash_next_moe_host_routed_merge_launch(const FlashNextMoeWorkspace& workspace,
+                                             Tensor& output, int tokens,
+                                             cudaStream_t stream);
+
 // Decode-arm (tokens <= 8) down-projection kernels. Both produce bitwise-identical BF16 output;
 // they differ only in how the eleven per-row partials are spread over warps and CTAs.
 //   Legacy   - (320, T) CTAs x 8 warps, one warp per row walking the paths serially.
