@@ -101,10 +101,15 @@ add_library(ninfer_ops STATIC
   ops/launcher/vision_pos_embed.cu
   ops/rmsnorm_rope/rmsnorm_rope.cpp
   ops/rmsnorm_rope/launch.cu
-  ops/context_kv_materialize/context_kv_materialize.cpp
-  ops/context_kv_materialize/materialize.cu
-  ops/candidate_selector/bf16/candidate_selector_path.cu
-  ops/candidate_selector/bf16/candidate_selector_path_plan.cpp
+  # Context-KV materialization is a context-cache restore path and retains an Ampere+
+  # cp.async/ldmatrix schedule. Phase 11 runs cache-disabled on Volta, so keep this
+  # backend out of the SM70 source graph rather than emulating its pipeline.
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/context_kv_materialize/context_kv_materialize.cpp>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/context_kv_materialize/materialize.cu>
+  # Candidate-selector path is used by speculative/DFlash proposal generation.
+  # Non-MTP Phase 11 does not instantiate it, and its staging schedule uses cp.async.
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/candidate_selector/bf16/candidate_selector_path.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/candidate_selector/bf16/candidate_selector_path_plan.cpp>
   # Softmax Attention and KV-cache state transitions.
   ops/softmax_attention/selected_block/selected_block_attention.cu
   ops/softmax_attention/dense/causal_cache/causal_softmax_attention.cpp
