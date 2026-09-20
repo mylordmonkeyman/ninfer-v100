@@ -139,7 +139,7 @@ add_library(ninfer_ops STATIC
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_attention/gated_delta_net/chunked/state_passing.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_attention/gated_delta_net/chunked/output.cu>
   ops/attn_input_proj/bf16/bf16_attn_input_decode.cu
-  ops/attn_input_proj/bf16/bf16_attn_input_gemm_mma.cu
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/attn_input_proj/bf16/bf16_attn_input_gemm_mma.cu>
   ops/attn_input_proj/bf16/bf16_attn_input_small_t.cu
   ops/attn_input_proj/bf16/bf16_attn_input_plan.cpp
   ops/attn_input_proj/fp8/fp8_attn_input_decode.cu
