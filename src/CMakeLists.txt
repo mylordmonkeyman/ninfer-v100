@@ -155,12 +155,12 @@ add_library(ninfer_ops STATIC
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/attn_input_proj/q4_q5/q4_q5_attn_input_gemm_mma.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/attn_input_proj/q4_q5/q4_q5_attn_input_small_t.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/attn_input_proj/q4_q5/q4_q5_attn_input_plan.cpp>
-  ops/attn_input_proj/w8/w8_attn_input_decode.cu
-  ops/attn_input_proj/w8/w8_attn_input_gemm_mma.cu
-  ops/attn_input_proj/w8/w8_attn_input_gemm_simt.cu
-  ops/attn_input_proj/w8/w8_attn_input_gemm_splitk.cu
-  ops/attn_input_proj/w8/w8_dflash2_attn_input.cu
-  ops/attn_input_proj/w8/w8_attn_input_plan.cpp
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/attn_input_proj/w8/w8_attn_input_decode.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/attn_input_proj/w8/w8_attn_input_gemm_mma.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/attn_input_proj/w8/w8_attn_input_gemm_simt.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/attn_input_proj/w8/w8_attn_input_gemm_splitk.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/attn_input_proj/w8/w8_dflash2_attn_input.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/attn_input_proj/w8/w8_attn_input_plan.cpp>
   ops/gdn_input_proj/fp8/fp8_gdn_input_decode.cu
   ops/gdn_input_proj/fp8/fp8_gdn_input_matrix.cu
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/gdn_input_proj/fp8/fp8_gdn_input_a8.cu>
