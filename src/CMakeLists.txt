@@ -128,8 +128,8 @@ add_library(ninfer_ops STATIC
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/softmax_attention/sliding_window/launch.cu>
   ops/kv_cache/append/kv_cache_append.cpp
   ops/kv_cache/append/launch.cu
-  ops/kv_cache/append/nvfp4_launch.cu
-  ops/kv_cache/append/k8v4_launch.cu
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/kv_cache/append/nvfp4_launch.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/kv_cache/append/k8v4_launch.cu>
   # Gated DeltaNet Linear Attention core.
   ops/linear_attention/gated_delta_net/gated_delta_net.cpp
   ops/linear_attention/gated_delta_net/replay.cpp
