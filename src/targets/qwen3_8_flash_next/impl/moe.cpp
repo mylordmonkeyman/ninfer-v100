@@ -1,14 +1,17 @@
 #include "targets/qwen3_8_flash_next/impl/moe.h"
 
 #include "core/layout.h"
+#include "targets/qwen3_8_flash_next/impl/cpu_expert_reference.h"
 #include "targets/qwen3_8_flash_next/impl/moe_kernels.h"
 #include "targets/qwen3_8_flash_next/impl/moe_route.h"
 #include "targets/qwen3_8_flash_next/impl/moe_workspace.h"
 #include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -110,6 +113,94 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
             std::fprintf(stderr, "-----------------------------------------------------------------\n\n");
         }
     }
+}
+
+void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_weights,
+                                const HostNvfp4ExpertLayerView& host_experts, Tensor& output,
+                                WorkspaceArena& workspace, cudaStream_t stream) {
+    const std::int32_t tokens = input.ne[1];
+    if (input.dtype != DType::BF16 || output.dtype != DType::BF16 || input.ne[0] != 2'560 ||
+        output.ne[0] != 2'560 || tokens < 1 || output.ne[1] != tokens ||
+        input.ne[2] != 1 || input.ne[3] != 1 || output.ne[2] != 1 || output.ne[3] != 1 ||
+        !input.is_contiguous() || !output.is_contiguous() || !aligned_to(input.data, 16) ||
+        !aligned_to(output.data, 16) ||
+        !exact_bf16_weight(resident_weights.router, 512, 2'560) ||
+        !exact_bf16_weight(resident_weights.shared_down, 2'560, 640) ||
+        !exact_bf16_weight(resident_weights.shared_gate, 640, 2'560) ||
+        !exact_bf16_weight(resident_weights.shared_up, 640, 2'560) ||
+        !exact_bf16_weight(resident_weights.shared_gate_weight, 1, 2'560) ||
+        !exact_expert_bank(host_experts.gate_up, 1'280, 2'560) ||
+        !exact_expert_bank(host_experts.down, 2'560, 640) || stream == nullptr) {
+        throw std::invalid_argument("Flash-Next host-backed MoE received an invalid exact target view");
+    }
+
+    const auto scope = workspace.scope();
+    FlashNextMoeWorkspace scratch = allocate_flash_next_moe_workspace(workspace, tokens);
+
+    flash_next_route(input, resident_weights.router, resident_weights.shared_gate_weight,
+                     scratch.scores, scratch.ids, scratch.alpha, scratch.shared_scale, stream);
+    stage_ledger_record(stream, FlashNextStageId::MoE_Router);
+
+    // The shared expert remains resident on device. Compute it before the host rendezvous so
+    // the same stream synchronization also makes the shared output complete.
+    flash_next_moe_host_shared_launch(input, resident_weights, scratch, output, stream);
+
+    const std::size_t input_words =
+        static_cast<std::size_t>(tokens) * kFlashNextExpertHidden;
+    const std::size_t routed_paths = static_cast<std::size_t>(tokens) * 10ULL;
+    std::vector<std::uint16_t> host_input(input_words);
+    std::vector<std::int32_t> host_ids(routed_paths);
+    std::vector<float> host_alpha(routed_paths);
+
+    CUDA_CHECK(cudaMemcpyAsync(host_input.data(), input.data,
+                               input_words * sizeof(std::uint16_t),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(host_ids.data(), scratch.ids.data,
+                               routed_paths * sizeof(std::int32_t),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(host_alpha.data(), scratch.alpha.data,
+                               routed_paths * sizeof(float),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    // Correctness-first Phase-10 CPU execution. Each expert pair sees the exact compact
+    // mapped bytes and rounds SiLU(gate)*up through BF16 before the down projection.
+    // Routing alpha is accumulated in the same path order as the GPU reference.
+    std::vector<float> routed_sum(
+        static_cast<std::size_t>(tokens) * kFlashNextExpertHidden, 0.0F);
+    std::vector<float> pair_output(kFlashNextExpertHidden);
+    CpuNvfp4ExpertReferenceScratch cpu_scratch{};
+
+    for (std::int32_t token = 0; token < tokens; ++token) {
+        const auto input_span = std::span<const std::uint16_t>(
+            host_input.data() + static_cast<std::size_t>(token) * kFlashNextExpertHidden,
+            kFlashNextExpertHidden);
+        float* token_sum =
+            routed_sum.data() + static_cast<std::size_t>(token) * kFlashNextExpertHidden;
+
+        for (std::int32_t path = 0; path < 10; ++path) {
+            const std::size_t route_index =
+                static_cast<std::size_t>(token) * 10ULL + static_cast<std::size_t>(path);
+            const HostNvfp4ExpertPairView expert =
+                host_experts.expert(host_ids[route_index]);
+            flash_next_cpu_nvfp4_expert_pair_reference(
+                expert, input_span, std::span<float>(pair_output), cpu_scratch);
+
+            const float alpha = host_alpha[route_index];
+            for (std::size_t row = 0; row < kFlashNextExpertHidden; ++row) {
+                token_sum[row] = std::fma(alpha, pair_output[row], token_sum[row]);
+            }
+        }
+    }
+
+    // activations is 640 * 11 BF16 values/token (14,080 B/token), which is larger than
+    // the 2,560 FP32 routed vector (10,240 B/token). The shared branch is already complete,
+    // so this storage can be safely reused as a temporary upload without enlarging the
+    // Phase-2 workspace/VRAM ledger.
+    const std::size_t routed_bytes = routed_sum.size() * sizeof(float);
+    CUDA_CHECK(cudaMemcpyAsync(scratch.activations.data, routed_sum.data(), routed_bytes,
+                               cudaMemcpyHostToDevice, stream));
+    flash_next_moe_host_routed_merge_launch(scratch, output, tokens, stream);
 }
 
 void flash_next_moe_bf16(const Tensor& input, const MoeBf16Weights& weights, Tensor& output,
