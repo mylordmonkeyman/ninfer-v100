@@ -102,9 +102,10 @@ add_library(ninfer_ops STATIC
   ops/rmsnorm_rope/rmsnorm_rope.cpp
   ops/rmsnorm_rope/launch.cu
   ops/context_kv_materialize/context_kv_materialize.cpp
-  ops/context_kv_materialize/materialize.cu
-  ops/candidate_selector/bf16/candidate_selector_path.cu
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/context_kv_materialize/materialize.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/candidate_selector/bf16/candidate_selector_path.cu>
   ops/candidate_selector/bf16/candidate_selector_path_plan.cpp
+  $<$<BOOL:${NINFER_VOLTA_BUILD}>:ops/volta_unsupported.cpp>
   # Softmax Attention and KV-cache state transitions.
   ops/softmax_attention/selected_block/selected_block_attention.cu
   ops/softmax_attention/dense/causal_cache/causal_softmax_attention.cpp
