@@ -35,6 +35,11 @@ Bf16Launch select_bf16_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t
     if (!supported_problem || t <= 0) {
         throw std::invalid_argument("bf16 linear: unsupported shape or T");
     }
+#if defined(NINFER_VOLTA_BUILD)
+    // Volta has no BF16 tensor-core instruction. Keep the complete registered
+    // BF16 shape set reachable through the correctness-first CUDA-core path.
+    return launch_bf16_volta_simt;
+#else
     if (output_head && t > 8) {
         throw std::invalid_argument("bf16 linear: Flash-Next target requires T in [1,8]");
     }
@@ -54,6 +59,7 @@ Bf16Launch select_bf16_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t
         (flash_next_text || orcarouter_head) ? 8 : (n == 5120 ? kBf16SmallTMaxTokens : kBf16LinearSmallTDispatchEnd);
     if (t <= small_t_end) { return launch_bf16_small_t; }
     return launch_bf16_mma;
+#endif
 }
 
 Bf16Launch select_bf16_launch(std::int32_t n, std::int32_t k, std::int32_t t, LinearPolicy policy) {
