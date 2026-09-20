@@ -1,5 +1,30 @@
 #include "ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_kernels.h"
 
+#if defined(NINFER_VOLTA_BUILD)
+
+#include <stdexcept>
+
+namespace ninfer::ops::detail {
+
+void q4_q5_gdn_input_conv_snapshot_launch(const Tensor&, const Weight&, const Weight&,
+                                          const Tensor&, Tensor&, const Tensor&, const Tensor&,
+                                          const Tensor&, Tensor&, Tensor&, Tensor&, Tensor&,
+                                          cudaStream_t) {
+    throw std::logic_error(
+        "Q4/Q5 GDN convolution snapshot backend is unavailable on Volta");
+}
+
+void q4_q5_gdn_input_conv_record_launch(const Tensor&, const Weight&, const Weight&,
+                                        const Tensor&, const Tensor&, const Tensor&, const Tensor&,
+                                        Tensor&, Tensor&, Tensor&, Tensor&, Tensor&, cudaStream_t) {
+    throw std::logic_error(
+        "Q4/Q5 GDN convolution record backend is unavailable on Volta");
+}
+
+} // namespace ninfer::ops::detail
+
+#else
+
 #include "core/device.h"
 #include "core/pdl.cuh"
 #include "ops/common/math.h"
@@ -388,3 +413,5 @@ void q4_q5_gdn_input_conv_record_launch(const Tensor& x, const Weight& qk_weight
 }
 
 } // namespace ninfer::ops::detail
+
+#endif // NINFER_VOLTA_BUILD
