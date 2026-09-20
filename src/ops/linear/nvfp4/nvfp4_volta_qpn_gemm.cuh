@@ -286,7 +286,7 @@ __global__ __launch_bounds__(
     }
 }
 
-22087 Every NVFP4 consumer that wants the plain contiguous output takes this
+// Shared launcher. Every NVFP4 consumer that wants the plain contiguous output takes this
 // directly; a fused consumer supplies its own OutputPolicy.
 //
 // Generation-2 SPLITK/NACC winners from a private sweep (bench/ops/nvfp4_qpn2_splitk_sweep.cu,
