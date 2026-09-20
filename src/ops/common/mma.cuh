@@ -8,10 +8,6 @@
 
 #include "ops/common/memory.cuh"
 
-#pragma once
-
-#include "ops/common/memory.cuh"
-
 namespace ninfer::ops {
 
 __device__ __forceinline__ void ldmatrix_x2(unsigned& r0, unsigned& r1, unsigned addr) {
