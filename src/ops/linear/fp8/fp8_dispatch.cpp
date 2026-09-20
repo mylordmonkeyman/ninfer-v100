@@ -140,6 +140,14 @@ std::size_t fp8_linear_workspace_capacity_bytes(std::int32_t output_rows, std::i
     if (min_tokens <= 0 || max_tokens < min_tokens) {
         throw std::invalid_argument("fp8 linear workspace: invalid token interval");
     }
+#if defined(NINFER_VOLTA_BUILD)
+    if (!is_fp8_linear_problem(output_rows, input_rows)) {
+        throw std::invalid_argument("fp8 linear workspace: unsupported shape");
+    }
+    (void)resolve_route(output_rows, input_rows, policy, min_tokens);
+    (void)resolve_route(output_rows, input_rows, policy, max_tokens);
+    return 0;
+#else
     if (is_fp8_f32_linear_problem(output_rows, input_rows)) {
         const Fp8Problem problem = resolve_fp8_problem(output_rows, input_rows);
         (void)resolve_route(output_rows, input_rows, policy, min_tokens);
@@ -157,11 +165,17 @@ std::size_t fp8_linear_workspace_capacity_bytes(std::int32_t output_rows, std::i
     return interval_uses_a8(problem, policy, min_tokens, max_tokens)
                ? fp8_a8_workspace_capacity_bytes(max_tokens, input_rows)
                : 0;
+#endif
 }
 
 void fp8_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
                   WorkspaceArena* workspace, cudaStream_t stream) {
     validate_fp8_weight(weight, "fp8 linear");
+#if defined(NINFER_VOLTA_BUILD)
+    (void)workspace;
+    (void)resolve_route(weight.n, weight.k, policy, x.ne[1]);
+    launch_a16(x, weight, out, stream);
+#else
     const Fp8LinearRoute route = resolve_route(weight.n, weight.k, policy, x.ne[1]);
     if (route == Fp8LinearRoute::A16) {
         launch_a16(x, weight, out, stream);
@@ -180,6 +194,7 @@ void fp8_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPoli
     auto scope                   = workspace->scope();
     const Fp8A8Workspace scratch = allocate_fp8_a8_workspace(*workspace, x.ne[1], weight.k);
     launch_fp8_a8(x, weight, out, scratch, stream);
+#endif
 }
 
 } // namespace ninfer::ops::detail
