@@ -11,9 +11,12 @@
 #include "ops/common/warp.cuh"
 #include "ops/linear/fp8/fp8_config.h"
 #include "ops/linear/fp8/fp8_output.cuh"
+#include "ops/linear/nvfp4/nvfp4_codec.cuh"
 
 #include <cuda_bf16.h>
+#if !defined(NINFER_VOLTA_BUILD)
 #include <cuda_fp8.h>
+#endif
 
 #include <cstdint>
 
@@ -66,9 +69,15 @@ __device__ __forceinline__ Fp8CodePack<Values> load_fp8_codes(const std::uint8_t
 }
 
 __device__ __forceinline__ float2 decode_fp8_e4m3x2(std::uint16_t storage) {
+#if defined(NINFER_VOLTA_BUILD)
+    return make_float2(
+        decode_nvfp4_e4m3(static_cast<std::uint8_t>(storage)),
+        decode_nvfp4_e4m3(static_cast<std::uint8_t>(storage >> 8)));
+#else
     __nv_fp8x2_e4m3 value;
     value.__x = storage;
     return static_cast<float2>(value);
+#endif
 }
 
 __device__ __forceinline__ float fp8_row_scale(float value) { return value; }
