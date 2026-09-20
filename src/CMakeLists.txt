@@ -123,9 +123,9 @@ add_library(ninfer_ops STATIC
   ops/softmax_attention/dense/packed/packed_softmax_attention.cpp
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/softmax_attention/dense/packed/launch.cu>
   ops/softmax_attention/dense/context/context_softmax_attention.cpp
-  ops/softmax_attention/dense/context/launch.cu
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/softmax_attention/dense/context/launch.cu>
   ops/softmax_attention/sliding_window/sliding_window_attention.cpp
-  ops/softmax_attention/sliding_window/launch.cu
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/softmax_attention/sliding_window/launch.cu>
   ops/kv_cache/append/kv_cache_append.cpp
   ops/kv_cache/append/launch.cu
   ops/kv_cache/append/nvfp4_launch.cu
