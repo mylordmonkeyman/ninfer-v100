@@ -92,7 +92,7 @@ __global__ __launch_bounds__(kThreads, 2) void quantize_bf16_expert_bank_kernel(
     }
 
     const float scale_unencoded = __fdiv_rn(max_abs, 6.0F);
-    const std::uint8_t scale    = __nv_cvt_float_to_fp8(scale_unencoded, __NV_SATFINITE, __NV_E4M3);
+    const std::uint8_t scale    = ops::detail::encode_nvfp4_e4m3_satfinite(scale_unencoded);
 
     std::uint32_t codes_lo = 0;
     std::uint32_t codes_hi = 0;
