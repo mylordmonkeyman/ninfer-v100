@@ -204,6 +204,7 @@ add_library(ninfer_ops STATIC
   ops/linear/nvfp4/nvfp4_format.cpp
   ops/linear/nvfp4/nvfp4_gemv.cu
   ops/linear/nvfp4/nvfp4_small_t.cu
+  $<$<BOOL:${NINFER_VOLTA_BUILD}>:ops/linear/nvfp4/nvfp4_volta_qpn_gemm.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear/nvfp4/nvfp4_w4a4.cu>
   ops/linear/nvfp4/nvfp4_dispatch.cpp
   ops/linear/q4/q4_small_t_mma.cu
