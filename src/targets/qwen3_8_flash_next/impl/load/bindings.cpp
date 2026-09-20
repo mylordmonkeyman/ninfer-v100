@@ -136,6 +136,7 @@ MoePlan bind_moe(artifact::Binder& binder, const std::string& prefix, NumericFor
         .expert_gate_up     = bind_expert("experts/gate_up", {512, 1'280, 2'560}),
         .expert_down        = bind_expert("experts/down", {512, 2'560, 640}),
         .experts_nvfp4      = (expert_format == NumericFormat::NVFP4),
+        .experts_host_mapped = retain_experts_on_host,
     };
 }
 
@@ -301,7 +302,8 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, LoadFeatures features) 
         const std::string prefix = "text/layers/" + std::to_string(layer) + "/";
         TextLayerPlan& target    = plan.text_layers[layer];
         target.attention_hyper   = bind_hyper(binder, prefix + "attention/hyper_connection/");
-        target.moe               = bind_moe(binder, prefix + "mlp/", NumericFormat::NVFP4);
+        target.moe               = bind_moe(binder, prefix + "mlp/", NumericFormat::NVFP4,
+                                             true, features.host_backed_experts);
         target.mlp_hyper         = bind_hyper(binder, prefix + "mlp/hyper_connection/");
         target.is_full_attention = layer >= 3 && (layer - 3) % 4 == 0;
         if (target.is_full_attention) {

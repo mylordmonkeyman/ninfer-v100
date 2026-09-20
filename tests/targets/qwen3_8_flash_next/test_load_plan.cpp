@@ -138,6 +138,51 @@ int test_synthetic_fixture_load_plans() {
             }
         }
 
+        // Case 6: Phase-10 host-backed main experts preserve exact compact payloads
+        // in the artifact mapping instead of the device arena.
+        {
+            ninfer::artifact::Binder resident_binder(reader);
+            const auto resident =
+                bind_artifact(resident_binder, {.vision = false, .mtp = false,
+                                                .host_backed_experts = false});
+            ninfer::artifact::Binder host_binder(reader);
+            const auto host =
+                bind_artifact(host_binder, {.vision = false, .mtp = false,
+                                            .host_backed_experts = true});
+
+            constexpr std::size_t kMainExpertObjects = 48ULL * 2ULL;
+            constexpr std::uint64_t kMainExpertBytes =
+                48ULL * 1'415'581'696ULL;
+            if (resident.materialization.device_objects.size() !=
+                    host.materialization.device_objects.size() + kMainExpertObjects ||
+                resident.materialization.mapped_tensor_objects.size() + kMainExpertObjects !=
+                    host.materialization.mapped_tensor_objects.size() ||
+                resident.materialization.device_capacity_bytes <
+                    host.materialization.device_capacity_bytes ||
+                resident.materialization.device_capacity_bytes -
+                        host.materialization.device_capacity_bytes !=
+                    kMainExpertBytes) {
+                std::cerr << "Synthetic host-backed expert placement mismatch: resident_device="
+                          << resident.materialization.device_objects.size()
+                          << " host_device=" << host.materialization.device_objects.size()
+                          << " resident_mapped="
+                          << resident.materialization.mapped_tensor_objects.size()
+                          << " host_mapped="
+                          << host.materialization.mapped_tensor_objects.size()
+                          << " saved_bytes="
+                          << (resident.materialization.device_capacity_bytes -
+                              host.materialization.device_capacity_bytes)
+                          << "\n";
+                return 1;
+            }
+            for (const auto& layer : host.bindings.text_layers) {
+                if (!layer.moe.experts_nvfp4 || !layer.moe.experts_host_mapped) {
+                    std::cerr << "Synthetic host-backed MoE binding lost NVFP4/mapped contract\n";
+                    return 1;
+                }
+            }
+        }
+
         std::cout << "PASS: test_synthetic_fixture_load_plans\n";
         return 0;
     } catch (const std::exception& e) {

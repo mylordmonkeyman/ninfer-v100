@@ -107,6 +107,9 @@ struct TextModelView {
     DeviceArena* weights_arena = nullptr;
     Weight token_embedding;
     std::array<TextLayerWeights, 48> layers;
+    // Present on the Phase-10 Volta path. These views point into the artifact's
+    // retained mmap and are never valid CUDA device pointers.
+    std::optional<HostNvfp4ExpertTableView> host_experts;
     std::array<AttentionWeights, kFullAttentionLayers> full_attention;
     std::array<GdnWeights, kGdnLayers> gdn;
     PleWeights ple;
