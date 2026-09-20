@@ -32,6 +32,27 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      # The Phase 11 targets link ninfer_ops, which makes Ninja compile every ops
+      # translation unit. selected_block's shared-row prefill path is Ampere-only
+      # (cp.async/ldmatrix/bf16 MMA) and is not part of the Phase 11 vertical slice.
+      # Keep this compile gate scoped to Phase 11 rather than broadening the port.
+      - name: Isolate unrelated Ampere-only selected-block prefill
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/ops/softmax_attention/selected_block/selected_block_attention.cu')
+          text = path.read_text()
+          text = text.replace('#include "prefill.cuh"', '#if !defined(NINFER_VOLTA_BUILD)\n#include "prefill.cuh"\n#endif')
+          marker = 'void selected_block_attention(const Tensor& query, const Tensor& positions,\n                                      int table_row,'
+          start = text.index(marker)
+          end = text.index('\n} // namespace ninfer::ops', start)
+          body = text[start:end]
+          text = text[:start] + '#if !defined(NINFER_VOLTA_BUILD)\n' + body + '\n#endif\n' + text[end:]
+          path.write_text(text)
+          PY
+
       - name: Configure CUDA 12.8 SM70
         shell: bash
         run: |
