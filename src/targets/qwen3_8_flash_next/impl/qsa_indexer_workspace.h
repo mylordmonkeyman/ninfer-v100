@@ -46,7 +46,14 @@ allocate_flash_next_qsa_indexer_workspace(Arena& arena, std::int32_t maximum_blo
         .ids             = arena.alloc(DType::I32, {maximum_blocks, tile_size}, 256),
         .sorted_ids      = arena.alloc(DType::I32, {maximum_blocks, tile_size}, 256),
         .packed_keys     = arena.alloc(DType::I64, {maximum_blocks, tile_size}, 256),
+#if defined(NINFER_VOLTA_BUILD)
+        // CUDA 12.8 has no cub::DeviceTopK. The Volta fallback sorts the full
+        // deterministic packed-key row with segmented radix sort, so it needs
+        // a full-width output buffer. Blackwell keeps the compact TopK output.
+        .packed_selected = arena.alloc(DType::I64, {maximum_blocks, tile_size}, 256),
+#else
         .packed_selected = arena.alloc(DType::I64, {512, tile_size}, 256),
+#endif
         .topk_ids        = arena.alloc(DType::I32, {512, tile_size}, 256),
         .offsets         = arena.alloc(DType::I32, {tile_size + 1}, 16),
         .sort_temp       = arena.alloc_bytes(sort_temp_bytes, 256),
