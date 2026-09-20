@@ -47,7 +47,11 @@ Nvfp4LinearRoute resolve_route(std::int32_t output_rows, std::int32_t input_rows
 }
 
 void launch_a16(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+#if defined(NINFER_VOLTA_BUILD)
+    constexpr std::int32_t kChunk = kNvfp4VoltaQpnMaxTokens;
+#else
     constexpr std::int32_t kChunk = kNvfp4LastSmallT;
+#endif
     for (std::int32_t token_begin = 0; token_begin < x.ne[1]; token_begin += kChunk) {
         const std::int32_t active = std::min(kChunk, x.ne[1] - token_begin);
         auto* input               = static_cast<std::uint8_t*>(x.data) +
@@ -56,11 +60,21 @@ void launch_a16(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t
                        static_cast<std::int64_t>(token_begin) * weight.n * sizeof(std::uint16_t);
         Tensor input_chunk(input, DType::BF16, {weight.k, active});
         Tensor output_chunk(output, DType::BF16, {weight.n, active});
+#if defined(NINFER_VOLTA_BUILD)
+        if (nvfp4_volta_qpn_supported(weight.n, weight.k, active)) {
+            launch_nvfp4_volta_qpn(input_chunk, weight, output_chunk, stream);
+        } else if (active == 1) {
+            launch_nvfp4_decode(input_chunk, weight, output_chunk, stream);
+        } else {
+            launch_nvfp4_small_t(input_chunk, weight, output_chunk, stream);
+        }
+#else
         if (active == 1) {
             launch_nvfp4_decode(input_chunk, weight, output_chunk, stream);
         } else {
             launch_nvfp4_small_t(input_chunk, weight, output_chunk, stream);
         }
+#endif
     }
 }
 
