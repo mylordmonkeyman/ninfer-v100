@@ -197,6 +197,18 @@ struct Nvfp4BankView {
     return (code & 8U) != 0 ? -magnitude : magnitude;
 }
 
+[[nodiscard]] float round_to_bf16_rne(float value) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    if ((bits & 0x7F800000U) != 0x7F800000U) {
+        bits += 0x7FFFU + ((bits >> 16) & 1U);
+        bits &= 0xFFFF0000U;
+    }
+    float rounded = 0.0F;
+    std::memcpy(&rounded, &bits, sizeof(rounded));
+    return rounded;
+}
+
 [[nodiscard]] float decode_e4m3fn(std::uint8_t code) {
     const bool negative = (code & 0x80U) != 0;
     const int exponent = (code >> 3) & 0x0F;
@@ -328,7 +340,8 @@ struct Scratch {
                                        int expert, const float* input, Scratch& scratch) {
     for (int row = 0; row < kIntermediate; ++row) {
         const auto [gate, up] = gate_up_rows_avx2(gate_up, expert, row, input);
-        scratch.activation[static_cast<std::size_t>(row)] = gate / (1.0F + std::exp(-gate)) * up;
+        scratch.activation[static_cast<std::size_t>(row)] =
+            round_to_bf16_rne(gate / (1.0F + std::exp(-gate)) * up);
     }
     double checksum = 0.0;
     for (int row = 0; row < kHidden; ++row) {
@@ -367,7 +380,8 @@ void compute_pair_scalar(const Nvfp4BankView& gate_up, const Nvfp4BankView& down
     for (int row = 0; row < kIntermediate; ++row) {
         const float gate = scalar_row(gate_up, expert, row, input);
         const float up = scalar_row(gate_up, expert, row + kIntermediate, input);
-        scratch.activation[static_cast<std::size_t>(row)] = gate / (1.0F + std::exp(-gate)) * up;
+        scratch.activation[static_cast<std::size_t>(row)] =
+            round_to_bf16_rne(gate / (1.0F + std::exp(-gate)) * up);
     }
     for (int row = 0; row < kHidden; ++row) {
         scratch.output[static_cast<std::size_t>(row)] =
@@ -670,6 +684,7 @@ void print_result(const BenchResult& result, const Options& options, std::size_t
     std::cout << std::fixed << std::setprecision(3)
               << "workers=" << options.threads << '\n'
               << "pair_bytes=" << pair_bytes << '\n'
+              << "activation_boundary=BF16_RNE" << '\n'
               << "timed_seconds=" << result.elapsed_s << '\n'
               << "pairs_per_s=" << result.pairs_per_s << '\n'
               << "us_per_pair=" << result.us_per_pair << '\n'
