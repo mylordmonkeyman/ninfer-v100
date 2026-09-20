@@ -1,5 +1,105 @@
 #include "ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_kernels.h"
 
+#if defined(NINFER_VOLTA_BUILD)
+
+#include <stdexcept>
+
+namespace ninfer::ops::detail {
+namespace {
+[[noreturn]] void unavailable() {
+    throw std::logic_error(
+        "generic BF16 GDN gating projection backend is unavailable on Volta");
+}
+} // namespace
+
+void bf16_gdn_gating_proj_gemv_launch(const Tensor&, const Weight&, const Weight&, const Tensor&,
+                                      const Tensor&, Tensor&, Tensor&, cudaStream_t) {
+    unavailable();
+}
+void bf16_gdn_gating_proj_small_t_split10_launch(const Tensor&, const Weight&, const Weight&,
+                                                 const Tensor&, const Tensor&, void*, std::size_t,
+                                                 Tensor&, Tensor&, cudaStream_t) {
+    unavailable();
+}
+bool bf16_gdn_gating_proj_mma_split8_launch(Bf16GdnGatingTokenVariant, const Tensor&,
+                                            const Weight&, const Weight&, const Tensor&,
+                                            const Tensor&, void*, Tensor&, Tensor&, std::int32_t,
+                                            cudaStream_t) {
+    unavailable();
+}
+bool bf16_gdn_gating_proj_mma_split4_launch(Bf16GdnGatingTokenVariant, const Tensor&,
+                                            const Weight&, const Weight&, const Tensor&,
+                                            const Tensor&, void*, Tensor&, Tensor&, std::int32_t,
+                                            cudaStream_t) {
+    unavailable();
+}
+bool bf16_gdn_gating_proj_mma_split2_launch(Bf16GdnGatingTokenVariant, const Tensor&,
+                                            const Weight&, const Weight&, const Tensor&,
+                                            const Tensor&, void*, Tensor&, Tensor&, std::int32_t,
+                                            cudaStream_t) {
+    unavailable();
+}
+void bf16_gdn_gating_proj_mma_unsplit_launch(Bf16GdnGatingTokenVariant, const Tensor&,
+                                             const Weight&, const Weight&, const Tensor&,
+                                             const Tensor&, Tensor&, Tensor&, cudaStream_t) {
+    unavailable();
+}
+void bf16_gdn_gating_proj_35_simt_c4_launch(const Tensor&, const Weight&, const Weight&,
+                                            const Tensor&, const Tensor&, Tensor&, Tensor&,
+                                            cudaStream_t) {
+    unavailable();
+}
+void bf16_gdn_gating_proj_35_simt_c8_launch(const Tensor&, const Weight&, const Weight&,
+                                            const Tensor&, const Tensor&, Tensor&, Tensor&,
+                                            cudaStream_t) {
+    unavailable();
+}
+bool bf16_gdn_gating_proj_35_mma_split32_launch(Bf16GdnGatingTokenVariant, const Tensor&,
+                                                const Weight&, const Weight&, const Tensor&,
+                                                const Tensor&, void*, Tensor&, Tensor&,
+                                                std::int32_t, cudaStream_t) {
+    unavailable();
+}
+bool bf16_gdn_norm_gating_proj_35_mma_split32_launch(
+    Bf16GdnGatingTokenVariant, const Tensor&, const Tensor&, float, Tensor&, const Weight&,
+    const Weight&, const Tensor&, const Tensor&, void*, Tensor&, Tensor&, std::int32_t,
+    cudaStream_t) {
+    unavailable();
+}
+bool bf16_gdn_gating_proj_35_mma_split16_launch(Bf16GdnGatingTokenVariant, const Tensor&,
+                                                const Weight&, const Weight&, const Tensor&,
+                                                const Tensor&, void*, Tensor&, Tensor&,
+                                                std::int32_t, cudaStream_t) {
+    unavailable();
+}
+bool bf16_gdn_gating_proj_35_mma_split8_launch(Bf16GdnGatingTokenVariant, const Tensor&,
+                                               const Weight&, const Weight&, const Tensor&,
+                                               const Tensor&, void*, Tensor&, Tensor&,
+                                               std::int32_t, cudaStream_t) {
+    unavailable();
+}
+bool bf16_gdn_gating_proj_35_mma_split4_launch(Bf16GdnGatingTokenVariant, const Tensor&,
+                                               const Weight&, const Weight&, const Tensor&,
+                                               const Tensor&, void*, Tensor&, Tensor&,
+                                               std::int32_t, cudaStream_t) {
+    unavailable();
+}
+bool bf16_gdn_gating_proj_35_mma_split2_launch(Bf16GdnGatingTokenVariant, const Tensor&,
+                                               const Weight&, const Weight&, const Tensor&,
+                                               const Tensor&, void*, Tensor&, Tensor&,
+                                               std::int32_t, cudaStream_t) {
+    unavailable();
+}
+void bf16_gdn_gating_proj_35_mma_unsplit_launch(Bf16GdnGatingTokenVariant, const Tensor&,
+                                                const Weight&, const Weight&, const Tensor&,
+                                                const Tensor&, Tensor&, Tensor&, cudaStream_t) {
+    unavailable();
+}
+
+} // namespace ninfer::ops::detail
+
+#else
+
 #include "ops/common/math.cuh"
 #include "ops/common/memory.cuh"
 #include "ops/common/warp.cuh"
@@ -625,3 +725,5 @@ void bf16_gdn_gating_proj_35_mma_unsplit_launch(Bf16GdnGatingTokenVariant varian
 }
 
 } // namespace ninfer::ops::detail
+
+#endif // NINFER_VOLTA_BUILD
