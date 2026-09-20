@@ -24,6 +24,13 @@ Fp8LinearRoute resolve_route(std::int32_t output_rows, std::int32_t input_rows, 
         throw std::invalid_argument("fp8 linear: unsupported shape");
     }
     const Fp8Problem problem = resolve_fp8_problem(output_rows, input_rows);
+#if defined(NINFER_VOLTA_BUILD)
+    // SM70 executes persistent E4M3 weights through the software-decoded A16
+    // CUDA-core backend. Native FP8 activation/MMA routes are not instruction-safe.
+    (void)problem;
+    (void)policy;
+    return Fp8LinearRoute::A16;
+#else
     if (policy == LinearPolicy::A16Only) { return Fp8LinearRoute::A16; }
     // A permissive policy does not require a lower-precision route. Vocabulary logits retain
     // BF16 activation compute for every policy, matching the existing Q6/W8 output heads.
@@ -57,14 +64,17 @@ Fp8LinearRoute resolve_route(std::int32_t output_rows, std::int32_t input_rows, 
         return tokens >= 16 ? Fp8LinearRoute::A8 : Fp8LinearRoute::A16;
     }
     throw std::logic_error("unreachable FP8 linear problem");
+#endif
 }
 
 void launch_a16(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
     const Fp8Problem problem = resolve_fp8_problem(weight.n, weight.k);
+#if !defined(NINFER_VOLTA_BUILD)
     if (problem == Fp8Problem::Vocabulary && x.ne[1] >= kFp8VocabularyFirstA16GemmT) {
         launch_fp8_vocabulary_a16_gemm(x, weight, out, stream);
         return;
     }
+#endif
     const std::int32_t chunk = problem == Fp8Problem::Vocabulary ? kFp8VocabularyLastA16SmallTMmaT
                                                                  : fp8_linear_small_t_max(problem);
     for (std::int32_t token_begin = 0; token_begin < x.ne[1]; token_begin += chunk) {
@@ -75,9 +85,12 @@ void launch_a16(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t
                        static_cast<std::int64_t>(token_begin) * weight.n * sizeof(std::uint16_t);
         Tensor input_chunk(input, DType::BF16, {weight.k, active});
         Tensor output_chunk(output, DType::BF16, {weight.n, active});
+#if !defined(NINFER_VOLTA_BUILD)
         if (problem == Fp8Problem::Vocabulary) {
             launch_fp8_vocabulary_a16_small_t(input_chunk, weight, output_chunk, stream);
-        } else if (active == 1) {
+        } else
+#endif
+        if (active == 1) {
             launch_fp8_decode(input_chunk, weight, output_chunk, stream);
         } else {
             launch_fp8_small_t(input_chunk, weight, output_chunk, stream);
@@ -87,6 +100,13 @@ void launch_a16(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t
 
 bool interval_uses_a8(Fp8Problem problem, LinearPolicy policy, std::int32_t min_tokens,
                       std::int32_t max_tokens) {
+#if defined(NINFER_VOLTA_BUILD)
+    (void)problem;
+    (void)policy;
+    (void)min_tokens;
+    (void)max_tokens;
+    return false;
+#else
     if (policy == LinearPolicy::A16Only) { return false; }
     switch (problem) {
     case Fp8Problem::AttnInput:
@@ -109,6 +129,7 @@ bool interval_uses_a8(Fp8Problem problem, LinearPolicy policy, std::int32_t min_
         return max_tokens >= 16;
     }
     throw std::logic_error("unreachable FP8 linear problem");
+#endif
 }
 
 } // namespace
