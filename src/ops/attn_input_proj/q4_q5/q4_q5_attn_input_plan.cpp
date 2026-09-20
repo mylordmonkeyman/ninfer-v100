@@ -58,6 +58,25 @@ void q4_q5_attn_input_execute_plan(const Q4Q5AttnInputPlan& plan, const Tensor& 
         throw std::invalid_argument("Q4/Q5 attention input: plan does not match exact problem");
     }
 
+#if defined(NINFER_VOLTA_BUILD)
+    // Every output column is independent. The SIMT split-output kernels are exact for
+    // T<=12, so tile arbitrary Volta prefills instead of entering the Ampere+
+    // grouped-MMA backend.
+    for (std::int32_t begin = 0; begin < x.ne[1];) {
+        const std::int32_t remaining = x.ne[1] - begin;
+        const std::int32_t count = remaining > 12 ? 12 : remaining;
+        Tensor x_chunk = x.slice(1, begin, count);
+        Tensor q_chunk = q.slice(1, begin, count);
+        Tensor gate_chunk = gate.slice(1, begin, count);
+        Tensor k_chunk = k.slice(1, begin, count);
+        Tensor v_chunk = v.slice(1, begin, count);
+        q4_q5_attn_input_small_t_launch(
+            x_chunk, query_key_weight, gate_value_weight,
+            q_chunk, gate_chunk, k_chunk, v_chunk, stream);
+        begin += count;
+    }
+    return;
+#else
     switch (plan.schedule) {
     case Q4Q5AttnInputScheduleId::ParentSplitFixed:
         q4_q5_attn_input_small_t_launch(x, query_key_weight, gate_value_weight, q, gate, k, v,
@@ -81,6 +100,7 @@ void q4_q5_attn_input_execute_plan(const Q4Q5AttnInputPlan& plan, const Tensor& 
         return;
     }
     throw std::logic_error("Q4/Q5 attention input: unknown schedule");
+#endif
 }
 
 void q4_q5_attn_input_dispatch(const Tensor& x, const Weight& query_key_weight,
