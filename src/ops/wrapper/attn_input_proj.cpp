@@ -153,6 +153,10 @@ void dispatch_single_parent(const Tensor& x, const Weight& weight, Tensor& q, Te
         return;
     }
 
+#if defined(NINFER_VOLTA_BUILD)
+    throw std::invalid_argument(
+        "W8 attention input projection is not part of the Volta Flash-Next path");
+#else
     constexpr std::int32_t kHidden = 2048;
     constexpr std::int32_t kQRows  = 4096;
     constexpr std::int32_t kKvRows = 512;
@@ -169,6 +173,7 @@ void dispatch_single_parent(const Tensor& x, const Weight& weight, Tensor& q, Te
     require_matrix(v, kKvRows, cols, "v");
     require_w8_rowsplit(weight, kRows, kHidden, "query/key/gate/value weight");
     detail::w8_attn_input_dispatch(x, weight, q, gate, k, v, stream);
+#endif
 }
 
 } // namespace
@@ -267,6 +272,16 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_gate_value_weight,
 
 void attn_input_proj(const Tensor& x, const Weight& query_key_value_weight, Tensor& q, Tensor& k,
                      Tensor& v, cudaStream_t stream) {
+#if defined(NINFER_VOLTA_BUILD)
+    (void)x;
+    (void)query_key_value_weight;
+    (void)q;
+    (void)k;
+    (void)v;
+    (void)stream;
+    throw std::invalid_argument(
+        "W8 three-output attention input projection is unavailable on Volta");
+#else
     constexpr std::int32_t kQRows  = 4096;
     constexpr std::int32_t kKvRows = 1024;
     constexpr std::int32_t kRows   = 6144;
@@ -283,6 +298,7 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_value_weight, Tens
     require_w8_rowsplit(query_key_value_weight, kRows, hidden, "query/key/value weight");
 
     detail::w8_attn_input_dispatch(x, query_key_value_weight, q, k, v, stream);
+#endif
 }
 
 } // namespace ninfer::ops
