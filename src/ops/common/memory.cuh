@@ -1,6 +1,8 @@
 #pragma once
 
+#if !defined(NINFER_VOLTA_BUILD)
 #include <cuda_pipeline.h>
+#endif
 #include <cuda_runtime.h>
 
 namespace ninfer::ops {
@@ -31,6 +33,13 @@ __device__ __forceinline__ void store_vec(T* ptr, V value) {
 __device__ __forceinline__ unsigned smem_addr(const void* ptr) {
     return static_cast<unsigned>(__cvta_generic_to_shared(ptr));
 }
+
+// These helpers model asynchronous global->shared pipelines. They are deliberately
+// unavailable in a Volta build: SM70 backends must use volta_memory.cuh and place
+// explicit barriers at the schedule points that make their shared-memory lifetime
+// correct. Defining synchronous lookalikes for cp_commit/cp_wait would hide an
+// invalid pipeline schedule.
+#if !defined(NINFER_VOLTA_BUILD)
 
 template <int Bytes, Cache Policy = Cache::ca>
 __device__ __forceinline__ void cp_async(void* smem_dst, const void* gmem_src) {
@@ -85,5 +94,7 @@ __device__ __forceinline__ void pipe_wait() {
     static_assert(Groups >= 0 && Groups <= 7, "pipe_wait group count must fit the PTX immediate");
     __pipeline_wait_prior(Groups);
 }
+
+#endif // !NINFER_VOLTA_BUILD
 
 } // namespace ninfer::ops

@@ -1,5 +1,15 @@
 #pragma once
 
+#if defined(NINFER_VOLTA_BUILD)
+
+#include "ops/common/volta_mma.cuh"
+
+#else
+
+#include "ops/common/memory.cuh"
+
+#pragma once
+
 #include "ops/common/memory.cuh"
 
 namespace ninfer::ops {
@@ -103,3 +113,5 @@ __device__ __forceinline__ void mma_nvfp4_e4m3(float& c0, float& c1, float& c2, 
 }
 
 } // namespace ninfer::ops
+
+#endif // NINFER_VOLTA_BUILD
