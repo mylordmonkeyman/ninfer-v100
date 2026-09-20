@@ -222,18 +222,18 @@ add_library(ninfer_ops STATIC
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear/q5/q5_rowsplit_gemm_mma.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear/q5/q5_rowsplit_gemm_simt.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear/q5/q5_rowsplit_gemv.cu>
-  ops/linear_add/bf16/bf16_linear_add_decode.cu
-  ops/linear_add/bf16/bf16_linear_add_gemm_mma.cu
-  ops/linear_add/bf16/bf16_linear_add_small_t.cu
-  ops/linear_add/bf16/bf16_linear_add_plan.cpp
-  ops/linear_add/nvfp4/nvfp4_linear_add_decode.cu
-  ops/linear_add/nvfp4/nvfp4_linear_add_small_t.cu
-  ops/linear_add/nvfp4/nvfp4_linear_add_w4a4.cu
-  ops/linear_add/nvfp4/nvfp4_linear_add_plan.cpp
-  ops/linear_add/fp8/fp8_linear_add_decode.cu
-  ops/linear_add/fp8/fp8_linear_add_small_t.cu
-  ops/linear_add/fp8/fp8_linear_add_a8.cu
-  ops/linear_add/fp8/fp8_linear_add_plan.cpp
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_add/bf16/bf16_linear_add_decode.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_add/bf16/bf16_linear_add_gemm_mma.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_add/bf16/bf16_linear_add_small_t.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_add/bf16/bf16_linear_add_plan.cpp>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_add/nvfp4/nvfp4_linear_add_decode.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_add/nvfp4/nvfp4_linear_add_small_t.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_add/nvfp4/nvfp4_linear_add_w4a4.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_add/nvfp4/nvfp4_linear_add_plan.cpp>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_add/fp8/fp8_linear_add_decode.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_add/fp8/fp8_linear_add_small_t.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_add/fp8/fp8_linear_add_a8.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_add/fp8/fp8_linear_add_plan.cpp>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_add/q5/q5_linear_add_gemm_mma.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_add/q5/q5_linear_add_gemm_simt.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_add/q5/q5_linear_add_gemv.cu>
@@ -245,14 +245,14 @@ add_library(ninfer_ops STATIC
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_swiglu/q4/q4_linear_swiglu_gemm_mma.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_swiglu/q4/q4_linear_swiglu_gemv.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_swiglu/q4/q4_linear_swiglu_plan.cpp>
-  ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_decode.cu
-  ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_small_t.cu
-  ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4.cu
-  ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_plan.cpp
-  ops/linear_swiglu/fp8/fp8_linear_swiglu_decode.cu
-  ops/linear_swiglu/fp8/fp8_linear_swiglu_small_t.cu
-  ops/linear_swiglu/fp8/fp8_linear_swiglu_a8.cu
-  ops/linear_swiglu/fp8/fp8_linear_swiglu_plan.cpp
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_decode.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_small_t.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_plan.cpp>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_swiglu/fp8/fp8_linear_swiglu_decode.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_swiglu/fp8/fp8_linear_swiglu_small_t.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_swiglu/fp8/fp8_linear_swiglu_a8.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_swiglu/fp8/fp8_linear_swiglu_plan.cpp>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_swiglu/w8/w8_linear_swiglu_decode.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_swiglu/w8/w8_dflash2_linear_swiglu.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_swiglu/w8/w8_linear_swiglu_gemm_mma.cu>
@@ -273,14 +273,14 @@ add_library(ninfer_ops STATIC
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_pair/w8/w8_pair_gemm_mma.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_pair/w8/w8_pair_gemm_splitk.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_pair/w8/w8_pair_plan.cpp>
-  ops/linear_topk/linear_topk.cpp
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_topk/linear_topk.cpp>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_topk/w8.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_topk/w8_m64.cu>
-  ops/linear_topk/fp8.cu
-  ops/linear_topk/fp8_m64.cu
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_topk/fp8.cu>
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_topk/fp8_m64.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_topk/q4.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_topk/q4_m64.cu>
-  ops/linear_topk/merge.cu
+  $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_topk/merge.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/sparse_moe/decode/sparse_moe_decode_kernels.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/sparse_moe/decode/sparse_moe_decode_plan.cpp>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/sparse_moe/prefill/sparse_moe_prefill_kernels.cu>
