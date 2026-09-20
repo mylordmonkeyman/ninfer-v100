@@ -2,6 +2,7 @@
 #include "ops/context_kv_materialize/launch.h"
 
 #include <stdexcept>
+#include <string>
 
 namespace ninfer::ops::detail {
 
