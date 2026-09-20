@@ -368,25 +368,43 @@ int test_prefill_equivalence_and_benchmark(ninfer::DeviceContext& device) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
     std::mt19937 rng(1337);
     std::uniform_real_distribution<float> dist_router(-0.1F, 0.1F);
+#if defined(NINFER_VOLTA_BUILD)
+    // Constrained-residency Phase-9 gate: positive activations plus signed router
+    // rows guarantee that experts 0..9 are the selected routed set.
+    std::uniform_real_distribution<float> dist_act(0.01F, 0.05F);
+    constexpr int kResidentExperts = 10;
+#else
     std::uniform_real_distribution<float> dist_act(-0.05F, 0.05F);
+    constexpr int kResidentExperts = 512;
+#endif
 
     constexpr std::uint64_t gate_code_bytes_per_expert  = 1'280ULL * 2'560 / 2;
     constexpr std::uint64_t gate_scale_bytes_per_expert = 1'280ULL * 2'560 / 16;
     constexpr std::uint64_t down_code_bytes_per_expert  = 2'560ULL * 640 / 2;
     constexpr std::uint64_t down_scale_bytes_per_expert = 2'560ULL * 640 / 16;
 
-    // Allocate 512 physical experts for prefill test
-    ninfer::DeviceBuffer gate_codes(512 * gate_code_bytes_per_expert);
-    ninfer::DeviceBuffer gate_scales(512 * gate_scale_bytes_per_expert);
-    ninfer::DeviceBuffer down_codes(512 * down_code_bytes_per_expert);
-    ninfer::DeviceBuffer down_scales(512 * down_scale_bytes_per_expert);
+    // Phase 9 permits constrained residency. Volta keeps only the ten experts
+    // that the test router can select; other builds retain the full-residency
+    // characterization workload.
+    ninfer::DeviceBuffer gate_codes(
+        static_cast<std::uint64_t>(kResidentExperts) * gate_code_bytes_per_expert);
+    ninfer::DeviceBuffer gate_scales(
+        static_cast<std::uint64_t>(kResidentExperts) * gate_scale_bytes_per_expert);
+    ninfer::DeviceBuffer down_codes(
+        static_cast<std::uint64_t>(kResidentExperts) * down_code_bytes_per_expert);
+    ninfer::DeviceBuffer down_scales(
+        static_cast<std::uint64_t>(kResidentExperts) * down_scale_bytes_per_expert);
     ninfer::DeviceBuffer gate_divisors(512 * sizeof(float));
     ninfer::DeviceBuffer down_divisors(512 * sizeof(float));
 
-    std::vector<std::uint8_t> h_gate_codes(512 * gate_code_bytes_per_expert, 0x22U);
-    std::vector<std::uint8_t> h_gate_scales(512 * gate_scale_bytes_per_expert, 0x38U);
-    std::vector<std::uint8_t> h_down_codes(512 * down_code_bytes_per_expert, 0x22U);
-    std::vector<std::uint8_t> h_down_scales(512 * down_scale_bytes_per_expert, 0x38U);
+    std::vector<std::uint8_t> h_gate_codes(
+        static_cast<std::uint64_t>(kResidentExperts) * gate_code_bytes_per_expert, 0x22U);
+    std::vector<std::uint8_t> h_gate_scales(
+        static_cast<std::uint64_t>(kResidentExperts) * gate_scale_bytes_per_expert, 0x38U);
+    std::vector<std::uint8_t> h_down_codes(
+        static_cast<std::uint64_t>(kResidentExperts) * down_code_bytes_per_expert, 0x22U);
+    std::vector<std::uint8_t> h_down_scales(
+        static_cast<std::uint64_t>(kResidentExperts) * down_scale_bytes_per_expert, 0x38U);
     std::vector<float> h_divisors(512, 1.0F);
 
     gate_codes.copy_from_host(h_gate_codes.data(), h_gate_codes.size());
@@ -403,7 +421,17 @@ int test_prefill_equivalence_and_benchmark(ninfer::DeviceContext& device) {
     ninfer::DeviceBuffer d_shared_gate_weight(2'560 * 2);
 
     std::vector<std::uint16_t> h_router(512ULL * 2'560);
+#if defined(NINFER_VOLTA_BUILD)
+    const std::uint16_t selected_router_word = float_to_bf16(0.0625F);
+    const std::uint16_t excluded_router_word = float_to_bf16(-0.0625F);
+    std::fill(h_router.begin(), h_router.end(), excluded_router_word);
+    for (int expert = 0; expert < kResidentExperts; ++expert) {
+        std::fill_n(h_router.begin() + static_cast<std::ptrdiff_t>(expert) * 2'560,
+                    2'560, selected_router_word);
+    }
+#else
     for (auto& v : h_router) { v = float_to_bf16(dist_router(rng)); }
+#endif
     d_router.copy_from_host(h_router.data(), h_router.size() * 2);
 
     std::vector<std::uint16_t> h_shared_down(2'560ULL * 640);
@@ -510,19 +538,30 @@ int test_prefill_equivalence_and_benchmark(ninfer::DeviceContext& device) {
         std::cout << "  Tokens T=" << tokens << " Prefill vs Decode Rel-L2 Error: "
                   << std::scientific << std::setprecision(6) << err << "\n" << std::flush;
 
+#if defined(NINFER_VOLTA_BUILD)
+        // Volta always takes the software W4A16 prefill route, including large T.
+        if (err > 1.0e-3) {
+            std::cerr << "FAILED: Volta W4A16 prefill T=" << tokens
+                      << " rel-L2 error exceeded tolerance 1e-3: " << err << "\n";
+            return 1;
+        }
+#else
         if (tokens < kFlashNextMoeMmaPrefillThreshold) {
             // The SIMT path should match the decode reference tightly.
             if (err > 1.0e-3) {
-                std::cerr << "FAILED: SIMT prefill T=" << tokens << " rel-L2 error exceeded tolerance 1e-3: " << err << "\n";
+                std::cerr << "FAILED: SIMT prefill T=" << tokens
+                          << " rel-L2 error exceeded tolerance 1e-3: " << err << "\n";
                 return 1;
             }
         } else {
             // The MMA path dynamically quantizes activations to W4A4.
             if (err > 0.20) {
-                std::cerr << "FAILED: MMA prefill T=" << tokens << " rel-L2 error exceeded tolerance 0.20: " << err << "\n";
+                std::cerr << "FAILED: MMA prefill T=" << tokens
+                          << " rel-L2 error exceeded tolerance 0.20: " << err << "\n";
                 return 1;
             }
         }
+#endif
 
         // Detailed breakdown
         cudaEvent_t ev_start, ev_route, ev_end;
@@ -538,6 +577,7 @@ int test_prefill_equivalence_and_benchmark(ninfer::DeviceContext& device) {
         flash_next_moe_kernels_launch(in_view, weights, scratch, out_prefill_view, device.stream);
         device.synchronize();
 
+#if !defined(NINFER_VOLTA_BUILD)
         if (tokens >= kFlashNextMoeMmaPrefillThreshold) {
             const std::size_t id_bytes =
                 static_cast<std::size_t>(tokens) * 10U * sizeof(std::int32_t);
@@ -582,6 +622,7 @@ int test_prefill_equivalence_and_benchmark(ninfer::DeviceContext& device) {
                       << " router ids bitwise identical vs scalar (slots=" << ids_old.size()
                       << " nonzero=" << nonzero << ")\n";
         }
+#endif
 
         const int kIters = (tokens >= 2048) ? 10 : 50;
         cudaEventRecord(ev_start, device.stream);
