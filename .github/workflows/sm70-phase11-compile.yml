@@ -59,6 +59,8 @@ jobs:
               'ops/softmax_attention/dense/causal_cache/small_t_fp8.cu',
               'ops/softmax_attention/dense/causal_cache/small_t_nvfp4.cu',
               'ops/softmax_attention/dense/causal_cache/small_t_k8v4.cu',
+              'ops/softmax_attention/dense/causal_cache/prompt.cu',
+              'ops/softmax_attention/dense/causal_cache/prompt_fp8.cu',
           ):
               text = text.replace(f'  {source}\n', '')
           cmake.write_text(text)
