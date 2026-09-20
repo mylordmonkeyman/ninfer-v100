@@ -187,14 +187,24 @@ void kv_cache_append_batch_launch(const Tensor& k, const Tensor& v, const Tensor
                                   const Tensor& valid_columns, const Tensor& table_rows,
                                   PagedKVBatchLayerView cache, cudaStream_t stream) {
     if (cache.storage == KvCacheStorage::Fp8KeyNvfp4Value) {
+#if defined(NINFER_VOLTA_BUILD)
+        throw std::invalid_argument(
+            "K8V4 KV-cache append is unavailable on Volta");
+#else
         kv_cache_append_k8v4_batch_launch(k, v, positions, valid_columns, table_rows, cache,
                                           stream);
         return;
+#endif
     }
     if (cache.storage == KvCacheStorage::Nvfp4Group16) {
+#if defined(NINFER_VOLTA_BUILD)
+        throw std::invalid_argument(
+            "NVFP4 KV-cache append is unavailable on Volta");
+#else
         kv_cache_append_nvfp4_batch_launch(k, v, positions, valid_columns, table_rows, cache,
                                            stream);
         return;
+#endif
     }
     const auto launch = [&]<bool Masked>() {
         const PagedKVBatchMetadata<Masked> metadata{
