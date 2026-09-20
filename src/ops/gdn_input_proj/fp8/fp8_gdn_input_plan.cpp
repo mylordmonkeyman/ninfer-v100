@@ -2,6 +2,7 @@
 
 #include "ops/linear/fp8/fp8_config.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <stdexcept>
 
@@ -15,11 +16,16 @@ enum class Fp8GdnInputRoute : std::uint8_t {
 
 Fp8GdnInputRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
     if (tokens <= 0) { throw std::invalid_argument("fp8 gdn_input_proj: T must be positive"); }
+#if defined(NINFER_VOLTA_BUILD)
+    (void)policy;
+    return Fp8GdnInputRoute::A16;
+#else
     if (policy == LinearPolicy::A16Only) { return Fp8GdnInputRoute::A16; }
     if (policy != LinearPolicy::AllowA8) {
         throw std::invalid_argument("fp8 gdn_input_proj: unsupported policy");
     }
     return tokens >= 8 ? Fp8GdnInputRoute::A8 : Fp8GdnInputRoute::A16;
+#endif
 }
 
 } // namespace
@@ -30,18 +36,48 @@ std::size_t fp8_gdn_input_workspace_capacity_bytes(LinearPolicy policy, std::int
         throw std::invalid_argument("fp8 gdn_input_proj workspace: invalid token interval");
     }
     (void)resolve_route(policy, min_tokens);
+#if defined(NINFER_VOLTA_BUILD)
+    (void)resolve_route(policy, max_tokens);
+    return 0;
+#else
     return resolve_route(policy, max_tokens) == Fp8GdnInputRoute::A8
                ? fp8_a8_workspace_capacity_bytes(max_tokens, Fp8GdnInputGeometry::kInputRows)
                : 0;
+#endif
 }
 
 void fp8_gdn_input_a16_dispatch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
                                 cudaStream_t stream) {
+#if defined(NINFER_VOLTA_BUILD)
+    constexpr std::int32_t kChunk   = 4;
+    constexpr std::int32_t kQkvRows = 10240;
+    constexpr std::int32_t kZRows   = 6144;
+    for (std::int32_t token_begin = 0; token_begin < x.ne[1]; token_begin += kChunk) {
+        const std::int32_t active = std::min(kChunk, x.ne[1] - token_begin);
+        auto* input = static_cast<std::uint8_t*>(x.data) +
+                      static_cast<std::int64_t>(token_begin) * weight.k * sizeof(std::uint16_t);
+        auto* qkv_output = static_cast<std::uint8_t*>(qkv.data) +
+                           static_cast<std::int64_t>(token_begin) * kQkvRows *
+                               sizeof(std::uint16_t);
+        auto* z_output = static_cast<std::uint8_t*>(z.data) +
+                         static_cast<std::int64_t>(token_begin) * kZRows *
+                             sizeof(std::uint16_t);
+        Tensor input_chunk(input, DType::BF16, {weight.k, active});
+        Tensor qkv_chunk(qkv_output, DType::BF16, {kQkvRows, active});
+        Tensor z_chunk(z_output, DType::BF16, {kZRows, active});
+        if (active == 1) {
+            fp8_gdn_input_decode_launch(input_chunk, weight, qkv_chunk, z_chunk, stream);
+        } else {
+            fp8_gdn_input_matrix_launch(input_chunk, weight, qkv_chunk, z_chunk, stream);
+        }
+    }
+#else
     if (x.ne[1] == 1) {
         fp8_gdn_input_decode_launch(x, weight, qkv, z, stream);
     } else {
         fp8_gdn_input_matrix_launch(x, weight, qkv, z, stream);
     }
+#endif
 }
 
 void fp8_gdn_input_a8_dispatch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
@@ -53,6 +89,11 @@ void fp8_gdn_input_a8_dispatch(const Tensor& x, const Weight& weight, Tensor& qk
 
 void fp8_gdn_input_dispatch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
                             LinearPolicy policy, WorkspaceArena* workspace, cudaStream_t stream) {
+#if defined(NINFER_VOLTA_BUILD)
+    (void)workspace;
+    (void)resolve_route(policy, x.ne[1]);
+    fp8_gdn_input_a16_dispatch(x, weight, qkv, z, stream);
+#else
     if (resolve_route(policy, x.ne[1]) == Fp8GdnInputRoute::A16) {
         fp8_gdn_input_a16_dispatch(x, weight, qkv, z, stream);
         return;
@@ -61,6 +102,7 @@ void fp8_gdn_input_dispatch(const Tensor& x, const Weight& weight, Tensor& qkv, 
         throw std::invalid_argument("fp8 A8 gdn_input_proj requires caller workspace");
     }
     fp8_gdn_input_a8_dispatch(x, weight, qkv, z, *workspace, stream);
+#endif
 }
 
 } // namespace ninfer::ops::detail
