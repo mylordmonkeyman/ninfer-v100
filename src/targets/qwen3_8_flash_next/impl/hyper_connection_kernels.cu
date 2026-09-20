@@ -3,11 +3,19 @@
 #include "core/device.h"
 #include "ops/common/math.cuh"
 #include "ops/common/warp.cuh"
+#if defined(NINFER_VOLTA_BUILD)
+#include "ops/common/volta_memory.cuh"
+#include "ops/common/volta_mma.cuh"
+#else
 #include "ops/linear/bf16/bf16_config.h"
 #include "ops/linear/bf16/bf16_gemm_mma.cuh"
 #include "ops/linear/bf16/bf16_gemm_mma_config.h"
+#endif
 
 #include <cuda_bf16.h>
+#if defined(NINFER_VOLTA_BUILD)
+#include <cuda_fp16.h>
+#endif
 #include <cuda_runtime.h>
 
 #include <cstdint>
@@ -615,9 +623,128 @@ up_reduction_vectorized_kernel(
     }
 }
 
-// Down & Up MMA Geometries and Schedules
-// Prefill down-projection is N=320 x T. A 32x32 tile yields only 40 CTAs at T=128 on 188 SMs.
-// Split-K=4 keeps that tile and launches 160 CTAs. Decode T<=8 stays on the fused path.
+// Down & Up matrix backends.
+//
+// SM70 cannot compile the inherited cp.async + ldmatrix + BF16-MMA schedule. Its
+// Phase-6 path keeps BF16 persistent storage, converts each staged K=4 slice to
+// FP16, and uses Volta m8n8k4 with FP32 accumulation. Norm, injection, SiLU,
+// and four-stream reduction remain in the existing portable kernels.
+#if defined(NINFER_VOLTA_BUILD)
+
+constexpr int kVoltaHyperWarps = 8;
+constexpr int kVoltaHyperThreads = kVoltaHyperWarps * 32;
+constexpr int kVoltaHyperRowsPerWarp = 32;
+constexpr int kVoltaHyperTokensPerTile = 8;
+constexpr int kVoltaHyperKStep = 4;
+
+struct alignas(16) VoltaHyperWarpTile {
+    __half a[kVoltaHyperRowsPerWarp * kVoltaHyperKStep];
+    __half b[kVoltaHyperTokensPerTile * kVoltaHyperKStep];
+};
+
+template <int Rows, int K, bool ApplySilu>
+__global__ __launch_bounds__(kVoltaHyperThreads, 2) void hyper_volta_mma_kernel(
+    const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ weight,
+    __nv_bfloat16* __restrict__ out, int tokens) {
+    static_assert((K % kVoltaHyperKStep) == 0);
+
+    __shared__ VoltaHyperWarpTile shared[kVoltaHyperWarps];
+
+    const int lane = static_cast<int>(threadIdx.x) & 31;
+    const int warp = static_cast<int>(threadIdx.x) >> 5;
+    const int row_base =
+        (static_cast<int>(blockIdx.x) * kVoltaHyperWarps + warp) * kVoltaHyperRowsPerWarp;
+    const int token_base = static_cast<int>(blockIdx.y) * kVoltaHyperTokensPerTile;
+    VoltaHyperWarpTile& tile = shared[warp];
+
+    ops::VoltaMma884Accumulator accumulator{};
+    accumulator.clear();
+
+    for (int k0 = 0; k0 < K; k0 += kVoltaHyperKStep) {
+#pragma unroll
+        for (int item = lane; item < kVoltaHyperRowsPerWarp * kVoltaHyperKStep; item += 32) {
+            const int local_row = item / kVoltaHyperKStep;
+            const int kk = item - local_row * kVoltaHyperKStep;
+            const int row = row_base + local_row;
+            tile.a[item] =
+                row < Rows
+                    ? __float2half_rn(__bfloat162float(
+                          weight[static_cast<std::int64_t>(row) * K + k0 + kk]))
+                    : __float2half_rn(0.0F);
+        }
+#pragma unroll
+        for (int item = lane; item < kVoltaHyperTokensPerTile * kVoltaHyperKStep; item += 32) {
+            const int local_token = item / kVoltaHyperKStep;
+            const int kk = item - local_token * kVoltaHyperKStep;
+            const int token = token_base + local_token;
+            tile.b[item] =
+                token < tokens
+                    ? __float2half_rn(__bfloat162float(
+                          x[static_cast<std::int64_t>(token) * K + k0 + kk]))
+                    : __float2half_rn(0.0F);
+        }
+        ops::volta_warp_barrier();
+
+        const int group = ops::volta_mma884_group(static_cast<unsigned>(lane));
+        const __half* a_tile =
+            tile.a + group * 8 * kVoltaHyperKStep;
+        const auto a_fragment =
+            ops::volta_mma884_load_a_row(a_tile, kVoltaHyperKStep);
+        const auto b_fragment =
+            ops::volta_mma884_load_b_col(tile.b, kVoltaHyperKStep);
+        ops::volta_mma884_f16_f32(accumulator, a_fragment, b_fragment);
+
+        // Volta independent thread scheduling requires an explicit lifetime
+        // barrier before any lane overwrites this warp's shared staging tile.
+        ops::volta_warp_barrier();
+    }
+
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const auto coordinate =
+            ops::volta_mma884_accumulator_coordinate(static_cast<unsigned>(lane), i);
+        const int row =
+            row_base + ops::volta_mma884_group(static_cast<unsigned>(lane)) * 8 +
+            coordinate.row;
+        const int token = token_base + coordinate.col;
+        if (row < Rows && token < tokens) {
+            float value = accumulator.x[i];
+            if constexpr (ApplySilu) { value = ops::silu(value * 0.25F); }
+            out[static_cast<std::int64_t>(token) * Rows + row] =
+                __float2bfloat16_rn(value);
+        }
+    }
+}
+
+template <int Rows, int K, bool ApplySilu>
+void launch_hyper_volta_mma(const __nv_bfloat16* x, const __nv_bfloat16* weight,
+                            __nv_bfloat16* out, int tokens, cudaStream_t stream) {
+    const dim3 grid(
+        static_cast<unsigned>((Rows + kVoltaHyperWarps * kVoltaHyperRowsPerWarp - 1) /
+                              (kVoltaHyperWarps * kVoltaHyperRowsPerWarp)),
+        static_cast<unsigned>((tokens + kVoltaHyperTokensPerTile - 1) /
+                              kVoltaHyperTokensPerTile));
+    hyper_volta_mma_kernel<Rows, K, ApplySilu>
+        <<<grid, kVoltaHyperThreads, 0, stream>>>(x, weight, out, tokens);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_down_prefill_dispatch(const __nv_bfloat16* x, const __nv_bfloat16* weight,
+                                  float* partials, __nv_bfloat16* low_rank, int tokens,
+                                  cudaStream_t stream) {
+    (void)partials;
+    launch_hyper_volta_mma<kLowRank, kConcat, true>(x, weight, low_rank, tokens, stream);
+}
+
+void launch_up_prefill_dispatch(const __nv_bfloat16* low_rank, const __nv_bfloat16* weight,
+                                __nv_bfloat16* up_gemm, int tokens, cudaStream_t stream) {
+    launch_hyper_volta_mma<kConcat, kLowRank, false>(
+        low_rank, weight, up_gemm, tokens, stream);
+}
+
+#else
+
+// Blackwell prefill retains its measured BF16 tensor-core schedules.
 using DownGeom    = ops::detail::Bf16GemvGeometry<320, 10240>;
 using DownSched   = ops::detail::Bf16MmaSchedule<32, 32, 256, 16, 16, 2, 2, ops::Cache::cg, ops::Cache::cg,
                                                  ops::detail::Bf16MmaFragmentPipeline::PingPong,
@@ -675,8 +802,8 @@ void launch_up_prefill(const __nv_bfloat16* low_rank, const __nv_bfloat16* weigh
         cudaFuncAttributeMaxDynamicSharedMemorySize, UpSched::kSharedBytes);
     CUDA_CHECK(attr_up);
     ops::detail::bf16_gemm_mma_kernel<UpGeom, UpSched, FullTokens>
-        <<<blocks_up, UpSched::kThreads, UpSched::kSharedBytes, stream>>>(low_rank, weight, out_up,
-                                                                         tokens);
+        <<<blocks_up, UpSched::kThreads, UpSched::kSharedBytes, stream>>>(
+            low_rank, weight, out_up, tokens);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -688,6 +815,8 @@ void launch_up_prefill_dispatch(const __nv_bfloat16* low_rank, const __nv_bfloat
         launch_up_prefill<false>(low_rank, weight, up_gemm, tokens, stream);
     }
 }
+
+#endif // NINFER_VOLTA_BUILD
 
 // Decode-route stage 1: `normalized` (all four streams), `low_rank`, and (when
 // inject_weight != nullptr) `injection`. Both routes leave identical bits in all three.
