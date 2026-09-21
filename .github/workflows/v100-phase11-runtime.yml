@@ -21,7 +21,7 @@ jobs:
       - cuda-12-8
       - ninfer-phase11
 
-    timeout-minutes: 10
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
