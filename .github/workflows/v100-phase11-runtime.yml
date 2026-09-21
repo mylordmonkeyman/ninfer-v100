@@ -1,0 +1,78 @@
+name: V100 Phase 11 Runtime
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v100-phase11-runtime
+  cancel-in-progress: false
+
+jobs:
+  environment:
+    name: V100 Environment
+
+    runs-on:
+      - self-hosted
+      - v100
+      - sm70
+      - cuda-12-8
+      - ninfer-phase11
+
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify V100 environment
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "=== Git ==="
+          git rev-parse HEAD
+          git status --short
+
+          echo "=== GPU ==="
+          nvidia-smi
+
+          echo "=== GPU details ==="
+          nvidia-smi \
+            --query-gpu=name,uuid,memory.total,driver_version \
+            --format=csv
+
+          echo "=== CUDA ==="
+          nvcc --version
+
+          echo "=== CMake ==="
+          cmake --version
+
+          echo "=== Ninja ==="
+          ninja --version
+
+          echo "=== CPU ==="
+          lscpu
+
+          echo "=== NUMA ==="
+          numactl --hardware
+
+          echo "=== PCI ==="
+          lspci | grep -i -E 'nvidia|vga|3d' || true
+
+          echo "=== Models ==="
+          find /models -maxdepth 3 -type f | head -100
+
+          echo "=== Oracle ==="
+          find /oracle -maxdepth 3 -type f | head -100
+
+          echo "=== Filesystems ==="
+          df -h
+
+          echo "=== Memory ==="
+          free -h
