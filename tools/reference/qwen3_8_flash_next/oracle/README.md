@@ -50,6 +50,24 @@ E:\NInfer\venv-qwen4exp\Scripts\python.exe run_oracle.py `
   --dump-states P:\dumps\oracle_seq
 ```
 
+### Phase 11 logits-only acceptance oracle
+
+For the frozen >=4096-position Phase 11 teacher-forced oracle, use the logits-only mode rather than `--dump-states`. It does not register the intermediate-state hooks and materializes the LM head in small position chunks, so the output contains only the FP32 logits needed by the V100 qualification test.
+
+Prepare a JSON token file as either a bare array or an object with a `token_ids` array, then run on the Linux oracle host:
+
+```bash
+~/ninfer-v100/venv-oracle/bin/python \
+  tools/reference/qwen3_8_flash_next/oracle/run_oracle.py \
+  --model-dir /srv/ninfer/source/mixed \
+  --ple-dir /srv/ninfer/source/ple/ples_int4 \
+  --ids-file /srv/ninfer/oracle/phase11/token_ids.json \
+  --dump-logits /srv/ninfer/oracle/phase11 \
+  --logits-chunk-size 8
+```
+
+The output `manifest.json` records contiguous teacher-forced positions and one FP32 `logits` tensor per position, which is the contract consumed by `ninfer_qwen3_8_flash_next_vertical_slice_real_test`. Keep the existing `--dump-states` mode for small detailed divergence investigations; it is intentionally not the full-oracle format.
+
 ### MTP reference qualification
 
 `mtp_reference.py` implements the MTP stem and wraps one Transformers decoder layer,
