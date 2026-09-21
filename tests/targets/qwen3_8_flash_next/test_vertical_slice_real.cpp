@@ -51,6 +51,24 @@ std::uint32_t round_up_128(std::uint64_t value) {
     return static_cast<std::uint32_t>(rounded);
 }
 
+std::uint32_t required_oracle_positions() {
+    constexpr std::uint32_t kPhase11Minimum = 4'096;
+    const char* smoke_env =
+        std::getenv("NINFER_PHASE11_ORACLE_SMOKE_POSITIONS");
+    if (smoke_env == nullptr || smoke_env[0] == '\0') {
+        return kPhase11Minimum;
+    }
+
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(smoke_env, &end, 10);
+    if (end == smoke_env || *end != '\0' || parsed < 2 ||
+        parsed >= kPhase11Minimum) {
+        throw std::invalid_argument(
+            "NINFER_PHASE11_ORACLE_SMOKE_POSITIONS must be in [2, 4095]");
+    }
+    return static_cast<std::uint32_t>(parsed);
+}
+
 std::vector<OracleRecord> load_manifest(const fs::path& manifest_path) {
     std::ifstream input(manifest_path);
     if (!input) {
@@ -239,12 +257,19 @@ int main() {
 
         const fs::path weights_path(weights_env);
         const fs::path manifest_path(oracle_env);
-        const std::vector<OracleRecord> records =
-            load_manifest(manifest_path);
-        if (records.size() < 4'096) {
+        const std::uint32_t required_positions = required_oracle_positions();
+        std::vector<OracleRecord> records = load_manifest(manifest_path);
+        if (records.size() < required_positions) {
             throw std::runtime_error(
-                "Phase 11 requires at least 4096 teacher-forced oracle positions");
+                "Phase 11 oracle has fewer positions than required");
         }
+        if (required_positions < 4'096U && records.size() > required_positions) {
+            records.resize(required_positions);
+        }
+        std::cout << "phase11.oracle_mode="
+                  << (required_positions < 4'096U ? "smoke" : "qualification")
+                  << '\n'
+                  << "phase11.required_positions=" << required_positions << '\n';
 
         const std::uint32_t max_context = round_up_128(
             std::max<std::uint64_t>(8'192ULL, records.size() + 1ULL));
@@ -380,7 +405,9 @@ int main() {
         const Phase11OracleMetrics metrics =
             metrics_accumulator.finalize();
         print_metrics(metrics);
-        if (!phase11_oracle_passes(metrics)) {
+        Phase11OracleThresholds thresholds{};
+        thresholds.minimum_positions = required_positions;
+        if (!phase11_oracle_passes(metrics, thresholds)) {
             std::cerr << "FAIL: Phase 11 teacher-forced oracle gate\n";
             return 1;
         }
