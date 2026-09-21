@@ -12,6 +12,9 @@ on:
         default: false
         type: boolean
 
+permissions:
+  contents: read
+
 concurrency:
   group: v100-phase11-runtime-${{ github.ref }}
   cancel-in-progress: true
@@ -19,6 +22,7 @@ concurrency:
 jobs:
   v100-phase11:
     name: V100 Phase 11 Runtime
+    if: ${{ github.actor == github.repository_owner }}
     runs-on:
       - self-hosted
       - v100
@@ -30,7 +34,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: recursive
           persist-credentials: false
@@ -199,7 +203,7 @@ jobs:
 
       - name: Upload Phase 11 results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: v100-phase11-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ github.workspace }}/.v100-phase11-results/${{ github.run_id }}-${{ github.run_attempt }}/
