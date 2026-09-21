@@ -18,6 +18,7 @@
 #include <semaphore>
 #include <span>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <vector>
 #include <condition_variable>
@@ -54,17 +55,34 @@ unsigned resolve_host_expert_worker_count() {
     return std::min(kDefaultWorkers, hardware == 0 ? 1U : hardware);
 }
 
+bool resolve_avx2_backend() {
+    const char* env = std::getenv("NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND");
+    if (env == nullptr || env[0] == '\0' || std::string_view(env) == "reference") {
+        return false;
+    }
+    if (std::string_view(env) == "avx2") {
+        if (!flash_next_cpu_nvfp4_avx2_available()) {
+            throw std::runtime_error(
+                "NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND=avx2 requested without AVX2/FMA");
+        }
+        return true;
+    }
+    throw std::invalid_argument(
+        "NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND must be reference or avx2");
+}
+
 class HostExpertWorkerPool {
   public:
     HostExpertWorkerPool()
-        : avx2_(flash_next_cpu_nvfp4_avx2_available()),
-          worker_count_(avx2_ ? resolve_host_expert_worker_count() : 0U) {
+        : avx2_(resolve_avx2_backend()),
+          worker_count_(resolve_host_expert_worker_count()) {
         workers_.reserve(worker_count_);
         for (unsigned worker = 0; worker < worker_count_; ++worker) {
             workers_.emplace_back([this] { worker_loop(); });
         }
         std::fprintf(stderr, "flash_next host_expert_backend=%s workers=%u\n",
-                     avx2_ ? "avx2_fma" : "scalar_reference", worker_count_);
+                     avx2_ ? "avx2_fma_parallel" : "scalar_reference_parallel",
+                     worker_count_);
     }
 
     HostExpertWorkerPool(const HostExpertWorkerPool&) = delete;
@@ -82,15 +100,8 @@ class HostExpertWorkerPool {
 
     void run(std::span<const HostExpertTask> tasks) {
         if (tasks.empty()) { return; }
-        if (!avx2_ || workers_.empty()) {
-            CpuNvfp4ExpertReferenceScratch scratch{};
-            for (const HostExpertTask& task : tasks) {
-                flash_next_cpu_nvfp4_expert_pair_reference(
-                    task.expert,
-                    std::span<const std::uint16_t>(task.input, kFlashNextExpertHidden),
-                    std::span<float>(task.output, kFlashNextExpertHidden), scratch);
-            }
-            return;
+        if (workers_.empty()) {
+            throw std::runtime_error("host expert worker pool has no workers");
         }
         if (tasks.size() > 1'048'576ULL) {
             throw std::invalid_argument("host expert batch exceeds worker semaphore capacity");
@@ -141,10 +152,17 @@ class HostExpertWorkerPool {
 
             try {
                 const HostExpertTask& task = tasks_[index];
-                flash_next_cpu_nvfp4_expert_pair_avx2(
-                    task.expert,
-                    std::span<const std::uint16_t>(task.input, kFlashNextExpertHidden),
-                    std::span<float>(task.output, kFlashNextExpertHidden), scratch);
+                if (avx2_) {
+                    flash_next_cpu_nvfp4_expert_pair_avx2(
+                        task.expert,
+                        std::span<const std::uint16_t>(task.input, kFlashNextExpertHidden),
+                        std::span<float>(task.output, kFlashNextExpertHidden), scratch);
+                } else {
+                    flash_next_cpu_nvfp4_expert_pair_reference(
+                        task.expert,
+                        std::span<const std::uint16_t>(task.input, kFlashNextExpertHidden),
+                        std::span<float>(task.output, kFlashNextExpertHidden), scratch);
+                }
             } catch (...) {
                 std::lock_guard<std::mutex> error_lock(error_mutex_);
                 if (!error_) { error_ = std::current_exception(); }
