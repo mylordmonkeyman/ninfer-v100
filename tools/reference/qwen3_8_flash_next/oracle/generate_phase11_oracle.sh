@@ -33,7 +33,18 @@ fi
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(git -C "$script_dir" rev-parse --show-toplevel)"
 
-python_bin="${NINFER_PHASE11_PYTHON:-$repo_root/venv-oracle/bin/python}"
+python_bin="${NINFER_PHASE11_PYTHON:-}"
+if [[ -z "$python_bin" ]]; then
+  if [[ -x "$repo_root/venv-oracle/bin/python" ]]; then
+    python_bin="$repo_root/venv-oracle/bin/python"
+  elif [[ -x "$HOME/ninfer-v100/venv-oracle/bin/python" ]]; then
+    # Supports running the generator from a clean temporary worktree while
+    # reusing the already-provisioned oracle environment in the canonical checkout.
+    python_bin="$HOME/ninfer-v100/venv-oracle/bin/python"
+  else
+    python_bin="$repo_root/venv-oracle/bin/python"
+  fi
+fi
 model_dir="${NINFER_PHASE11_MODEL_DIR:-/srv/ninfer/source/mixed}"
 ple_dir="${NINFER_PHASE11_PLE_DIR:-/srv/ninfer/source/ple/ples_int4}"
 output_dir="${NINFER_PHASE11_OUTPUT_DIR:-/srv/ninfer/oracle/phase11}"
