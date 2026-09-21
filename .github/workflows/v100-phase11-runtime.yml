@@ -35,6 +35,12 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
+      - name: Validate oracle helper syntax
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 -m py_compile tools/reference/qwen3_8_flash_next/oracle/run_oracle.py
+
       # The Phase 11 targets link ninfer_ops, which makes Ninja compile every
       # ops translation unit. These attention kernels are Ampere-only and are
       # not part of the Phase 11 vertical slice. Keep this compile gate scoped
