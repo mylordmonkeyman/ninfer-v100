@@ -12,9 +12,15 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <exception>
+#include <mutex>
+#include <semaphore>
 #include <span>
 #include <stdexcept>
+#include <thread>
 #include <vector>
+#include <condition_variable>
 
 #include "core/device.h"
 
@@ -24,6 +30,163 @@ namespace {
 std::atomic<std::uint64_t> s_host_expert_layer_calls{0};
 std::atomic<std::uint64_t> s_host_expert_routed_tokens{0};
 std::atomic<std::uint64_t> s_host_expert_pairs{0};
+
+struct HostExpertTask {
+    HostNvfp4ExpertPairView expert{};
+    const std::uint16_t* input = nullptr;
+    float* output = nullptr;
+};
+
+unsigned resolve_host_expert_worker_count() {
+    constexpr unsigned kDefaultWorkers = 32;
+    constexpr unsigned kMaximumWorkers = 256;
+    if (const char* env = std::getenv("NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS");
+        env != nullptr && env[0] != '\0') {
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(env, &end, 10);
+        if (end == env || *end != '\0' || parsed == 0 || parsed > kMaximumWorkers) {
+            throw std::invalid_argument(
+                "NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS must be in [1, 256]");
+        }
+        return static_cast<unsigned>(parsed);
+    }
+    const unsigned hardware = std::thread::hardware_concurrency();
+    return std::min(kDefaultWorkers, hardware == 0 ? 1U : hardware);
+}
+
+class HostExpertWorkerPool {
+  public:
+    HostExpertWorkerPool()
+        : avx2_(flash_next_cpu_nvfp4_avx2_available()),
+          worker_count_(avx2_ ? resolve_host_expert_worker_count() : 0U) {
+        workers_.reserve(worker_count_);
+        for (unsigned worker = 0; worker < worker_count_; ++worker) {
+            workers_.emplace_back([this] { worker_loop(); });
+        }
+        std::fprintf(stderr, "flash_next host_expert_backend=%s workers=%u\n",
+                     avx2_ ? "avx2_fma" : "scalar_reference", worker_count_);
+    }
+
+    HostExpertWorkerPool(const HostExpertWorkerPool&) = delete;
+    HostExpertWorkerPool& operator=(const HostExpertWorkerPool&) = delete;
+
+    ~HostExpertWorkerPool() {
+        stop_.store(true, std::memory_order_release);
+        if (!workers_.empty()) {
+            work_.release(static_cast<std::ptrdiff_t>(workers_.size()));
+        }
+        for (std::thread& worker : workers_) {
+            if (worker.joinable()) { worker.join(); }
+        }
+    }
+
+    void run(std::span<const HostExpertTask> tasks) {
+        if (tasks.empty()) { return; }
+        if (!avx2_ || workers_.empty()) {
+            CpuNvfp4ExpertReferenceScratch scratch{};
+            for (const HostExpertTask& task : tasks) {
+                flash_next_cpu_nvfp4_expert_pair_reference(
+                    task.expert,
+                    std::span<const std::uint16_t>(task.input, kFlashNextExpertHidden),
+                    std::span<float>(task.output, kFlashNextExpertHidden), scratch);
+            }
+            return;
+        }
+        if (tasks.size() > 1'048'576ULL) {
+            throw std::invalid_argument("host expert batch exceeds worker semaphore capacity");
+        }
+
+        std::unique_lock<std::mutex> submit_lock(submit_mutex_);
+        tasks_ = tasks.data();
+        task_count_ = tasks.size();
+        next_.store(0, std::memory_order_relaxed);
+        remaining_.store(tasks.size(), std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> error_lock(error_mutex_);
+            error_ = nullptr;
+        }
+
+        work_.release(static_cast<std::ptrdiff_t>(tasks.size()));
+        {
+            std::unique_lock<std::mutex> done_lock(done_mutex_);
+            done_cv_.wait(done_lock, [this] {
+                return remaining_.load(std::memory_order_acquire) == 0;
+            });
+        }
+
+        std::exception_ptr error;
+        {
+            std::lock_guard<std::mutex> error_lock(error_mutex_);
+            error = error_;
+        }
+        tasks_ = nullptr;
+        task_count_ = 0;
+        if (error) { std::rethrow_exception(error); }
+    }
+
+  private:
+    void worker_loop() {
+        CpuNvfp4ExpertReferenceScratch scratch{};
+        for (;;) {
+            work_.acquire();
+            if (stop_.load(std::memory_order_acquire)) { return; }
+
+            const std::size_t index =
+                next_.fetch_add(1, std::memory_order_relaxed);
+            if (index >= task_count_) {
+                // One semaphore permit is released per task, so this is a hard
+                // invariant unless the pool state was corrupted.
+                std::terminate();
+            }
+
+            try {
+                const HostExpertTask& task = tasks_[index];
+                flash_next_cpu_nvfp4_expert_pair_avx2(
+                    task.expert,
+                    std::span<const std::uint16_t>(task.input, kFlashNextExpertHidden),
+                    std::span<float>(task.output, kFlashNextExpertHidden), scratch);
+            } catch (...) {
+                std::lock_guard<std::mutex> error_lock(error_mutex_);
+                if (!error_) { error_ = std::current_exception(); }
+            }
+
+            if (remaining_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                done_cv_.notify_one();
+            }
+        }
+    }
+
+    bool avx2_ = false;
+    unsigned worker_count_ = 0;
+    std::vector<std::thread> workers_;
+    std::counting_semaphore<1'048'576> work_{0};
+    std::atomic<bool> stop_{false};
+    std::atomic<std::size_t> next_{0};
+    std::atomic<std::size_t> remaining_{0};
+    const HostExpertTask* tasks_ = nullptr;
+    std::size_t task_count_ = 0;
+    std::mutex submit_mutex_;
+    std::mutex done_mutex_;
+    std::condition_variable done_cv_;
+    std::mutex error_mutex_;
+    std::exception_ptr error_;
+};
+
+HostExpertWorkerPool& host_expert_worker_pool() {
+    static HostExpertWorkerPool pool;
+    return pool;
+}
+
+struct HostMoeCpuBuffers {
+    std::vector<std::uint16_t> input;
+    std::vector<std::int32_t> ids;
+    std::vector<float> alpha;
+    std::vector<float> routed_sum;
+    std::vector<float> pair_outputs;
+    std::vector<HostExpertTask> tasks;
+};
+
+thread_local HostMoeCpuBuffers s_host_moe_buffers;
 
 
 bool aligned_to(const void* pointer, std::uintptr_t alignment) {
@@ -173,47 +336,63 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     const std::size_t input_words =
         static_cast<std::size_t>(tokens) * kFlashNextExpertHidden;
     const std::size_t routed_paths = static_cast<std::size_t>(tokens) * 10ULL;
-    std::vector<std::uint16_t> host_input(input_words);
-    std::vector<std::int32_t> host_ids(routed_paths);
-    std::vector<float> host_alpha(routed_paths);
+    HostMoeCpuBuffers& cpu = s_host_moe_buffers;
+    cpu.input.resize(input_words);
+    cpu.ids.resize(routed_paths);
+    cpu.alpha.resize(routed_paths);
+    cpu.routed_sum.resize(
+        static_cast<std::size_t>(tokens) * kFlashNextExpertHidden);
+    cpu.pair_outputs.resize(routed_paths * kFlashNextExpertHidden);
+    cpu.tasks.resize(routed_paths);
+    std::fill(cpu.routed_sum.begin(), cpu.routed_sum.end(), 0.0F);
 
-    CUDA_CHECK(cudaMemcpyAsync(host_input.data(), input.data,
+    CUDA_CHECK(cudaMemcpyAsync(cpu.input.data(), input.data,
                                input_words * sizeof(std::uint16_t),
                                cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaMemcpyAsync(host_ids.data(), scratch.ids.data,
+    CUDA_CHECK(cudaMemcpyAsync(cpu.ids.data(), scratch.ids.data,
                                routed_paths * sizeof(std::int32_t),
                                cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaMemcpyAsync(host_alpha.data(), scratch.alpha.data,
+    CUDA_CHECK(cudaMemcpyAsync(cpu.alpha.data(), scratch.alpha.data,
                                routed_paths * sizeof(float),
                                cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    // Correctness-first Phase-10 CPU execution. Each expert pair sees the exact compact
-    // mapped bytes and rounds SiLU(gate)*up through BF16 before the down projection.
-    // Routing alpha is accumulated in the same path order as the GPU reference.
-    std::vector<float> routed_sum(
-        static_cast<std::size_t>(tokens) * kFlashNextExpertHidden, 0.0F);
-    std::vector<float> pair_output(kFlashNextExpertHidden);
-    CpuNvfp4ExpertReferenceScratch cpu_scratch{};
-
+    // Independent routed expert pairs are computed concurrently. Each task writes
+    // a private FP32 vector. Routing alpha is then accumulated below on this thread
+    // in the original token/path order so the reduction contract remains deterministic.
     for (std::int32_t token = 0; token < tokens; ++token) {
-        const auto input_span = std::span<const std::uint16_t>(
-            host_input.data() + static_cast<std::size_t>(token) * kFlashNextExpertHidden,
-            kFlashNextExpertHidden);
-        float* token_sum =
-            routed_sum.data() + static_cast<std::size_t>(token) * kFlashNextExpertHidden;
-
+        const std::uint16_t* token_input =
+            cpu.input.data() +
+            static_cast<std::size_t>(token) * kFlashNextExpertHidden;
         for (std::int32_t path = 0; path < 10; ++path) {
             const std::size_t route_index =
-                static_cast<std::size_t>(token) * 10ULL + static_cast<std::size_t>(path);
-            const HostNvfp4ExpertPairView expert =
-                host_experts.expert(host_ids[route_index]);
-            flash_next_cpu_nvfp4_expert_pair_reference(
-                expert, input_span, std::span<float>(pair_output), cpu_scratch);
+                static_cast<std::size_t>(token) * 10ULL +
+                static_cast<std::size_t>(path);
+            cpu.tasks[route_index] = HostExpertTask{
+                .expert = host_experts.expert(cpu.ids[route_index]),
+                .input = token_input,
+                .output = cpu.pair_outputs.data() +
+                          route_index * kFlashNextExpertHidden,
+            };
+        }
+    }
 
-            const float alpha = host_alpha[route_index];
+    host_expert_worker_pool().run(cpu.tasks);
+
+    for (std::int32_t token = 0; token < tokens; ++token) {
+        float* token_sum =
+            cpu.routed_sum.data() +
+            static_cast<std::size_t>(token) * kFlashNextExpertHidden;
+        for (std::int32_t path = 0; path < 10; ++path) {
+            const std::size_t route_index =
+                static_cast<std::size_t>(token) * 10ULL +
+                static_cast<std::size_t>(path);
+            const float* pair_output =
+                cpu.pair_outputs.data() + route_index * kFlashNextExpertHidden;
+            const float alpha = cpu.alpha[route_index];
             for (std::size_t row = 0; row < kFlashNextExpertHidden; ++row) {
-                token_sum[row] = std::fma(alpha, pair_output[row], token_sum[row]);
+                token_sum[row] =
+                    std::fma(alpha, pair_output[row], token_sum[row]);
             }
         }
     }
@@ -234,7 +413,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     static_assert(kActivationPitchBytes >= kRoutedBytesPerToken);
     CUDA_CHECK(cudaMemcpy2DAsync(
         scratch.activations.data, kActivationPitchBytes,
-        routed_sum.data(), kRoutedBytesPerToken,
+        cpu.routed_sum.data(), kRoutedBytesPerToken,
         kRoutedBytesPerToken, static_cast<std::size_t>(tokens),
         cudaMemcpyHostToDevice, stream));
     flash_next_moe_host_routed_merge_launch(

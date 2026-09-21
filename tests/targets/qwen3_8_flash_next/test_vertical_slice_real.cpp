@@ -13,6 +13,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -311,6 +312,7 @@ int main() {
         Phase11OracleAccumulator metrics_accumulator;
         auto lane = executor.allocate_lane();
         std::uint64_t sampled_tokens = 0;
+        const auto qualification_started = std::chrono::steady_clock::now();
 
         for (std::size_t index = 0; index < records.size(); ++index) {
             const OracleRecord& record = records[index];
@@ -375,6 +377,33 @@ int main() {
                 static_cast<std::int32_t>(record.position + 1U)) {
                 throw std::runtime_error(
                     "Phase 11 recurrent/state frontier did not advance");
+            }
+
+            const std::size_t completed = index + 1U;
+            if ((completed % 64U) == 0U || completed == records.size()) {
+                const double elapsed = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - qualification_started).count();
+                const auto progress_stats =
+                    flash_next_host_expert_execution_stats();
+                const double positions_per_second =
+                    elapsed > 0.0 ? static_cast<double>(completed) / elapsed : 0.0;
+                const double pairs_per_second =
+                    elapsed > 0.0
+                        ? static_cast<double>(progress_stats.expert_pairs) / elapsed
+                        : 0.0;
+                const double remaining_seconds =
+                    positions_per_second > 0.0
+                        ? static_cast<double>(records.size() - completed) /
+                              positions_per_second
+                        : 0.0;
+                std::cout << std::fixed << std::setprecision(3)
+                          << "phase11.progress.positions=" << completed
+                          << "/" << records.size()
+                          << " elapsed_s=" << elapsed
+                          << " positions_per_s=" << positions_per_second
+                          << " expert_pairs_per_s=" << pairs_per_second
+                          << " eta_s=" << remaining_seconds << '\n'
+                          << std::flush;
             }
         }
 

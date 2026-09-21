@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <iostream>
 #include <vector>
 
@@ -55,6 +56,23 @@ int main() {
     CpuNvfp4ExpertReferenceScratch scratch{};
     flash_next_cpu_nvfp4_expert_pair_reference(expert, input, output, scratch);
 
+    if (flash_next_cpu_nvfp4_avx2_available()) {
+        std::array<float, kFlashNextExpertHidden> avx2_output{};
+        CpuNvfp4ExpertReferenceScratch avx2_scratch{};
+        flash_next_cpu_nvfp4_expert_pair_avx2(
+            expert, input, avx2_output, avx2_scratch);
+        for (std::size_t row = 0; row < output.size(); ++row) {
+            const float tolerance =
+                1.0e-5F * std::max(1.0F, std::abs(output[row]));
+            if (std::abs(avx2_output[row] - output[row]) > tolerance) {
+                std::cerr << "CPU NVFP4 AVX2 row " << row
+                          << " differs from scalar reference: "
+                          << avx2_output[row] << " vs " << output[row] << '\n';
+                return 1;
+            }
+        }
+    }
+
     for (std::size_t row = 0; row < output.size(); ++row) {
         if (output[row] != 4096.0F) {
             std::cerr << "CPU NVFP4 reference row " << row << " produced "
@@ -62,6 +80,6 @@ int main() {
             return 1;
         }
     }
-    std::cout << "PASS: CPU NVFP4 expert-pair scalar reference\n";
+    std::cout << "PASS: CPU NVFP4 expert-pair scalar/AVX2 parity\n";
     return 0;
 }
