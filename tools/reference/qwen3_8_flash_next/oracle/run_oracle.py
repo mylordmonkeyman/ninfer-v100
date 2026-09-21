@@ -289,6 +289,94 @@ def register_hooks(model: nn.Module):
 
     return stage_outputs
 
+def parse_token_list(ids: str, ids_file: str, token_id: int) -> List[int]:
+    if ids and ids_file:
+        raise SystemExit("--ids and --ids-file are mutually exclusive")
+    if ids_file:
+        with open(ids_file, "r", encoding="utf-8") as f:
+            root = json.load(f)
+        if isinstance(root, dict):
+            if "token_ids" not in root:
+                raise SystemExit("--ids-file JSON object must contain a token_ids array")
+            root = root["token_ids"]
+        if not isinstance(root, list) or not root:
+            raise SystemExit("--ids-file must contain a non-empty JSON token ID array")
+        return [int(t) for t in root]
+    if ids:
+        parsed = [int(t.strip()) for t in ids.split(",") if t.strip()]
+        if not parsed:
+            raise SystemExit("--ids did not contain any token IDs")
+        return parsed
+    return [token_id]
+
+
+def dump_logits_only(
+    hidden_states: torch.Tensor,
+    lm_head_weight: torch.Tensor,
+    token_list: List[int],
+    dump_root: str,
+    chunk_size: int,
+):
+    if chunk_size <= 0:
+        raise SystemExit("--logits-chunk-size must be positive")
+    if hidden_states.ndim != 3 or hidden_states.shape[0] != 1:
+        raise RuntimeError("logits-only oracle expects hidden states shaped [1, seq, hidden]")
+    if hidden_states.shape[1] != len(token_list):
+        raise RuntimeError("logits-only oracle hidden/token length mismatch")
+
+    os.makedirs(dump_root, exist_ok=True)
+    manifest = {
+        "oracle": {
+            "kind": "qwen3_8_flash_next_cpu_fp32_logits_only",
+            "teacher_forced": True,
+            "dtype": "FP32",
+        },
+        "positions": [],
+    }
+
+    total = len(token_list)
+    for start in range(0, total, chunk_size):
+        end = min(total, start + chunk_size)
+        with torch.no_grad():
+            logits_chunk = F.linear(hidden_states[:, start:end, :], lm_head_weight)[0]
+
+        for local_idx in range(end - start):
+            pos = start + local_idx
+            logits_pos = logits_chunk[local_idx].detach().contiguous().cpu()
+            data = logits_pos.numpy().astype(np.float32, copy=False).tobytes()
+            bin_file = f"pos{pos:06d}_logits.bin"
+            with open(os.path.join(dump_root, bin_file), "wb") as out:
+                out.write(data)
+
+            manifest["positions"].append({
+                "position": pos,
+                "token_id": int(token_list[pos]),
+                "tensors": [{
+                    "name": "logits",
+                    "dtype": "FP32",
+                    "shape": [int(logits_pos.numel())],
+                    "file": bin_file,
+                    "bytes": len(data),
+                }],
+            })
+
+            if pos < 4 or (pos + 1) % 128 == 0 or pos + 1 == total:
+                top1 = int(torch.argmax(logits_pos).item())
+                print(
+                    f"[logits-only {pos + 1:04d}/{total:04d}] "
+                    f"token={token_list[pos]} top1={top1}"
+                )
+
+        del logits_chunk
+
+    manifest_tmp = os.path.join(dump_root, "manifest.json.tmp")
+    manifest_path = os.path.join(dump_root, "manifest.json")
+    with open(manifest_tmp, "w", encoding="utf-8") as out:
+        json.dump(manifest, out, indent=2)
+    os.replace(manifest_tmp, manifest_path)
+    print(f"Dumped {total} FP32 logits-only positions to {manifest_path}")
+
+
 # The MTP reference lives in mtp_reference.py, faithful to vLLM's
 # Qwen4ExpMultiTokenPredictor. The class that used to sit here mixed the four
 # hyper streams down in the stem and repeated the result, omitted
@@ -386,14 +474,20 @@ def main():
     parser.add_argument("--ple-dir", default=r"E:\NInfer\qwen3_8_flash_next\source\ple\ples_int4", help="Path to PLE INT4 shards")
     parser.add_argument("--token-id", type=int, default=248045, help="Single token ID to execute")
     parser.add_argument("--ids", type=str, default="", help="Comma-separated token IDs to execute in sequence")
+    parser.add_argument("--ids-file", type=str, default="", help="JSON file containing a token ID array or {\\\"token_ids\\\": [...]}")
     parser.add_argument("--dump-states", type=str, default="", help="Directory to dump state tensors and manifest")
+    parser.add_argument("--dump-logits", type=str, default="", help="Directory to dump only FP32 logits and a Phase 11-compatible manifest")
+    parser.add_argument("--logits-chunk-size", type=int, default=8, help="LM-head positions per chunk in --dump-logits mode")
     parser.add_argument("--mtp-synthetic", action="store_true", help="Run MTP synthetic architecture parity step")
     parser.add_argument("--mtp-real", action="store_true", help="Run the real-weight MTP reference over --ids (scheme A) and chained draft steps")
     parser.add_argument("--draft-steps", type=int, default=3, help="Chained draft steps after the prompt in --mtp-real")
     args = parser.parse_args()
 
+    if args.dump_states and args.dump_logits:
+        raise SystemExit("--dump-states and --dump-logits are mutually exclusive")
+
     if args.mtp_real:
-        ids = [int(t.strip()) for t in args.ids.split(",") if t.strip()] if args.ids else [args.token_id]
+        ids = parse_token_list(args.ids, args.ids_file, args.token_id)
         run_mtp_real(args.model_dir, args.ple_dir, ids, args.draft_steps, args.dump_states)
         return
 
@@ -430,18 +524,30 @@ def main():
 
     print(f"Building authoritative Transformers Qwen4ExpTextModel from {args.model_dir} ...")
     model, lm_head_weight = build_oracle(args.model_dir, args.ple_dir)
-    stage_outputs = register_hooks(model)
+    stage_outputs = register_hooks(model) if args.dump_states else None
 
-    if args.ids:
-        token_list = [int(t.strip()) for t in args.ids.split(",") if t.strip()]
-    else:
-        token_list = [args.token_id]
+    token_list = parse_token_list(args.ids, args.ids_file, args.token_id)
 
     input_ids = torch.tensor([token_list], dtype=torch.long)
-    print(f"Running teacher-forced forward pass for {len(token_list)} tokens: {token_list} ...")
+    if args.dump_logits:
+        print(f"Running logits-only teacher-forced forward pass for {len(token_list)} tokens ...")
+    else:
+        print(f"Running teacher-forced forward pass for {len(token_list)} tokens: {token_list} ...")
 
     with torch.no_grad():
         out = model(input_ids=input_ids, use_cache=False)
+
+    if args.dump_logits:
+        dump_logits_only(
+            out.last_hidden_state,
+            lm_head_weight,
+            token_list,
+            args.dump_logits,
+            args.logits_chunk_size,
+        )
+        return
+
+    with torch.no_grad():
         logits_all = F.linear(out.last_hidden_state, lm_head_weight)  # [1, seq_len, vocab_size]
 
     manifest = {"positions": []}
@@ -456,6 +562,7 @@ def main():
         print("  Top-5: ", ", ".join(f"{tid.item()}:{val.item():.2f}" for val, tid in zip(top5_vals, top5_ids)))
 
         if args.dump_states:
+            assert stage_outputs is not None
             pos_dir = os.path.join(args.dump_states, f"pos{pos:04d}")
             os.makedirs(pos_dir, exist_ok=True)
             pos_records = []
