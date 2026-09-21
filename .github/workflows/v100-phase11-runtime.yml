@@ -176,7 +176,12 @@ jobs:
           ctest \
             --test-dir build-v100 \
             -V \
-            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.full_phase11) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[full-phase11]')) }}
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+            2>&1 | tee "$result_dir/oracle-calibration-128.log"
+
+      # A [full-phase11] push opts into the expensive full-oracle qualification.
+      - name: Validate full Phase 11 oracle
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.full_phase11) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[full-phase11]')) }}
         shell: bash
         run: |
           set -euxo pipefail
