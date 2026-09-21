@@ -5,6 +5,12 @@ on:
     branches:
       - forwardport/v100-flash-next
   workflow_dispatch:
+    inputs:
+      full_phase11:
+        description: Run the full >=4096-position Phase 11 qualification oracle
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: v100-phase11-runtime-${{ github.ref }}
@@ -20,7 +26,7 @@ jobs:
       - cuda-12-8
       - ninfer-phase11
 
-    timeout-minutes: 90
+    timeout-minutes: 360
 
     steps:
       - name: Checkout
@@ -85,45 +91,52 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "=== Git ==="
           git rev-parse HEAD
-          git status --short
-
-          echo "=== GPU ==="
           nvidia-smi
-
-          echo "=== GPU details ==="
-          nvidia-smi --query-gpu=name,uuid,memory.total,driver_version --format=csv
-
-          echo "=== CUDA ==="
           nvcc --version
-
-          echo "=== CMake ==="
           cmake --version
-
-          echo "=== Ninja ==="
           ninja --version
-
-          echo "=== CPU ==="
-          lscpu
-
-          echo "=== NUMA ==="
           numactl --hardware
+          test -r /models/qwen3-8b-flash-next
+          test -r /oracle/cpu_seq/manifest.json
 
-          echo "=== PCI ==="
-          lspci | grep -i -E 'nvidia|vga|3d'
+      - name: Validate mounted CPU oracle smoke
+        shell: bash
+        run: |
+          set -euxo pipefail
 
-          echo "=== Models ==="
-          find /models -maxdepth 3 -type f | head -100
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
 
-          echo "=== Oracle ==="
-          find /oracle -maxdepth 3 -type f | head -100
+          manifest = Path("/oracle/cpu_seq/manifest.json")
+          root = json.loads(manifest.read_text())
+          positions = root["positions"]
+          expected = [248045, 846, 198, 20206]
+          if len(positions) < len(expected):
+              raise SystemExit(f"oracle has only {len(positions)} positions")
 
-          echo "=== Filesystems ==="
-          df -h
+          for i, token_id in enumerate(expected):
+              rec = positions[i]
+              if rec["position"] != i:
+                  raise SystemExit(f"oracle position {i} is not contiguous")
+              if rec["token_id"] != token_id:
+                  raise SystemExit(
+                      f"oracle token {i}: expected {token_id}, got {rec['token_id']}"
+                  )
+              logits = next(
+                  (t for t in rec["tensors"] if t["name"] == "logits"),
+                  None,
+              )
+              if logits is None or logits["dtype"] != "FP32":
+                  raise SystemExit(f"oracle position {i} is missing FP32 logits")
+              path = manifest.parent / logits["file"]
+              expected_bytes = int(logits["shape"][0]) * 4
+              if not path.is_file() or path.stat().st_size != expected_bytes:
+                  raise SystemExit(f"oracle logits file is invalid: {path}")
 
-          echo "=== Memory ==="
-          free -h
+          print("Validated 4-position independent CPU FP32 oracle")
+          PY
 
       - name: Configure CUDA 12.8 SM70
         shell: bash
@@ -153,7 +166,6 @@ jobs:
               ninfer_qwen3_8_flash_next_vertical_slice_real_test \
               ninfer_qwen3_8_flash_next_text_executor_test \
               ninfer_qwen3_8_flash_next_load_plan_test \
-              ninfer_qwen3_8_flash_next_reference \
             -j "$(nproc)"
 
       - name: Run Phase 11 contract test
@@ -166,43 +178,77 @@ jobs:
             --output-on-failure \
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_test$'
 
-      - name: Run physical V100 one-position smoke
+      - name: Run 4-position independent CPU-oracle smoke
         shell: bash
         env:
-          NINFER_FLASH_NEXT_ORACLE_CHAT23_MAX_POSITIONS: "1"
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/cpu_seq/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "4"
         run: |
           set -euxo pipefail
 
-          smoke_dir="${RUNNER_TEMP}/phase11-v100-smoke"
-          rm -rf "$smoke_dir"
-          mkdir -p "$smoke_dir"
+          result_dir="/results/phase11/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$result_dir"
 
-          build-v100/tools/reference/qwen3_8_flash_next/ninfer_qwen3_8_flash_next_reference \
-            -m /models/qwen3-8b-flash-next \
-            --oracle-chat23-logits "$smoke_dir"
+          ctest \
+            --test-dir build-v100 \
+            -V \
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+            2>&1 | tee "$result_dir/oracle-smoke.log"
 
-          test -s "$smoke_dir/pos0000_logits.bin"
-          test "$(stat -c '%s' "$smoke_dir/pos0000_logits.bin")" -eq 496640
-
-          echo "=== Smoke output ==="
-          ls -lh "$smoke_dir"
-          echo "=== GPU after smoke ==="
-          nvidia-smi
-
-      - name: Upload V100 smoke output
-        uses: actions/upload-artifact@v4
-        with:
-          name: v100-phase11-smoke-${{ github.sha }}
-          path: ${{ runner.temp }}/phase11-v100-smoke/
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Report Phase 11 acceptance-oracle status
+      - name: Validate full Phase 11 oracle
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_phase11 }}
         shell: bash
         run: |
           set -euxo pipefail
 
-          echo "The physical V100 runtime smoke above executed real model code."
-          echo "The final Phase 11 correctness gate still requires a >=4096-position"
-          echo "FP32 teacher-forced oracle manifest via NINFER_FLASH_NEXT_ORACLE_MANIFEST."
-          echo "The 23-position BF16 chat diagnostic dump is not that acceptance oracle."
+          test -r /oracle/phase11/manifest.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = Path("/oracle/phase11/manifest.json")
+          positions = json.loads(manifest.read_text())["positions"]
+          if len(positions) < 4096:
+              raise SystemExit(
+                  f"full Phase 11 oracle has only {len(positions)} positions"
+              )
+          print(f"Validated full Phase 11 oracle metadata: {len(positions)} positions")
+          PY
+
+      - name: Run full Phase 11 qualification
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_phase11 }}
+        shell: bash
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+        run: |
+          set -euxo pipefail
+
+          result_dir="/results/phase11/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$result_dir"
+
+          ctest \
+            --test-dir build-v100 \
+            -V \
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+            2>&1 | tee "$result_dir/oracle-full.log"
+
+      - name: Capture final GPU state
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          result_dir="/results/phase11/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$result_dir"
+          nvidia-smi | tee "$result_dir/nvidia-smi.txt"
+          git rev-parse HEAD | tee "$result_dir/commit.txt"
+
+      - name: Upload Phase 11 results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v100-phase11-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /results/phase11/${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: warn
+          retention-days: 14
