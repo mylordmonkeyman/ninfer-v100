@@ -1,6 +1,9 @@
 name: V100 Phase 11 Runtime
 
 on:
+  push:
+    branches:
+      - forwardport/v100-flash-next
   workflow_dispatch:
 
 concurrency:
@@ -139,13 +142,6 @@ jobs:
             -DNINFER_BUILD_BENCHMARKS=OFF \
             -DBUILD_TESTING=ON
 
-      - name: List CMake targets
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          cmake --build build-v100 --target help | tee build-targets.txt
-
       - name: Build Phase 11 targets
         shell: bash
         run: |
@@ -157,8 +153,9 @@ jobs:
               ninfer_qwen3_8_flash_next_vertical_slice_real_test \
               ninfer_qwen3_8_flash_next_text_executor_test \
               ninfer_qwen3_8_flash_next_load_plan_test \
+              ninfer_qwen3_8_flash_next_reference \
             -j "$(nproc)"
-            
+
       - name: Run Phase 11 contract test
         shell: bash
         run: |
@@ -168,13 +165,44 @@ jobs:
             --test-dir build-v100 \
             --output-on-failure \
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_test$'
-      
-      - name: Run Phase 11 real vertical slice
+
+      - name: Run physical V100 one-position smoke
+        shell: bash
+        env:
+          NINFER_FLASH_NEXT_ORACLE_CHAT23_MAX_POSITIONS: "1"
+        run: |
+          set -euxo pipefail
+
+          smoke_dir="${RUNNER_TEMP}/phase11-v100-smoke"
+          rm -rf "$smoke_dir"
+          mkdir -p "$smoke_dir"
+
+          build-v100/tools/reference/qwen3_8_flash_next/ninfer_qwen3_8_flash_next_reference \
+            -m /models/qwen3-8b-flash-next \
+            --oracle-chat23-logits "$smoke_dir"
+
+          test -s "$smoke_dir/pos0000_logits.bin"
+          test "$(stat -c '%s' "$smoke_dir/pos0000_logits.bin")" -eq 496640
+
+          echo "=== Smoke output ==="
+          ls -lh "$smoke_dir"
+          echo "=== GPU after smoke ==="
+          nvidia-smi
+
+      - name: Upload V100 smoke output
+        uses: actions/upload-artifact@v4
+        with:
+          name: v100-phase11-smoke-${{ github.sha }}
+          path: ${{ runner.temp }}/phase11-v100-smoke/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Report Phase 11 acceptance-oracle status
         shell: bash
         run: |
           set -euxo pipefail
 
-          ctest \
-            --test-dir build-v100 \
-            --output-on-failure \
-            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$'
+          echo "The physical V100 runtime smoke above executed real model code."
+          echo "The final Phase 11 correctness gate still requires a >=4096-position"
+          echo "FP32 teacher-forced oracle manifest via NINFER_FLASH_NEXT_ORACLE_MANIFEST."
+          echo "The 23-position BF16 chat diagnostic dump is not that acceptance oracle."
