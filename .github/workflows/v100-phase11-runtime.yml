@@ -160,7 +160,6 @@ jobs:
             2>&1 | tee "$result_dir/oracle-smoke.log"
 
       - name: Run 128-position Phase 11 calibration
-        if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[phase11-calibrate]') }}
         shell: bash
         env:
           NINFER_WEIGHTS: /models/qwen3-8b-flash-next
