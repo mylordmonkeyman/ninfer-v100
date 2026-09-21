@@ -41,6 +41,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -1752,6 +1753,7 @@ int run_materialize_mtp(const ReferenceToolOptions& opts) {
     return 0;
 }
 
+#if !defined(NINFER_VOLTA_BUILD)
 int run_mtp_step(const ReferenceToolOptions& opts) {
     int device_count = 0;
     const auto err   = cudaGetDeviceCount(&device_count);
@@ -1836,6 +1838,8 @@ int run_mtp_step(const ReferenceToolOptions& opts) {
     return 0;
 }
 
+#endif
+
 int run_oracle_chat23_logits(const ReferenceToolOptions& opts) {
     int device_count = 0;
     const auto err   = cudaGetDeviceCount(&device_count);
@@ -1868,7 +1872,11 @@ int run_oracle_chat23_logits(const ReferenceToolOptions& opts) {
     const std::uint32_t resolved_groups =
         opts.page_groups == 0 ? curve.maximum_main_page_groups : opts.page_groups;
     auto runtime_plan = finalize_flash_next_runtime_plan(config, resolved_groups);
-    auto model        = LoadedModel::load_from_file(opts.model_path, device);
+    LoadFeatures oracle_features{};
+#if defined(NINFER_VOLTA_BUILD)
+    oracle_features.host_backed_experts = true;
+#endif
+    auto model = LoadedModel::load_from_file(opts.model_path, device, oracle_features);
     FlashNextRuntimeAllocation alloc(runtime_plan);
     alloc.initialize(device.stream);
     FlashNextTextExecutor executor(model.text_view(), model.ple_metadata(), device, alloc);
@@ -1944,7 +1952,11 @@ int main(int argc, char** argv) {
         } else if (opts.mode == "materialize-mtp") {
             return run_materialize_mtp(opts);
         } else if (opts.mode == "mtp-step") {
+#if defined(NINFER_VOLTA_BUILD)
+            throw std::runtime_error("mtp-step is not qualified for the Volta reference build");
+#else
             return run_mtp_step(opts);
+#endif
         } else if (opts.mode == "mtp-acceptance-trace") {
             return run_mtp_acceptance_trace(opts);
         } else if (opts.mode == "chat-diagnostic") {
