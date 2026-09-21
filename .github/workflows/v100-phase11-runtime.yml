@@ -88,7 +88,14 @@ jobs:
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
             -DCMAKE_CUDA_ARCHITECTURES=70
+      
+      - name: List CMake targets
+        shell: bash
+        run: |
+          set -euxo pipefail
 
+          cmake --build build-v100 --target help | tee build-targets.txt
+          
       - name: Build Phase 11 targets
         shell: bash
         run: |
