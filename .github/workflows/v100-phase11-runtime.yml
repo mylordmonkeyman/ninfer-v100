@@ -41,57 +41,6 @@ jobs:
           set -euxo pipefail
           python3 -m py_compile tools/reference/qwen3_8_flash_next/oracle/run_oracle.py
 
-      # The Phase 11 targets link ninfer_ops, which makes Ninja compile every
-      # ops translation unit. These attention kernels are Ampere-only and are
-      # not part of the Phase 11 vertical slice. Keep this compile gate scoped
-      # to Phase 11 rather than broadening the Volta port into unrelated work.
-      - name: Isolate unrelated Ampere-only attention kernels
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path('src/ops/softmax_attention/selected_block/selected_block_attention.cu')
-          text = path.read_text()
-          text = text.replace(
-              '#include "prefill.cuh"',
-              '#if !defined(NINFER_VOLTA_BUILD)\n#include "prefill.cuh"\n#endif'
-          )
-
-          marker = 'void selected_block_attention(const Tensor& query, const Tensor& positions,\n                                      int table_row,'
-          start = text.index(marker)
-          end = text.index('\n} // namespace ninfer::ops', start)
-
-          body = text[start:end]
-
-          text = (
-              text[:start]
-              + '#if !defined(NINFER_VOLTA_BUILD)\n'
-              + body
-              + '\n#endif\n'
-              + text[end:]
-          )
-
-          path.write_text(text)
-
-          cmake = Path('src/CMakeLists.txt')
-          text = cmake.read_text()
-
-          for source in (
-              'ops/softmax_attention/dense/causal_cache/small_t.cu',
-              'ops/softmax_attention/dense/causal_cache/small_t_fp8.cu',
-              'ops/softmax_attention/dense/causal_cache/small_t_nvfp4.cu',
-              'ops/softmax_attention/dense/causal_cache/small_t_k8v4.cu',
-              'ops/softmax_attention/dense/causal_cache/prompt.cu',
-              'ops/softmax_attention/dense/causal_cache/prompt_fp8.cu',
-          ):
-              text = text.replace(f'  {source}\n', '')
-
-          cmake.write_text(text)
-          PY
-
       - name: Verify V100 environment
         shell: bash
         run: |
