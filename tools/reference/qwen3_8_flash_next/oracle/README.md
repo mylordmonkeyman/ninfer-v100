@@ -52,9 +52,28 @@ E:\NInfer\venv-qwen4exp\Scripts\python.exe run_oracle.py `
 
 ### Phase 11 logits-only acceptance oracle
 
-For the frozen >=4096-position Phase 11 teacher-forced oracle, use the logits-only mode rather than `--dump-states`. It does not register the intermediate-state hooks and materializes the LM head in small position chunks, so the output contains only the FP32 logits needed by the V100 qualification test.
+For the frozen >=4096-position Phase 11 teacher-forced oracle, use the dedicated generator rather than `--dump-states`. The generator creates a deterministic 4096-position corpus with explicit instruction/chat, code, ordinary prose, reasoning/math, and long-context ranges; runs the independent CPU FP32 oracle without intermediate-state hooks; validates every logits file; and only then publishes the finished artifact.
 
-Prepare a JSON token file as either a bare array or an object with a `token_ids` array, then run on the Linux oracle host:
+On the physical V100 host, from a checkout containing these oracle tools:
+
+```bash
+tools/reference/qwen3_8_flash_next/oracle/generate_phase11_oracle.sh
+```
+
+Defaults are the pinned host assets:
+
+```text
+Python: /home/$USER/ninfer-v100/venv-oracle/bin/python
+mixed:  /srv/ninfer/source/mixed
+PLE:    /srv/ninfer/source/ple/ples_int4
+output: /srv/ninfer/oracle/phase11
+```
+
+The final directory contains `token_ids.json`, `manifest.json`, one FP32 logits file per teacher-forced position, and `provenance.json`. The validator requires contiguous positions, exact token-ID agreement with the frozen corpus, one FP32 logits tensor per position, and exact file sizes.
+
+If a previously published `/srv/ninfer/oracle/phase11` must intentionally be replaced, rerun with `--replace`; the old artifact is renamed to a timestamped backup before the new one is published.
+
+For lower-level use, the equivalent manual oracle invocation is:
 
 ```bash
 ~/ninfer-v100/venv-oracle/bin/python \
@@ -66,7 +85,7 @@ Prepare a JSON token file as either a bare array or an object with a `token_ids`
   --logits-chunk-size 8
 ```
 
-The output `manifest.json` records contiguous teacher-forced positions and one FP32 `logits` tensor per position, which is the contract consumed by `ninfer_qwen3_8_flash_next_vertical_slice_real_test`. Keep the existing `--dump-states` mode for small detailed divergence investigations; it is intentionally not the full-oracle format.
+Keep the existing `--dump-states` mode for small detailed divergence investigations; it is intentionally not the full-oracle format.
 
 ### MTP reference qualification
 
