@@ -168,3 +168,13 @@ jobs:
             --test-dir build-v100 \
             --output-on-failure \
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_test$'
+      
+      - name: Run Phase 11 real vertical slice
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ctest \
+            --test-dir build-v100 \
+            --output-on-failure \
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$'
