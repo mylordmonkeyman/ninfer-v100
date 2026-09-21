@@ -76,3 +76,28 @@ jobs:
 
           echo "=== Memory ==="
           free -h
+      - name: Configure SM70 build
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cmake \
+            -S . \
+            -B build-v100 \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CUDA_ARCHITECTURES=70
+
+      - name: Build Phase 11 targets
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cmake --build build-v100 \
+            --target \
+              ninfer_qwen3_8_flash_next_vertical_slice_test \
+              ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+              ninfer_qwen3_8_flash_next_text_executor_test \
+              ninfer_qwen3_8_flash_next_load_plan_test \
+            -j "$(nproc)"
+          
