@@ -158,3 +158,13 @@ jobs:
               ninfer_qwen3_8_flash_next_text_executor_test \
               ninfer_qwen3_8_flash_next_load_plan_test \
             -j "$(nproc)"
+            
+      - name: Run Phase 11 contract test
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ctest \
+            --test-dir build-v100 \
+            --output-on-failure \
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_test$'
