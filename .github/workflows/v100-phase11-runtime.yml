@@ -156,27 +156,21 @@ jobs:
             2>&1 | tee "$result_dir/oracle-smoke.log"
 
       - name: Validate full Phase 11 oracle
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_phase11 }}
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.full_phase11) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[full-phase11]')) }}
         shell: bash
         run: |
           set -euxo pipefail
 
           test -r /oracle/phase11/manifest.json
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          manifest = Path("/oracle/phase11/manifest.json")
-          positions = json.loads(manifest.read_text())["positions"]
-          if len(positions) < 4096:
-              raise SystemExit(
-                  f"full Phase 11 oracle has only {len(positions)} positions"
-              )
-          print(f"Validated full Phase 11 oracle metadata: {len(positions)} positions")
-          PY
+          test -r /oracle/phase11/token_ids.json
+          test -r /oracle/phase11/provenance.json
+          python3 tools/reference/qwen3_8_flash_next/oracle/validate_phase11_oracle.py \
+            --corpus /oracle/phase11/token_ids.json \
+            --manifest /oracle/phase11/manifest.json \
+            --minimum 4096
 
       - name: Run full Phase 11 qualification
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_phase11 }}
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.full_phase11) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[full-phase11]')) }}
         shell: bash
         env:
           NINFER_WEIGHTS: /models/qwen3-8b-flash-next
