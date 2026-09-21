@@ -1880,7 +1880,19 @@ int run_oracle_chat23_logits(const ReferenceToolOptions& opts) {
     FlashNextRuntimeAllocation alloc(runtime_plan);
     alloc.initialize(device.stream);
     FlashNextTextExecutor executor(model.text_view(), model.ple_metadata(), device, alloc);
-    dump_oracle_chat23_logits(executor, device, runtime_plan, opts.oracle_chat23_logits);
+    std::int32_t max_positions = 23;
+    if (const char* env = std::getenv("NINFER_FLASH_NEXT_ORACLE_CHAT23_MAX_POSITIONS");
+        env != nullptr && env[0] != '\0') {
+        char* end = nullptr;
+        const long parsed = std::strtol(env, &end, 10);
+        if (end == env || *end != '\0' || parsed < 1 || parsed > 23) {
+            throw std::invalid_argument(
+                "NINFER_FLASH_NEXT_ORACLE_CHAT23_MAX_POSITIONS must be in [1, 23]");
+        }
+        max_positions = static_cast<std::int32_t>(parsed);
+    }
+    dump_oracle_chat23_logits(
+        executor, device, runtime_plan, opts.oracle_chat23_logits, max_positions);
     return 0;
 }
 
