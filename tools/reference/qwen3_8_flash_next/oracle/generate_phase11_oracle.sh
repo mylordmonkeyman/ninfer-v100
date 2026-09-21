@@ -135,6 +135,11 @@ if [[ -e "$output_dir" ]]; then
   echo "moved previous oracle to $backup"
 fi
 
+# mktemp creates the build directory as 0700. Make the validated oracle
+# traversable/readable by the unprivileged runner before publishing it into the
+# read-only /srv/ninfer/oracle -> /oracle bind mount.
+chmod -R a+rX -- "$build_dir"
+
 mv -- "$build_dir" "$output_dir"
 published=1
 trap - EXIT
