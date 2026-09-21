@@ -17,7 +17,9 @@ __device__ int selected_token(int ordinal, int count, int complete, const int* s
     return ordinal < count * 4 ? selected[ordinal / 4] * 4 + ordinal % 4
                                : complete * 4 + ordinal - count * 4;
 }
+#if !defined(NINFER_VOLTA_BUILD)
 #include "prefill.cuh"
+#endif
 constexpr int kWarps = 4;
 constexpr int kThreads = 32 * kWarps;
 constexpr int kPartialStride = 288; // 256 values and two statistics; align rows to 128 bytes.
@@ -190,6 +192,7 @@ void selected_block_attention(const Tensor& query, const Tensor& positions,
     CUDA_CHECK(cudaGetLastError());
 }
 
+#if !defined(NINFER_VOLTA_BUILD)
 void selected_block_attention(const Tensor& query, const Tensor& positions,
                                       int table_row, const Tensor& selections,
                                       const Tensor& counts, const SelectedBlockAttentionCache& cache,
@@ -221,4 +224,5 @@ void selected_block_attention(const Tensor& query, const Tensor& positions,
     else { launch.template operator()<__nv_fp8_e4m3>(); }
     CUDA_CHECK(cudaGetLastError());
 }
+#endif
 } // namespace ninfer::ops
