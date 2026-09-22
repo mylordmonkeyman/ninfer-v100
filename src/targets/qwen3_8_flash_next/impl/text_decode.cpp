@@ -284,6 +284,10 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
     }();
+    const bool fp32_mlp_hyper_low_rank = fp32_mlp_hyper_normalized && [] {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+    }();
     auto sync_hyper_shadow = [&] {
         if (fp32_hyper_state) {
             hyper_fp32_to_bf16(round_ws.hyper_hidden_fp32, round_ws.hyper_hidden, stream);
@@ -297,6 +301,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
     constexpr bool fp32_mlp_hyper_output = false;
     constexpr bool fp32_mlp_hyper_input = false;
     constexpr bool fp32_mlp_hyper_normalized = false;
+    constexpr bool fp32_mlp_hyper_low_rank = false;
     auto sync_hyper_shadow = [&] {};
 #endif
 
@@ -430,7 +435,16 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         // MLP hyper prepare -> block_input [2560, B]
         sync_hyper_shadow();
 #if defined(NINFER_VOLTA_BUILD)
-        if (fp32_mlp_hyper_normalized) {
+        if (fp32_mlp_hyper_low_rank) {
+            flash_next_hyper_prepare_fp32_low_rank_stage(
+                round_ws.hyper_hidden_fp32, round_ws.hyper_after_attn_stage_fp32,
+                model.layers[layer].mlp_hyper, round_ws.hyper_scratch,
+                round_ws.block_input, stream);
+            emit_state(prefix + "mlp_block_input", round_ws.hyper_scratch.mixed_fp32);
+            // Restore the exact production tensors before MoE consumes them.
+            flash_next_hyper_prepare(round_ws.hyper_hidden, model.layers[layer].mlp_hyper,
+                                     round_ws.hyper_scratch, round_ws.block_input, stream);
+        } else if (fp32_mlp_hyper_normalized) {
             flash_next_hyper_prepare_fp32_normalized_stage(
                 round_ws.hyper_hidden_fp32, round_ws.hyper_after_attn_stage_fp32,
                 model.layers[layer].mlp_hyper, round_ws.hyper_scratch,

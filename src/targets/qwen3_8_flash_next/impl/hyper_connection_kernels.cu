@@ -349,6 +349,52 @@ low_rank_and_injection_fp32_normalized_kernel(
         hyper_low_rank_epilogue(sum, row, token, low_rank, injection);
     }
 }
+
+__global__ void __launch_bounds__(256)
+low_rank_and_injection_fp32_normalized_low_rank_kernel(
+    const float* __restrict__ normalized,
+    const __nv_bfloat16* __restrict__ down_weight,
+    const __nv_bfloat16* __restrict__ inject_weight,
+    float* __restrict__ low_rank,
+    float* __restrict__ injection,
+    int tokens, int total_rows) {
+    __shared__ float s_warp_sums[8];
+
+    const int row   = static_cast<int>(blockIdx.x);
+    const int token = static_cast<int>(blockIdx.y);
+    const int tid   = static_cast<int>(threadIdx.x);
+    if (token >= tokens || row >= total_rows) { return; }
+
+    const float* x_token =
+        normalized + static_cast<std::int64_t>(token) * kConcat;
+    const __nv_bfloat16* w_row = (row < kLowRank)
+        ? (down_weight + static_cast<std::int64_t>(row) * kConcat)
+        : (inject_weight + static_cast<std::int64_t>(row - kLowRank) * kConcat);
+
+    float sum = 0.0F;
+#pragma unroll
+    for (int chunk = tid; chunk < (kConcat / 8); chunk += 256) {
+        const int col_base = chunk * 8;
+        const auto w_raw =
+            *reinterpret_cast<const ulonglong2*>(w_row + col_base);
+        const auto* w_bf = reinterpret_cast<const __nv_bfloat16*>(&w_raw);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            sum = fmaf(__bfloat162float(w_bf[i]), x_token[col_base + i], sum);
+        }
+    }
+    sum = ops::block_reduce_sum<256>(sum, s_warp_sums);
+    if (tid == 0) {
+        if (row < kLowRank) {
+            low_rank[static_cast<std::int64_t>(token) * kLowRank + row] =
+                ops::silu(sum * 0.25F);
+        } else {
+            injection[static_cast<std::int64_t>(token) * kStreams +
+                      (row - kLowRank)] =
+                2.0F * ops::sigmoid(sum * 0.25F);
+        }
+    }
+}
 #endif
 
 // =========================================================================
@@ -564,6 +610,68 @@ mix_up_and_reduce_fp32_normalized_kernel(
         const auto* x_bf = reinterpret_cast<const __nv_bfloat16*>(&x_raw);
         sum = fmaf(__bfloat162float(w_bf[0]), __bfloat162float(x_bf[0]), sum);
         sum = fmaf(__bfloat162float(w_bf[1]), __bfloat162float(x_bf[1]), sum);
+    }
+
+    sum = ops::warp_reduce_sum(sum);
+    if (lane_id == 0) {
+        const float mix_gate = ops::sigmoid(sum);
+        const float norm_val =
+            normalized[static_cast<std::int64_t>(token) * kConcat + row];
+        s_contrib[stream] = mix_gate * norm_val;
+    }
+    __syncthreads();
+
+    if (tid == 0) {
+        const float mean =
+            (s_contrib[0] + s_contrib[1] + s_contrib[2] + s_contrib[3]) * 0.25F;
+        const std::int64_t offset =
+            static_cast<std::int64_t>(token) * kHidden + hidden;
+        block_input_fp32[offset] = mean;
+        block_input[offset] = __float2bfloat16_rn(mean);
+    }
+}
+
+__global__ void __launch_bounds__(128)
+mix_up_and_reduce_fp32_normalized_low_rank_kernel(
+    const float* __restrict__ normalized,
+    const float* __restrict__ low_rank,
+    const __nv_bfloat16* __restrict__ up_weight,
+    __nv_bfloat16* __restrict__ block_input,
+    float* __restrict__ block_input_fp32,
+    int tokens) {
+    __shared__ float s_contrib[kStreams];
+
+    const int hidden  = static_cast<int>(blockIdx.x);
+    const int token   = static_cast<int>(blockIdx.y);
+    const int tid     = static_cast<int>(threadIdx.x);
+    const int stream  = tid >> 5;
+    const int lane_id = tid & 31;
+    if (token >= tokens || hidden >= kHidden) { return; }
+
+    const int row = stream * kHidden + hidden;
+    const __nv_bfloat16* w_row =
+        up_weight + static_cast<std::int64_t>(row) * kLowRank;
+    const float* lr_token =
+        low_rank + static_cast<std::int64_t>(token) * kLowRank;
+
+    float sum = 0.0F;
+    {
+        const int col_base = lane_id * 8;
+        const auto w_raw =
+            *reinterpret_cast<const ulonglong2*>(w_row + col_base);
+        const auto* w_bf = reinterpret_cast<const __nv_bfloat16*>(&w_raw);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            sum = fmaf(__bfloat162float(w_bf[i]), lr_token[col_base + i], sum);
+        }
+    }
+    {
+        const int col_base = 256 + lane_id * 2;
+        const auto w_raw =
+            *reinterpret_cast<const std::uint32_t*>(w_row + col_base);
+        const auto* w_bf = reinterpret_cast<const __nv_bfloat16*>(&w_raw);
+        sum = fmaf(__bfloat162float(w_bf[0]), lr_token[col_base], sum);
+        sum = fmaf(__bfloat162float(w_bf[1]), lr_token[col_base + 1], sum);
     }
 
     sum = ops::warp_reduce_sum(sum);
@@ -1144,6 +1252,39 @@ void flash_next_hyper_prepare_fp32_normalized_stage_launch(
         <<<dim3(kHidden, tokens), 128, 0, stream>>>(
             static_cast<const float*>(normalized_fp32.data),
             static_cast<const __nv_bfloat16*>(scratch.low_rank.data),
+            static_cast<const __nv_bfloat16*>(weights.input_mix_up.qdata),
+            static_cast<__nv_bfloat16*>(block_input.data),
+            static_cast<float*>(scratch.mixed_fp32.data), tokens);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void flash_next_hyper_prepare_fp32_low_rank_stage_launch(
+    const Tensor& hidden_fp32, Tensor& normalized_fp32,
+    const HyperConnectionWeights& weights, FlashNextHyperWorkspace& scratch,
+    Tensor& block_input, cudaStream_t stream) {
+    const int tokens = static_cast<int>(hidden_fp32.ne[1]);
+    constexpr int kTotalRows = kLowRank + kStreams;
+    float* low_rank_fp32 = static_cast<float*>(scratch.down_split.data);
+
+    group_norm_fp32_to_fp32_kernel<<<dim3(kStreams, tokens), kNormThreads, 0, stream>>>(
+        static_cast<const float*>(hidden_fp32.data),
+        static_cast<const __nv_bfloat16*>(weights.norm.data),
+        static_cast<float*>(normalized_fp32.data), tokens);
+    CUDA_CHECK(cudaGetLastError());
+
+    low_rank_and_injection_fp32_normalized_low_rank_kernel
+        <<<dim3(kTotalRows, tokens), 256, 0, stream>>>(
+            static_cast<const float*>(normalized_fp32.data),
+            static_cast<const __nv_bfloat16*>(weights.input_mix_down.qdata),
+            static_cast<const __nv_bfloat16*>(weights.block_inject.qdata),
+            low_rank_fp32, static_cast<float*>(scratch.injection.data),
+            tokens, kTotalRows);
+    CUDA_CHECK(cudaGetLastError());
+
+    mix_up_and_reduce_fp32_normalized_low_rank_kernel
+        <<<dim3(kHidden, tokens), 128, 0, stream>>>(
+            static_cast<const float*>(normalized_fp32.data),
+            low_rank_fp32,
             static_cast<const __nv_bfloat16*>(weights.input_mix_up.qdata),
             static_cast<__nv_bfloat16*>(block_input.data),
             static_cast<float*>(scratch.mixed_fp32.data), tokens);

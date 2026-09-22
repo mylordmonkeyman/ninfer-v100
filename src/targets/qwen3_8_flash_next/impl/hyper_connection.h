@@ -31,6 +31,12 @@ void flash_next_hyper_prepare_fp32_normalized_stage(
     const Tensor& hidden_fp32, Tensor& normalized_fp32,
     const HyperConnectionWeights& weights, FlashNextHyperWorkspace& scratch,
     Tensor& block_input, cudaStream_t stream);
+// Extends the diagnostic through the low-rank SiLU result in FP32. The temporary
+// low-rank buffer reuses the first [320, tokens] slice of scratch.down_split.
+void flash_next_hyper_prepare_fp32_low_rank_stage(
+    const Tensor& hidden_fp32, Tensor& normalized_fp32,
+    const HyperConnectionWeights& weights, FlashNextHyperWorkspace& scratch,
+    Tensor& block_input, cudaStream_t stream);
 #endif
 
 void flash_next_hyper_inject(const Tensor& block_output, const Tensor& injection, Tensor& hidden,

@@ -33,6 +33,10 @@ void flash_next_hyper_prepare_fp32_normalized_stage_launch(
     const Tensor& hidden_fp32, Tensor& normalized_fp32,
     const HyperConnectionWeights& weights, FlashNextHyperWorkspace& scratch,
     Tensor& block_input, cudaStream_t stream);
+void flash_next_hyper_prepare_fp32_low_rank_stage_launch(
+    const Tensor& hidden_fp32, Tensor& normalized_fp32,
+    const HyperConnectionWeights& weights, FlashNextHyperWorkspace& scratch,
+    Tensor& block_input, cudaStream_t stream);
 #endif
 void flash_next_hyper_mix_launch(const Tensor& hidden, const HyperMixerWeights& weights,
                                  FlashNextHyperWorkspace& scratch, Tensor& block_input,
