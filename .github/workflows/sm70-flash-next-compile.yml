@@ -1,4 +1,4 @@
-name: SM70 Phase 11 Compile
+name: SM70 Flash-Next Compile
 
 on:
   push:
@@ -6,12 +6,16 @@ on:
       - forwardport/v100-flash-next
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
-  group: sm70-phase11-${{ github.ref }}
+  group: sm70-flash-next-compile-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  compile-phase11:
+  compile:
+    name: SM70 Flash-Next Compile
     runs-on: ubuntu-24.04
     container:
       image: nvidia/cuda:12.8.1-devel-ubuntu24.04
@@ -30,7 +34,10 @@ jobs:
             pkg-config
           python3 -m pip install --break-system-packages 'cmake>=3.28,<4' ninja
 
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Configure CUDA 12.8 SM70
         shell: bash
@@ -43,21 +50,26 @@ jobs:
             -DNINFER_BUILD_BENCHMARKS=OFF \
             -DBUILD_TESTING=ON
 
-      - name: Build Phase 11 targets
+      - name: Build Flash-Next SM70 targets
         shell: bash
         run: |
           cmake --build build-sm70 --parallel 2 --target \
+            ninfer_qwen3_8_flash_next_expert_bank_test \
+            ninfer_qwen3_8_flash_next_cpu_expert_reference_test \
+            ninfer_qwen3_8_flash_next_moe_test \
+            ninfer_qwen3_8_flash_next_text_decode_test \
+            ninfer_qwen3_8_flash_next_loader_test \
             ninfer_qwen3_8_flash_next_vertical_slice_test \
             ninfer_qwen3_8_flash_next_vertical_slice_real_test \
             ninfer_qwen3_8_flash_next_text_executor_test \
             ninfer_qwen3_8_flash_next_load_plan_test
 
-      - name: Run host-only Phase 11 contract test
+      - name: Run host-only Flash-Next contract test
         shell: bash
         run: |
           # GitHub-hosted runners have the CUDA toolkit but no NVIDIA driver.
-          # This test is CPU-only; expose CUDA's link stub under the runtime SONAME
-          # so the executable can start without requiring physical GPU hardware.
+          # This contract test is CPU-only; expose CUDA's link stub under the
+          # runtime SONAME so the executable can start without physical GPU hardware.
           stub_src=/usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so
           stub_dir="$PWD/build-sm70/cuda-driver-stub"
           mkdir -p "$stub_dir"
