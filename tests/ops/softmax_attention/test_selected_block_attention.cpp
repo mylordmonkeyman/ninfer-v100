@@ -159,8 +159,16 @@ void run_case(Fixture& fixture, DeviceContext& device, bool low_precision, int b
     WorkspaceArena workspace(std::max<std::size_t>(256,
         prefill ? 0 : ops::selected_block_attention_workspace_capacity_bytes(batch)));
     auto invoke = [&] {
+#if defined(NINFER_VOLTA_BUILD)
+        if (prefill) {
+            throw std::runtime_error(
+                "selected block attention shared-row prefill overload is unavailable on SM70");
+        }
+        ops::selected_block_attention(q, p, r, s, c, fixture.cache, workspace, out, device.stream);
+#else
         if (prefill) { ops::selected_block_attention(q, p, 1, s, c, fixture.cache, out, device.stream); }
         else { ops::selected_block_attention(q, p, r, s, c, fixture.cache, workspace, out, device.stream); }
+#endif
     };
     auto verify = [&] {
         device.synchronize();
@@ -242,6 +250,12 @@ void run_case(Fixture& fixture, DeviceContext& device, bool low_precision, int b
 
 int main(int argc, char** argv) {
     const bool prefill_only = argc > 1 && std::string_view(argv[1]) == "--prefill-only";
+#if defined(NINFER_VOLTA_BUILD)
+    if (prefill_only) {
+        std::puts("SKIP: selected-block shared-row prefill overload is not built for SM70");
+        return 77;
+    }
+#endif
     int devices = 0;
     const auto status = cudaGetDeviceCount(&devices);
     if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver || devices == 0) { return 77; }
