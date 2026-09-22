@@ -16,6 +16,9 @@ struct FlashNextGdnWorkspace {
     Tensor value;
     Tensor z;
     Tensor recurrent_output;
+#if defined(NINFER_VOLTA_BUILD)
+    Tensor recurrent_output_fp32;
+#endif
     Tensor gated_output;
     Tensor g;
     Tensor beta;
@@ -32,6 +35,9 @@ FlashNextGdnWorkspace allocate_flash_next_gdn_workspace(Arena& arena, std::int32
         .value            = arena.alloc(DType::BF16, {6'144, tokens}, 256),
         .z                = arena.alloc(DType::BF16, {6'144, tokens}, 256),
         .recurrent_output = arena.alloc(DType::BF16, {6'144, tokens}, 256),
+#if defined(NINFER_VOLTA_BUILD)
+        .recurrent_output_fp32 = arena.alloc(DType::FP32, {6'144, tokens}, 256),
+#endif
         .gated_output     = arena.alloc(DType::BF16, {6'144, tokens}, 256),
         .g                = arena.alloc(DType::FP32, {48, tokens}, 16),
         .beta             = arena.alloc(DType::FP32, {48, tokens}, 16),

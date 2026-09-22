@@ -8,6 +8,8 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <stdexcept>
+#include <type_traits>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 namespace {
@@ -90,7 +92,17 @@ __global__ void controls_kernel(const __nv_bfloat16* __restrict__ input,
     }
 }
 
-__global__ void output_gate_kernel(const __nv_bfloat16* __restrict__ recurrent,
+template <typename RecurrentT>
+__device__ __forceinline__ float recurrent_to_float(RecurrentT value) {
+    if constexpr (std::is_same_v<RecurrentT, float>) {
+        return value;
+    } else {
+        return __bfloat162float(value);
+    }
+}
+
+template <typename RecurrentT>
+__global__ void output_gate_kernel(const RecurrentT* __restrict__ recurrent,
                                    const __nv_bfloat16* __restrict__ z,
                                    const __nv_bfloat16* __restrict__ norm,
                                    __nv_bfloat16* __restrict__ gated) {
@@ -101,7 +113,7 @@ __global__ void output_gate_kernel(const __nv_bfloat16* __restrict__ recurrent,
     const int warp          = static_cast<int>(threadIdx.x) >> 5;
     const int dim           = warp * 32 + lane;
     const std::int64_t base = static_cast<std::int64_t>(batch) * kValueRows + head * 128;
-    const float x           = __bfloat162float(recurrent[base + dim]);
+    const float x           = recurrent_to_float(recurrent[base + dim]);
     float square            = ops::warp_reduce_sum(x * x);
     if (lane == 0) { squares[warp] = square; }
     __syncthreads();
@@ -148,11 +160,22 @@ void flash_next_gdn_controls_launch(const Tensor& input, const GdnWeights& weigh
 
 void flash_next_gdn_output_gate_launch(const FlashNextGdnWorkspace& scratch, const Tensor& norm,
                                        cudaStream_t stream) {
-    output_gate_kernel<<<dim3(48, static_cast<unsigned>(scratch.recurrent_output.ne[1])), 128, 0,
-                         stream>>>(static_cast<const __nv_bfloat16*>(scratch.recurrent_output.data),
-                                   static_cast<const __nv_bfloat16*>(scratch.z.data),
-                                   static_cast<const __nv_bfloat16*>(norm.data),
-                                   static_cast<__nv_bfloat16*>(scratch.gated_output.data));
+    const dim3 grid(48, static_cast<unsigned>(scratch.recurrent_output.ne[1]));
+    if (scratch.recurrent_output.dtype == DType::BF16) {
+        output_gate_kernel<<<grid, 128, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.recurrent_output.data),
+            static_cast<const __nv_bfloat16*>(scratch.z.data),
+            static_cast<const __nv_bfloat16*>(norm.data),
+            static_cast<__nv_bfloat16*>(scratch.gated_output.data));
+    } else if (scratch.recurrent_output.dtype == DType::FP32) {
+        output_gate_kernel<<<grid, 128, 0, stream>>>(
+            static_cast<const float*>(scratch.recurrent_output.data),
+            static_cast<const __nv_bfloat16*>(scratch.z.data),
+            static_cast<const __nv_bfloat16*>(norm.data),
+            static_cast<__nv_bfloat16*>(scratch.gated_output.data));
+    } else {
+        throw std::invalid_argument("Flash-Next GDN output gate received unsupported recurrent dtype");
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 

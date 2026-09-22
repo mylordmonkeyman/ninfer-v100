@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <stdexcept>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
@@ -110,6 +111,12 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
 
     const auto scope              = workspace.scope();
     FlashNextGdnWorkspace scratch = allocate_flash_next_gdn_workspace(workspace, batch);
+#if defined(NINFER_VOLTA_BUILD)
+    if (const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_GDN_READOUT");
+        env != nullptr && env[0] == '1' && env[1] == '\0') {
+        scratch.recurrent_output = scratch.recurrent_output_fp32;
+    }
+#endif
     ops::linear(input, weights.query_key_value_z, scratch.projected, ops::LinearPolicy::A16Only,
                 workspace, stream);
     if (emit) { emit("gdn_projected", scratch.projected); }

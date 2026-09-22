@@ -135,9 +135,17 @@ __device__ __forceinline__ void apply_gdn_transition(float (&state)[kDvPerWarp][
     }
 }
 
-template <bool Normalize>
+__device__ __forceinline__ void store_readout(__nv_bfloat16* output, float value) {
+    *output = __float2bfloat16(value);
+}
+
+__device__ __forceinline__ void store_readout(float* output, float value) {
+    *output = value;
+}
+
+template <bool Normalize, typename OutputT>
 __device__ __forceinline__ void readout_and_store(float (&state)[kDvPerWarp][kQkPerLane],
-                                                  const __nv_bfloat16* query, __nv_bfloat16* output,
+                                                  const __nv_bfloat16* query, OutputT* output,
                                                   std::uint32_t dqk_base, std::uint32_t dv_base,
                                                   int lane, float scale) {
     RawQkLane q = load_raw_qk_lane(query, dqk_base);
@@ -152,7 +160,7 @@ __device__ __forceinline__ void readout_and_store(float (&state)[kDvPerWarp][kQk
         partial = warp_sum<kWarpSize>(partial);
         if (lane == r) { attn_val = partial; }
     }
-    if (lane < kDvPerWarp) { output[dv_base + lane] = __float2bfloat16(attn_val * scale); }
+    if (lane < kDvPerWarp) { store_readout(output + dv_base + lane, attn_val * scale); }
 }
 
 struct RecurrentCoordinates {
@@ -302,7 +310,7 @@ struct DirectAccess {
     }
 };
 
-template <typename StateT = float>
+template <typename StateT = float, typename OutputT = __nv_bfloat16>
 struct BatchUpdateAccess {
     const __nv_bfloat16* q;
     const __nv_bfloat16* k;
@@ -313,7 +321,7 @@ struct BatchUpdateAccess {
     StateT* states_write;
     const std::int32_t* source_state_slots;
     const std::int32_t* destination_state_slots;
-    __nv_bfloat16* out;
+    OutputT* out;
     head_map heads;
     std::int64_t state_slot_stride;
     float scale;
@@ -362,8 +370,8 @@ struct BatchUpdateAccess {
         return q + (column(coord, token) * heads.H_qk + coord.qk_head) * kStateDim;
     }
 
-    __device__ __forceinline__ __nv_bfloat16* output_ptr(const RecurrentCoordinates& coord,
-                                                         std::int32_t token) const {
+    __device__ __forceinline__ OutputT* output_ptr(const RecurrentCoordinates& coord,
+                                                   std::int32_t token) const {
         return out + (column(coord, token) * heads.H_v + coord.value_head) * kStateDim;
     }
 };
@@ -686,9 +694,9 @@ __global__ void __launch_bounds__(kWarpSize* kNumWarps, 2)
     store_state_tile(state, access.state_write_base(coord), coord);
 }
 
-template <bool NormalizeInputs, typename StateT = float>
+template <bool NormalizeInputs, typename StateT = float, typename OutputT = __nv_bfloat16>
 __global__ void __launch_bounds__(kWarpSize* kNumWarps, 2)
-    recurrent_batch_update_kernel(BatchUpdateAccess<StateT> access) {
+    recurrent_batch_update_kernel(BatchUpdateAccess<StateT, OutputT> access) {
     const RecurrentCoordinates coord = access.coordinates();
     __align__(16) float state[kDvPerWarp][kQkPerLane];
     load_state_tile(state, access.state_read_base(coord), coord);

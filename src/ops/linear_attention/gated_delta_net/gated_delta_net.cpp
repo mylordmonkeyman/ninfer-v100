@@ -115,7 +115,9 @@ Geometry validate_recurrent_batch_update(const Tensor& q, const Tensor& k, const
     require_dtype(q, DType::BF16, "q must be BF16");
     require_dtype(k, DType::BF16, "k must be BF16");
     require_dtype(v, DType::BF16, "v must be BF16");
-    require_dtype(out, DType::BF16, "out must be BF16");
+    if (out.dtype != DType::BF16 && out.dtype != DType::FP32) {
+        throw std::invalid_argument("gated_delta_net: batch-update out must be BF16 or FP32");
+    }
     require_dtype(g, DType::FP32, "g must be FP32");
     require_dtype(beta, DType::FP32, "beta must be FP32");
     if (ssm_states.dtype != DType::FP32 && ssm_states.dtype != DType::BF16) {
