@@ -19,6 +19,7 @@
 #endif
 
 #include <cstdint>
+#include <type_traits>
 
 namespace ninfer::ops::detail {
 
@@ -107,10 +108,32 @@ __device__ __forceinline__ void accumulate_rows(const Fp8CodePack<Values> (&code
     }
 }
 
+template <int Values, int Rows, int AccumulatorChains>
+__device__ __forceinline__ void accumulate_rows_fp32(
+    const Fp8CodePack<Values> (&codes)[Rows], const float* activation,
+    float (&accumulators)[Rows][AccumulatorChains]) {
+    constexpr int kChainMask = AccumulatorChains - 1;
+#pragma unroll
+    for (int pair = 0; pair < Values / 2; ++pair) {
+        const float2 active = make_float2(activation[2 * pair], activation[2 * pair + 1]);
+#pragma unroll
+        for (int row = 0; row < Rows; ++row) {
+            const std::uint32_t word   = codes[row].words[pair >> 1];
+            const std::uint16_t packed = static_cast<std::uint16_t>(word >> ((pair & 1) * 16));
+            const float2 weight        = decode_fp8_e4m3x2(packed);
+            accumulators[row][(2 * pair) & kChainMask] =
+                fmaf(weight.x, active.x, accumulators[row][(2 * pair) & kChainMask]);
+            accumulators[row][(2 * pair + 1) & kChainMask] =
+                fmaf(weight.y, active.y, accumulators[row][(2 * pair + 1) & kChainMask]);
+        }
+    }
+}
+
 template <class Geometry, class Schedule, class Output, class RowPolicy = Fp8GemvIdentityRows,
-          bool PairRows = false, class Epilogue = Fp8IdentityEpilogue, class Scale = __nv_bfloat16>
+          bool PairRows = false, class Epilogue = Fp8IdentityEpilogue,
+          class Scale = __nv_bfloat16, class InputT = __nv_bfloat16>
 __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_gemv_kernel(
-    const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ weight_codes,
+    const InputT* __restrict__ x, const std::uint8_t* __restrict__ weight_codes,
     const Scale* __restrict__ row_scales, Output output, RowPolicy row_policy = {},
     Epilogue epilogue = {}) {
     constexpr int kValuesPerPhase = kWarpSize * Schedule::kValuesPerLane;
@@ -118,6 +141,7 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void
     static_assert((Geometry::kOutputRows % Schedule::kRowsPerCta) == 0);
     static_assert(!PairRows || (Schedule::kRowsPerWarp % 2) == 0);
     static_assert(!PairRows || ((Geometry::kOutputRows / 2) % (Schedule::kRowsPerCta / 2)) == 0);
+    static_assert(std::is_same_v<InputT, __nv_bfloat16> || std::is_same_v<InputT, float>);
     constexpr int kPhases = Geometry::kInputRows / kValuesPerPhase;
     constexpr int kStoredRowsPerWarp =
         PairRows ? Schedule::kRowsPerWarp / 2 : Schedule::kRowsPerWarp;
@@ -141,7 +165,11 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void
                 weight_codes + static_cast<std::int64_t>(weight_row) * Geometry::kInputRows +
                 value_begin);
         }
-        accumulate_rows(row_codes, activation_pairs + value_begin / 2, accumulators);
+        if constexpr (std::is_same_v<InputT, __nv_bfloat16>) {
+            accumulate_rows(row_codes, activation_pairs + value_begin / 2, accumulators);
+        } else {
+            accumulate_rows_fp32(row_codes, x + value_begin, accumulators);
+        }
     }
 
     if constexpr (PairRows) {

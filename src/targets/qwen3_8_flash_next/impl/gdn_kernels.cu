@@ -362,7 +362,8 @@ void flash_next_gdn_output_project_fp32_launch(
     using Geometry = ::ninfer::ops::detail::Fp8FlashNextResidualGeometry;
     using Schedule =
         typename ::ninfer::ops::detail::Fp8LinearDecodeProductionSchedule<Geometry>::Type;
-    if (gated_output_bf16.dtype != DType::BF16 ||
+    if ((gated_output_bf16.dtype != DType::BF16 &&
+         gated_output_bf16.dtype != DType::FP32) ||
         gated_output_bf16.ne[0] != Geometry::kInputRows ||
         gated_output_bf16.ne[1] != 1 ||
         projection.qtype != QType::FP8_E4M3FN_ROW_F32S ||
@@ -385,11 +386,19 @@ void flash_next_gdn_output_project_fp32_launch(
         static_cast<__nv_bfloat16*>(output_bf16.data),
         Geometry::kOutputRows,
     };
-    ::ninfer::ops::detail::fp8_gemv_kernel<Geometry, Schedule>
-        <<<kBlocks, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(gated_output_bf16.data),
-            static_cast<const std::uint8_t*>(projection.qdata),
-            static_cast<const float*>(projection.scales), mirror);
+    if (gated_output_bf16.dtype == DType::BF16) {
+        ::ninfer::ops::detail::fp8_gemv_kernel<Geometry, Schedule>
+            <<<kBlocks, Schedule::kThreads, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(gated_output_bf16.data),
+                static_cast<const std::uint8_t*>(projection.qdata),
+                static_cast<const float*>(projection.scales), mirror);
+    } else {
+        ::ninfer::ops::detail::fp8_gemv_kernel<Geometry, Schedule>
+            <<<kBlocks, Schedule::kThreads, 0, stream>>>(
+                static_cast<const float*>(gated_output_bf16.data),
+                static_cast<const std::uint8_t*>(projection.qdata),
+                static_cast<const float*>(projection.scales), mirror);
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 

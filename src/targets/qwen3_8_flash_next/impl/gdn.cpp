@@ -127,6 +127,7 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
     bool fp32_project_conv = false;
     bool fp32_gate = false;
     bool fp32_output_project = false;
+    bool fp32_output_input = false;
 #if defined(NINFER_VOLTA_BUILD)
     const bool fp32_conv = [] {
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_GDN_CONV");
@@ -159,6 +160,10 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
     if (fp32_output_project) {
         *output_stage = workspace.alloc(DType::FP32, {2'560, batch}, 256);
     }
+    fp32_output_input = fp32_output_project && fp32_gate && [] {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+    }();
 #endif
     if (fp32_project_conv) {
 #if defined(NINFER_VOLTA_BUILD)
@@ -232,8 +237,10 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
     // output tensor consumed by the rest of decode.
     if (fp32_output_project) {
 #if defined(NINFER_VOLTA_BUILD)
+        const Tensor& projection_input =
+            fp32_output_input ? gated_output_stage : scratch.gated_output;
         flash_next_gdn_output_project_fp32_launch(
-            scratch.gated_output, weights.output, *output_stage, output, stream);
+            projection_input, weights.output, *output_stage, output, stream);
 #endif
     } else {
         ops::linear(scratch.gated_output, weights.output, output,
