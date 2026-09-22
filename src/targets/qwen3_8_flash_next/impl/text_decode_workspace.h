@@ -17,7 +17,8 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 struct FlashNextTextDecodeWorkspace {
     Tensor hyper_hidden;    // BF16 [10240, tokens]
 #if defined(NINFER_VOLTA_BUILD)
-    Tensor hyper_hidden_fp32; // FP32 [10240, tokens], optional SM70 master residual state
+    Tensor hyper_hidden_fp32;           // FP32 [10240, tokens], optional SM70 master residual state
+    Tensor hyper_after_attn_stage_fp32; // FP32 [10240, tokens], diagnostic alternate inject
 #endif
     Tensor block_input;     // BF16 [2560, tokens]
     Tensor block_output;    // BF16 [2560, tokens]
@@ -34,7 +35,8 @@ FlashNextTextDecodeWorkspace allocate_flash_next_text_decode_workspace(Arena& ar
     FlashNextTextDecodeWorkspace ws{};
     ws.hyper_hidden               = arena.alloc(DType::BF16, {10'240, tokens}, 256);
 #if defined(NINFER_VOLTA_BUILD)
-    ws.hyper_hidden_fp32          = arena.alloc(DType::FP32, {10'240, tokens}, 256);
+    ws.hyper_hidden_fp32           = arena.alloc(DType::FP32, {10'240, tokens}, 256);
+    ws.hyper_after_attn_stage_fp32 = arena.alloc(DType::FP32, {10'240, tokens}, 256);
 #endif
     ws.block_input                = arena.alloc(DType::BF16, {2'560, tokens}, 256);
     ws.block_output               = arena.alloc(DType::BF16, {2'560, tokens}, 256);

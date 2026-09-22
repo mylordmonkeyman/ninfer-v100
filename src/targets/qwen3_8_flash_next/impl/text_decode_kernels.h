@@ -28,6 +28,9 @@ void hyper_fp32_to_bf16(const Tensor& source, Tensor& destination, cudaStream_t 
 void hyper_add_bf16_to_fp32(const Tensor& addend, Tensor& destination, cudaStream_t stream);
 void hyper_inject_bf16_to_fp32(const Tensor& block_output, const Tensor& injection,
                                Tensor& hyper_hidden, cudaStream_t stream);
+void hyper_inject_fp32_to_fp32_stage(const Tensor& block_output, const Tensor& injection,
+                                     const Tensor& hyper_hidden, Tensor& output_stage,
+                                     cudaStream_t stream);
 #endif
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

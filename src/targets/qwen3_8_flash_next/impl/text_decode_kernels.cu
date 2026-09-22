@@ -58,6 +58,25 @@ __global__ void hyper_add_bf16_to_fp32_kernel(
     }
 }
 
+__global__ void hyper_inject_fp32_to_fp32_stage_kernel(
+    const float* __restrict__ block_output,
+    const float* __restrict__ injection,
+    const float* __restrict__ hyper_hidden,
+    float* __restrict__ output_stage, int tokens) {
+    const int index = blockIdx.x * blockDim.x + threadIdx.x;
+    const int token = blockIdx.y;
+    if (index >= 10'240 || token >= tokens) return;
+    const int stream = index / 2'560;
+    const int hidden = index - stream * 2'560;
+    const float out =
+        block_output[static_cast<std::int64_t>(token) * 2'560 + hidden];
+    const float scale =
+        injection[static_cast<std::int64_t>(token) * 4 + stream];
+    const std::int64_t offset =
+        static_cast<std::int64_t>(token) * 10'240 + index;
+    output_stage[offset] = fmaf(out, scale, hyper_hidden[offset]);
+}
+
 __global__ void hyper_inject_bf16_to_fp32_kernel(
     const __nv_bfloat16* __restrict__ block_output,
     const float* __restrict__ injection,
@@ -115,6 +134,19 @@ void hyper_add_bf16_to_fp32(
     hyper_add_bf16_to_fp32_kernel<<<(count + 255) / 256, 256, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(addend.data),
         static_cast<float*>(destination.data), count);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void hyper_inject_fp32_to_fp32_stage(
+    const Tensor& block_output, const Tensor& injection,
+    const Tensor& hyper_hidden, Tensor& output_stage, cudaStream_t stream) {
+    const int tokens = static_cast<int>(hyper_hidden.ne[1]);
+    dim3 grid((10'240 + 255) / 256, tokens);
+    hyper_inject_fp32_to_fp32_stage_kernel<<<grid, 256, 0, stream>>>(
+        static_cast<const float*>(block_output.data),
+        static_cast<const float*>(injection.data),
+        static_cast<const float*>(hyper_hidden.data),
+        static_cast<float*>(output_stage.data), tokens);
     CUDA_CHECK(cudaGetLastError());
 }
 

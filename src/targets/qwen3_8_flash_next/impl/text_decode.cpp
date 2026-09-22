@@ -264,6 +264,10 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_ROUTER_INPUT");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
     }();
+    const bool fp32_hyper_inject_stage = fp32_hyper_state && [] {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+    }();
     auto sync_hyper_shadow = [&] {
         if (fp32_hyper_state) {
             hyper_fp32_to_bf16(round_ws.hyper_hidden_fp32, round_ws.hyper_hidden, stream);
@@ -272,6 +276,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
 #else
     constexpr bool fp32_hyper_state = false;
     constexpr bool fp32_router_input = false;
+    constexpr bool fp32_hyper_inject_stage = false;
     auto sync_hyper_shadow = [&] {};
 #endif
 
@@ -367,10 +372,23 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         // Attention hyper inject
 #if defined(NINFER_VOLTA_BUILD)
         if (fp32_hyper_state) {
+            const bool emit_fp32_inject_stage =
+                fp32_hyper_inject_stage &&
+                attn_block_output_stage.data != nullptr &&
+                attn_block_output_stage.dtype == DType::FP32;
+            if (emit_fp32_inject_stage) {
+                hyper_inject_fp32_to_fp32_stage(
+                    attn_block_output_stage, round_ws.hyper_scratch.injection,
+                    round_ws.hyper_hidden_fp32, round_ws.hyper_after_attn_stage_fp32, stream);
+                emit_state(prefix + "hyper_after_attn",
+                           round_ws.hyper_after_attn_stage_fp32);
+            }
             hyper_inject_bf16_to_fp32(
                 round_ws.block_output, round_ws.hyper_scratch.injection,
                 round_ws.hyper_hidden_fp32, stream);
-            emit_state(prefix + "hyper_after_attn", round_ws.hyper_hidden_fp32);
+            if (!emit_fp32_inject_stage) {
+                emit_state(prefix + "hyper_after_attn", round_ws.hyper_hidden_fp32);
+            }
         } else
 #endif
         {
