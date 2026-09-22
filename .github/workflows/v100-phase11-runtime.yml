@@ -151,7 +151,7 @@ jobs:
             --output-on-failure \
             -R '^ninfer_selected_block_attention_test$'
 
-      - name: Preserve FP32 MLP input into both expert branches positions 0-6 with CPU stage oracle
+      - name: Preserve routed-expert FP32 intermediate positions 0-6 with CPU stage oracle
         continue-on-error: true
         shell: bash
         env:
@@ -177,8 +177,7 @@ jobs:
           NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
           NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
           NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
-          NINFER_FLASH_NEXT_FP32_MOE_SHARED_INPUT: "1"
-          NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT: "1"
+          NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE: "1"
         run: |
           set -euxo pipefail
           test -r /oracle/phase11-stage-trace7/manifest.json
