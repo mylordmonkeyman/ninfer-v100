@@ -291,6 +291,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
 
         // At layer 1: evaluate PLE neural injection and add residual
         if (layer == 1) {
+            sync_hyper_shadow();
             emit_state("ple_gathered", gathered_ple_embedding);
             flash_next_ple_decode(round_ws.hyper_hidden, gathered_ple_embedding, model.ple,
                                   source_slots, destination_slots, state.ple_convolution_states,
@@ -534,6 +535,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
 
         // At layer 1: evaluate PLE neural injection and add residual
         if (layer == 1) {
+            sync_hyper_shadow();
             emit_state("ple_gathered", gathered_ple_embedding);
             flash_next_ple_prefill_chunk(round_ws.hyper_hidden, gathered_ple_embedding, model.ple,
                                          source_slot, destination_slot,
