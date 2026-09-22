@@ -127,9 +127,9 @@ __global__ void prepare_qk_matrices_kernel(const std::uint16_t* q_bf16,
     const bool is_qk = warp >= 3;
     const int job_warp = is_qk ? warp - 3 : warp;
     const int group = ninfer::ops::volta_mma884_group(static_cast<unsigned>(lane));
-    const int tile = kPrepareTileJobs[job_warp][group];
+    const int tile = prepare_tile_job(job_warp, group);
     const bool active = tile >= 0;
-    const TileCoord coordinate = active ? kLowerTileCoords[tile] : TileCoord{0, 0};
+    const TileCoord coordinate = lower_tile_coord(tile);
     const __half* a_matrix = is_qk ? shared.q : shared.k;
     const __half* b_matrix = shared.k;
 

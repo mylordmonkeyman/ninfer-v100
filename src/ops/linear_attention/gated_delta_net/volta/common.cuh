@@ -37,6 +37,13 @@ inline constexpr TileCoord kLowerTileCoords[kLowerTiles] = {
     {3, 0}, {3, 1}, {3, 2}, {3, 3},
 };
 
+__host__ __device__ constexpr TileCoord lower_tile_coord(int tile) noexcept {
+    if (tile < 0 || tile >= kLowerTiles) { return {0, 0}; }
+    int row = 0;
+    while ((row + 1) * (row + 2) / 2 <= tile) { ++row; }
+    return {row, tile - row * (row + 1) / 2};
+}
+
 __host__ __device__ constexpr int lower_tile_index(int br, int bc) noexcept {
     return br * (br + 1) / 2 + bc;
 }

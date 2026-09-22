@@ -25,6 +25,13 @@ inline constexpr int kPrepareTileJobs[3][4] = {
     {8, 9, -1, -1},
 };
 
+__host__ __device__ constexpr int prepare_tile_job(int job_warp, int group) noexcept {
+    const int tile = job_warp * 4 + group;
+    return job_warp >= 0 && job_warp < 3 && group >= 0 && group < 4 && tile < kLowerTiles
+               ? tile
+               : -1;
+}
+
 __host__ __device__ constexpr std::size_t prepare_norm_index(int chunk, int qk_head, int row,
                                                               int qk_heads) noexcept {
     return (static_cast<std::size_t>(chunk) * qk_heads + qk_head) * kChunkSize + row;
