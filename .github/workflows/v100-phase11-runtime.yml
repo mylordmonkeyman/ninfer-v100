@@ -154,11 +154,8 @@ jobs:
           NINFER_PHASE11_STAGE_ORACLE_POSITION: "6"
         run: |
           set -euxo pipefail
-          if [[ ! -r /oracle/phase11-stage-trace7/manifest.json ]]; then
-            echo "CPU stage trace is not mounted yet: /oracle/phase11-stage-trace7/manifest.json"
-            echo "Generate it on the host with tools/reference/qwen3_8_flash_next/oracle/generate_phase11_stage_trace.sh"
-            exit 0
-          fi
+          test -r /oracle/phase11-stage-trace7/manifest.json
+          test -r /oracle/phase11-stage-trace7/provenance.json
 
           result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$result_dir"
