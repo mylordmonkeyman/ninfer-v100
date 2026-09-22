@@ -104,28 +104,22 @@ float matrix_row(const Nvfp4ExpertMatrixView& matrix, std::int32_t row,
 
 namespace {
 
-void expert_pair_reference_impl(
+void expert_pair_reference_compute(
     const HostNvfp4ExpertPairView& expert,
-    std::span<const std::uint16_t> input_bf16,
+    const float* input,
     std::span<float> output,
     CpuNvfp4ExpertReferenceScratch& scratch,
     bool round_intermediate_to_bf16) {
-    if (input_bf16.size() != kFlashNextExpertHidden ||
-        output.size() != kFlashNextExpertHidden) {
-        throw std::invalid_argument("CPU NVFP4 reference: invalid activation/output length");
+    if (output.size() != kFlashNextExpertHidden) {
+        throw std::invalid_argument("CPU NVFP4 reference: invalid output length");
     }
     validate_matrix(expert.gate_up, 1'280, 2'560, "gate/up");
     validate_matrix(expert.down, 2'560, 640, "down");
 
-    for (std::size_t i = 0; i < input_bf16.size(); ++i) {
-        scratch.input[i] = bf16_to_float(input_bf16[i]);
-    }
-
     for (int row = 0; row < static_cast<int>(kFlashNextExpertIntermediate); ++row) {
-        const float gate = matrix_row(expert.gate_up, row, scratch.input.data());
+        const float gate = matrix_row(expert.gate_up, row, input);
         const float up = matrix_row(
-            expert.gate_up, row + static_cast<int>(kFlashNextExpertIntermediate),
-            scratch.input.data());
+            expert.gate_up, row + static_cast<int>(kFlashNextExpertIntermediate), input);
         const float activation = gate / (1.0F + std::exp(-gate)) * up;
         scratch.intermediate[static_cast<std::size_t>(row)] =
             round_intermediate_to_bf16 ? round_to_bf16_rne(activation) : activation;
@@ -135,6 +129,22 @@ void expert_pair_reference_impl(
         output[static_cast<std::size_t>(row)] =
             matrix_row(expert.down, row, scratch.intermediate.data());
     }
+}
+
+void expert_pair_reference_impl(
+    const HostNvfp4ExpertPairView& expert,
+    std::span<const std::uint16_t> input_bf16,
+    std::span<float> output,
+    CpuNvfp4ExpertReferenceScratch& scratch,
+    bool round_intermediate_to_bf16) {
+    if (input_bf16.size() != kFlashNextExpertHidden) {
+        throw std::invalid_argument("CPU NVFP4 reference: invalid activation length");
+    }
+    for (std::size_t i = 0; i < input_bf16.size(); ++i) {
+        scratch.input[i] = bf16_to_float(input_bf16[i]);
+    }
+    expert_pair_reference_compute(
+        expert, scratch.input.data(), output, scratch, round_intermediate_to_bf16);
 }
 
 } // namespace
@@ -153,6 +163,17 @@ void flash_next_cpu_nvfp4_expert_pair_reference_fp32_intermediate(
     std::span<float> output,
     CpuNvfp4ExpertReferenceScratch& scratch) {
     expert_pair_reference_impl(expert, input_bf16, output, scratch, false);
+}
+
+void flash_next_cpu_nvfp4_expert_pair_reference_fp32_input(
+    const HostNvfp4ExpertPairView& expert,
+    std::span<const float> input_fp32,
+    std::span<float> output,
+    CpuNvfp4ExpertReferenceScratch& scratch) {
+    if (input_fp32.size() != kFlashNextExpertHidden) {
+        throw std::invalid_argument("CPU NVFP4 reference: invalid FP32 activation length");
+    }
+    expert_pair_reference_compute(expert, input_fp32.data(), output, scratch, true);
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

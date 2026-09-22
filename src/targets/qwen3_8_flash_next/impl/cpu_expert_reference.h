@@ -37,6 +37,14 @@ void flash_next_cpu_nvfp4_expert_pair_reference_fp32_intermediate(
     std::span<float> output,
     CpuNvfp4ExpertReferenceScratch& scratch);
 
+// Diagnostic only: preserve the unrounded FP32 MoE activation at the routed-expert
+// input boundary while retaining the production BF16 SiLU(gate)*up boundary.
+void flash_next_cpu_nvfp4_expert_pair_reference_fp32_input(
+    const HostNvfp4ExpertPairView& expert,
+    std::span<const float> input_fp32,
+    std::span<float> output,
+    CpuNvfp4ExpertReferenceScratch& scratch);
+
 // Production-like AVX2/FMA implementation of the same compact-NVFP4 contract.
 // It preserves the BF16_RNE activation boundary and returns the unweighted FP32
 // down vector. Callers must retain deterministic routing-alpha accumulation order.

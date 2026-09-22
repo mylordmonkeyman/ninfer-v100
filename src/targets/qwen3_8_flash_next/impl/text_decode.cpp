@@ -292,6 +292,10 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
     }();
+    const bool fp32_moe_routed_input = fp32_mlp_hyper_apply && [] {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+    }();
     auto sync_hyper_shadow = [&] {
         if (fp32_hyper_state) {
             hyper_fp32_to_bf16(round_ws.hyper_hidden_fp32, round_ws.hyper_hidden, stream);
@@ -307,6 +311,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
     constexpr bool fp32_mlp_hyper_normalized = false;
     constexpr bool fp32_mlp_hyper_low_rank = false;
     constexpr bool fp32_mlp_hyper_apply = false;
+    constexpr bool fp32_moe_routed_input = false;
     auto sync_hyper_shadow = [&] {};
 #endif
 
@@ -503,10 +508,16 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
 #else
                 nullptr;
 #endif
+            const Tensor* routed_expert_input =
+#if defined(NINFER_VOLTA_BUILD)
+                fp32_moe_routed_input ? &round_ws.hyper_scratch.mixed_fp32 : nullptr;
+#else
+                nullptr;
+#endif
             flash_next_moe_host_backed(
                 round_ws.block_input, model.layers[layer].moe,
                 model.host_experts->layers[layer], round_ws.block_output,
-                workspace, stream, moe_emit, router_input);
+                workspace, stream, moe_emit, router_input, routed_expert_input);
         } else {
             flash_next_moe(round_ws.block_input, model.layers[layer].moe,
                            round_ws.block_output, workspace, stream);

@@ -35,6 +35,7 @@ std::atomic<std::uint64_t> s_host_expert_pairs{0};
 struct HostExpertTask {
     HostNvfp4ExpertPairView expert{};
     const std::uint16_t* input = nullptr;
+    const float* input_fp32 = nullptr;
     float* output = nullptr;
 };
 
@@ -165,7 +166,12 @@ class HostExpertWorkerPool {
 
             try {
                 const HostExpertTask& task = tasks_[index];
-                if (avx2_) {
+                if (task.input_fp32 != nullptr) {
+                    flash_next_cpu_nvfp4_expert_pair_reference_fp32_input(
+                        task.expert,
+                        std::span<const float>(task.input_fp32, kFlashNextExpertHidden),
+                        std::span<float>(task.output, kFlashNextExpertHidden), scratch);
+                } else if (avx2_) {
                     flash_next_cpu_nvfp4_expert_pair_avx2(
                         task.expert,
                         std::span<const std::uint16_t>(task.input, kFlashNextExpertHidden),
@@ -216,6 +222,7 @@ HostExpertWorkerPool& host_expert_worker_pool() {
 
 struct HostMoeCpuBuffers {
     std::vector<std::uint16_t> input;
+    std::vector<float> input_fp32;
     std::vector<std::int32_t> ids;
     std::vector<float> alpha;
     std::vector<float> routed_sum;
@@ -343,7 +350,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                                 const HostNvfp4ExpertLayerView& host_experts, Tensor& output,
                                 WorkspaceArena& workspace, cudaStream_t stream,
                                 const MoeStageEmitter& emit,
-                                const Tensor* router_input_fp32) {
+                                const Tensor* router_input_fp32,
+                                const Tensor* routed_expert_input_fp32) {
     const std::int32_t tokens = input.ne[1];
     if (input.dtype != DType::BF16 || output.dtype != DType::BF16 || input.ne[0] != 2'560 ||
         output.ne[0] != 2'560 || tokens < 1 || output.ne[1] != tokens ||
@@ -358,6 +366,19 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         !exact_expert_bank(host_experts.gate_up, 1'280, 2'560) ||
         !exact_expert_bank(host_experts.down, 2'560, 640) || stream == nullptr) {
         throw std::invalid_argument("Flash-Next host-backed MoE received an invalid exact target view");
+    }
+
+    const bool use_routed_expert_input_fp32 =
+        routed_expert_input_fp32 != nullptr && routed_expert_input_fp32->data != nullptr;
+    if (use_routed_expert_input_fp32 &&
+        (routed_expert_input_fp32->dtype != DType::FP32 ||
+         routed_expert_input_fp32->ne[0] != kFlashNextExpertHidden ||
+         routed_expert_input_fp32->ne[1] != tokens ||
+         routed_expert_input_fp32->ne[2] != 1 || routed_expert_input_fp32->ne[3] != 1 ||
+         !routed_expert_input_fp32->is_contiguous() ||
+         !aligned_to(routed_expert_input_fp32->data, 16))) {
+        throw std::invalid_argument(
+            "Flash-Next host-backed MoE received an invalid FP32 routed-expert input");
     }
 
     const auto scope = workspace.scope();
@@ -393,7 +414,11 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         static_cast<std::size_t>(tokens) * kFlashNextExpertHidden;
     const std::size_t routed_paths = static_cast<std::size_t>(tokens) * 10ULL;
     HostMoeCpuBuffers& cpu = s_host_moe_buffers;
-    cpu.input.resize(input_words);
+    if (use_routed_expert_input_fp32) {
+        cpu.input_fp32.resize(input_words);
+    } else {
+        cpu.input.resize(input_words);
+    }
     cpu.ids.resize(routed_paths);
     cpu.alpha.resize(routed_paths);
     cpu.routed_sum.resize(
@@ -402,9 +427,15 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     cpu.tasks.resize(routed_paths);
     std::fill(cpu.routed_sum.begin(), cpu.routed_sum.end(), 0.0F);
 
-    CUDA_CHECK(cudaMemcpyAsync(cpu.input.data(), input.data,
-                               input_words * sizeof(std::uint16_t),
-                               cudaMemcpyDeviceToHost, stream));
+    if (use_routed_expert_input_fp32) {
+        CUDA_CHECK(cudaMemcpyAsync(
+            cpu.input_fp32.data(), routed_expert_input_fp32->data,
+            input_words * sizeof(float), cudaMemcpyDeviceToHost, stream));
+    } else {
+        CUDA_CHECK(cudaMemcpyAsync(cpu.input.data(), input.data,
+                                   input_words * sizeof(std::uint16_t),
+                                   cudaMemcpyDeviceToHost, stream));
+    }
     CUDA_CHECK(cudaMemcpyAsync(cpu.ids.data(), scratch.ids.data,
                                routed_paths * sizeof(std::int32_t),
                                cudaMemcpyDeviceToHost, stream));
@@ -417,9 +448,12 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     // a private FP32 vector. Routing alpha is then accumulated below on this thread
     // in the original token/path order so the reduction contract remains deterministic.
     for (std::int32_t token = 0; token < tokens; ++token) {
-        const std::uint16_t* token_input =
-            cpu.input.data() +
+        const std::size_t token_offset =
             static_cast<std::size_t>(token) * kFlashNextExpertHidden;
+        const std::uint16_t* token_input =
+            use_routed_expert_input_fp32 ? nullptr : cpu.input.data() + token_offset;
+        const float* token_input_fp32 =
+            use_routed_expert_input_fp32 ? cpu.input_fp32.data() + token_offset : nullptr;
         for (std::int32_t path = 0; path < 10; ++path) {
             const std::size_t route_index =
                 static_cast<std::size_t>(token) * 10ULL +
@@ -427,6 +461,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
             cpu.tasks[route_index] = HostExpertTask{
                 .expert = host_experts.expert(cpu.ids[route_index]),
                 .input = token_input,
+                .input_fp32 = token_input_fp32,
                 .output = cpu.pair_outputs.data() +
                           route_index * kFlashNextExpertHidden,
             };
