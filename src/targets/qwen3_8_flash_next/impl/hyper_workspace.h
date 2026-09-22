@@ -15,6 +15,9 @@ struct FlashNextHyperWorkspace {
     Tensor injection;
     Tensor up_gemm;
     Tensor down_split;
+#if defined(NINFER_VOLTA_BUILD)
+    Tensor mixed_fp32;
+#endif
 };
 
 template <class Arena>
@@ -25,6 +28,9 @@ FlashNextHyperWorkspace allocate_flash_next_hyper_workspace(Arena& arena, std::i
         .injection  = arena.alloc(DType::FP32, {4, tokens}, 16),
         .up_gemm    = arena.alloc(DType::BF16, {10'240, tokens}, 256),
         .down_split = arena.alloc(DType::FP32, {320, tokens * kHyperDownSplitK}, 256),
+#if defined(NINFER_VOLTA_BUILD)
+        .mixed_fp32 = arena.alloc(DType::FP32, {2'560, tokens}, 256),
+#endif
     };
 }
 
