@@ -85,7 +85,7 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
                            const Tensor& source_slots, const Tensor& destination_slots,
                            Tensor& convolution_states, Tensor& ssm_states,
                            WorkspaceArena& workspace, Tensor& output, cudaStream_t stream,
-                           bool aliased_recurrent_scan) {
+                           bool aliased_recurrent_scan, const GdnStageEmitter& emit) {
     const std::int32_t batch = input.ne[1];
     if (!exact_tensor(input, DType::BF16, 2'560, batch) || batch < 1 || batch > 8 ||
         !exact_tensor(output, DType::BF16, 2'560, batch) ||
@@ -112,7 +112,12 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
     FlashNextGdnWorkspace scratch = allocate_flash_next_gdn_workspace(workspace, batch);
     ops::linear(input, weights.query_key_value_z, scratch.projected, ops::LinearPolicy::A16Only,
                 workspace, stream);
+    if (emit) { emit("gdn_projected", scratch.projected); }
     flash_next_gdn_controls_launch(input, weights, scratch, stream);
+    if (emit) {
+        emit("gdn_g", scratch.g);
+        emit("gdn_beta", scratch.beta);
+    }
 
     if (aliased_recurrent_scan && batch > 1) {
         for (std::int32_t r = 0; r < batch; ++r) {
@@ -144,7 +149,15 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
                                           stream);
     }
 
+    if (emit) {
+        emit("gdn_query", scratch.query);
+        emit("gdn_key", scratch.key);
+        emit("gdn_value", scratch.value);
+        emit("gdn_z", scratch.z);
+        emit("gdn_recurrent_output", scratch.recurrent_output);
+    }
     flash_next_gdn_output_gate_launch(scratch, weights.norm, stream);
+    if (emit) { emit("gdn_gated_output", scratch.gated_output); }
     ops::linear(scratch.gated_output, weights.output, output, ops::LinearPolicy::A16Only, workspace,
                 stream);
 }

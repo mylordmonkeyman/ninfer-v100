@@ -346,10 +346,16 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                 qsa_emit);
         } else {
             const std::size_t gdn_idx = gdn_ordinal(layer);
+            GdnStageEmitter gdn_emit{};
+            if (sink && sink->on_state) {
+                gdn_emit = [&](std::string_view name, const Tensor& tensor) {
+                    emit_state(prefix + std::string(name), tensor);
+                };
+            }
             flash_next_gdn_decode(round_ws.block_input, model.gdn[gdn_idx], source_slots,
                                   destination_slots, state.gdn_convolution_states[gdn_idx],
                                   state.gdn_ssm_states[gdn_idx], workspace, round_ws.block_output,
-                                  stream, aliased_recurrent_scan);
+                                  stream, aliased_recurrent_scan, gdn_emit);
         }
         emit_state(prefix + "attn_block_output", round_ws.block_output);
 

@@ -298,6 +298,11 @@ def register_hooks(model: nn.Module):
             stage_outputs[prefix + "moe_shared_scale"] = torch.sigmoid(output.detach()).clone()
         return hook
 
+    def save_gdn_norm_input(prefix: str):
+        def hook(module, input):
+            stage_outputs[prefix + "gdn_recurrent_output"] = input[0].detach().clone()
+        return hook
+
     # Embedding
     model.embed_tokens.register_forward_hook(save_output("embedding"))
 
@@ -312,7 +317,14 @@ def register_hooks(model: nn.Module):
 
         # linear_attn or self_attn
         if hasattr(model.layers[l], "linear_attn"):
-            model.layers[l].linear_attn.register_forward_hook(save_output(prefix + "attn_block_output"))
+            gdn = model.layers[l].linear_attn
+            gdn.register_forward_hook(save_output(prefix + "attn_block_output"))
+            gdn.in_proj_qkv.register_forward_hook(save_output(prefix + "gdn_qkv_projected"))
+            gdn.in_proj_z.register_forward_hook(save_output(prefix + "gdn_z"))
+            gdn.in_proj_a.register_forward_hook(save_output(prefix + "gdn_a"))
+            gdn.in_proj_b.register_forward_hook(save_output(prefix + "gdn_b"))
+            gdn.norm.register_forward_pre_hook(save_gdn_norm_input(prefix))
+            gdn.out_proj.register_forward_pre_hook(save_input(prefix + "gdn_gated_output"))
         elif hasattr(model.layers[l], "self_attn"):
             attn = model.layers[l].self_attn
             attn.register_forward_hook(save_output(prefix + "attn_block_output"))
@@ -342,6 +354,30 @@ def register_hooks(model: nn.Module):
     model.hyper_connection_mixer.register_forward_hook(save_output("final_hidden"))
 
     return stage_outputs
+
+def derive_gdn_stages(gdn: nn.Module, stage_outputs: dict, prefix: str):
+    qkv = stage_outputs[prefix + "gdn_qkv_projected"]
+    z = stage_outputs[prefix + "gdn_z"]
+    a = stage_outputs[prefix + "gdn_a"]
+    b = stage_outputs[prefix + "gdn_b"]
+
+    qkv_channels = qkv.transpose(1, 2)
+    weight = gdn.conv1d.weight
+    conv = F.conv1d(
+        qkv_channels.to(weight.dtype),
+        weight=weight,
+        bias=gdn.conv1d.bias,
+        padding=weight.shape[-1] - 1,
+        groups=qkv_channels.shape[1],
+    )[:, :, : qkv_channels.shape[-1]]
+    conv = F.silu(conv).transpose(1, 2)
+    query, key, value = torch.split(conv, [2048, 2048, 6144], dim=-1)
+
+    beta = torch.sigmoid(b.float())
+    g = -torch.exp(gdn.A_log.float()) * F.softplus(a.float() + gdn.dt_bias.float())
+    projected = torch.cat([qkv, z], dim=-1)
+    return projected, query, key, value, z, g, beta
+
 
 def apply_text_qsa_rope(x: torch.Tensor, position: int, theta: float = 1.0e7) -> torch.Tensor:
     """Apply Qwen4Exp text MRoPE for equal T/H/W positions."""
@@ -671,6 +707,29 @@ def main():
                     stages.append(("hyper_after_ple", stage_outputs[prefix + "hyper_in"][0, pos]))
 
                 stages.append((prefix + "attn_block_input", stage_outputs[prefix + "attn_block_input"][0, pos]))
+                if prefix + "gdn_qkv_projected" in stage_outputs:
+                    gdn = model.layers[l].linear_attn
+                    projected, query, key, value, z, g, beta = derive_gdn_stages(
+                        gdn, stage_outputs, prefix
+                    )
+                    recurrent = stage_outputs[prefix + "gdn_recurrent_output"].reshape(
+                        1, len(token_list), 48, 128
+                    )
+                    stages.append((prefix + "gdn_projected", projected[0, pos]))
+                    stages.append((prefix + "gdn_query", query[0, pos]))
+                    stages.append((prefix + "gdn_key", key[0, pos]))
+                    stages.append((prefix + "gdn_value", value[0, pos]))
+                    stages.append((prefix + "gdn_z", z[0, pos]))
+                    stages.append((prefix + "gdn_g", g[0, pos]))
+                    stages.append((prefix + "gdn_beta", beta[0, pos]))
+                    stages.append((
+                        prefix + "gdn_recurrent_output",
+                        recurrent[0, pos].reshape(-1),
+                    ))
+                    stages.append((
+                        prefix + "gdn_gated_output",
+                        stage_outputs[prefix + "gdn_gated_output"][0, pos],
+                    ))
                 if prefix + "qsa_q_proj" in stage_outputs:
                     q_proj = stage_outputs[prefix + "qsa_q_proj"][0, pos]
                     k_proj = stage_outputs[prefix + "qsa_k_proj"][0, pos]
