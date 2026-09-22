@@ -90,7 +90,7 @@ echo "  final:  $output_dir"
 
 "$python_bin" "$script_dir/make_phase11_corpus.py"   --model-dir "$model_dir"   --output "$build_dir/token_ids.json"
 
-"$python_bin" "$script_dir/run_oracle.py"   --model-dir "$model_dir"   --ple-dir "$ple_dir"   --ids-file "$build_dir/token_ids.json"   --dump-logits "$build_dir"   --logits-chunk-size "$chunk_size"
+OMP_NUM_THREADS="${NINFER_PHASE11_ORACLE_THREADS:-32}" MKL_NUM_THREADS="${NINFER_PHASE11_ORACLE_THREADS:-32}" OPENBLAS_NUM_THREADS="${NINFER_PHASE11_ORACLE_THREADS:-32}" NUMEXPR_NUM_THREADS="${NINFER_PHASE11_ORACLE_THREADS:-32}" NINFER_ORACLE_DETERMINISTIC=1 NINFER_ORACLE_THREADS="${NINFER_PHASE11_ORACLE_THREADS:-32}" "$python_bin" "$script_dir/run_oracle.py"   --model-dir "$model_dir"   --ple-dir "$ple_dir"   --ids-file "$build_dir/token_ids.json"   --dump-logits "$build_dir"   --logits-chunk-size "$chunk_size"
 
 "$python_bin" "$script_dir/validate_phase11_oracle.py"   --corpus "$build_dir/token_ids.json"   --manifest "$build_dir/manifest.json"   --minimum 4096
 

@@ -21,11 +21,13 @@ from transformers.models.qwen4_exp.modeling_qwen4_exp import (
 )
 
 if os.environ.get("NINFER_ORACLE_DETERMINISTIC") == "1":
-    # Compact stage traces are diagnostics, not throughput benchmarks. Pinning
-    # PyTorch to one CPU worker removes reduction-order drift between repeated
-    # runs so tensor comparisons are against a stable reference.
+    # Oracle runs are correctness artifacts, not throughput benchmarks. Pin the
+    # worker count explicitly so reduction order is stable across repeated runs.
+    oracle_threads = int(os.environ.get("NINFER_ORACLE_THREADS", "1"))
+    if oracle_threads < 1:
+        raise RuntimeError("NINFER_ORACLE_THREADS must be >= 1")
     torch.manual_seed(0)
-    torch.set_num_threads(1)
+    torch.set_num_threads(oracle_threads)
     torch.set_num_interop_threads(1)
     torch.use_deterministic_algorithms(True)
 
