@@ -68,14 +68,14 @@ __device__ __forceinline__ BridgePlan finish_cta_range(RangeStats local, float* 
     const int warp = tid >> 5;
 
     const float local_min =
-        local.min_nonzero_abs == 0.0F ? CUDART_INF_F : local.min_nonzero_abs;
+        local.min_nonzero_abs == 0.0F ? kBridgeInfinity : local.min_nonzero_abs;
     const float max_value = warp_max(local.max_abs);
     const float min_value = warp_min(local_min);
 
     if (lane == 0) {
         scratch[warp] = max_value;
         scratch[Dv16Schedule::kWarps + warp] =
-            min_value == CUDART_INF_F ? 0.0F : min_value;
+            min_value == kBridgeInfinity ? 0.0F : min_value;
     }
     __syncthreads();
 
@@ -413,7 +413,7 @@ __device__ __forceinline__ void phase_c_mma(const __half* r_half, const __half* 
         const int token_block = warp;
         mma_macro16<32, true, true>(
             r_half + token_block * 16 * kBridgeLd, kBridgeLd, d_half, kBridgeLd,
-            r_plan.inv * d_plan.inv, vp + token_block, kChunkSize, d);
+            r_plan.inv * d_plan.inv, vp + token_block * 16, kChunkSize, d + token_block * 16);
     }
 }
 

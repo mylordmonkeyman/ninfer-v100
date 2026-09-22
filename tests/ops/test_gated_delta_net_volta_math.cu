@@ -111,7 +111,7 @@ int test_bridge_planner() {
         ++failures;
     }
 
-    const auto nonfinite = volta::plan_fp16_bridge({CUDART_INF_F, 1.0F});
+    const auto nonfinite = volta::plan_fp16_bridge({volta::kBridgeInfinity, 1.0F});
     if (nonfinite.mode != volta::BridgeMode::Fp32Simt) {
         std::cerr << "non-finite bridge range did not fall back to FP32\n";
         ++failures;

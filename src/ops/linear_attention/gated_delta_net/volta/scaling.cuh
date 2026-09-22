@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 namespace ninfer::ops::detail::gated_delta_net::volta {
 
@@ -30,6 +31,7 @@ struct BridgePlan {
 
 inline constexpr float kFp16Headroom = 32768.0F;
 inline constexpr float kFp16MinSafe = 0x1p-14F;
+inline constexpr float kBridgeInfinity = std::numeric_limits<float>::infinity();
 
 __host__ __device__ inline RangeStats empty_range_stats() noexcept {
     return {};
@@ -38,7 +40,7 @@ __host__ __device__ inline RangeStats empty_range_stats() noexcept {
 __host__ __device__ inline void range_observe(RangeStats& range, float value) noexcept {
     const float magnitude = fabsf(value);
     if (!isfinite(magnitude)) {
-        range.max_abs = CUDART_INF_F;
+        range.max_abs = kBridgeInfinity;
         range.min_nonzero_abs = 0.0F;
         return;
     }
@@ -51,7 +53,7 @@ __host__ __device__ inline void range_observe(RangeStats& range, float value) no
 
 __host__ __device__ inline RangeStats merge_range_stats(RangeStats a, RangeStats b) noexcept {
     if (!isfinite(a.max_abs) || !isfinite(b.max_abs)) {
-        return {CUDART_INF_F, 0.0F};
+        return {kBridgeInfinity, 0.0F};
     }
     RangeStats out{};
     out.max_abs = a.max_abs > b.max_abs ? a.max_abs : b.max_abs;
@@ -111,7 +113,7 @@ __host__ __device__ inline BridgePlan plan_fp16_bridge(RangeStats range) noexcep
 
 __host__ __device__ inline float bridge_dynamic_range_ratio(RangeStats range) noexcept {
     if (range.max_abs == 0.0F) { return 1.0F; }
-    if (range.min_nonzero_abs == 0.0F) { return CUDART_INF_F; }
+    if (range.min_nonzero_abs == 0.0F) { return kBridgeInfinity; }
     return range.max_abs / range.min_nonzero_abs;
 }
 
