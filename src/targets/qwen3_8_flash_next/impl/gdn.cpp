@@ -69,6 +69,14 @@ std::size_t flash_next_gdn_workspace_capacity_bytes(std::int32_t min_batch,
     }
     WorkspaceLayoutBuilder layout;
     (void)allocate_flash_next_gdn_workspace(layout, max_batch);
+#if defined(NINFER_VOLTA_BUILD)
+    // Decode is capped at B<=8. Account for optional FP32 causal-conv
+    // Q/K/V scratch without scaling that diagnostic storage to prefill width.
+    const std::int32_t decode_batch = std::min(max_batch, 8);
+    (void)layout.alloc(DType::FP32, {2'048, decode_batch}, 256);
+    (void)layout.alloc(DType::FP32, {2'048, decode_batch}, 256);
+    (void)layout.alloc(DType::FP32, {6'144, decode_batch}, 256);
+#endif
     {
         auto scope = layout.scope();
         const std::size_t qkvz_ws = ops::linear_workspace_capacity_bytes(
@@ -112,6 +120,12 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
     const auto scope              = workspace.scope();
     FlashNextGdnWorkspace scratch = allocate_flash_next_gdn_workspace(workspace, batch);
 #if defined(NINFER_VOLTA_BUILD)
+    if (const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_GDN_CONV");
+        env != nullptr && env[0] == '1' && env[1] == '\0') {
+        scratch.query = workspace.alloc(DType::FP32, {2'048, batch}, 256);
+        scratch.key   = workspace.alloc(DType::FP32, {2'048, batch}, 256);
+        scratch.value = workspace.alloc(DType::FP32, {6'144, batch}, 256);
+    }
     if (const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_GDN_READOUT");
         env != nullptr && env[0] == '1' && env[1] == '\0') {
         scratch.recurrent_output = scratch.recurrent_output_fp32;

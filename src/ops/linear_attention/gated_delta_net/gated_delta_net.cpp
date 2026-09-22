@@ -112,9 +112,19 @@ Geometry validate_recurrent_batch_update(const Tensor& q, const Tensor& k, const
                                          const Tensor& ssm_states, const Tensor& source_state_slots,
                                          const Tensor& destination_state_slots, const Tensor& out) {
     constexpr std::int32_t kMaximumBatch = 8;
+#if defined(NINFER_VOLTA_BUILD)
+    const bool qkv_dtype_ok =
+        (q.dtype == DType::BF16 || q.dtype == DType::FP32) &&
+        q.dtype == k.dtype && q.dtype == v.dtype;
+    if (!qkv_dtype_ok) {
+        throw std::invalid_argument(
+            "gated_delta_net: Volta batch-update q/k/v must share BF16 or FP32 dtype");
+    }
+#else
     require_dtype(q, DType::BF16, "q must be BF16");
     require_dtype(k, DType::BF16, "k must be BF16");
     require_dtype(v, DType::BF16, "v must be BF16");
+#endif
     if (out.dtype != DType::BF16 && out.dtype != DType::FP32) {
         throw std::invalid_argument("gated_delta_net: batch-update out must be BF16 or FP32");
     }

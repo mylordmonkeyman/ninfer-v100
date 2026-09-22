@@ -19,12 +19,22 @@ constexpr int kValueRows    = 6'144;
 constexpr int kConvChannels = 10'240;
 constexpr int kProjected    = 16'384;
 
+template <typename OutputT>
+__device__ __forceinline__ void store_conv_activation(OutputT* destination, float value) {
+    if constexpr (std::is_same_v<OutputT, float>) {
+        *destination = value;
+    } else {
+        *destination = __float2bfloat16_rn(value);
+    }
+}
+
+template <typename OutputT>
 __global__ void conv_split_kernel(
     const __nv_bfloat16* __restrict__ projected, const __nv_bfloat16* __restrict__ convolution,
     const std::int32_t* __restrict__ source_slots,
     const std::int32_t* __restrict__ destination_slots, __nv_bfloat16* __restrict__ states,
-    __nv_bfloat16* __restrict__ query, __nv_bfloat16* __restrict__ key,
-    __nv_bfloat16* __restrict__ value, __nv_bfloat16* __restrict__ z,
+    OutputT* __restrict__ query, OutputT* __restrict__ key,
+    OutputT* __restrict__ value, __nv_bfloat16* __restrict__ z,
     int batch_offset = 0) {
     const int channel =
         static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
@@ -48,15 +58,15 @@ __global__ void conv_split_kernel(
     states[destination_base + kConvChannels + channel] =
         states[source_base + 2 * kConvChannels + channel];
     states[destination_base + 2 * kConvChannels + channel] = current_bf16;
-    const __nv_bfloat16 activated                          = __float2bfloat16_rn(ops::silu(sum));
+    const float activated            = ops::silu(sum);
     const std::int64_t batch_qk = static_cast<std::int64_t>(batch) * kQkRows;
     const std::int64_t batch_v  = static_cast<std::int64_t>(batch) * kValueRows;
     if (channel < kQkRows) {
-        query[batch_qk + channel] = activated;
+        store_conv_activation(query + batch_qk + channel, activated);
     } else if (channel < 2 * kQkRows) {
-        key[batch_qk + channel - kQkRows] = activated;
+        store_conv_activation(key + batch_qk + channel - kQkRows, activated);
     } else {
-        value[batch_v + channel - 2 * kQkRows] = activated;
+        store_conv_activation(value + batch_v + channel - 2 * kQkRows, activated);
     }
     if (channel < kValueRows) {
         z[batch_v + channel] =
@@ -132,18 +142,37 @@ void flash_next_gdn_conv_launch(const FlashNextGdnWorkspace& scratch, const Tens
     constexpr int threads = 256;
     const unsigned b_count = (batch_count > 0) ? static_cast<unsigned>(batch_count)
                                                : static_cast<unsigned>(scratch.projected.ne[1]);
-    conv_split_kernel<<<dim3((kConvChannels + threads - 1) / threads, b_count),
-                        threads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(scratch.projected.data),
-        static_cast<const __nv_bfloat16*>(convolution.data),
-        static_cast<const std::int32_t*>(source_slots.data),
-        static_cast<const std::int32_t*>(destination_slots.data),
-        static_cast<__nv_bfloat16*>(convolution_states.data),
-        static_cast<__nv_bfloat16*>(scratch.query.data),
-        static_cast<__nv_bfloat16*>(scratch.key.data),
-        static_cast<__nv_bfloat16*>(scratch.value.data),
-        static_cast<__nv_bfloat16*>(scratch.z.data),
-        batch_offset);
+    const dim3 grid((kConvChannels + threads - 1) / threads, b_count);
+    if (scratch.query.dtype == DType::BF16 && scratch.key.dtype == DType::BF16 &&
+        scratch.value.dtype == DType::BF16) {
+        conv_split_kernel<__nv_bfloat16><<<grid, threads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.projected.data),
+            static_cast<const __nv_bfloat16*>(convolution.data),
+            static_cast<const std::int32_t*>(source_slots.data),
+            static_cast<const std::int32_t*>(destination_slots.data),
+            static_cast<__nv_bfloat16*>(convolution_states.data),
+            static_cast<__nv_bfloat16*>(scratch.query.data),
+            static_cast<__nv_bfloat16*>(scratch.key.data),
+            static_cast<__nv_bfloat16*>(scratch.value.data),
+            static_cast<__nv_bfloat16*>(scratch.z.data),
+            batch_offset);
+    } else if (scratch.query.dtype == DType::FP32 && scratch.key.dtype == DType::FP32 &&
+               scratch.value.dtype == DType::FP32) {
+        conv_split_kernel<float><<<grid, threads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.projected.data),
+            static_cast<const __nv_bfloat16*>(convolution.data),
+            static_cast<const std::int32_t*>(source_slots.data),
+            static_cast<const std::int32_t*>(destination_slots.data),
+            static_cast<__nv_bfloat16*>(convolution_states.data),
+            static_cast<float*>(scratch.query.data),
+            static_cast<float*>(scratch.key.data),
+            static_cast<float*>(scratch.value.data),
+            static_cast<__nv_bfloat16*>(scratch.z.data),
+            batch_offset);
+    } else {
+        throw std::invalid_argument(
+            "Flash-Next GDN convolution requires matching BF16 or FP32 Q/K/V");
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 

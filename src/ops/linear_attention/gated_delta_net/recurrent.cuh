@@ -79,6 +79,17 @@ __device__ __forceinline__ RawQkLane load_raw_qk_lane(const __nv_bfloat16* base,
     return out;
 }
 
+__device__ __forceinline__ RawQkLane load_raw_qk_lane(const float* base,
+                                                      std::uint32_t dqk_base) {
+    RawQkLane out{};
+    const float4 packed = load_vec<float4>(base + dqk_base);
+    out.value[0] = packed.x;
+    out.value[1] = packed.y;
+    out.value[2] = packed.z;
+    out.value[3] = packed.w;
+    return out;
+}
+
 template <bool Normalize>
 __device__ __forceinline__ void normalize_qk_lane(float (&value)[kQkPerLane], int lane) {
     if constexpr (Normalize) {
@@ -100,6 +111,13 @@ __device__ __forceinline__ RawValueLane load_value_lane(const __nv_bfloat16* bas
         out.bits  = base[dv_base + lane];
         out.value = __bfloat162float(out.bits);
     }
+    return out;
+}
+
+__device__ __forceinline__ RawValueLane load_value_lane(const float* base, int lane,
+                                                        std::uint32_t dv_base) {
+    RawValueLane out{__float2bfloat16(0.0f), 0.0f};
+    if (lane < kDvPerWarp) { out.value = base[dv_base + lane]; }
     return out;
 }
 
@@ -143,9 +161,9 @@ __device__ __forceinline__ void store_readout(float* output, float value) {
     *output = value;
 }
 
-template <bool Normalize, typename OutputT>
+template <bool Normalize, typename QueryT, typename OutputT>
 __device__ __forceinline__ void readout_and_store(float (&state)[kDvPerWarp][kQkPerLane],
-                                                  const __nv_bfloat16* query, OutputT* output,
+                                                  const QueryT* query, OutputT* output,
                                                   std::uint32_t dqk_base, std::uint32_t dv_base,
                                                   int lane, float scale) {
     RawQkLane q = load_raw_qk_lane(query, dqk_base);
@@ -310,11 +328,12 @@ struct DirectAccess {
     }
 };
 
-template <typename StateT = float, typename OutputT = __nv_bfloat16>
+template <typename InputT = __nv_bfloat16, typename StateT = float,
+          typename OutputT = __nv_bfloat16>
 struct BatchUpdateAccess {
-    const __nv_bfloat16* q;
-    const __nv_bfloat16* k;
-    const __nv_bfloat16* v;
+    const InputT* q;
+    const InputT* k;
+    const InputT* v;
     const float* g;
     const float* beta;
     const StateT* states_read;
@@ -350,12 +369,12 @@ struct BatchUpdateAccess {
                static_cast<std::int64_t>(coord.value_head) * kStateDim * kStateDim;
     }
 
-    __device__ __forceinline__ const __nv_bfloat16* key_ptr(const RecurrentCoordinates& coord,
+    __device__ __forceinline__ const InputT* key_ptr(const RecurrentCoordinates& coord,
                                                             std::int32_t token) const {
         return k + (column(coord, token) * heads.H_qk + coord.qk_head) * kStateDim;
     }
 
-    __device__ __forceinline__ const __nv_bfloat16* value_ptr(const RecurrentCoordinates& coord,
+    __device__ __forceinline__ const InputT* value_ptr(const RecurrentCoordinates& coord,
                                                               std::int32_t token) const {
         return v + (column(coord, token) * heads.H_v + coord.value_head) * kStateDim;
     }
@@ -365,7 +384,7 @@ struct BatchUpdateAccess {
         return load_source_gate(g, beta, column(coord, token) * heads.H_v + coord.value_head);
     }
 
-    __device__ __forceinline__ const __nv_bfloat16* query_ptr(const RecurrentCoordinates& coord,
+    __device__ __forceinline__ const InputT* query_ptr(const RecurrentCoordinates& coord,
                                                               std::int32_t token) const {
         return q + (column(coord, token) * heads.H_qk + coord.qk_head) * kStateDim;
     }
@@ -694,9 +713,10 @@ __global__ void __launch_bounds__(kWarpSize* kNumWarps, 2)
     store_state_tile(state, access.state_write_base(coord), coord);
 }
 
-template <bool NormalizeInputs, typename StateT = float, typename OutputT = __nv_bfloat16>
+template <bool NormalizeInputs, typename InputT = __nv_bfloat16,
+          typename StateT = float, typename OutputT = __nv_bfloat16>
 __global__ void __launch_bounds__(kWarpSize* kNumWarps, 2)
-    recurrent_batch_update_kernel(BatchUpdateAccess<StateT, OutputT> access) {
+    recurrent_batch_update_kernel(BatchUpdateAccess<InputT, StateT, OutputT> access) {
     const RecurrentCoordinates coord = access.coordinates();
     __align__(16) float state[kDvPerWarp][kQkPerLane];
     load_state_tile(state, access.state_read_base(coord), coord);
