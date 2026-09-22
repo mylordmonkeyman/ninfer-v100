@@ -39,4 +39,11 @@ void flash_next_route(const Tensor& input, const Weight& router, const Weight& s
                       Tensor& score_workspace, Tensor& ids, Tensor& alpha, Tensor& shared_scale,
                       cudaStream_t stream);
 
+#if defined(NINFER_VOLTA_BUILD)
+void flash_next_route_fp32_input(const Tensor& input, const Weight& router,
+                                 const Weight& shared_gate, Tensor& score_workspace,
+                                 Tensor& ids, Tensor& alpha, Tensor& shared_scale,
+                                 cudaStream_t stream);
+#endif
+
 } // namespace ninfer::targets::qwen3_8_flash_next::detail
