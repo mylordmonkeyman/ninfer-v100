@@ -1211,6 +1211,80 @@ flash_next_moe_prefill_shared_gate_up_kernel(const __nv_bfloat16* __restrict__ i
     }
 }
 
+// Diagnostic-only shared-expert gate/up variant that changes only the input activation
+// boundary: FP32 input, BF16 weights, the same per-lane FMA order, FP32 accumulation,
+// and the same final BF16 SiLU(gate)*up materialization as the production kernel.
+__global__ void
+flash_next_moe_prefill_shared_gate_up_fp32_input_kernel(
+    const float* __restrict__ input,
+    const __nv_bfloat16* __restrict__ shared_gate,
+    const __nv_bfloat16* __restrict__ shared_up,
+    __nv_bfloat16* __restrict__ activations, int tokens) {
+    const int warp         = static_cast<int>(threadIdx.x) >> 5;
+    const int lane         = static_cast<int>(threadIdx.x) & 31;
+    const int pair         = static_cast<int>(blockIdx.x) * 8 + warp;
+    const int token_base   = static_cast<int>(blockIdx.y) * 8;
+    const int batch_tokens = min(8, tokens - token_base);
+
+    if (pair >= kIntermediate || batch_tokens <= 0) { return; }
+
+    const auto* g_row = shared_gate + static_cast<std::int64_t>(pair) * kHidden;
+    const auto* u_row = shared_up + static_cast<std::int64_t>(pair) * kHidden;
+
+    float gate_sum[8] = {};
+    float up_sum[8]   = {};
+
+    for (int col_base = 0; col_base < kHidden; col_base += 256) {
+        const int col = col_base + lane * 8;
+        if (col < kHidden) {
+            const auto g_v = *reinterpret_cast<const uint4*>(&g_row[col]);
+            const auto u_v = *reinterpret_cast<const uint4*>(&u_row[col]);
+            const std::uint32_t g_raw[4] = {g_v.x, g_v.y, g_v.z, g_v.w};
+            const std::uint32_t u_raw[4] = {u_v.x, u_v.y, u_v.z, u_v.w};
+
+            #pragma unroll
+            for (int b = 0; b < 8; ++b) {
+                if (b < batch_tokens) {
+                    const int token = token_base + b;
+                    const auto* in_x =
+                        input + static_cast<std::int64_t>(token) * kHidden;
+                    const float4 x_lo =
+                        *reinterpret_cast<const float4*>(&in_x[col]);
+                    const float4 x_hi =
+                        *reinterpret_cast<const float4*>(&in_x[col + 4]);
+                    const float x_raw[8] = {
+                        x_lo.x, x_lo.y, x_lo.z, x_lo.w,
+                        x_hi.x, x_hi.y, x_hi.z, x_hi.w,
+                    };
+
+                    #pragma unroll
+                    for (int p = 0; p < 4; ++p) {
+                        const float2 g_pair = ops::bf16x2_bits_to_float2(g_raw[p]);
+                        const float2 u_pair = ops::bf16x2_bits_to_float2(u_raw[p]);
+                        gate_sum[b] = fmaf(g_pair.x, x_raw[2 * p], gate_sum[b]);
+                        gate_sum[b] = fmaf(g_pair.y, x_raw[2 * p + 1], gate_sum[b]);
+                        up_sum[b]   = fmaf(u_pair.x, x_raw[2 * p], up_sum[b]);
+                        up_sum[b]   = fmaf(u_pair.y, x_raw[2 * p + 1], up_sum[b]);
+                    }
+                }
+            }
+        }
+    }
+
+    #pragma unroll
+    for (int b = 0; b < 8; ++b) {
+        if (b < batch_tokens) {
+            const int token   = token_base + b;
+            const float g_tot = ops::warp_reduce_sum(gate_sum[b]);
+            const float u_tot = ops::warp_reduce_sum(up_sum[b]);
+            if (lane == 0) {
+                activations[(static_cast<std::int64_t>(token) * kPaths + kTopK) * kIntermediate + pair] =
+                    __float2bfloat16_rn(ops::silu(g_tot) * u_tot);
+            }
+        }
+    }
+}
+
 // Step 4a: Grouped Expert Down Projection (SIMT W4A16 for small token counts T < 512)
 // CTA: 256 threads (8 warps). 16 rows per CTA (8 warps x 2 rows).
 // Grid: (kHidden / 16, kGridY) = (160, 8).
@@ -2229,16 +2303,25 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
 
 void flash_next_moe_host_shared_launch(const Tensor& input, const MoeWeights& weights,
                                        const FlashNextMoeWorkspace& workspace,
-                                       cudaStream_t stream) {
+                                       cudaStream_t stream,
+                                       const Tensor* input_fp32) {
     const int tokens = static_cast<int>(input.ne[1]);
 
     // Keep the Phase-10 bring-up path independent of the inherited shared-MMA backend.
     const dim3 gate_grid(kIntermediate / 8, (static_cast<unsigned>(tokens) + 7U) / 8U);
-    flash_next_moe_prefill_shared_gate_up_kernel<<<gate_grid, 256, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(input.data),
-        static_cast<const __nv_bfloat16*>(weights.shared_gate.qdata),
-        static_cast<const __nv_bfloat16*>(weights.shared_up.qdata),
-        static_cast<__nv_bfloat16*>(workspace.activations.data), tokens);
+    if (input_fp32 != nullptr && input_fp32->data != nullptr) {
+        flash_next_moe_prefill_shared_gate_up_fp32_input_kernel<<<gate_grid, 256, 0, stream>>>(
+            static_cast<const float*>(input_fp32->data),
+            static_cast<const __nv_bfloat16*>(weights.shared_gate.qdata),
+            static_cast<const __nv_bfloat16*>(weights.shared_up.qdata),
+            static_cast<__nv_bfloat16*>(workspace.activations.data), tokens);
+    } else {
+        flash_next_moe_prefill_shared_gate_up_kernel<<<gate_grid, 256, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(input.data),
+            static_cast<const __nv_bfloat16*>(weights.shared_gate.qdata),
+            static_cast<const __nv_bfloat16*>(weights.shared_up.qdata),
+            static_cast<__nv_bfloat16*>(workspace.activations.data), tokens);
+    }
     CUDA_CHECK(cudaGetLastError());
     stage_ledger_record(stream, FlashNextStageId::MoE_SharedGateUp);
 }
