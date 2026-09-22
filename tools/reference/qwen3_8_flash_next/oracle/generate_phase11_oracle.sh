@@ -94,7 +94,7 @@ OMP_NUM_THREADS="${NINFER_PHASE11_ORACLE_THREADS:-32}" MKL_NUM_THREADS="${NINFER
 
 "$python_bin" "$script_dir/validate_phase11_oracle.py"   --corpus "$build_dir/token_ids.json"   --manifest "$build_dir/manifest.json"   --minimum 4096
 
-REPO_COMMIT="$(git -C "$repo_root" rev-parse HEAD)" MIXED_REVISION="a4e813ed3cfbbcc61e2929699eccb864a4dfa843" PLE_REVISION="da8b39586016d8325ac619be28ad77d6296625ec" BUILD_DIR="$build_dir" "$python_bin" - <<'PY'
+REPO_COMMIT="$(git -C "$repo_root" rev-parse HEAD)" MIXED_REVISION="a4e813ed3cfbbcc61e2929699eccb864a4dfa843" PLE_REVISION="da8b39586016d8325ac619be28ad77d6296625ec" ORACLE_THREADS="${NINFER_PHASE11_ORACLE_THREADS:-32}" BUILD_DIR="$build_dir" "$python_bin" - <<'PY'
 import hashlib
 import json
 import os
@@ -106,6 +106,8 @@ manifest_bytes = (root / "manifest.json").read_bytes()
 payload = {
     "schema": "ninfer.phase11.oracle_provenance.v1",
     "repository_commit": os.environ["REPO_COMMIT"],
+    "oracle_threads": int(os.environ["ORACLE_THREADS"]),
+    "deterministic_algorithms": True,
     "mixed_checkpoint": {
         "repo": "primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8",
         "revision": os.environ["MIXED_REVISION"],

@@ -399,6 +399,12 @@ def dump_logits_only(
         for local_idx in range(end - start):
             pos = start + local_idx
             logits_pos = logits_chunk[local_idx].detach().contiguous().cpu()
+            if not torch.isfinite(logits_pos).all():
+                bad = int((~torch.isfinite(logits_pos)).sum().item())
+                raise RuntimeError(
+                    f"CPU oracle logits position {pos} contains {bad} non-finite "
+                    "values; refusing to publish oracle"
+                )
             data = logits_pos.numpy().astype(np.float32, copy=False).tobytes()
             bin_file = f"pos{pos:06d}_logits.bin"
             with open(os.path.join(dump_root, bin_file), "wb") as out:
