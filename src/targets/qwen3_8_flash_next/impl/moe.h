@@ -42,7 +42,8 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
 void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_weights,
                                 const HostNvfp4ExpertLayerView& host_experts, Tensor& output,
                                 WorkspaceArena& workspace, cudaStream_t stream,
-                                const MoeStageEmitter& emit = {});
+                                const MoeStageEmitter& emit = {},
+                                const Tensor* router_input_fp32 = nullptr);
 
 void flash_next_moe_bf16(const Tensor& input, const MoeBf16Weights& weights, Tensor& output,
                          WorkspaceArena& workspace, cudaStream_t stream);
