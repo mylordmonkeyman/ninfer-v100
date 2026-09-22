@@ -1,6 +1,10 @@
 #include "ops/linear_attention/gated_delta_net/volta/bf16_sm70.cuh"
 #include "ops/linear_attention/gated_delta_net/volta/common.cuh"
 #include "ops/linear_attention/gated_delta_net/volta/mma_tiles.cuh"
+#include "ops/linear_attention/gated_delta_net/volta/decay.cuh"
+#include "ops/linear_attention/gated_delta_net/volta/neumann_solve.cuh"
+#include "ops/linear_attention/gated_delta_net/volta/scaling.cuh"
+#include "ops/linear_attention/gated_delta_net/volta/triangular_solve.cuh"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -70,6 +74,118 @@ __global__ void macro16_basis_kernel(const __half* a, const __half* b, float* ou
         const int col = macro.col + local.col;
         output[row * 16 + col] = accum.x[i];
     }
+}
+
+int test_bridge_planner() {
+    int failures = 0;
+
+    volta::RangeStats observed{};
+    volta::range_observe(observed, 0.0F);
+    volta::range_observe(observed, -0x1p-20F);
+    volta::range_observe(observed, 1.0F);
+    if (observed.max_abs != 1.0F || observed.min_nonzero_abs != 0x1p-20F) {
+        std::cerr << "range observation mismatch\n";
+        ++failures;
+    }
+
+    const auto zero = volta::plan_fp16_bridge({0.0F, 0.0F});
+    if (zero.mode != volta::BridgeMode::Fp16Mma || zero.mul != 1.0F || zero.inv != 1.0F) {
+        std::cerr << "all-zero bridge plan mismatch\n";
+        ++failures;
+    }
+
+    const auto safe = volta::plan_fp16_bridge({1.0F, 0x1p-20F});
+    if (safe.mode != volta::BridgeMode::Fp16Mma || safe.mul != 32768.0F ||
+        safe.inv != 0x1p-15F || safe.range.max_abs * safe.mul > volta::kFp16Headroom ||
+        safe.range.min_nonzero_abs * safe.mul < volta::kFp16MinSafe) {
+        std::cerr << "safe bridge plan mismatch\n";
+        ++failures;
+    }
+
+    const auto impossible = volta::plan_fp16_bridge({32768.0F, 0x1p-30F});
+    if (impossible.mode != volta::BridgeMode::Fp32Simt) {
+        std::cerr << "unsafe bridge range did not fall back to FP32\n";
+        ++failures;
+    }
+
+    const auto nonfinite = volta::plan_fp16_bridge({CUDART_INF_F, 1.0F});
+    if (nonfinite.mode != volta::BridgeMode::Fp32Simt) {
+        std::cerr << "non-finite bridge range did not fall back to FP32\n";
+        ++failures;
+    }
+    return failures;
+}
+
+int test_decay_values() {
+    std::array<float, volta::kChunkSize> g{};
+    volta::DecayValues decay{};
+    volta::compute_decay_values(g.data(), decay);
+
+    for (int t = 0; t < volta::kChunkSize; ++t) {
+        if (decay.alpha[t] != 1.0F || decay.prefix[t] != 1.0F || decay.suffix[t] != 1.0F) {
+            std::cerr << "zero-g decay mismatch at t=" << t << "\n";
+            return 1;
+        }
+    }
+    for (int row = 0; row < volta::kChunkSize; ++row) {
+        for (int col = 0; col <= row; ++col) {
+            if (volta::pairwise_decay(decay, row, col) != 1.0F) {
+                std::cerr << "zero-g pairwise decay mismatch\n";
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+int test_solve_primitives() {
+    constexpr int kN = volta::kChunkSize;
+    std::array<float, kN * kN> b{};
+    std::array<float, kN * kN> exact{};
+    std::array<float, kN * kN> neumann{};
+    std::array<float, volta::kSolveScratchElements> scratch{};
+
+    for (int row = 1; row < kN; ++row) {
+        b[static_cast<std::size_t>(row) * kN + row - 1] = 0.25F;
+    }
+
+    volta::exact_inverse_bt32(b.data(), kN, exact.data(), kN, scratch.data());
+    volta::neumann2_inverse_bt32(b.data(), kN, neumann.data(), kN);
+
+    for (int row = 0; row < kN; ++row) {
+        for (int col = 0; col < kN; ++col) {
+            float expected_exact = 0.0F;
+            if (col <= row) {
+                expected_exact = 1.0F;
+                for (int i = col; i < row; ++i) { expected_exact *= -0.25F; }
+            }
+            const float got_exact = exact[static_cast<std::size_t>(row) * kN + col];
+            if (std::bit_cast<std::uint32_t>(got_exact) !=
+                std::bit_cast<std::uint32_t>(expected_exact)) {
+                std::cerr << "exact triangular inverse mismatch at (" << row << ',' << col
+                          << ") got=" << got_exact << " expected=" << expected_exact << "\n";
+                return 1;
+            }
+
+            float expected_neumann = 0.0F;
+            const int distance = row - col;
+            if (distance == 0) {
+                expected_neumann = 1.0F;
+            } else if (distance == 1) {
+                expected_neumann = -0.25F;
+            } else if (distance == 2) {
+                expected_neumann = 0.0625F;
+            }
+            const float got_neumann = neumann[static_cast<std::size_t>(row) * kN + col];
+            if (std::bit_cast<std::uint32_t>(got_neumann) !=
+                std::bit_cast<std::uint32_t>(expected_neumann)) {
+                std::cerr << "Neumann2 mismatch at (" << row << ',' << col << ") got="
+                          << got_neumann << " expected=" << expected_neumann << "\n";
+                return 1;
+            }
+        }
+    }
+    return 0;
 }
 
 int test_bf16_conversion() {
@@ -319,8 +435,20 @@ int main() {
     std::cerr << "GDN Volta math test built outside NINFER_VOLTA_BUILD\n";
     return 1;
 #else
+    int failures = 0;
+    failures += test_bridge_planner();
+    failures += test_decay_values();
+    failures += test_solve_primitives();
+    if (failures != 0) {
+        std::cout << "FAIL: GDN Volta host mathematical qualification\n";
+        return 1;
+    }
+
     int device_count = 0;
-    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) { return 77; }
+    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+        std::cout << "SKIP: host math passed; no CUDA device for SM70 MMA qualification\n";
+        return 77;
+    }
 
     cudaDeviceProp properties{};
     if (!cuda_ok(cudaGetDeviceProperties(&properties, 0), "cudaGetDeviceProperties")) { return 1; }
@@ -329,7 +457,6 @@ int main() {
         return 77;
     }
 
-    int failures = 0;
     failures += test_bf16_conversion();
     failures += test_macro16_fragment_mapping();
     failures += test_macro16_basis_mapping();
