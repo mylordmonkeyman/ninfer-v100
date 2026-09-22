@@ -24,7 +24,8 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
                            Tensor& convolution_states, Tensor& ssm_states,
                            WorkspaceArena& workspace, Tensor& output, cudaStream_t stream,
                            bool aliased_recurrent_scan = false,
-                           const GdnStageEmitter& emit = {});
+                           const GdnStageEmitter& emit = {},
+                           Tensor* output_stage = nullptr);
 
 // T-wide prefill chunk execution for one lane.
 void flash_next_gdn_prefill_chunk(const Tensor& input, const GdnWeights& weights,

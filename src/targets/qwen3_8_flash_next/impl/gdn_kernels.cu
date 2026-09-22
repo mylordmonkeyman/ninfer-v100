@@ -33,6 +33,20 @@ __device__ __forceinline__ void store_conv_activation(OutputT* destination, floa
 }
 
 #if defined(NINFER_VOLTA_BUILD)
+struct FlashNextFp32MirrorOutput {
+    float* fp32;
+    __nv_bfloat16* bf16;
+    std::int32_t rows;
+
+    __device__ __forceinline__ void store(std::int32_t parent_row, std::int32_t token,
+                                          float value) const {
+        const std::int64_t index =
+            static_cast<std::int64_t>(token) * rows + parent_row;
+        fp32[index] = value;
+        bf16[index] = __float2bfloat16_rn(value);
+    }
+};
+
 struct FlashNextFp32ProjectConvOutput {
     __nv_bfloat16* projected;
     const __nv_bfloat16* convolution;
@@ -342,6 +356,43 @@ void flash_next_gdn_output_gate_launch(const FlashNextGdnWorkspace& scratch, con
 }
 
 #if defined(NINFER_VOLTA_BUILD)
+void flash_next_gdn_output_project_fp32_launch(
+    const Tensor& gated_output_bf16, const Weight& projection, Tensor& output_fp32,
+    Tensor& output_bf16, cudaStream_t stream) {
+    using Geometry = ::ninfer::ops::detail::Fp8FlashNextResidualGeometry;
+    using Schedule =
+        typename ::ninfer::ops::detail::Fp8LinearDecodeProductionSchedule<Geometry>::Type;
+    if (gated_output_bf16.dtype != DType::BF16 ||
+        gated_output_bf16.ne[0] != Geometry::kInputRows ||
+        gated_output_bf16.ne[1] != 1 ||
+        projection.qtype != QType::FP8_E4M3FN_ROW_F32S ||
+        projection.n != Geometry::kOutputRows ||
+        projection.k != Geometry::kInputRows ||
+        projection.scale_dtype != DType::FP32 ||
+        output_fp32.dtype != DType::FP32 ||
+        output_fp32.ne[0] != Geometry::kOutputRows ||
+        output_fp32.ne[1] != 1 ||
+        output_bf16.dtype != DType::BF16 ||
+        output_bf16.ne[0] != Geometry::kOutputRows ||
+        output_bf16.ne[1] != 1) {
+        throw std::invalid_argument(
+            "Flash-Next FP32 GDN output projection diagnostic received invalid T=1 views");
+    }
+
+    constexpr int kBlocks = Geometry::kOutputRows / Schedule::kRowsPerCta;
+    const FlashNextFp32MirrorOutput mirror{
+        static_cast<float*>(output_fp32.data),
+        static_cast<__nv_bfloat16*>(output_bf16.data),
+        Geometry::kOutputRows,
+    };
+    ::ninfer::ops::detail::fp8_gemv_kernel<Geometry, Schedule>
+        <<<kBlocks, Schedule::kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(gated_output_bf16.data),
+            static_cast<const std::uint8_t*>(projection.qdata),
+            static_cast<const float*>(projection.scales), mirror);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 void flash_next_gdn_output_gate_fp32_launch(const FlashNextGdnWorkspace& scratch,
                                             const Tensor& norm, Tensor& gated_output_fp32,
                                             cudaStream_t stream) {

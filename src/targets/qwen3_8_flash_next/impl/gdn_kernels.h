@@ -25,6 +25,9 @@ void flash_next_gdn_output_gate_launch(const FlashNextGdnWorkspace& scratch, con
 void flash_next_gdn_output_gate_fp32_launch(const FlashNextGdnWorkspace& scratch,
                                             const Tensor& norm, Tensor& gated_output_fp32,
                                             cudaStream_t stream);
+void flash_next_gdn_output_project_fp32_launch(
+    const Tensor& gated_output_bf16, const Weight& projection, Tensor& output_fp32,
+    Tensor& output_bf16, cudaStream_t stream);
 #endif
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

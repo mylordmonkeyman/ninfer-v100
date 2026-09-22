@@ -325,6 +325,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         emit_state(prefix + "attn_block_input", round_ws.block_input);
 
         // Execute QSA or GDN attention
+        Tensor attn_block_output_stage;
         if (is_qsa_layer(layer)) {
             const std::size_t qsa_idx = qsa_ordinal(layer);
             flash_next_qsa_indexer_decode(
@@ -355,9 +356,13 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
             flash_next_gdn_decode(round_ws.block_input, model.gdn[gdn_idx], source_slots,
                                   destination_slots, state.gdn_convolution_states[gdn_idx],
                                   state.gdn_ssm_states[gdn_idx], workspace, round_ws.block_output,
-                                  stream, aliased_recurrent_scan, gdn_emit);
+                                  stream, aliased_recurrent_scan, gdn_emit,
+                                  &attn_block_output_stage);
         }
-        emit_state(prefix + "attn_block_output", round_ws.block_output);
+        emit_state(prefix + "attn_block_output",
+                   attn_block_output_stage.data != nullptr
+                       ? attn_block_output_stage
+                       : round_ws.block_output);
 
         // Attention hyper inject
 #if defined(NINFER_VOLTA_BUILD)

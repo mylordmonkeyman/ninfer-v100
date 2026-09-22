@@ -77,6 +77,7 @@ std::size_t flash_next_gdn_workspace_capacity_bytes(std::int32_t min_batch,
     (void)layout.alloc(DType::FP32, {2'048, decode_batch}, 256);
     (void)layout.alloc(DType::FP32, {6'144, decode_batch}, 256);
     (void)layout.alloc(DType::FP32, {6'144, decode_batch}, 256);
+    (void)layout.alloc(DType::FP32, {2'560, decode_batch}, 256);
 #endif
     {
         auto scope = layout.scope();
@@ -95,8 +96,10 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
                            const Tensor& source_slots, const Tensor& destination_slots,
                            Tensor& convolution_states, Tensor& ssm_states,
                            WorkspaceArena& workspace, Tensor& output, cudaStream_t stream,
-                           bool aliased_recurrent_scan, const GdnStageEmitter& emit) {
+                           bool aliased_recurrent_scan, const GdnStageEmitter& emit,
+                           Tensor* output_stage) {
     const std::int32_t batch = input.ne[1];
+    if (output_stage != nullptr) { *output_stage = Tensor{}; }
     if (!exact_tensor(input, DType::BF16, 2'560, batch) || batch < 1 || batch > 8 ||
         !exact_tensor(output, DType::BF16, 2'560, batch) ||
         !exact_tensor(source_slots, DType::I32, batch) ||
@@ -123,6 +126,7 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
     Tensor gated_output_stage;
     bool fp32_project_conv = false;
     bool fp32_gate = false;
+    bool fp32_output_project = false;
 #if defined(NINFER_VOLTA_BUILD)
     const bool fp32_conv = [] {
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_GDN_CONV");
@@ -147,6 +151,13 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
     }();
     if (fp32_gate) {
         gated_output_stage = workspace.alloc(DType::FP32, {6'144, batch}, 256);
+    }
+    fp32_output_project = batch == 1 && output_stage != nullptr && [] {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_GDN_OUTPUT");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+    }();
+    if (fp32_output_project) {
+        *output_stage = workspace.alloc(DType::FP32, {2'560, batch}, 256);
     }
 #endif
     if (fp32_project_conv) {
@@ -215,10 +226,19 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
         flash_next_gdn_output_gate_launch(scratch, weights.norm, stream);
         if (emit) { emit("gdn_gated_output", scratch.gated_output); }
     }
-    // The FP32 gate diagnostic also writes this BF16 mirror, so output projection
-    // behavior remains identical while stage comparison observes the unrounded gate.
-    ops::linear(scratch.gated_output, weights.output, output, ops::LinearPolicy::A16Only, workspace,
-                stream);
+    // The gate diagnostic writes scratch.gated_output as the same BF16 mirror used
+    // by production. For the projection diagnostic, run the exact T=1 FP8 GEMV
+    // schedule once and expose its unrounded accumulator while preserving the BF16
+    // output tensor consumed by the rest of decode.
+    if (fp32_output_project) {
+#if defined(NINFER_VOLTA_BUILD)
+        flash_next_gdn_output_project_fp32_launch(
+            scratch.gated_output, weights.output, *output_stage, output, stream);
+#endif
+    } else {
+        ops::linear(scratch.gated_output, weights.output, output,
+                    ops::LinearPolicy::A16Only, workspace, stream);
+    }
 }
 
 void flash_next_gdn_prefill_chunk(const Tensor& input, const GdnWeights& weights,
