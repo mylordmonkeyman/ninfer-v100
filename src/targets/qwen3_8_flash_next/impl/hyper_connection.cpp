@@ -28,9 +28,10 @@ bool exact_norm(const Tensor& norm) {
 }
 
 void validate_common(const Tensor& hidden, const Tensor& block_input,
-                     const FlashNextHyperWorkspace& scratch) {
+                     const FlashNextHyperWorkspace& scratch,
+                     DType hidden_dtype = DType::BF16) {
     const std::int32_t tokens = hidden.ne[1];
-    if (hidden.dtype != DType::BF16 || hidden.ne[0] != 10'240 || hidden.ne[2] != 1 ||
+    if (hidden.dtype != hidden_dtype || hidden.ne[0] != 10'240 || hidden.ne[2] != 1 ||
         hidden.ne[3] != 1 || tokens < 1 || !hidden.is_contiguous() ||
         !aligned_to(hidden.data, 16) || block_input.dtype != DType::BF16 ||
         block_input.ne[0] != 2'560 || block_input.ne[1] != tokens || block_input.ne[2] != 1 ||
@@ -77,6 +78,30 @@ void flash_next_hyper_prepare(const Tensor& hidden, const HyperConnectionWeights
     }
     flash_next_hyper_prepare_launch(hidden, weights, scratch, block_input, stream);
 }
+
+#if defined(NINFER_VOLTA_BUILD)
+void flash_next_hyper_prepare_fp32_hidden_stage(
+    const Tensor& hidden_fp32, const HyperConnectionWeights& weights,
+    FlashNextHyperWorkspace& scratch, Tensor& block_input, cudaStream_t stream) {
+    validate_common(hidden_fp32, block_input, scratch, DType::FP32);
+    const std::int32_t tokens = hidden_fp32.ne[1];
+    if (tokens > 8 || !exact_norm(weights.norm) ||
+        !exact_bf16_weight(weights.input_mix_down, 320, 10'240) ||
+        !exact_bf16_weight(weights.input_mix_up, 10'240, 320) ||
+        !exact_bf16_weight(weights.block_inject, 4, 10'240) ||
+        scratch.mixed_fp32.dtype != DType::FP32 ||
+        scratch.mixed_fp32.ne[0] != 2'560 ||
+        scratch.mixed_fp32.ne[1] != tokens ||
+        !scratch.mixed_fp32.is_contiguous() ||
+        !aligned_to(scratch.mixed_fp32.data, 16) ||
+        stream == nullptr) {
+        throw std::invalid_argument(
+            "Flash-Next FP32 hyper-input diagnostic received invalid exact tensors");
+    }
+    flash_next_hyper_prepare_fp32_hidden_stage_launch(
+        hidden_fp32, weights, scratch, block_input, stream);
+}
+#endif
 
 void flash_next_hyper_inject(const Tensor& block_output, const Tensor& injection, Tensor& hidden,
                              cudaStream_t stream) {

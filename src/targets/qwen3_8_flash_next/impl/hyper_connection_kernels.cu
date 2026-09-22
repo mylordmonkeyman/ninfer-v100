@@ -162,6 +162,61 @@ group_norm_vectorized_kernel(const __nv_bfloat16* __restrict__ hidden,
         normalized + static_cast<std::int64_t>(token) * kConcat + stream_offset, s_inv_rms, tid);
 }
 
+#if defined(NINFER_VOLTA_BUILD)
+// Diagnostic-only variant of legacy group RMSNorm. The thread/chunk mapping and
+// reduction tree are unchanged; only the hidden load remains FP32. Output is
+// deliberately rounded to BF16 so every later hyper-prepare stage is production.
+__global__ void __launch_bounds__(kNormThreads)
+group_norm_fp32_to_bf16_kernel(const float* __restrict__ hidden,
+                               const __nv_bfloat16* __restrict__ norm,
+                               __nv_bfloat16* __restrict__ normalized,
+                               int tokens) {
+    __shared__ float s_warp_sums[kNormThreads / 32];
+    __shared__ float s_inv_rms;
+
+    const int stream = static_cast<int>(blockIdx.x);
+    const int token  = static_cast<int>(blockIdx.y);
+    const int tid    = static_cast<int>(threadIdx.x);
+    if (token >= tokens || stream >= kStreams) { return; }
+
+    const int stream_offset = stream * kHidden;
+    const float* in_stream =
+        hidden + static_cast<std::int64_t>(token) * kConcat + stream_offset;
+
+    float sum_sq = 0.0F;
+    for (int chunk = tid; chunk < (kHidden / 8); chunk += kNormThreads) {
+        const int col_base = chunk * 8;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const float v = in_stream[col_base + i];
+            sum_sq = fmaf(v, v, sum_sq);
+        }
+    }
+    sum_sq = ops::block_reduce_sum<kNormThreads>(sum_sq, s_warp_sums);
+    if (tid == 0) { s_inv_rms = hyper_inv_rms(sum_sq); }
+    __syncthreads();
+
+    auto* out_stream =
+        normalized + static_cast<std::int64_t>(token) * kConcat + stream_offset;
+    const auto* norm_stream = norm + stream_offset;
+    for (int chunk = tid; chunk < (kHidden / 8); chunk += kNormThreads) {
+        const int col_base = chunk * 8;
+        const auto raw_norm =
+            *reinterpret_cast<const ulonglong2*>(norm_stream + col_base);
+        const auto* bf_norm = reinterpret_cast<const __nv_bfloat16*>(&raw_norm);
+        ulonglong2 raw_out;
+        auto* bf_out = reinterpret_cast<__nv_bfloat16*>(&raw_out);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            bf_out[i] = __float2bfloat16_rn(
+                in_stream[col_base + i] * s_inv_rms *
+                (1.0F + __bfloat162float(bf_norm[i])));
+        }
+        *reinterpret_cast<ulonglong2*>(out_stream + col_base) = raw_out;
+    }
+}
+#endif
+
 // =========================================================================
 // Kernel 2 (legacy decode route): Fused Down Projection & Injection Gates
 // Grid: dim3(total_rows, tokens) where total_rows = 324 (or 320)
@@ -873,6 +928,37 @@ void flash_next_hyper_prepare_launch(const Tensor& hidden, const HyperConnection
     flash_next_hyper_prepare_route_launch(hidden, weights, scratch, block_input, stream,
                                           flash_next_hyper_decode_route());
 }
+
+#if defined(NINFER_VOLTA_BUILD)
+void flash_next_hyper_prepare_fp32_hidden_stage_launch(
+    const Tensor& hidden_fp32, const HyperConnectionWeights& weights,
+    FlashNextHyperWorkspace& scratch, Tensor& block_input, cudaStream_t stream) {
+    const int tokens = static_cast<int>(hidden_fp32.ne[1]);
+    constexpr int kTotalRows = kLowRank + kStreams;
+
+    group_norm_fp32_to_bf16_kernel<<<dim3(kStreams, tokens), kNormThreads, 0, stream>>>(
+        static_cast<const float*>(hidden_fp32.data),
+        static_cast<const __nv_bfloat16*>(weights.norm.data),
+        static_cast<__nv_bfloat16*>(scratch.normalized.data), tokens);
+    CUDA_CHECK(cudaGetLastError());
+
+    low_rank_and_injection_kernel<<<dim3(kTotalRows, tokens), 256, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(scratch.normalized.data),
+        static_cast<const __nv_bfloat16*>(weights.input_mix_down.qdata),
+        static_cast<const __nv_bfloat16*>(weights.block_inject.qdata),
+        static_cast<__nv_bfloat16*>(scratch.low_rank.data),
+        static_cast<float*>(scratch.injection.data), tokens, kTotalRows);
+    CUDA_CHECK(cudaGetLastError());
+
+    mix_up_and_reduce_kernel<<<dim3(kHidden, tokens), 128, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(scratch.normalized.data),
+        static_cast<const __nv_bfloat16*>(scratch.low_rank.data),
+        static_cast<const __nv_bfloat16*>(weights.input_mix_up.qdata),
+        static_cast<__nv_bfloat16*>(block_input.data),
+        static_cast<float*>(scratch.mixed_fp32.data), tokens);
+    CUDA_CHECK(cudaGetLastError());
+}
+#endif
 
 void flash_next_hyper_prepare_route_launch(const Tensor& hidden,
                                            const HyperConnectionWeights& weights,

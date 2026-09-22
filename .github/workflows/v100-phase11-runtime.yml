@@ -151,7 +151,7 @@ jobs:
             --output-on-failure \
             -R '^ninfer_selected_block_attention_test$'
 
-      - name: Localize FP32 MLP hyper output positions 0-6 with CPU stage oracle
+      - name: Localize FP32 MLP hyper input positions 0-6 with CPU stage oracle
         continue-on-error: true
         shell: bash
         env:
@@ -173,6 +173,7 @@ jobs:
           NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
           NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
           NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
         run: |
           set -euxo pipefail
           test -r /oracle/phase11-stage-trace7/manifest.json

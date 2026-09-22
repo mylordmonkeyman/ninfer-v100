@@ -25,6 +25,11 @@ enum class FlashNextHyperDecodeRoute : std::uint8_t { Fused, Legacy };
 void flash_next_hyper_prepare_launch(const Tensor& hidden, const HyperConnectionWeights& weights,
                                      FlashNextHyperWorkspace& scratch, Tensor& block_input,
                                      cudaStream_t stream);
+#if defined(NINFER_VOLTA_BUILD)
+void flash_next_hyper_prepare_fp32_hidden_stage_launch(
+    const Tensor& hidden_fp32, const HyperConnectionWeights& weights,
+    FlashNextHyperWorkspace& scratch, Tensor& block_input, cudaStream_t stream);
+#endif
 void flash_next_hyper_mix_launch(const Tensor& hidden, const HyperMixerWeights& weights,
                                  FlashNextHyperWorkspace& scratch, Tensor& block_input,
                                  cudaStream_t stream);

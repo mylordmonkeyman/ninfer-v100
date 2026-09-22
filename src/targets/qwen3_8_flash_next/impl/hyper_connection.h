@@ -19,6 +19,13 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 void flash_next_hyper_prepare(const Tensor& hidden, const HyperConnectionWeights& weights,
                               FlashNextHyperWorkspace& scratch, Tensor& block_input,
                               cudaStream_t stream);
+#if defined(NINFER_VOLTA_BUILD)
+// Decode-only diagnostic: read the FP32 hyper master through group RMSNorm, then
+// intentionally rejoin production at the BF16 normalized boundary.
+void flash_next_hyper_prepare_fp32_hidden_stage(
+    const Tensor& hidden_fp32, const HyperConnectionWeights& weights,
+    FlashNextHyperWorkspace& scratch, Tensor& block_input, cudaStream_t stream);
+#endif
 
 void flash_next_hyper_inject(const Tensor& block_output, const Tensor& injection, Tensor& hidden,
                              cudaStream_t stream);
