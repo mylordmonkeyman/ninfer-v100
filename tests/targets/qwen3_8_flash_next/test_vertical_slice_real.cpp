@@ -2,6 +2,7 @@
 #include "targets/qwen3_8_flash_next/impl/load/loader.h"
 #include "targets/qwen3_8_flash_next/impl/moe.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_state.h"
+#include "targets/qwen3_8_flash_next/impl/text_decode.h"
 #include "targets/qwen3_8_flash_next/impl/text_executor.h"
 #include "targets/qwen3_8_flash_next/impl/vertical_slice.h"
 
@@ -404,6 +405,140 @@ int main() {
         std::uint64_t sampled_tokens = 0;
         const auto qualification_started = std::chrono::steady_clock::now();
 
+        const char* stage_root_env =
+            std::getenv("NINFER_PHASE11_STAGE_ORACLE_ROOT");
+        const bool stage_trace_enabled =
+            stage_root_env != nullptr && stage_root_env[0] != '\0';
+        const fs::path stage_root =
+            stage_trace_enabled ? fs::path(stage_root_env) : fs::path{};
+        std::uint32_t stage_trace_position = 6;
+        if (const char* position_env =
+                std::getenv("NINFER_PHASE11_STAGE_ORACLE_POSITION");
+            position_env != nullptr && position_env[0] != '\0') {
+            char* end = nullptr;
+            const unsigned long parsed = std::strtoul(position_env, &end, 10);
+            if (end == position_env || *end != '\0' ||
+                parsed > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::invalid_argument(
+                    "NINFER_PHASE11_STAGE_ORACLE_POSITION is invalid");
+            }
+            stage_trace_position = static_cast<std::uint32_t>(parsed);
+        }
+        std::string first_bad_stage;
+        double first_bad_cosine = 1.0;
+        double first_bad_nrmse = 0.0;
+        double first_bad_max_error = 0.0;
+
+        FlashNextDecodeStateSink stage_sink;
+        stage_sink.on_state = [&](std::string_view name, const ninfer::Tensor& tensor) {
+            if (!stage_trace_enabled) {
+                return;
+            }
+            char pos_dir[32];
+            std::snprintf(
+                pos_dir, sizeof(pos_dir), "pos%04u", stage_trace_position);
+            const fs::path expected_path =
+                stage_root / pos_dir / (std::string(name) + ".bin");
+            if (!fs::is_regular_file(expected_path)) {
+                return;
+            }
+
+            const std::size_t count = tensor.numel();
+            const std::uint64_t expected_bytes =
+                static_cast<std::uint64_t>(count) * sizeof(float);
+            if (fs::file_size(expected_path) != expected_bytes) {
+                throw std::runtime_error(
+                    "Phase 11 stage oracle shape mismatch for " +
+                    std::string(name));
+            }
+
+            std::vector<float> expected(count);
+            {
+                std::ifstream input(
+                    expected_path, std::ios::binary);
+                input.read(
+                    reinterpret_cast<char*>(expected.data()),
+                    static_cast<std::streamsize>(expected_bytes));
+                if (!input) {
+                    throw std::runtime_error(
+                        "Phase 11 failed to read stage oracle " +
+                        expected_path.string());
+                }
+            }
+
+            std::vector<float> candidate(count);
+            if (tensor.dtype == ninfer::DType::BF16) {
+                std::vector<std::uint16_t> words(count);
+                CUDA_CHECK(cudaMemcpy(
+                    words.data(), tensor.data,
+                    count * sizeof(std::uint16_t),
+                    cudaMemcpyDeviceToHost));
+                for (std::size_t i = 0; i < count; ++i) {
+                    candidate[i] = bf16_to_float(words[i]);
+                }
+            } else if (tensor.dtype == ninfer::DType::FP32) {
+                CUDA_CHECK(cudaMemcpy(
+                    candidate.data(), tensor.data,
+                    count * sizeof(float),
+                    cudaMemcpyDeviceToHost));
+            } else {
+                return;
+            }
+
+            long double dot = 0.0L;
+            long double candidate_sq = 0.0L;
+            long double expected_sq = 0.0L;
+            long double error_sq = 0.0L;
+            double max_error = 0.0;
+            for (std::size_t i = 0; i < count; ++i) {
+                const long double a = candidate[i];
+                const long double b = expected[i];
+                const long double d = a - b;
+                dot += a * b;
+                candidate_sq += a * a;
+                expected_sq += b * b;
+                error_sq += d * d;
+                max_error =
+                    std::max(max_error, std::abs(
+                        static_cast<double>(d)));
+            }
+            const long double denom =
+                std::sqrt(candidate_sq * expected_sq);
+            const double cosine =
+                denom > 0.0L
+                    ? static_cast<double>(dot / denom)
+                    : (candidate_sq == expected_sq ? 1.0 : 0.0);
+            const long double expected_rms =
+                std::sqrt(expected_sq /
+                          static_cast<long double>(count));
+            const long double error_rms =
+                std::sqrt(error_sq /
+                          static_cast<long double>(count));
+            const double nrmse =
+                static_cast<double>(
+                    error_rms /
+                    std::max(expected_rms, 1.0e-12L));
+            const bool pass =
+                cosine >= 0.99999 && nrmse <= 2.0e-3;
+
+            std::cout << std::fixed << std::setprecision(8)
+                      << "phase11.stage_trace.position="
+                      << stage_trace_position
+                      << " stage=" << name
+                      << " cosine=" << cosine
+                      << " nrmse=" << nrmse
+                      << " max_error=" << max_error
+                      << " pass=" << (pass ? 1 : 0)
+                      << '\n' << std::flush;
+
+            if (!pass && first_bad_stage.empty()) {
+                first_bad_stage = std::string(name);
+                first_bad_cosine = cosine;
+                first_bad_nrmse = nrmse;
+                first_bad_max_error = max_error;
+            }
+        };
+
         for (std::size_t index = 0; index < records.size(); ++index) {
             const OracleRecord& record = records[index];
             LaneStepRequest request{
@@ -419,8 +554,14 @@ int main() {
                 .custom_embedding = nullptr,
             };
 
+            const FlashNextDecodeStateSink* round_sink =
+                stage_trace_enabled &&
+                        record.position == stage_trace_position
+                    ? &stage_sink
+                    : nullptr;
             auto round = executor.execute_round(
-                std::span<const LaneStepRequest>(&request, 1));
+                std::span<const LaneStepRequest>(&request, 1),
+                round_sink);
             const ninfer::Tensor logits = round.logits();
             if (logits.dtype != ninfer::DType::BF16 ||
                 logits.ne[1] != 1 || logits.ne[2] != 1 ||
@@ -513,6 +654,21 @@ int main() {
                           << " expert_pairs_per_s=" << pairs_per_second
                           << " eta_s=" << remaining_seconds << '\n'
                           << std::flush;
+            }
+        }
+
+        if (stage_trace_enabled) {
+            if (first_bad_stage.empty()) {
+                std::cout
+                    << "phase11.stage_trace.first_bad_stage=none\n";
+            } else {
+                std::cout << std::fixed << std::setprecision(8)
+                          << "phase11.stage_trace.first_bad_stage="
+                          << first_bad_stage
+                          << " cosine=" << first_bad_cosine
+                          << " nrmse=" << first_bad_nrmse
+                          << " max_error=" << first_bad_max_error
+                          << '\n';
             }
         }
 

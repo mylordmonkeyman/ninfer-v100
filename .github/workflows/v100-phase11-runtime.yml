@@ -141,31 +141,32 @@ jobs:
             --output-on-failure \
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_test$'
 
-      - name: Compare SIMT vs Volta QPN FP8 decode
+      - name: Compare position 6 stages with CPU oracle
+        if: ${{ hashFiles('/oracle/phase11-stage-trace7/manifest.json') != '' }}
         continue-on-error: true
         shell: bash
         env:
           NINFER_WEIGHTS: /models/qwen3-8b-flash-next
           NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
-          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "16"
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "7"
           NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
           NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
-          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace7
+          NINFER_PHASE11_STAGE_ORACLE_POSITION: "6"
         run: |
           set -euxo pipefail
           result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$result_dir"
-
-          echo "=== baseline SIMT T=1 FP8 ===" | tee "$result_dir/fp8-t1-ab.log"
           ctest --test-dir build-v100 -V \
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
-            2>&1 | tee -a "$result_dir/fp8-t1-ab.log" || true
+            2>&1 | tee "$result_dir/stage-trace-pos6.log"
 
-          echo "=== diagnostic Volta QPN T=1 FP8 ===" | tee -a "$result_dir/fp8-t1-ab.log"
-          NINFER_VOLTA_FP8_QPN_T1=1 \
-            ctest --test-dir build-v100 -V \
-              -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
-              2>&1 | tee -a "$result_dir/fp8-t1-ab.log" || true
+      - name: Note missing CPU stage trace
+        if: ${{ hashFiles('/oracle/phase11-stage-trace7/manifest.json') == '' }}
+        shell: bash
+        run: |
+          echo "CPU stage trace is not mounted yet: /oracle/phase11-stage-trace7/manifest.json"
+          echo "Generate it on the host with tools/reference/qwen3_8_flash_next/oracle/generate_phase11_stage_trace.sh"
 
       # A [full-phase11] push opts into the expensive full-oracle qualification.
       - name: Validate full Phase 11 oracle
