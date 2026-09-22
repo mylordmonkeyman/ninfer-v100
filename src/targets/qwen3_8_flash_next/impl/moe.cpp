@@ -342,7 +342,8 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
 void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_weights,
                                 const HostNvfp4ExpertLayerView& host_experts, Tensor& output,
                                 WorkspaceArena& workspace, cudaStream_t stream,
-                                const MoeStageEmitter& emit) {
+                                const MoeStageEmitter& emit,
+                                const Tensor* router_input_fp32) {
     const std::int32_t tokens = input.ne[1];
     if (input.dtype != DType::BF16 || output.dtype != DType::BF16 || input.ne[0] != 2'560 ||
         output.ne[0] != 2'560 || tokens < 1 || output.ne[1] != tokens ||
@@ -362,8 +363,19 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     const auto scope = workspace.scope();
     FlashNextMoeWorkspace scratch = allocate_flash_next_moe_workspace(workspace, tokens);
 
-    flash_next_route(input, resident_weights.router, resident_weights.shared_gate_weight,
-                     scratch.scores, scratch.ids, scratch.alpha, scratch.shared_scale, stream);
+#if defined(NINFER_VOLTA_BUILD)
+    if (router_input_fp32 != nullptr && router_input_fp32->data != nullptr) {
+        flash_next_route_fp32_input(
+            *router_input_fp32, resident_weights.router,
+            resident_weights.shared_gate_weight, scratch.scores, scratch.ids,
+            scratch.alpha, scratch.shared_scale, stream);
+    } else
+#endif
+    {
+        flash_next_route(input, resident_weights.router, resident_weights.shared_gate_weight,
+                         scratch.scores, scratch.ids, scratch.alpha, scratch.shared_scale,
+                         stream);
+    }
     stage_ledger_record(stream, FlashNextStageId::MoE_Router);
     if (emit) {
         emit("moe_router_scores", scratch.scores);
