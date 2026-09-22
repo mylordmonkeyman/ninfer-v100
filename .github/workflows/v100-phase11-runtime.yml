@@ -174,59 +174,7 @@ jobs:
           result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$result_dir"
           ctest --test-dir build-v100 -V \
-            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test
-      # A [full-phase11] push opts into the expensive full-oracle qualification.
-      - name: Validate full Phase 11 oracle
-        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.full_phase11) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[full-phase11]')) }}
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          test -r /oracle/phase11/manifest.json
-          test -r /oracle/phase11/token_ids.json
-          test -r /oracle/phase11/provenance.json
-          python3 tools/reference/qwen3_8_flash_next/oracle/validate_phase11_oracle.py \
-            --corpus /oracle/phase11/token_ids.json \
-            --manifest /oracle/phase11/manifest.json \
-            --minimum 4096
-
-      - name: Run full Phase 11 qualification
-        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.full_phase11) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[full-phase11]')) }}
-        shell: bash
-        env:
-          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
-          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
-        run: |
-          set -euxo pipefail
-
-          result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p "$result_dir"
-
-          ctest \
-            --test-dir build-v100 \
-            -V \
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
-            2>&1 | tee "$result_dir/oracle-full.log"
-
-      - name: Capture final GPU state
-        if: always()
-        shell: bash
-        run: |
-          set +e
-          result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p "$result_dir"
-          nvidia-smi | tee "$result_dir/nvidia-smi.txt"
-          git rev-parse HEAD | tee "$result_dir/commit.txt"
-
-      - name: Upload Phase 11 results
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: v100-phase11-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ github.workspace }}/.v100-phase11-results/${{ github.run_id }}-${{ github.run_attempt }}/
-          if-no-files-found: warn
-          retention-days: 14
- \
             2>&1 | tee "$result_dir/oracle-128-baseline.log"
 
       - name: Compare 128-position FP32 GDN readout
@@ -245,61 +193,8 @@ jobs:
           result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$result_dir"
           ctest --test-dir build-v100 -V \
-            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test
-      # A [full-phase11] push opts into the expensive full-oracle qualification.
-      - name: Validate full Phase 11 oracle
-        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.full_phase11) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[full-phase11]')) }}
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          test -r /oracle/phase11/manifest.json
-          test -r /oracle/phase11/token_ids.json
-          test -r /oracle/phase11/provenance.json
-          python3 tools/reference/qwen3_8_flash_next/oracle/validate_phase11_oracle.py \
-            --corpus /oracle/phase11/token_ids.json \
-            --manifest /oracle/phase11/manifest.json \
-            --minimum 4096
-
-      - name: Run full Phase 11 qualification
-        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.full_phase11) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[full-phase11]')) }}
-        shell: bash
-        env:
-          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
-          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
-        run: |
-          set -euxo pipefail
-
-          result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p "$result_dir"
-
-          ctest \
-            --test-dir build-v100 \
-            -V \
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
-            2>&1 | tee "$result_dir/oracle-full.log"
-
-      - name: Capture final GPU state
-        if: always()
-        shell: bash
-        run: |
-          set +e
-          result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p "$result_dir"
-          nvidia-smi | tee "$result_dir/nvidia-smi.txt"
-          git rev-parse HEAD | tee "$result_dir/commit.txt"
-
-      - name: Upload Phase 11 results
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: v100-phase11-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ github.workspace }}/.v100-phase11-results/${{ github.run_id }}-${{ github.run_attempt }}/
-          if-no-files-found: warn
-          retention-days: 14
- \
             2>&1 | tee "$result_dir/oracle-128-fp32-gdn.log"
-
       # A [full-phase11] push opts into the expensive full-oracle qualification.
       - name: Validate full Phase 11 oracle
         if: ${{ (github.event_name == 'workflow_dispatch' && inputs.full_phase11) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[full-phase11]')) }}
