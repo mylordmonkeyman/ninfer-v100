@@ -29,7 +29,13 @@ struct FusedSharedLayout {
     static constexpr std::size_t Bytes = align128(E + 1024);
 };
 
+struct GroupedDv16SharedLayout {
+    static constexpr std::size_t Q = FusedSharedLayout<16>::Bytes;
+    static constexpr std::size_t Bytes = align128(Q + 8320);
+};
+
 static_assert(FusedSharedLayout<16>::Bytes == 26624);
 static_assert(FusedSharedLayout<32>::Bytes == 35072);
+static_assert(GroupedDv16SharedLayout::Bytes == 34944);
 
 } // namespace ninfer::ops::detail::gated_delta_net::volta

@@ -1,5 +1,6 @@
 #include "ops/linear_attention/gated_delta_net/volta/launch.h"
 
+#include "ops/linear_attention/gated_delta_net/volta/fused_grouped_dv16.cuh"
 #include "ops/linear_attention/gated_delta_net/volta/fused_state_output.cuh"
 #include "ops/linear_attention/gated_delta_net/volta/schedule.cuh"
 #include "ops/linear_attention/gated_delta_net/volta/shared_tiles.cuh"
@@ -49,6 +50,24 @@ cudaError_t configure_probe(KernelResources& out) {
     return cudaSuccess;
 }
 
+cudaError_t configure_grouped_dv16() {
+    constexpr int kThreads = GdnSchedule<16>::kThreads;
+    constexpr std::size_t kDynamicSmem = GroupedDv16SharedLayout::Bytes;
+
+    cudaError_t status = cudaFuncSetAttribute(
+        fused_grouped_dv16_kernel, cudaFuncAttributePreferredSharedMemoryCarveout,
+        cudaSharedmemCarveoutMaxShared);
+    if (status != cudaSuccess) { return status; }
+
+    cudaFuncAttributes attrs{};
+    status = cudaFuncGetAttributes(&attrs, fused_grouped_dv16_kernel);
+    if (status != cudaSuccess) { return status; }
+
+    int active_blocks = 0;
+    return cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &active_blocks, fused_grouped_dv16_kernel, kThreads, kDynamicSmem);
+}
+
 cudaError_t configure_dv16(KernelResources& out) {
     constexpr int kThreads = GdnSchedule<16>::kThreads;
     constexpr std::size_t kDynamicSmem = FusedSharedLayout<16>::Bytes;
@@ -84,6 +103,9 @@ cudaError_t initialize_runtime() {
     if (status != cudaSuccess) { return status; }
 
     status = configure_probe<32>(resources.dv32);
+    if (status != cudaSuccess) { return status; }
+
+    status = configure_grouped_dv16();
     if (status != cudaSuccess) { return status; }
 
     resources.dv16_qualified = false;

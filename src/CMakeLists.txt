@@ -140,6 +140,7 @@ add_library(ninfer_ops STATIC
   $<$<BOOL:${NINFER_VOLTA_BUILD}>:ops/linear_attention/gated_delta_net/volta/launch.cu>
   $<$<BOOL:${NINFER_VOLTA_BUILD}>:ops/linear_attention/gated_delta_net/volta/prepare_qk_matrices.cu>
   $<$<BOOL:${NINFER_VOLTA_BUILD}>:ops/linear_attention/gated_delta_net/volta/fused_state_output.cu>
+  $<$<BOOL:${NINFER_VOLTA_BUILD}>:ops/linear_attention/gated_delta_net/volta/fused_grouped_dv16.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_attention/gated_delta_net/chunked/launch.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_attention/gated_delta_net/chunked/prepare_wy_wu.cu>
   $<$<NOT:$<BOOL:${NINFER_VOLTA_BUILD}>>:ops/linear_attention/gated_delta_net/chunked/state_passing.cu>
