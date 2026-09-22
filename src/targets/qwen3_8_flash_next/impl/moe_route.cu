@@ -172,6 +172,40 @@ __global__ void route_projection_kernel(const __nv_bfloat16* __restrict__ input,
     }
 }
 
+
+#if defined(NINFER_VOLTA_BUILD)
+__global__ void route_projection_fp32_input_kernel(
+    const float* __restrict__ input,
+    const __nv_bfloat16* __restrict__ router,
+    const __nv_bfloat16* __restrict__ shared_gate,
+    float* __restrict__ scores, int tokens) {
+    __shared__ float partial[8];
+    const int row   = static_cast<int>(blockIdx.x);
+    const int token = static_cast<int>(blockIdx.y);
+    const int tid   = static_cast<int>(threadIdx.x);
+    const int warp  = tid >> 5;
+    const int lane  = tid & 31;
+    if (row >= kExperts + 1 || token >= tokens) { return; }
+    const __nv_bfloat16* weight =
+        row < kExperts ? router + static_cast<std::int64_t>(row) * kHidden : shared_gate;
+    const float* in_tok = input + static_cast<std::int64_t>(token) * kHidden;
+    float acc = 0.0F;
+    for (int column = tid; column < kHidden; column += static_cast<int>(blockDim.x)) {
+        acc = fmaf(__bfloat162float(weight[column]), in_tok[column], acc);
+    }
+    const float sum = warp_sum_lane0(acc);
+    if (lane == 0) { partial[warp] = sum; }
+    __syncthreads();
+    if (warp == 0) {
+        float total = lane < 8 ? partial[lane] : 0.0F;
+        total = warp_sum_lane0(total);
+        if (lane == 0) {
+            scores[static_cast<std::int64_t>(token) * (kExperts + 1) + row] = total;
+        }
+    }
+}
+#endif
+
 // ---------------------------------------------------------------------------------------------
 // Fused decode router (T <= 8): projection + top-10 selection + renormalisation + shared gate in
 // ONE launch, bit-identical to route_projection_kernel followed by route_kernel.
@@ -598,5 +632,33 @@ void flash_next_route(const Tensor& input, const Weight& router, const Weight& s
 
     flash_next_route_scores(score_workspace, ids, alpha, shared_scale, stream);
 }
+
+#if defined(NINFER_VOLTA_BUILD)
+void flash_next_route_fp32_input(const Tensor& input, const Weight& router,
+                                 const Weight& shared_gate, Tensor& score_workspace,
+                                 Tensor& ids, Tensor& alpha, Tensor& shared_scale,
+                                 cudaStream_t stream) {
+    const std::int32_t tokens = input.ne[1];
+    if (input.dtype != DType::FP32 || input.ne[0] != kHidden || input.ne[2] != 1 ||
+        input.ne[3] != 1 || tokens < 1 || tokens > kFusedMaxTokens ||
+        !input.is_contiguous() || !aligned_to(input.data, 16) ||
+        !exact_bf16_weight(router, kExperts, kHidden) ||
+        !exact_bf16_weight(shared_gate, 1, kHidden) ||
+        score_workspace.dtype != DType::FP32 ||
+        score_workspace.ne[0] != kExperts + 1 ||
+        score_workspace.ne[1] != tokens || stream == nullptr) {
+        throw std::invalid_argument("Flash-Next FP32 router input has invalid shape");
+    }
+    const dim3 grid(static_cast<unsigned>(kExperts + 1),
+                    static_cast<unsigned>(tokens));
+    route_projection_fp32_input_kernel<<<grid, kLegacyThreads, 0, stream>>>(
+        static_cast<const float*>(input.data),
+        static_cast<const __nv_bfloat16*>(router.qdata),
+        static_cast<const __nv_bfloat16*>(shared_gate.qdata),
+        static_cast<float*>(score_workspace.data), tokens);
+    CUDA_CHECK(cudaGetLastError());
+    flash_next_route_scores(score_workspace, ids, alpha, shared_scale, stream);
+}
+#endif
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail
