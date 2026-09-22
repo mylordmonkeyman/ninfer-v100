@@ -77,6 +77,9 @@ if(NINFER_VOLTA_BUILD)
   ninfer_add_test(ninfer_volta_nvfp4_codec_test
     SOURCES ops/test_volta_nvfp4_codec.cu
     LIBRARIES CUDA::cudart)
+  ninfer_add_test(ninfer_gated_delta_net_volta_math_test
+    SOURCES ops/test_gated_delta_net_volta_math.cu
+    LIBRARIES CUDA::cudart)
 endif()
 
 # Artifact framing and model-independent runtime contracts.
