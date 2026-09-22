@@ -76,6 +76,7 @@ std::size_t flash_next_gdn_workspace_capacity_bytes(std::int32_t min_batch,
     (void)layout.alloc(DType::FP32, {2'048, decode_batch}, 256);
     (void)layout.alloc(DType::FP32, {2'048, decode_batch}, 256);
     (void)layout.alloc(DType::FP32, {6'144, decode_batch}, 256);
+    (void)layout.alloc(DType::FP32, {6'144, decode_batch}, 256);
 #endif
     {
         auto scope = layout.scope();
@@ -119,7 +120,9 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
 
     const auto scope              = workspace.scope();
     FlashNextGdnWorkspace scratch = allocate_flash_next_gdn_workspace(workspace, batch);
+    Tensor gated_output_stage;
     bool fp32_project_conv = false;
+    bool fp32_gate = false;
 #if defined(NINFER_VOLTA_BUILD)
     const bool fp32_conv = [] {
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_GDN_CONV");
@@ -137,6 +140,13 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
     if (const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_GDN_READOUT");
         env != nullptr && env[0] == '1' && env[1] == '\0') {
         scratch.recurrent_output = scratch.recurrent_output_fp32;
+    }
+    fp32_gate = [] {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_GDN_GATE");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+    }();
+    if (fp32_gate) {
+        gated_output_stage = workspace.alloc(DType::FP32, {6'144, batch}, 256);
     }
 #endif
     if (fp32_project_conv) {
@@ -195,8 +205,18 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
         emit("gdn_z", scratch.z);
         emit("gdn_recurrent_output", scratch.recurrent_output);
     }
-    flash_next_gdn_output_gate_launch(scratch, weights.norm, stream);
-    if (emit) { emit("gdn_gated_output", scratch.gated_output); }
+    if (fp32_gate) {
+#if defined(NINFER_VOLTA_BUILD)
+        flash_next_gdn_output_gate_fp32_launch(
+            scratch, weights.norm, gated_output_stage, stream);
+#endif
+        if (emit) { emit("gdn_gated_output", gated_output_stage); }
+    } else {
+        flash_next_gdn_output_gate_launch(scratch, weights.norm, stream);
+        if (emit) { emit("gdn_gated_output", scratch.gated_output); }
+    }
+    // The FP32 gate diagnostic also writes this BF16 mirror, so output projection
+    // behavior remains identical while stage comparison observes the unrounded gate.
     ops::linear(scratch.gated_output, weights.output, output, ops::LinearPolicy::A16Only, workspace,
                 stream);
 }

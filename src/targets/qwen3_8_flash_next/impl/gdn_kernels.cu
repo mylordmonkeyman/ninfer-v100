@@ -196,6 +196,31 @@ __global__ void output_gate_kernel(const RecurrentT* __restrict__ recurrent,
         __float2bfloat16_rn(normalized * ops::sigmoid(__bfloat162float(z[base + dim])));
 }
 
+#if defined(NINFER_VOLTA_BUILD)
+template <typename RecurrentT>
+__global__ void output_gate_fp32_mirror_kernel(
+    const RecurrentT* __restrict__ recurrent, const __nv_bfloat16* __restrict__ z,
+    const __nv_bfloat16* __restrict__ norm, float* __restrict__ gated_fp32,
+    __nv_bfloat16* __restrict__ gated_bf16) {
+    __shared__ float squares[4];
+    const int head          = static_cast<int>(blockIdx.x);
+    const int batch         = static_cast<int>(blockIdx.y);
+    const int lane          = static_cast<int>(threadIdx.x) & 31;
+    const int warp          = static_cast<int>(threadIdx.x) >> 5;
+    const int dim           = warp * 32 + lane;
+    const std::int64_t base = static_cast<std::int64_t>(batch) * kValueRows + head * 128;
+    const float x           = recurrent_to_float(recurrent[base + dim]);
+    float square            = ops::warp_reduce_sum(x * x);
+    if (lane == 0) { squares[warp] = square; }
+    __syncthreads();
+    const float sum        = squares[0] + squares[1] + squares[2] + squares[3];
+    const float normalized = x * rsqrtf(sum / 128.0F + 1.0e-6F) * __bfloat162float(norm[dim]);
+    const float gated      = normalized * ops::sigmoid(__bfloat162float(z[base + dim]));
+    gated_fp32[base + dim] = gated;
+    gated_bf16[base + dim] = __float2bfloat16_rn(gated);
+}
+#endif
+
 } // namespace
 
 #if defined(NINFER_VOLTA_BUILD)
@@ -315,5 +340,39 @@ void flash_next_gdn_output_gate_launch(const FlashNextGdnWorkspace& scratch, con
     }
     CUDA_CHECK(cudaGetLastError());
 }
+
+#if defined(NINFER_VOLTA_BUILD)
+void flash_next_gdn_output_gate_fp32_launch(const FlashNextGdnWorkspace& scratch,
+                                            const Tensor& norm, Tensor& gated_output_fp32,
+                                            cudaStream_t stream) {
+    if (gated_output_fp32.dtype != DType::FP32 ||
+        gated_output_fp32.ne[0] != kValueRows ||
+        gated_output_fp32.ne[1] != scratch.recurrent_output.ne[1] ||
+        !gated_output_fp32.is_contiguous()) {
+        throw std::invalid_argument(
+            "Flash-Next FP32 GDN gate diagnostic received invalid output");
+    }
+    const dim3 grid(48, static_cast<unsigned>(scratch.recurrent_output.ne[1]));
+    if (scratch.recurrent_output.dtype == DType::BF16) {
+        output_gate_fp32_mirror_kernel<<<grid, 128, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.recurrent_output.data),
+            static_cast<const __nv_bfloat16*>(scratch.z.data),
+            static_cast<const __nv_bfloat16*>(norm.data),
+            static_cast<float*>(gated_output_fp32.data),
+            static_cast<__nv_bfloat16*>(scratch.gated_output.data));
+    } else if (scratch.recurrent_output.dtype == DType::FP32) {
+        output_gate_fp32_mirror_kernel<<<grid, 128, 0, stream>>>(
+            static_cast<const float*>(scratch.recurrent_output.data),
+            static_cast<const __nv_bfloat16*>(scratch.z.data),
+            static_cast<const __nv_bfloat16*>(norm.data),
+            static_cast<float*>(gated_output_fp32.data),
+            static_cast<__nv_bfloat16*>(scratch.gated_output.data));
+    } else {
+        throw std::invalid_argument(
+            "Flash-Next FP32 GDN gate diagnostic received unsupported recurrent dtype");
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+#endif
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail
