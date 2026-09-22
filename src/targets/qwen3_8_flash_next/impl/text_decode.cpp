@@ -254,9 +254,34 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
     FlashNextTextDecodeWorkspace round_ws =
         allocate_flash_next_text_decode_workspace(workspace, batch);
 
+#if defined(NINFER_VOLTA_BUILD)
+    const bool fp32_hyper_state = [] {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_HYPER_STATE");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+    }();
+    auto sync_hyper_shadow = [&] {
+        if (fp32_hyper_state) {
+            hyper_fp32_to_bf16(round_ws.hyper_hidden_fp32, round_ws.hyper_hidden, stream);
+        }
+    };
+#else
+    constexpr bool fp32_hyper_state = false;
+    auto sync_hyper_shadow = [&] {};
+#endif
+
     // 1. Repeat embedding into 4 hyperconnection streams
-    repeat_embedding_to_hyper_streams(embedding, round_ws.hyper_hidden, stream);
-    emit_state("hyper_init", round_ws.hyper_hidden);
+#if defined(NINFER_VOLTA_BUILD)
+    if (fp32_hyper_state) {
+        repeat_embedding_to_hyper_streams_fp32(
+            embedding, round_ws.hyper_hidden_fp32, stream);
+        sync_hyper_shadow();
+        emit_state("hyper_init", round_ws.hyper_hidden_fp32);
+    } else
+#endif
+    {
+        repeat_embedding_to_hyper_streams(embedding, round_ws.hyper_hidden, stream);
+        emit_state("hyper_init", round_ws.hyper_hidden);
+    }
 
     // 2. 48-layer execution loop
     for (std::size_t layer = 0; layer < 48; ++layer) {
@@ -272,11 +297,22 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                                   workspace, round_ws.ple_injection, stream,
                                   aliased_recurrent_scan);
             emit_state("ple_injection", round_ws.ple_injection);
-            ops::residual_add(round_ws.ple_injection, round_ws.hyper_hidden, stream);
-            emit_state("hyper_after_ple", round_ws.hyper_hidden);
+#if defined(NINFER_VOLTA_BUILD)
+            if (fp32_hyper_state) {
+                hyper_add_bf16_to_fp32(
+                    round_ws.ple_injection, round_ws.hyper_hidden_fp32, stream);
+                sync_hyper_shadow();
+                emit_state("hyper_after_ple", round_ws.hyper_hidden_fp32);
+            } else
+#endif
+            {
+                ops::residual_add(round_ws.ple_injection, round_ws.hyper_hidden, stream);
+                emit_state("hyper_after_ple", round_ws.hyper_hidden);
+            }
         }
 
         // Attention hyper prepare -> block_input [2560, B]
+        sync_hyper_shadow();
         flash_next_hyper_prepare(round_ws.hyper_hidden, model.layers[layer].attention_hyper,
                                  round_ws.hyper_scratch, round_ws.block_input, stream);
         emit_state(prefix + "attn_block_input", round_ws.block_input);
@@ -311,11 +347,22 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         emit_state(prefix + "attn_block_output", round_ws.block_output);
 
         // Attention hyper inject
-        flash_next_hyper_inject(round_ws.block_output, round_ws.hyper_scratch.injection,
-                                round_ws.hyper_hidden, stream);
-        emit_state(prefix + "hyper_after_attn", round_ws.hyper_hidden);
+#if defined(NINFER_VOLTA_BUILD)
+        if (fp32_hyper_state) {
+            hyper_inject_bf16_to_fp32(
+                round_ws.block_output, round_ws.hyper_scratch.injection,
+                round_ws.hyper_hidden_fp32, stream);
+            emit_state(prefix + "hyper_after_attn", round_ws.hyper_hidden_fp32);
+        } else
+#endif
+        {
+            flash_next_hyper_inject(round_ws.block_output, round_ws.hyper_scratch.injection,
+                                    round_ws.hyper_hidden, stream);
+            emit_state(prefix + "hyper_after_attn", round_ws.hyper_hidden);
+        }
 
         // MLP hyper prepare -> block_input [2560, B]
+        sync_hyper_shadow();
         flash_next_hyper_prepare(round_ws.hyper_hidden, model.layers[layer].mlp_hyper,
                                  round_ws.hyper_scratch, round_ws.block_input, stream);
         emit_state(prefix + "mlp_block_input", round_ws.block_input);
@@ -338,11 +385,22 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         emit_state(prefix + "mlp_block_output", round_ws.block_output);
 
         // MLP hyper inject
-        flash_next_hyper_inject(round_ws.block_output, round_ws.hyper_scratch.injection,
-                                round_ws.hyper_hidden, stream);
-        emit_state(prefix + "hyper_after_mlp", round_ws.hyper_hidden);
+#if defined(NINFER_VOLTA_BUILD)
+        if (fp32_hyper_state) {
+            hyper_inject_bf16_to_fp32(
+                round_ws.block_output, round_ws.hyper_scratch.injection,
+                round_ws.hyper_hidden_fp32, stream);
+            emit_state(prefix + "hyper_after_mlp", round_ws.hyper_hidden_fp32);
+        } else
+#endif
+        {
+            flash_next_hyper_inject(round_ws.block_output, round_ws.hyper_scratch.injection,
+                                    round_ws.hyper_hidden, stream);
+            emit_state(prefix + "hyper_after_mlp", round_ws.hyper_hidden);
+        }
     }
 
+    sync_hyper_shadow();
     if (state.mtp_backbone_hidden.data != nullptr) {
         const auto mtp_scope = workspace.scope();
         Tensor mtp_embedding = embedding;
@@ -438,10 +496,35 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
     FlashNextTextDecodeWorkspace round_ws =
         allocate_flash_next_text_decode_workspace(workspace, tokens);
 
+#if defined(NINFER_VOLTA_BUILD)
+    const bool fp32_hyper_state = [] {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_HYPER_STATE");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+    }();
+    auto sync_hyper_shadow = [&] {
+        if (fp32_hyper_state) {
+            hyper_fp32_to_bf16(round_ws.hyper_hidden_fp32, round_ws.hyper_hidden, stream);
+        }
+    };
+#else
+    constexpr bool fp32_hyper_state = false;
+    auto sync_hyper_shadow = [&] {};
+#endif
+
     // 1. Repeat embedding into 4 hyperconnection streams
-    repeat_embedding_to_hyper_streams(embedding, round_ws.hyper_hidden, stream);
+#if defined(NINFER_VOLTA_BUILD)
+    if (fp32_hyper_state) {
+        repeat_embedding_to_hyper_streams_fp32(
+            embedding, round_ws.hyper_hidden_fp32, stream);
+        sync_hyper_shadow();
+        emit_state("hyper_init", round_ws.hyper_hidden_fp32);
+    } else
+#endif
+    {
+        repeat_embedding_to_hyper_streams(embedding, round_ws.hyper_hidden, stream);
+        emit_state("hyper_init", round_ws.hyper_hidden);
+    }
     stage_ledger_record(stream, FlashNextStageId::Preamble_EmbeddingStaging);
-    emit_state("hyper_init", round_ws.hyper_hidden);
 
     // 2. 48-layer execution loop
     for (std::size_t layer = 0; layer < 48; ++layer) {
@@ -457,12 +540,24 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                                          state.ple_convolution_states, workspace,
                                          round_ws.ple_injection, stream);
             emit_state("ple_injection", round_ws.ple_injection);
-            ops::residual_add(round_ws.ple_injection, round_ws.hyper_hidden, stream);
-            stage_ledger_record(stream, FlashNextStageId::PLE_Injection);
-            emit_state("hyper_after_ple", round_ws.hyper_hidden);
+#if defined(NINFER_VOLTA_BUILD)
+            if (fp32_hyper_state) {
+                hyper_add_bf16_to_fp32(
+                    round_ws.ple_injection, round_ws.hyper_hidden_fp32, stream);
+                sync_hyper_shadow();
+                stage_ledger_record(stream, FlashNextStageId::PLE_Injection);
+                emit_state("hyper_after_ple", round_ws.hyper_hidden_fp32);
+            } else
+#endif
+            {
+                ops::residual_add(round_ws.ple_injection, round_ws.hyper_hidden, stream);
+                stage_ledger_record(stream, FlashNextStageId::PLE_Injection);
+                emit_state("hyper_after_ple", round_ws.hyper_hidden);
+            }
         }
 
         // Attention hyper prepare -> block_input [2560, T]
+        sync_hyper_shadow();
         flash_next_hyper_prepare(round_ws.hyper_hidden, model.layers[layer].attention_hyper,
                                  round_ws.hyper_scratch, round_ws.block_input, stream);
         stage_ledger_record(stream, FlashNextStageId::Hyper_PrepareAttn);
@@ -497,12 +592,24 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
         emit_state(prefix + "attn_block_output", round_ws.block_output);
 
         // Attention hyper inject
-        flash_next_hyper_inject(round_ws.block_output, round_ws.hyper_scratch.injection,
-                                round_ws.hyper_hidden, stream);
-        stage_ledger_record(stream, FlashNextStageId::Hyper_InjectAttn);
-        emit_state(prefix + "hyper_after_attn", round_ws.hyper_hidden);
+#if defined(NINFER_VOLTA_BUILD)
+        if (fp32_hyper_state) {
+            hyper_inject_bf16_to_fp32(
+                round_ws.block_output, round_ws.hyper_scratch.injection,
+                round_ws.hyper_hidden_fp32, stream);
+            stage_ledger_record(stream, FlashNextStageId::Hyper_InjectAttn);
+            emit_state(prefix + "hyper_after_attn", round_ws.hyper_hidden_fp32);
+        } else
+#endif
+        {
+            flash_next_hyper_inject(round_ws.block_output, round_ws.hyper_scratch.injection,
+                                    round_ws.hyper_hidden, stream);
+            stage_ledger_record(stream, FlashNextStageId::Hyper_InjectAttn);
+            emit_state(prefix + "hyper_after_attn", round_ws.hyper_hidden);
+        }
 
         // MLP hyper prepare -> block_input [2560, T]
+        sync_hyper_shadow();
         flash_next_hyper_prepare(round_ws.hyper_hidden, model.layers[layer].mlp_hyper,
                                  round_ws.hyper_scratch, round_ws.block_input, stream);
         stage_ledger_record(stream, FlashNextStageId::Hyper_PrepareMlp);
@@ -520,12 +627,24 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
         emit_state(prefix + "mlp_block_output", round_ws.block_output);
 
         // MLP hyper inject
-        flash_next_hyper_inject(round_ws.block_output, round_ws.hyper_scratch.injection,
-                                round_ws.hyper_hidden, stream);
-        stage_ledger_record(stream, FlashNextStageId::Hyper_InjectMlp);
-        emit_state(prefix + "hyper_after_mlp", round_ws.hyper_hidden);
+#if defined(NINFER_VOLTA_BUILD)
+        if (fp32_hyper_state) {
+            hyper_inject_bf16_to_fp32(
+                round_ws.block_output, round_ws.hyper_scratch.injection,
+                round_ws.hyper_hidden_fp32, stream);
+            stage_ledger_record(stream, FlashNextStageId::Hyper_InjectMlp);
+            emit_state(prefix + "hyper_after_mlp", round_ws.hyper_hidden_fp32);
+        } else
+#endif
+        {
+            flash_next_hyper_inject(round_ws.block_output, round_ws.hyper_scratch.injection,
+                                    round_ws.hyper_hidden, stream);
+            stage_ledger_record(stream, FlashNextStageId::Hyper_InjectMlp);
+            emit_state(prefix + "hyper_after_mlp", round_ws.hyper_hidden);
+        }
     }
 
+    sync_hyper_shadow();
     if (state.mtp_backbone_hidden.data != nullptr) {
         const auto mtp_scope = workspace.scope();
         Tensor mtp_embedding = embedding;

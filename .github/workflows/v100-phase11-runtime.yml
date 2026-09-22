@@ -163,6 +163,7 @@ jobs:
           NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace7
           NINFER_PHASE11_STAGE_ORACLE_POSITION: "6"
           NINFER_PHASE11_STAGE_ORACLE_ALL_POSITIONS: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
         run: |
           set -euxo pipefail
           test -r /oracle/phase11-stage-trace7/manifest.json
