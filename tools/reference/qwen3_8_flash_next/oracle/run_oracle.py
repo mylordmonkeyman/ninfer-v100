@@ -20,6 +20,15 @@ from transformers.models.qwen4_exp.modeling_qwen4_exp import (
     Qwen4ExpTextDecoderLayer,
 )
 
+if os.environ.get("NINFER_ORACLE_DETERMINISTIC") == "1":
+    # Compact stage traces are diagnostics, not throughput benchmarks. Pinning
+    # PyTorch to one CPU worker removes reduction-order drift between repeated
+    # runs so tensor comparisons are against a stable reference.
+    torch.manual_seed(0)
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
+    torch.use_deterministic_algorithms(True)
+
 FP4_LUT = torch.tensor(
     [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
     dtype=torch.float32,
@@ -277,6 +286,8 @@ def register_hooks(model: nn.Module):
             attn.q_proj.register_forward_hook(save_output(prefix + "qsa_q_proj"))
             attn.k_proj.register_forward_hook(save_output(prefix + "qsa_k_proj"))
             attn.v_proj.register_forward_hook(save_output(prefix + "qsa_v_proj"))
+            attn.q_norm.register_forward_hook(save_output(prefix + "qsa_query_normed"))
+            attn.k_norm.register_forward_hook(save_output(prefix + "qsa_key_normed"))
             attn.o_proj.register_forward_pre_hook(save_input(prefix + "qsa_gated"))
 
         # mlp_hyper_connection input & output
@@ -293,6 +304,25 @@ def register_hooks(model: nn.Module):
     model.hyper_connection_mixer.register_forward_hook(save_output("final_hidden"))
 
     return stage_outputs
+
+def apply_text_qsa_rope(x: torch.Tensor, position: int, theta: float = 1.0e7) -> torch.Tensor:
+    """Apply Qwen4Exp text MRoPE for equal T/H/W positions."""
+    if x.shape[-1] != 256:
+        raise RuntimeError(f"expected QSA head_dim=256, got {x.shape[-1]}")
+    half = 32
+    pair = torch.arange(half, dtype=torch.float32, device=x.device)
+    inv_freq = torch.exp((-2.0 * pair / 64.0) * math.log(theta))
+    angle = float(position) * inv_freq
+    cos = torch.cos(angle)
+    sin = torch.sin(angle)
+    rotary = x[..., :64].float()
+    first = rotary[..., :half]
+    second = rotary[..., half:]
+    rotated = torch.cat(
+        [first * cos - second * sin, second * cos + first * sin], dim=-1
+    )
+    return torch.cat([rotated, x[..., 64:].float()], dim=-1)
+
 
 def parse_token_list(ids: str, ids_file: str, token_id: int) -> List[int]:
     if ids and ids_file:
@@ -601,15 +631,19 @@ def main():
                         prefix + "qsa_projected",
                         torch.cat([q_proj, k_proj, v_proj], dim=-1),
                     ))
-                    stages.append((
-                        prefix + "qsa_gate",
-                        q_heads[:, 256:].reshape(-1),
-                    ))
+                    gate = q_heads[:, 256:].reshape(-1)
+                    query_normed = stage_outputs[prefix + "qsa_query_normed"][0, pos]
+                    key_normed = stage_outputs[prefix + "qsa_key_normed"][0, pos]
+                    query = apply_text_qsa_rope(query_normed, pos)
+                    key = apply_text_qsa_rope(key_normed, pos)
+                    gated = stage_outputs[prefix + "qsa_gated"][0, pos]
+                    attended = gated.float() / torch.sigmoid(gate.float())
+                    stages.append((prefix + "qsa_gate", gate))
+                    stages.append((prefix + "qsa_query", query))
+                    stages.append((prefix + "qsa_key", key))
                     stages.append((prefix + "qsa_value", v_proj))
-                    stages.append((
-                        prefix + "qsa_gated",
-                        stage_outputs[prefix + "qsa_gated"][0, pos],
-                    ))
+                    stages.append((prefix + "qsa_attended", attended))
+                    stages.append((prefix + "qsa_gated", gated))
                 stages.append((prefix + "attn_block_output", stage_outputs[prefix + "attn_block_output"][0, pos]))
                 stages.append((prefix + "hyper_after_attn", stage_outputs[prefix + "hyper_after_attn"][0, pos]))
                 stages.append((prefix + "mlp_block_input", stage_outputs[prefix + "mlp_block_input"][0, pos]))

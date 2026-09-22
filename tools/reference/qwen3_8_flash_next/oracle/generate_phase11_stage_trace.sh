@@ -100,7 +100,13 @@ echo "  positions: $positions"
 echo "  temp:      $build_dir"
 echo "  final:     $output_dir"
 
-"$python_bin" "$script_dir/run_oracle.py"   --model-dir "$model_dir"   --ple-dir "$ple_dir"   --ids-file "$build_dir/token_ids.json"   --dump-states "$build_dir"
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 \
+NINFER_ORACLE_DETERMINISTIC=1 \
+"$python_bin" "$script_dir/run_oracle.py" \
+  --model-dir "$model_dir" \
+  --ple-dir "$ple_dir" \
+  --ids-file "$build_dir/token_ids.json" \
+  --dump-states "$build_dir"
 
 ROOT="$build_dir" POSITIONS="$positions" "$python_bin" - <<'PY'
 import json
@@ -125,7 +131,10 @@ required = [
     "L00_hyper_after_mlp",
     "L03_qsa_projected",
     "L03_qsa_gate",
+    "L03_qsa_query",
+    "L03_qsa_key",
     "L03_qsa_value",
+    "L03_qsa_attended",
     "L03_qsa_gated",
     "final_hidden",
     "logits",
