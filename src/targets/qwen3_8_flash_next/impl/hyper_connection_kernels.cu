@@ -1263,7 +1263,9 @@ void flash_next_hyper_prepare_fp32_low_rank_stage_launch(
     const HyperConnectionWeights& weights, FlashNextHyperWorkspace& scratch,
     Tensor& block_input, cudaStream_t stream) {
     const int tokens = static_cast<int>(hidden_fp32.ne[1]);
-    constexpr int kTotalRows = kLowRank + kStreams;
+    // This diagnostic owns only the 320 low-rank rows. Injection gates stay exactly
+    // as produced by the preceding production hyper-prepare when the apply A/B is on.
+    constexpr int kTotalRows = kLowRank;
     float* low_rank_fp32 = static_cast<float*>(scratch.down_split.data);
 
     group_norm_fp32_to_fp32_kernel<<<dim3(kStreams, tokens), kNormThreads, 0, stream>>>(
