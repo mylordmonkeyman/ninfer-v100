@@ -424,10 +424,14 @@ int main() {
             }
             stage_trace_position = static_cast<std::uint32_t>(parsed);
         }
-        std::string first_bad_stage;
-        double first_bad_cosine = 1.0;
-        double first_bad_nrmse = 0.0;
-        double first_bad_max_error = 0.0;
+        const bool stage_trace_all_positions =
+            stage_trace_enabled &&
+            std::getenv("NINFER_PHASE11_STAGE_ORACLE_ALL_POSITIONS") != nullptr;
+        std::uint32_t current_stage_trace_position = stage_trace_position;
+        std::vector<std::string> first_bad_stage_by_position(records.size());
+        std::vector<double> first_bad_cosine_by_position(records.size(), 1.0);
+        std::vector<double> first_bad_nrmse_by_position(records.size(), 0.0);
+        std::vector<double> first_bad_max_error_by_position(records.size(), 0.0);
 
         FlashNextDecodeStateSink stage_sink;
         stage_sink.on_state = [&](std::string_view name, const ninfer::Tensor& tensor) {
@@ -436,7 +440,7 @@ int main() {
             }
             char pos_dir[32];
             std::snprintf(
-                pos_dir, sizeof(pos_dir), "pos%04u", stage_trace_position);
+                pos_dir, sizeof(pos_dir), "pos%04u", current_stage_trace_position);
             const fs::path expected_path =
                 stage_root / pos_dir / (std::string(name) + ".bin");
             if (!fs::is_regular_file(expected_path)) {
@@ -523,7 +527,7 @@ int main() {
 
             std::cout << std::fixed << std::setprecision(8)
                       << "phase11.stage_trace.position="
-                      << stage_trace_position
+                      << current_stage_trace_position
                       << " stage=" << name
                       << " cosine=" << cosine
                       << " nrmse=" << nrmse
@@ -531,11 +535,14 @@ int main() {
                       << " pass=" << (pass ? 1 : 0)
                       << '\n' << std::flush;
 
-            if (!pass && first_bad_stage.empty()) {
-                first_bad_stage = std::string(name);
-                first_bad_cosine = cosine;
-                first_bad_nrmse = nrmse;
-                first_bad_max_error = max_error;
+            if (!pass &&
+                current_stage_trace_position < first_bad_stage_by_position.size() &&
+                first_bad_stage_by_position[current_stage_trace_position].empty()) {
+                first_bad_stage_by_position[current_stage_trace_position] =
+                    std::string(name);
+                first_bad_cosine_by_position[current_stage_trace_position] = cosine;
+                first_bad_nrmse_by_position[current_stage_trace_position] = nrmse;
+                first_bad_max_error_by_position[current_stage_trace_position] = max_error;
             }
         };
 
@@ -554,9 +561,11 @@ int main() {
                 .custom_embedding = nullptr,
             };
 
+            current_stage_trace_position = record.position;
             const FlashNextDecodeStateSink* round_sink =
                 stage_trace_enabled &&
-                        record.position == stage_trace_position
+                        (stage_trace_all_positions ||
+                         record.position == stage_trace_position)
                     ? &stage_sink
                     : nullptr;
             auto round = executor.execute_round(
@@ -658,17 +667,30 @@ int main() {
         }
 
         if (stage_trace_enabled) {
-            if (first_bad_stage.empty()) {
-                std::cout
-                    << "phase11.stage_trace.first_bad_stage=none\n";
-            } else {
-                std::cout << std::fixed << std::setprecision(8)
-                          << "phase11.stage_trace.first_bad_stage="
-                          << first_bad_stage
-                          << " cosine=" << first_bad_cosine
-                          << " nrmse=" << first_bad_nrmse
-                          << " max_error=" << first_bad_max_error
-                          << '\n';
+            const std::size_t begin =
+                stage_trace_all_positions ? 0U :
+                static_cast<std::size_t>(stage_trace_position);
+            const std::size_t end =
+                stage_trace_all_positions ? records.size() :
+                std::min(records.size(), begin + 1U);
+            for (std::size_t position = begin; position < end; ++position) {
+                if (first_bad_stage_by_position[position].empty()) {
+                    std::cout
+                        << "phase11.stage_trace.position=" << position
+                        << " first_bad_stage=none\n";
+                } else {
+                    std::cout << std::fixed << std::setprecision(8)
+                              << "phase11.stage_trace.position=" << position
+                              << " first_bad_stage="
+                              << first_bad_stage_by_position[position]
+                              << " cosine="
+                              << first_bad_cosine_by_position[position]
+                              << " nrmse="
+                              << first_bad_nrmse_by_position[position]
+                              << " max_error="
+                              << first_bad_max_error_by_position[position]
+                              << '\n';
+                }
             }
         }
 
