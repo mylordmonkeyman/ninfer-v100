@@ -309,6 +309,7 @@ mix_up_and_reduce_kernel(const __nv_bfloat16* __restrict__ normalized,
                          const __nv_bfloat16* __restrict__ low_rank,
                          const __nv_bfloat16* __restrict__ up_weight,
                          __nv_bfloat16* __restrict__ block_input,
+                         float* __restrict__ block_input_fp32,
                          int tokens) {
     __shared__ float s_contrib[kStreams];
 
@@ -364,8 +365,10 @@ mix_up_and_reduce_kernel(const __nv_bfloat16* __restrict__ normalized,
     if (tid == 0) {
         const float mean =
             (s_contrib[0] + s_contrib[1] + s_contrib[2] + s_contrib[3]) * 0.25F;
-        block_input[static_cast<std::int64_t>(token) * kHidden + hidden] =
-            __float2bfloat16_rn(mean);
+        const std::int64_t offset =
+            static_cast<std::int64_t>(token) * kHidden + hidden;
+        if (block_input_fp32 != nullptr) { block_input_fp32[offset] = mean; }
+        block_input[offset] = __float2bfloat16_rn(mean);
     }
 }
 
@@ -578,6 +581,7 @@ up_reduction_vectorized_kernel(
     const __nv_bfloat16* __restrict__ gemm_out,
     const __nv_bfloat16* __restrict__ normalized,
     __nv_bfloat16* __restrict__ block_input,
+    float* __restrict__ block_input_fp32,
     int tokens) {
     
     const int token = static_cast<int>(blockIdx.x);
@@ -619,7 +623,15 @@ up_reduction_vectorized_kernel(
             out_bf[i] = __float2bfloat16_rn(mean[i] * 0.25F);
         }
 
-        *reinterpret_cast<ulonglong2*>(block_input + static_cast<std::int64_t>(token) * kHidden + h_base) = out_raw;
+        const std::int64_t out_offset =
+            static_cast<std::int64_t>(token) * kHidden + h_base;
+        *reinterpret_cast<ulonglong2*>(block_input + out_offset) = out_raw;
+        if (block_input_fp32 != nullptr) {
+            #pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                block_input_fp32[out_offset + i] = mean[i] * 0.25F;
+            }
+        }
     }
 }
 
@@ -884,7 +896,13 @@ void flash_next_hyper_prepare_route_launch(const Tensor& hidden,
             static_cast<const __nv_bfloat16*>(scratch.normalized.data),
             static_cast<const __nv_bfloat16*>(scratch.low_rank.data),
             static_cast<const __nv_bfloat16*>(weights.input_mix_up.qdata),
-            static_cast<__nv_bfloat16*>(block_input.data), tokens);
+            static_cast<__nv_bfloat16*>(block_input.data),
+#if defined(NINFER_VOLTA_BUILD)
+            static_cast<float*>(scratch.mixed_fp32.data),
+#else
+            nullptr,
+#endif
+            tokens);
         CUDA_CHECK(cudaGetLastError());
     } else {
         // Prefill route (T >= 16) - Weight-Stationary & Tensor Core Accelerated
@@ -920,7 +938,13 @@ void flash_next_hyper_prepare_route_launch(const Tensor& hidden,
         up_reduction_vectorized_kernel<<<tokens, 256, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(scratch.up_gemm.data),
             static_cast<const __nv_bfloat16*>(scratch.normalized.data),
-            static_cast<__nv_bfloat16*>(block_input.data), tokens);
+            static_cast<__nv_bfloat16*>(block_input.data),
+#if defined(NINFER_VOLTA_BUILD)
+            static_cast<float*>(scratch.mixed_fp32.data),
+#else
+            nullptr,
+#endif
+            tokens);
         CUDA_CHECK(cudaGetLastError());
     }
 }
@@ -951,7 +975,13 @@ void flash_next_hyper_mix_route_launch(const Tensor& hidden, const HyperMixerWei
             static_cast<const __nv_bfloat16*>(scratch.normalized.data),
             static_cast<const __nv_bfloat16*>(scratch.low_rank.data),
             static_cast<const __nv_bfloat16*>(weights.input_mix_up.qdata),
-            static_cast<__nv_bfloat16*>(block_input.data), tokens);
+            static_cast<__nv_bfloat16*>(block_input.data),
+#if defined(NINFER_VOLTA_BUILD)
+            static_cast<float*>(scratch.mixed_fp32.data),
+#else
+            nullptr,
+#endif
+            tokens);
         CUDA_CHECK(cudaGetLastError());
     } else {
         // Prefill route (T >= 16)
@@ -979,7 +1009,13 @@ void flash_next_hyper_mix_route_launch(const Tensor& hidden, const HyperMixerWei
         up_reduction_vectorized_kernel<<<tokens, 256, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(scratch.up_gemm.data),
             static_cast<const __nv_bfloat16*>(scratch.normalized.data),
-            static_cast<__nv_bfloat16*>(block_input.data), tokens);
+            static_cast<__nv_bfloat16*>(block_input.data),
+#if defined(NINFER_VOLTA_BUILD)
+            static_cast<float*>(scratch.mixed_fp32.data),
+#else
+            nullptr,
+#endif
+            tokens);
         CUDA_CHECK(cudaGetLastError());
     }
 }
