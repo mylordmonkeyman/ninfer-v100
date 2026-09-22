@@ -161,6 +161,25 @@ def build_oracle(model_dir: str, ple_dir: str):
     model.float()
     model.eval()
 
+    # Qwen4ExpTextRotaryEmbedding stores inv_freq/original_inv_freq as
+    # persistent=False buffers. They are constructed on the meta device above,
+    # so to_empty() allocates uninitialized CPU storage for them and
+    # load_state_dict() cannot restore them from the checkpoint. Recreate those
+    # buffers from config explicitly before the first forward pass.
+    rotary_modules = [
+        module for module in model.modules()
+        if isinstance(module, Qwen4ExpTextRotaryEmbedding)
+    ]
+    if not rotary_modules:
+        raise RuntimeError("reference model has no Qwen4ExpTextRotaryEmbedding")
+    for module in rotary_modules:
+        fresh = Qwen4ExpTextRotaryEmbedding(module.config, device="cpu")
+        module.inv_freq = nn.Buffer(fresh.inv_freq.detach().clone(), persistent=False)
+        module.original_inv_freq = nn.Buffer(
+            fresh.original_inv_freq.detach().clone(), persistent=False
+        )
+        module.attention_scaling = fresh.attention_scaling
+
     # Load weights
     index_path = os.path.join(model_dir, "model.safetensors.index.json")
     with open(index_path, "r", encoding="utf-8") as f:
@@ -584,6 +603,11 @@ def main():
 
     with torch.no_grad():
         logits_all = F.linear(out.last_hidden_state, lm_head_weight)  # [1, seq_len, vocab_size]
+    if not torch.isfinite(logits_all).all():
+        bad = int((~torch.isfinite(logits_all)).sum().item())
+        raise RuntimeError(
+            f"CPU oracle produced {bad} non-finite logits; refusing to publish trace"
+        )
 
     manifest = {"positions": []}
 
@@ -654,7 +678,14 @@ def main():
             stages.append(("logits", logits_pos))
 
             for name, tensor in stages:
-                f32_bytes = tensor.detach().cpu().numpy().astype(np.float32).tobytes()
+                array = tensor.detach().cpu().numpy().astype(np.float32, copy=False)
+                if not np.isfinite(array).all():
+                    bad = int((~np.isfinite(array)).sum())
+                    raise RuntimeError(
+                        f"CPU oracle stage {name} at position {pos} contains "
+                        f"{bad} non-finite values; refusing to publish trace"
+                    )
+                f32_bytes = array.tobytes()
                 bin_file = f"{name}.bin"
                 with open(os.path.join(pos_dir, bin_file), "wb") as f:
                     f.write(f32_bytes)

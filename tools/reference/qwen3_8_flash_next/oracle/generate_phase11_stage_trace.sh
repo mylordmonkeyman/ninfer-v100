@@ -112,6 +112,7 @@ ROOT="$build_dir" POSITIONS="$positions" "$python_bin" - <<'PY'
 import json
 import os
 from pathlib import Path
+import numpy as np
 
 root = Path(os.environ["ROOT"])
 positions = int(os.environ["POSITIONS"])
@@ -149,7 +150,14 @@ for record in records:
         path = root / tensor["file"]
         if not path.is_file() or path.stat().st_size != int(tensor["bytes"]):
             raise SystemExit(f"invalid tensor file: {path}")
-print(f"Validated {positions}-position CPU stage trace")
+        if tensor.get("dtype") == "FP32":
+            values = np.fromfile(path, dtype=np.float32)
+            if not np.isfinite(values).all():
+                raise SystemExit(
+                    f"non-finite tensor in stage trace: position={record['position']} "
+                    f"name={tensor['name']} file={path}"
+                )
+print(f"Validated {positions}-position finite CPU stage trace")
 PY
 
 cat > "$build_dir/provenance.json" <<EOF
