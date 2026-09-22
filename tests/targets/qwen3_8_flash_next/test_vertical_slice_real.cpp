@@ -309,6 +309,96 @@ int main() {
         print_vram(preflight.vram_ledger, vram_result);
 
         reset_flash_next_host_expert_execution_stats();
+
+        if (const char* prefill_probe =
+                std::getenv("NINFER_PHASE11_PREFILL_PROBE_POSITIONS");
+            prefill_probe != nullptr && prefill_probe[0] != '\0') {
+            char* end = nullptr;
+            const unsigned long parsed = std::strtoul(prefill_probe, &end, 10);
+            if (end == prefill_probe || *end != '\0' || parsed == 0 ||
+                parsed > records.size() || parsed > contract.runtime.prefill_chunk) {
+                throw std::invalid_argument(
+                    "NINFER_PHASE11_PREFILL_PROBE_POSITIONS must be in "
+                    "[1, min(oracle positions, prefill_chunk)]");
+            }
+            const std::size_t probe_positions = static_cast<std::size_t>(parsed);
+            std::vector<std::int32_t> probe_tokens(probe_positions);
+            std::vector<std::array<std::int32_t, 3>> probe_mrope(probe_positions);
+            for (std::size_t i = 0; i < probe_positions; ++i) {
+                probe_tokens[i] = records[i].token_id;
+                const auto position = static_cast<std::int32_t>(records[i].position);
+                probe_mrope[i] = {position, position, position};
+            }
+
+            auto probe_lane = executor.allocate_lane();
+            const auto started = std::chrono::steady_clock::now();
+            auto round = executor.execute_prefill_chunk(
+                probe_lane, probe_tokens, probe_mrope, 0);
+            const ninfer::Tensor logits = round.logits();
+            if (logits.dtype != ninfer::DType::BF16 || logits.ne[0] <= 0 ||
+                static_cast<std::size_t>(logits.ne[0]) !=
+                    records[probe_positions - 1].logits_count) {
+                throw std::runtime_error(
+                    "Phase 11 prefill probe logits do not match oracle shape");
+            }
+
+            std::vector<std::uint16_t> candidate_bf16(
+                records[probe_positions - 1].logits_count);
+            CUDA_CHECK(cudaMemcpyAsync(
+                candidate_bf16.data(), logits.data,
+                candidate_bf16.size() * sizeof(std::uint16_t),
+                cudaMemcpyDeviceToHost, device.stream));
+            device.synchronize();
+
+            std::vector<float> candidate(candidate_bf16.size());
+            for (std::size_t i = 0; i < candidate.size(); ++i) {
+                candidate[i] = bf16_to_float(candidate_bf16[i]);
+            }
+            const OracleRecord& record = records[probe_positions - 1];
+            const std::vector<float> oracle = load_fp32_logits(record);
+            const std::int32_t target_token =
+                probe_positions < records.size()
+                    ? records[probe_positions].token_id
+                    : -1;
+
+            Phase11OracleAccumulator probe_accumulator;
+            probe_accumulator.observe(
+                record.position, target_token, candidate, oracle);
+            const Phase11OracleMetrics probe_metrics =
+                probe_accumulator.finalize();
+            const auto expert_stats =
+                flash_next_host_expert_execution_stats();
+            const double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - started).count();
+
+            std::cout << std::fixed << std::setprecision(8)
+                      << "phase11.prefill_probe.positions=" << probe_positions
+                      << " final_position=" << record.position
+                      << " candidate_top1=" << lower_id_argmax(candidate)
+                      << " oracle_top1=" << lower_id_argmax(oracle)
+                      << " kl=" << probe_metrics.mean_kl
+                      << " relative_nll_delta="
+                      << probe_metrics.relative_mean_nll_delta
+                      << " max_logit_error="
+                      << probe_metrics.maximum_logit_error
+                      << " elapsed_s=" << elapsed
+                      << " expert_pairs=" << expert_stats.expert_pairs
+                      << '\n';
+
+            const std::array<LaneCommitDecision, 1> decisions{{
+                LaneCommitDecision{.accept = true},
+            }};
+            round.commit(decisions);
+            if (executor.committed_frontier(probe_lane) !=
+                static_cast<std::int32_t>(probe_positions)) {
+                throw std::runtime_error(
+                    "Phase 11 prefill probe frontier did not advance");
+            }
+            executor.release_lane(probe_lane);
+            device.synchronize();
+            return 0;
+        }
+
         Phase11OracleAccumulator metrics_accumulator;
         auto lane = executor.allocate_lane();
         std::uint64_t sampled_tokens = 0;
