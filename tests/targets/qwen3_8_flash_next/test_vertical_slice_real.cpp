@@ -877,8 +877,10 @@ int main() {
             }
 
             const std::size_t count = tensor.numel();
+            const bool integer_tensor = tensor.dtype == ninfer::DType::I32;
             const std::uint64_t expected_bytes =
-                static_cast<std::uint64_t>(count) * sizeof(float);
+                static_cast<std::uint64_t>(count) *
+                (integer_tensor ? sizeof(std::int32_t) : sizeof(float));
             if (fs::file_size(expected_path) != expected_bytes) {
                 throw std::runtime_error(
                     "Phase 11 stage oracle shape mismatch for " +
@@ -886,37 +888,63 @@ int main() {
             }
 
             std::vector<float> expected(count);
-            {
-                std::ifstream input(
-                    expected_path, std::ios::binary);
-                input.read(
-                    reinterpret_cast<char*>(expected.data()),
-                    static_cast<std::streamsize>(expected_bytes));
-                if (!input) {
-                    throw std::runtime_error(
-                        "Phase 11 failed to read stage oracle " +
-                        expected_path.string());
-                }
-            }
-
             std::vector<float> candidate(count);
-            const bool integer_tensor = tensor.dtype == ninfer::DType::I32;
-            if (tensor.dtype == ninfer::DType::BF16) {
-                std::vector<std::uint16_t> words(count);
+            std::vector<std::int32_t> expected_i32;
+            std::vector<std::int32_t> candidate_i32;
+            if (integer_tensor) {
+                expected_i32.resize(count);
+                {
+                    std::ifstream input(
+                        expected_path, std::ios::binary);
+                    input.read(
+                        reinterpret_cast<char*>(expected_i32.data()),
+                        static_cast<std::streamsize>(expected_bytes));
+                    if (!input) {
+                        throw std::runtime_error(
+                            "Phase 11 failed to read integer stage oracle " +
+                            expected_path.string());
+                    }
+                }
+                candidate_i32.resize(count);
                 CUDA_CHECK(cudaMemcpy(
-                    words.data(), tensor.data,
-                    count * sizeof(std::uint16_t),
+                    candidate_i32.data(), tensor.data,
+                    count * sizeof(std::int32_t),
                     cudaMemcpyDeviceToHost));
                 for (std::size_t i = 0; i < count; ++i) {
-                    candidate[i] = bf16_to_float(words[i]);
+                    expected[i] = static_cast<float>(expected_i32[i]);
+                    candidate[i] = static_cast<float>(candidate_i32[i]);
                 }
-            } else if (tensor.dtype == ninfer::DType::FP32) {
-                CUDA_CHECK(cudaMemcpy(
-                    candidate.data(), tensor.data,
-                    count * sizeof(float),
-                    cudaMemcpyDeviceToHost));
             } else {
-                return;
+                {
+                    std::ifstream input(
+                        expected_path, std::ios::binary);
+                    input.read(
+                        reinterpret_cast<char*>(expected.data()),
+                        static_cast<std::streamsize>(expected_bytes));
+                    if (!input) {
+                        throw std::runtime_error(
+                            "Phase 11 failed to read stage oracle " +
+                            expected_path.string());
+                    }
+                }
+
+                if (tensor.dtype == ninfer::DType::BF16) {
+                    std::vector<std::uint16_t> words(count);
+                    CUDA_CHECK(cudaMemcpy(
+                        words.data(), tensor.data,
+                        count * sizeof(std::uint16_t),
+                        cudaMemcpyDeviceToHost));
+                    for (std::size_t i = 0; i < count; ++i) {
+                        candidate[i] = bf16_to_float(words[i]);
+                    }
+                } else if (tensor.dtype == ninfer::DType::FP32) {
+                    CUDA_CHECK(cudaMemcpy(
+                        candidate.data(), tensor.data,
+                        count * sizeof(float),
+                        cudaMemcpyDeviceToHost));
+                } else {
+                    return;
+                }
             }
 
             long double dot = 0.0L;
@@ -965,6 +993,22 @@ int main() {
                       << " max_error=" << max_error
                       << " pass=" << (pass ? 1 : 0)
                       << '\n' << std::flush;
+
+            if (integer_tensor && !pass) {
+                std::cout << "phase11.router_ids_mismatch.position="
+                          << current_stage_trace_position
+                          << " stage=" << name << " expected=";
+                for (std::size_t i = 0; i < expected_i32.size(); ++i) {
+                    if (i != 0) { std::cout << ','; }
+                    std::cout << expected_i32[i];
+                }
+                std::cout << " candidate=";
+                for (std::size_t i = 0; i < candidate_i32.size(); ++i) {
+                    if (i != 0) { std::cout << ','; }
+                    std::cout << candidate_i32[i];
+                }
+                std::cout << '\n' << std::flush;
+            }
 
             if (!pass &&
                 current_stage_trace_position < first_bad_stage_by_position.size() &&

@@ -258,6 +258,28 @@ __device__ __forceinline__ void accumulate_shared_uint4(uint4 w, uint4 a, float&
     shared_sum = fmaf(wv3.y, av3.y, shared_sum);
 }
 
+
+// Diagnostic-only FP32 activation helper for the shared expert. The FP32 values live in
+// the otherwise-unused routed paths 8-9 of the host-backed activation slab; the first
+// eight paths are later overwritten by the 2,560-value FP32 routed sum.
+__device__ __forceinline__ void accumulate_shared_fp32_uint4(
+    uint4 w, const float* __restrict__ a, float& shared_sum) {
+    const float2 wv0 = ops::bf16x2_bits_to_float2(w.x);
+    const float2 wv1 = ops::bf16x2_bits_to_float2(w.y);
+    const float2 wv2 = ops::bf16x2_bits_to_float2(w.z);
+    const float2 wv3 = ops::bf16x2_bits_to_float2(w.w);
+    const float4 av0 = *reinterpret_cast<const float4*>(a);
+    const float4 av1 = *reinterpret_cast<const float4*>(a + 4);
+    shared_sum = fmaf(wv0.x, av0.x, shared_sum);
+    shared_sum = fmaf(wv0.y, av0.y, shared_sum);
+    shared_sum = fmaf(wv1.x, av0.z, shared_sum);
+    shared_sum = fmaf(wv1.y, av0.w, shared_sum);
+    shared_sum = fmaf(wv2.x, av1.x, shared_sum);
+    shared_sum = fmaf(wv2.y, av1.y, shared_sum);
+    shared_sum = fmaf(wv3.x, av1.z, shared_sum);
+    shared_sum = fmaf(wv3.y, av1.w, shared_sum);
+}
+
 // Warp-cooperative BF16 dot product of shared_down row `row` with the shared-path activations
 // of this token: 80 uint4 (640 values) as two full-warp phases plus a 16-lane tail, one fmaf
 // chain per lane, then the shfl_down tree. Meaningful on lane 0 only.
@@ -281,6 +303,33 @@ __device__ __forceinline__ float down_shared_path_value(
         const uint4 w = shared_row[64 + lane];
         const uint4 a = shared_act[64 + lane];
         accumulate_shared_uint4(w, a, shared_sum);
+    }
+
+    return ops::warp_reduce_sum(shared_sum);
+}
+
+
+__device__ __forceinline__ float down_shared_path_fp32_value(
+    const __nv_bfloat16* __restrict__ shared_down,
+    const __nv_bfloat16* __restrict__ token_activations, int row, int lane) {
+    float shared_sum = 0.0F;
+    const auto* shared_row = reinterpret_cast<const uint4*>(
+        shared_down + static_cast<std::int64_t>(row) * kIntermediate);
+    const auto* shared_act = reinterpret_cast<const float*>(
+        token_activations + static_cast<std::int64_t>(kTopK - 2) * kIntermediate);
+
+#pragma unroll
+    for (int phase = 0; phase < 2; ++phase) {
+        const int vector_index = phase * 32 + lane;
+        const uint4 w = shared_row[vector_index];
+        accumulate_shared_fp32_uint4(
+            w, shared_act + static_cast<std::int64_t>(vector_index) * 8, shared_sum);
+    }
+    if (lane < 16) {
+        const int vector_index = 64 + lane;
+        const uint4 w = shared_row[vector_index];
+        accumulate_shared_fp32_uint4(
+            w, shared_act + static_cast<std::int64_t>(vector_index) * 8, shared_sum);
     }
 
     return ops::warp_reduce_sum(shared_sum);
@@ -1211,6 +1260,78 @@ flash_next_moe_prefill_shared_gate_up_kernel(const __nv_bfloat16* __restrict__ i
     }
 }
 
+
+// Diagnostic-only shared-expert gate/up variant that keeps the production BF16 input and
+// BF16 weights but retains SiLU(gate)*up in FP32. The output is overlaid on routed paths
+// 8-9, which are unused by the host-backed path after shared gate/up completes.
+__global__ void
+flash_next_moe_prefill_shared_gate_up_fp32_intermediate_kernel(
+    const __nv_bfloat16* __restrict__ input,
+    const __nv_bfloat16* __restrict__ shared_gate,
+    const __nv_bfloat16* __restrict__ shared_up,
+    __nv_bfloat16* __restrict__ activations, int tokens) {
+    const int warp         = static_cast<int>(threadIdx.x) >> 5;
+    const int lane         = static_cast<int>(threadIdx.x) & 31;
+    const int pair         = static_cast<int>(blockIdx.x) * 8 + warp;
+    const int token_base   = static_cast<int>(blockIdx.y) * 8;
+    const int batch_tokens = min(8, tokens - token_base);
+
+    if (pair >= kIntermediate || batch_tokens <= 0) { return; }
+
+    const auto* g_row = shared_gate + static_cast<std::int64_t>(pair) * kHidden;
+    const auto* u_row = shared_up + static_cast<std::int64_t>(pair) * kHidden;
+
+    float gate_sum[8] = {};
+    float up_sum[8]   = {};
+
+    for (int col_base = 0; col_base < kHidden; col_base += 256) {
+        const int col = col_base + lane * 8;
+        if (col < kHidden) {
+            const auto g_v = *reinterpret_cast<const uint4*>(&g_row[col]);
+            const auto u_v = *reinterpret_cast<const uint4*>(&u_row[col]);
+            const std::uint32_t g_raw[4] = {g_v.x, g_v.y, g_v.z, g_v.w};
+            const std::uint32_t u_raw[4] = {u_v.x, u_v.y, u_v.z, u_v.w};
+
+#pragma unroll
+            for (int b = 0; b < 8; ++b) {
+                if (b < batch_tokens) {
+                    const int token  = token_base + b;
+                    const auto* in_x = input + static_cast<std::int64_t>(token) * kHidden;
+                    const auto x_v   = *reinterpret_cast<const uint4*>(&in_x[col]);
+                    const std::uint32_t x_raw[4] = {x_v.x, x_v.y, x_v.z, x_v.w};
+
+#pragma unroll
+                    for (int p = 0; p < 4; ++p) {
+                        const float2 g_pair = ops::bf16x2_bits_to_float2(g_raw[p]);
+                        const float2 u_pair = ops::bf16x2_bits_to_float2(u_raw[p]);
+                        const float2 x_pair = ops::bf16x2_bits_to_float2(x_raw[p]);
+                        gate_sum[b] = fmaf(g_pair.x, x_pair.x, gate_sum[b]);
+                        gate_sum[b] = fmaf(g_pair.y, x_pair.y, gate_sum[b]);
+                        up_sum[b]   = fmaf(u_pair.x, x_pair.x, up_sum[b]);
+                        up_sum[b]   = fmaf(u_pair.y, x_pair.y, up_sum[b]);
+                    }
+                }
+            }
+        }
+    }
+
+#pragma unroll
+    for (int b = 0; b < 8; ++b) {
+        if (b < batch_tokens) {
+            const int token   = token_base + b;
+            const float g_tot = ops::warp_reduce_sum(gate_sum[b]);
+            const float u_tot = ops::warp_reduce_sum(up_sum[b]);
+            if (lane == 0) {
+                auto* token_activations =
+                    activations + static_cast<std::int64_t>(token) * kPaths * kIntermediate;
+                auto* shared_fp32 = reinterpret_cast<float*>(
+                    token_activations + static_cast<std::int64_t>(kTopK - 2) * kIntermediate);
+                shared_fp32[pair] = ops::silu(g_tot) * u_tot;
+            }
+        }
+    }
+}
+
 // Diagnostic-only shared-expert gate/up variant that changes only the input activation
 // boundary: FP32 input, BF16 weights, the same per-lane FMA order, FP32 accumulation,
 // and the same final BF16 SiLU(gate)*up materialization as the production kernel.
@@ -1734,6 +1855,34 @@ __global__ void flash_next_moe_host_routed_merge_kernel(
         activations + static_cast<std::int64_t>(token) * kPaths * kIntermediate;
     const float shared_value =
         down_shared_path_value(shared_down, token_activations, row, lane);
+
+    if (lane == 0) {
+        const float routed =
+            reinterpret_cast<const float*>(token_activations)[row];
+        output[static_cast<std::int64_t>(token) * kHidden + row] =
+            __float2bfloat16_rn(fmaf(shared_scale[token], shared_value, routed));
+    }
+}
+
+
+// Diagnostic host-backed merge consuming the FP32 shared activation overlaid on routed
+// paths 8-9. Routed sums and the final FP32 combine are identical to the production merge.
+__global__ void flash_next_moe_host_routed_merge_shared_fp32_intermediate_kernel(
+    const float* __restrict__ shared_scale,
+    const __nv_bfloat16* __restrict__ activations,
+    const __nv_bfloat16* __restrict__ shared_down,
+    __nv_bfloat16* __restrict__ output) {
+    const int token = static_cast<int>(blockIdx.y);
+    const int tid   = static_cast<int>(threadIdx.x);
+    const int warp  = tid >> 5;
+    const int lane  = tid & 31;
+    const int row   = static_cast<int>(blockIdx.x) * kDownWarps + warp;
+    if (row >= kHidden) { return; }
+
+    const auto* token_activations =
+        activations + static_cast<std::int64_t>(token) * kPaths * kIntermediate;
+    const float shared_value =
+        down_shared_path_fp32_value(shared_down, token_activations, row, lane);
 
     if (lane == 0) {
         const float routed =
@@ -2304,12 +2453,23 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
 void flash_next_moe_host_shared_launch(const Tensor& input, const MoeWeights& weights,
                                        const FlashNextMoeWorkspace& workspace,
                                        cudaStream_t stream,
-                                       const Tensor* input_fp32) {
+                                       const Tensor* input_fp32,
+                                       bool fp32_intermediate) {
     const int tokens = static_cast<int>(input.ne[1]);
 
     // Keep the Phase-10 bring-up path independent of the inherited shared-MMA backend.
     const dim3 gate_grid(kIntermediate / 8, (static_cast<unsigned>(tokens) + 7U) / 8U);
-    if (input_fp32 != nullptr && input_fp32->data != nullptr) {
+    if (fp32_intermediate) {
+        if (input_fp32 != nullptr && input_fp32->data != nullptr) {
+            throw std::invalid_argument(
+                "shared FP32-intermediate diagnostic requires BF16 shared input");
+        }
+        flash_next_moe_prefill_shared_gate_up_fp32_intermediate_kernel<<<gate_grid, 256, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(input.data),
+            static_cast<const __nv_bfloat16*>(weights.shared_gate.qdata),
+            static_cast<const __nv_bfloat16*>(weights.shared_up.qdata),
+            static_cast<__nv_bfloat16*>(workspace.activations.data), tokens);
+    } else if (input_fp32 != nullptr && input_fp32->data != nullptr) {
         flash_next_moe_prefill_shared_gate_up_fp32_input_kernel<<<gate_grid, 256, 0, stream>>>(
             static_cast<const float*>(input_fp32->data),
             static_cast<const __nv_bfloat16*>(weights.shared_gate.qdata),
@@ -2329,16 +2489,25 @@ void flash_next_moe_host_shared_launch(const Tensor& input, const MoeWeights& we
 void flash_next_moe_host_routed_merge_launch(const MoeWeights& weights,
                                              const FlashNextMoeWorkspace& workspace,
                                              Tensor& output, int tokens,
-                                             cudaStream_t stream) {
+                                             cudaStream_t stream,
+                                             bool shared_fp32_intermediate) {
     if (tokens <= 0) {
         throw std::invalid_argument("Flash-Next host routed merge requires positive tokens");
     }
     const dim3 grid(kHidden / kDownWarps, static_cast<unsigned>(tokens));
-    flash_next_moe_host_routed_merge_kernel<<<grid, kDownWarps * 32, 0, stream>>>(
-        static_cast<const float*>(workspace.shared_scale.data),
-        static_cast<const __nv_bfloat16*>(workspace.activations.data),
-        static_cast<const __nv_bfloat16*>(weights.shared_down.qdata),
-        static_cast<__nv_bfloat16*>(output.data));
+    if (shared_fp32_intermediate) {
+        flash_next_moe_host_routed_merge_shared_fp32_intermediate_kernel<<<grid, kDownWarps * 32, 0, stream>>>(
+            static_cast<const float*>(workspace.shared_scale.data),
+            static_cast<const __nv_bfloat16*>(workspace.activations.data),
+            static_cast<const __nv_bfloat16*>(weights.shared_down.qdata),
+            static_cast<__nv_bfloat16*>(output.data));
+    } else {
+        flash_next_moe_host_routed_merge_kernel<<<grid, kDownWarps * 32, 0, stream>>>(
+            static_cast<const float*>(workspace.shared_scale.data),
+            static_cast<const __nv_bfloat16*>(workspace.activations.data),
+            static_cast<const __nv_bfloat16*>(weights.shared_down.qdata),
+            static_cast<__nv_bfloat16*>(output.data));
+    }
     CUDA_CHECK(cudaGetLastError());
     stage_ledger_record(stream, FlashNextStageId::MoE_Reduce);
 }

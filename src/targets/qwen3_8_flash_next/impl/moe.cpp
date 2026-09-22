@@ -61,6 +61,11 @@ bool resolve_fp32_intermediate_diagnostic() {
     return env != nullptr && env[0] != '\0' && std::string_view(env) != "0";
 }
 
+bool resolve_shared_fp32_intermediate_diagnostic() {
+    const char* env = std::getenv("NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE");
+    return env != nullptr && env[0] != '\0' && std::string_view(env) != "0";
+}
+
 bool resolve_avx2_backend() {
     const char* env = std::getenv("NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND");
     if (env == nullptr || env[0] == '\0' || std::string_view(env) == "reference") {
@@ -393,6 +398,12 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         throw std::invalid_argument(
             "Flash-Next host-backed MoE received an invalid FP32 shared-expert input");
     }
+    const bool use_shared_fp32_intermediate =
+        resolve_shared_fp32_intermediate_diagnostic();
+    if (use_shared_fp32_intermediate && use_shared_expert_input_fp32) {
+        throw std::invalid_argument(
+            "shared FP32-intermediate diagnostic requires the production BF16 shared input");
+    }
 
     const auto scope = workspace.scope();
     FlashNextMoeWorkspace scratch = allocate_flash_next_moe_workspace(workspace, tokens);
@@ -418,14 +429,15 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         emit("moe_shared_scale", scratch.shared_scale);
     }
 
-    // The shared expert remains resident on device. Compute its BF16 activation before the
-    // host rendezvous. The optional FP32 diagnostic changes only the gate/up input boundary;
-    // the shared activation and all later shared-expert boundaries remain BF16. The shared
-    // down projection is deferred until the routed FP32 sum returns so both branches can be
-    // combined before the final BF16 rounding.
+    // The shared expert remains resident on device. By default its gate/up activation is
+    // materialized as BF16 before the host rendezvous. Diagnostics may change either the
+    // gate/up input boundary or, separately, retain SiLU(gate)*up in FP32 for shared_down.
+    // The shared down projection is deferred until the routed FP32 sum returns so both
+    // branches can be combined before the final BF16 rounding.
     flash_next_moe_host_shared_launch(
         input, resident_weights, scratch, stream,
-        use_shared_expert_input_fp32 ? shared_expert_input_fp32 : nullptr);
+        use_shared_expert_input_fp32 ? shared_expert_input_fp32 : nullptr,
+        use_shared_fp32_intermediate);
 
     const std::size_t input_words =
         static_cast<std::size_t>(tokens) * kFlashNextExpertHidden;
@@ -525,7 +537,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         kRoutedBytesPerToken, static_cast<std::size_t>(tokens),
         cudaMemcpyHostToDevice, stream));
     flash_next_moe_host_routed_merge_launch(
-        resident_weights, scratch, output, tokens, stream);
+        resident_weights, scratch, output, tokens, stream,
+        use_shared_fp32_intermediate);
 }
 
 void flash_next_moe_bf16(const Tensor& input, const MoeBf16Weights& weights, Tensor& output,
