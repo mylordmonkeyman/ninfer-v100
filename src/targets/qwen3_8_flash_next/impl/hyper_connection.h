@@ -25,6 +25,12 @@ void flash_next_hyper_prepare(const Tensor& hidden, const HyperConnectionWeights
 void flash_next_hyper_prepare_fp32_hidden_stage(
     const Tensor& hidden_fp32, const HyperConnectionWeights& weights,
     FlashNextHyperWorkspace& scratch, Tensor& block_input, cudaStream_t stream);
+// Extends the diagnostic one boundary farther: the normalized streams remain FP32
+// through the down projection and final stream contribution; low_rank stays BF16.
+void flash_next_hyper_prepare_fp32_normalized_stage(
+    const Tensor& hidden_fp32, Tensor& normalized_fp32,
+    const HyperConnectionWeights& weights, FlashNextHyperWorkspace& scratch,
+    Tensor& block_input, cudaStream_t stream);
 #endif
 
 void flash_next_hyper_inject(const Tensor& block_output, const Tensor& injection, Tensor& hidden,
