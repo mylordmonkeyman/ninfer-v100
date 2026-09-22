@@ -1,4 +1,7 @@
 #include "core/device.h"
+#include "targets/qwen3_8_flash_next/impl/gdn.h"
+#include "targets/qwen3_8_flash_next/impl/gdn_kernels.h"
+#include "targets/qwen3_8_flash_next/impl/gdn_workspace.h"
 #include "targets/qwen3_8_flash_next/impl/load/loader.h"
 #include "targets/qwen3_8_flash_next/impl/moe.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_state.h"
@@ -230,6 +233,204 @@ void print_vram(const FlashNextStaticVramLedger& ledger,
               << ledger.routed_expert_layers << '\n';
 }
 
+struct GdnConvIsolationMetrics {
+    double cosine = 0.0;
+    double nrmse = 0.0;
+    double max_error = 0.0;
+};
+
+std::vector<float> load_stage_fp32_vector(const fs::path& path, std::size_t expected_count) {
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    if (!input) {
+        throw std::runtime_error(
+            "Phase 11 GDN isolation cannot open stage oracle: " + path.string());
+    }
+    const auto end = input.tellg();
+    const std::uint64_t expected_bytes =
+        static_cast<std::uint64_t>(expected_count) * sizeof(float);
+    if (end < 0 || static_cast<std::uint64_t>(end) != expected_bytes) {
+        throw std::runtime_error(
+            "Phase 11 GDN isolation stage oracle has unexpected size: " + path.string());
+    }
+    input.seekg(0);
+    std::vector<float> values(expected_count);
+    input.read(reinterpret_cast<char*>(values.data()),
+               static_cast<std::streamsize>(expected_bytes));
+    if (!input) {
+        throw std::runtime_error(
+            "Phase 11 GDN isolation failed to read stage oracle: " + path.string());
+    }
+    return values;
+}
+
+std::uint16_t float_to_bf16_rn(float value) {
+    const std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
+    const std::uint32_t exponent = bits & 0x7F800000U;
+    const std::uint32_t mantissa = bits & 0x007FFFFFU;
+    if (exponent == 0x7F800000U && mantissa != 0U) {
+        return static_cast<std::uint16_t>((bits >> 16U) | 0x0040U);
+    }
+    const std::uint32_t rounded =
+        bits + 0x00007FFFU + ((bits >> 16U) & 1U);
+    return static_cast<std::uint16_t>(rounded >> 16U);
+}
+
+GdnConvIsolationMetrics compare_bf16_stage(
+    const ninfer::Tensor& candidate, std::span<const float> expected) {
+    if (candidate.dtype != ninfer::DType::BF16 ||
+        candidate.numel() != expected.size()) {
+        throw std::runtime_error(
+            "Phase 11 GDN isolation candidate shape/dtype mismatch");
+    }
+
+    std::vector<std::uint16_t> words(expected.size());
+    CUDA_CHECK(cudaMemcpy(
+        words.data(), candidate.data, words.size() * sizeof(std::uint16_t),
+        cudaMemcpyDeviceToHost));
+
+    long double dot = 0.0L;
+    long double candidate_sq = 0.0L;
+    long double expected_sq = 0.0L;
+    long double error_sq = 0.0L;
+    double max_error = 0.0;
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        const long double a = bf16_to_float(words[i]);
+        const long double b = expected[i];
+        if (!std::isfinite(static_cast<double>(a)) ||
+            !std::isfinite(static_cast<double>(b))) {
+            throw std::runtime_error(
+                "Phase 11 GDN isolation encountered a nonfinite value");
+        }
+        const long double d = a - b;
+        dot += a * b;
+        candidate_sq += a * a;
+        expected_sq += b * b;
+        error_sq += d * d;
+        max_error = std::max(
+            max_error, std::abs(static_cast<double>(d)));
+    }
+
+    const long double denom = std::sqrt(candidate_sq * expected_sq);
+    const double cosine =
+        denom > 0.0L
+            ? static_cast<double>(dot / denom)
+            : (candidate_sq == expected_sq ? 1.0 : 0.0);
+    const long double expected_rms =
+        std::sqrt(expected_sq / static_cast<long double>(expected.size()));
+    const long double error_rms =
+        std::sqrt(error_sq / static_cast<long double>(expected.size()));
+    const double nrmse = static_cast<double>(
+        error_rms / std::max(expected_rms, 1.0e-12L));
+    return {
+        .cosine = cosine,
+        .nrmse = nrmse,
+        .max_error = max_error,
+    };
+}
+
+bool gdn_conv_isolation_passes(const GdnConvIsolationMetrics& metrics) {
+    return metrics.cosine >= 0.99999 && metrics.nrmse <= 2.0e-3;
+}
+
+void print_gdn_conv_isolation_metrics(
+    std::string_view stage, const GdnConvIsolationMetrics& metrics) {
+    std::cout << std::fixed << std::setprecision(8)
+              << "phase11.gdn_conv_isolation.stage=" << stage
+              << " cosine=" << metrics.cosine
+              << " nrmse=" << metrics.nrmse
+              << " max_error=" << metrics.max_error
+              << " pass=" << (gdn_conv_isolation_passes(metrics) ? 1 : 0)
+              << '\n';
+}
+
+int run_layer0_gdn_conv_isolation(
+    const TextModelView& text, const fs::path& stage_root,
+    ninfer::DeviceContext& device) {
+    constexpr std::size_t kProjected = 16'384;
+    constexpr std::size_t kQuery = 2'048;
+    constexpr std::size_t kKey = 2'048;
+    constexpr std::size_t kValue = 6'144;
+    constexpr std::size_t kConvChannels = 10'240;
+
+    const fs::path position_root = stage_root / "pos0000";
+    const std::vector<float> expected_projected =
+        load_stage_fp32_vector(position_root / "L00_gdn_projected.bin", kProjected);
+    const std::vector<float> expected_query =
+        load_stage_fp32_vector(position_root / "L00_gdn_query.bin", kQuery);
+    const std::vector<float> expected_key =
+        load_stage_fp32_vector(position_root / "L00_gdn_key.bin", kKey);
+    const std::vector<float> expected_value =
+        load_stage_fp32_vector(position_root / "L00_gdn_value.bin", kValue);
+
+    std::vector<std::uint16_t> projected_bf16(kProjected);
+    for (std::size_t i = 0; i < expected_projected.size(); ++i) {
+        projected_bf16[i] = float_to_bf16_rn(expected_projected[i]);
+    }
+
+    ninfer::WorkspaceArena workspace(
+        flash_next_gdn_workspace_capacity_bytes(1, 1));
+    FlashNextGdnWorkspace scratch =
+        allocate_flash_next_gdn_workspace(workspace, 1);
+    ninfer::DeviceBuffer convolution_states(
+        kConvChannels * 3ULL * sizeof(std::uint16_t));
+    ninfer::DeviceBuffer source_slot(sizeof(std::int32_t));
+    ninfer::DeviceBuffer destination_slot(sizeof(std::int32_t));
+    const std::int32_t zero = 0;
+
+    CUDA_CHECK(cudaMemcpyAsync(
+        scratch.projected.data, projected_bf16.data(),
+        projected_bf16.size() * sizeof(std::uint16_t),
+        cudaMemcpyHostToDevice, device.stream));
+    CUDA_CHECK(cudaMemsetAsync(
+        convolution_states.p, 0, convolution_states.bytes, device.stream));
+    CUDA_CHECK(cudaMemcpyAsync(
+        source_slot.p, &zero, sizeof(zero), cudaMemcpyHostToDevice,
+        device.stream));
+    CUDA_CHECK(cudaMemcpyAsync(
+        destination_slot.p, &zero, sizeof(zero), cudaMemcpyHostToDevice,
+        device.stream));
+
+    ninfer::Tensor source(source_slot.p, ninfer::DType::I32, {1});
+    ninfer::Tensor destination(destination_slot.p, ninfer::DType::I32, {1});
+    ninfer::Tensor states(
+        convolution_states.p, ninfer::DType::BF16,
+        {static_cast<std::int32_t>(kConvChannels), 3, 1});
+
+    flash_next_gdn_conv_launch(
+        scratch, text.gdn[0].convolution, source, destination, states,
+        device.stream);
+    device.synchronize();
+
+    const GdnConvIsolationMetrics projected_metrics =
+        compare_bf16_stage(scratch.projected, expected_projected);
+    const GdnConvIsolationMetrics query_metrics =
+        compare_bf16_stage(scratch.query, expected_query);
+    const GdnConvIsolationMetrics key_metrics =
+        compare_bf16_stage(scratch.key, expected_key);
+    const GdnConvIsolationMetrics value_metrics =
+        compare_bf16_stage(scratch.value, expected_value);
+
+    std::cout
+        << "phase11.gdn_conv_isolation.position=0"
+        << " source=cpu_stage_gdn_projected"
+        << " projected_boundary=bf16_rn"
+        << " initial_conv_state=zero"
+        << " production_kernel=flash_next_gdn_conv_launch\n";
+    print_gdn_conv_isolation_metrics(
+        "L00_gdn_projected_injected", projected_metrics);
+    print_gdn_conv_isolation_metrics("L00_gdn_query", query_metrics);
+    print_gdn_conv_isolation_metrics("L00_gdn_key", key_metrics);
+    print_gdn_conv_isolation_metrics("L00_gdn_value", value_metrics);
+
+    const bool pass =
+        gdn_conv_isolation_passes(query_metrics) &&
+        gdn_conv_isolation_passes(key_metrics) &&
+        gdn_conv_isolation_passes(value_metrics);
+    std::cout << "phase11.gdn_conv_isolation.overall_pass="
+              << (pass ? 1 : 0) << '\n';
+    return pass ? 0 : 1;
+}
+
 } // namespace
 
 int main() {
@@ -290,6 +491,13 @@ int main() {
             weights_path, device, contract.load);
         device.synchronize();
         vram.after_model_load = phase11_cuda_memory_snapshot();
+
+        if (const char* isolation_root =
+                std::getenv("NINFER_PHASE11_GDN_CONV_ISOLATION_ROOT");
+            isolation_root != nullptr && isolation_root[0] != '\0') {
+            return run_layer0_gdn_conv_isolation(
+                model.text_view(), fs::path(isolation_root), device);
+        }
 
         FlashNextRuntimeAllocation allocation(preflight.runtime_plan);
         allocation.initialize(device.stream);
