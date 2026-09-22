@@ -4,6 +4,8 @@
 
 #include <cuda_bf16.h>
 
+#include <cstdlib>
+
 namespace ninfer::ops::detail {
 
 #ifdef NINFER_VOLTA_BUILD
@@ -25,9 +27,13 @@ bool fp8_volta_qpn_supported(std::int32_t n, std::int32_t k, std::int32_t t) noe
     // 32x8 route, so here the alternative is chunking -- reading the whole weight twice -- and the
     // second tile wins easily.
     //
-    // T=1 is excluded: the SIMT decode kernel reads 446.7 GB/s there against this kernel's 434.5,
-    // because a single row leaves seven of the tile's eight A rows padded with zeros.
-    return t >= 2 && t <= 4 * S::kRowsPerTile;
+    // Historical V100 builds also routed T=1 through QPN. Keep the current SIMT
+    // default while the Flash-Next forward-port numerically qualifies that path.
+    static const bool qpn_t1 = [] {
+        const char* env = std::getenv("NINFER_VOLTA_FP8_QPN_T1");
+        return env != nullptr && env[0] != '\0' && env[0] != '0';
+    }();
+    return (t >= 2 || (t == 1 && qpn_t1)) && t <= 4 * S::kRowsPerTile;
 }
 
 void launch_fp8_volta_qpn(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {

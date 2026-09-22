@@ -141,7 +141,7 @@ jobs:
             --output-on-failure \
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_test$'
 
-      - name: Compare BF16 vs FP32 expert intermediate
+      - name: Compare SIMT vs Volta QPN FP8 decode
         continue-on-error: true
         shell: bash
         env:
@@ -156,16 +156,16 @@ jobs:
           result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$result_dir"
 
-          echo "=== production BF16 expert intermediate ===" | tee "$result_dir/expert-intermediate-ab.log"
+          echo "=== baseline SIMT T=1 FP8 ===" | tee "$result_dir/fp8-t1-ab.log"
           ctest --test-dir build-v100 -V \
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
-            2>&1 | tee -a "$result_dir/expert-intermediate-ab.log" || true
+            2>&1 | tee -a "$result_dir/fp8-t1-ab.log" || true
 
-          echo "=== diagnostic FP32 expert intermediate ===" | tee -a "$result_dir/expert-intermediate-ab.log"
-          NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE=1 \
+          echo "=== diagnostic Volta QPN T=1 FP8 ===" | tee -a "$result_dir/fp8-t1-ab.log"
+          NINFER_VOLTA_FP8_QPN_T1=1 \
             ctest --test-dir build-v100 -V \
               -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
-              2>&1 | tee -a "$result_dir/expert-intermediate-ab.log" || true
+              2>&1 | tee -a "$result_dir/fp8-t1-ab.log" || true
 
       # A [full-phase11] push opts into the expensive full-oracle qualification.
       - name: Validate full Phase 11 oracle
