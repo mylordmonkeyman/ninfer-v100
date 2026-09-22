@@ -322,9 +322,15 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
 
         // MoE
         if (model.host_experts.has_value()) {
+            MoeStageEmitter moe_emit{};
+            if (sink && sink->on_state) {
+                moe_emit = [&](std::string_view name, const Tensor& tensor) {
+                    emit_state(prefix + std::string(name), tensor);
+                };
+            }
             flash_next_moe_host_backed(round_ws.block_input, model.layers[layer].moe,
                                        model.host_experts->layers[layer],
-                                       round_ws.block_output, workspace, stream);
+                                       round_ws.block_output, workspace, stream, moe_emit);
         } else {
             flash_next_moe(round_ws.block_input, model.layers[layer].moe,
                            round_ws.block_output, workspace, stream);

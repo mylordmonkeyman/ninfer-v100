@@ -341,7 +341,8 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
 
 void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_weights,
                                 const HostNvfp4ExpertLayerView& host_experts, Tensor& output,
-                                WorkspaceArena& workspace, cudaStream_t stream) {
+                                WorkspaceArena& workspace, cudaStream_t stream,
+                                const MoeStageEmitter& emit) {
     const std::int32_t tokens = input.ne[1];
     if (input.dtype != DType::BF16 || output.dtype != DType::BF16 || input.ne[0] != 2'560 ||
         output.ne[0] != 2'560 || tokens < 1 || output.ne[1] != tokens ||
@@ -364,6 +365,11 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     flash_next_route(input, resident_weights.router, resident_weights.shared_gate_weight,
                      scratch.scores, scratch.ids, scratch.alpha, scratch.shared_scale, stream);
     stage_ledger_record(stream, FlashNextStageId::MoE_Router);
+    if (emit) {
+        emit("moe_router_ids", scratch.ids);
+        emit("moe_router_alpha", scratch.alpha);
+        emit("moe_shared_scale", scratch.shared_scale);
+    }
 
     // The shared expert remains resident on device. Compute its BF16 activation before the
     // host rendezvous. The shared down projection is deferred until the routed FP32 sum returns

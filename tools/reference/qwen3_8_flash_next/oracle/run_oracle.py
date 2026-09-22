@@ -286,6 +286,18 @@ def register_hooks(model: nn.Module):
             stage_outputs[name] = val.detach().clone()
         return hook
 
+    def save_router(prefix: str):
+        def hook(module, input, output):
+            _, router_alpha, router_ids = output
+            stage_outputs[prefix + "moe_router_alpha"] = router_alpha.detach().clone()
+            stage_outputs[prefix + "moe_router_ids"] = router_ids.detach().to(torch.int32).clone()
+        return hook
+
+    def save_shared_scale(prefix: str):
+        def hook(module, input, output):
+            stage_outputs[prefix + "moe_shared_scale"] = torch.sigmoid(output.detach()).clone()
+        return hook
+
     # Embedding
     model.embed_tokens.register_forward_hook(save_output("embedding"))
 
@@ -317,6 +329,11 @@ def register_hooks(model: nn.Module):
 
         # mlp
         model.layers[l].mlp.register_forward_hook(save_output(prefix + "mlp_block_output"))
+        if hasattr(model.layers[l].mlp, "gate"):
+            model.layers[l].mlp.gate.register_forward_hook(save_router(prefix))
+            model.layers[l].mlp.shared_expert_gate.register_forward_hook(
+                save_shared_scale(prefix)
+            )
 
         # layer output
         model.layers[l].register_forward_hook(save_output(prefix + "hyper_after_mlp"))
@@ -679,6 +696,19 @@ def main():
                 stages.append((prefix + "attn_block_output", stage_outputs[prefix + "attn_block_output"][0, pos]))
                 stages.append((prefix + "hyper_after_attn", stage_outputs[prefix + "hyper_after_attn"][0, pos]))
                 stages.append((prefix + "mlp_block_input", stage_outputs[prefix + "mlp_block_input"][0, pos]))
+                if prefix + "moe_router_ids" in stage_outputs:
+                    stages.append((
+                        prefix + "moe_router_ids",
+                        stage_outputs[prefix + "moe_router_ids"][pos],
+                    ))
+                    stages.append((
+                        prefix + "moe_router_alpha",
+                        stage_outputs[prefix + "moe_router_alpha"][pos],
+                    ))
+                    stages.append((
+                        prefix + "moe_shared_scale",
+                        stage_outputs[prefix + "moe_shared_scale"][pos],
+                    ))
                 stages.append((prefix + "mlp_block_output", stage_outputs[prefix + "mlp_block_output"][0, pos]))
                 stages.append((prefix + "hyper_after_mlp", stage_outputs[prefix + "hyper_after_mlp"][0, pos]))
 

@@ -137,6 +137,9 @@ required = [
     "L03_qsa_value",
     "L03_qsa_attended",
     "L03_qsa_gated",
+    "L32_moe_router_ids",
+    "L32_moe_router_alpha",
+    "L32_moe_shared_scale",
     "final_hidden",
     "logits",
 ]

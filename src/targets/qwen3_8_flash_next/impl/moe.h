@@ -7,6 +7,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <string_view>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
@@ -26,6 +28,8 @@ flash_next_host_expert_execution_stats() noexcept;
 [[nodiscard]] std::size_t flash_next_moe_workspace_capacity_bytes(std::int32_t min_tokens,
                                                                   std::int32_t max_tokens);
 
+using MoeStageEmitter = std::function<void(std::string_view, const Tensor&)>;
+
 // Exact Qwen4-exp 512-expert/top-10 MoE leaf with top-10 renormalized probabilities
 // (norm_topk_prob=true per transformers Qwen4ExpTextTopKRouter); the independent shared expert is sigmoid-gated.
 void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& output,
@@ -37,7 +41,8 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
 // back into the BF16 output. Performance is intentionally not a goal here.
 void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_weights,
                                 const HostNvfp4ExpertLayerView& host_experts, Tensor& output,
-                                WorkspaceArena& workspace, cudaStream_t stream);
+                                WorkspaceArena& workspace, cudaStream_t stream,
+                                const MoeStageEmitter& emit = {});
 
 void flash_next_moe_bf16(const Tensor& input, const MoeBf16Weights& weights, Tensor& output,
                          WorkspaceArena& workspace, cudaStream_t stream);

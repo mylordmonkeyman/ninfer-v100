@@ -471,6 +471,7 @@ int main() {
             }
 
             std::vector<float> candidate(count);
+            const bool integer_tensor = tensor.dtype == ninfer::DType::I32;
             if (tensor.dtype == ninfer::DType::BF16) {
                 std::vector<std::uint16_t> words(count);
                 CUDA_CHECK(cudaMemcpy(
@@ -523,7 +524,8 @@ int main() {
                     error_rms /
                     std::max(expected_rms, 1.0e-12L));
             const bool pass =
-                cosine >= 0.99999 && nrmse <= 2.0e-3;
+                integer_tensor ? max_error == 0.0
+                               : (cosine >= 0.99999 && nrmse <= 2.0e-3);
 
             std::cout << std::fixed << std::setprecision(8)
                       << "phase11.stage_trace.position="
