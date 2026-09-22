@@ -366,6 +366,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                      scratch.scores, scratch.ids, scratch.alpha, scratch.shared_scale, stream);
     stage_ledger_record(stream, FlashNextStageId::MoE_Router);
     if (emit) {
+        emit("moe_router_scores", scratch.scores);
         emit("moe_router_ids", scratch.ids);
         emit("moe_router_alpha", scratch.alpha);
         emit("moe_shared_scale", scratch.shared_scale);

@@ -438,6 +438,77 @@ int main() {
             if (!stage_trace_enabled) {
                 return;
             }
+
+            if (current_stage_trace_position == 6 &&
+                name == "L32_moe_router_scores" &&
+                tensor.dtype == ninfer::DType::FP32 &&
+                tensor.numel() >= 513) {
+                std::vector<float> scores(tensor.numel());
+                CUDA_CHECK(cudaMemcpy(
+                    scores.data(), tensor.data,
+                    scores.size() * sizeof(float),
+                    cudaMemcpyDeviceToHost));
+                std::vector<std::pair<float, std::int32_t>> ranked;
+                ranked.reserve(512);
+                for (std::int32_t expert = 0; expert < 512; ++expert) {
+                    ranked.emplace_back(scores[expert], expert);
+                }
+                std::stable_sort(
+                    ranked.begin(), ranked.end(),
+                    [](const auto& lhs, const auto& rhs) {
+                        return lhs.first > rhs.first ||
+                               (lhs.first == rhs.first && lhs.second < rhs.second);
+                    });
+                std::cout << std::fixed << std::setprecision(8)
+                          << "phase11.router_probe.position=6 layer=32"
+                          << " top10_margin="
+                          << (ranked[9].first - ranked[10].first)
+                          << " top10_ids=";
+                for (std::size_t i = 0; i < 10; ++i) {
+                    if (i != 0) { std::cout << ','; }
+                    std::cout << ranked[i].second;
+                }
+                std::cout << " top12_scores=";
+                for (std::size_t i = 0; i < 12; ++i) {
+                    if (i != 0) { std::cout << ','; }
+                    std::cout << ranked[i].first;
+                }
+                std::cout << '\n' << std::flush;
+            }
+
+            if (current_stage_trace_position == 6 &&
+                name == "L32_moe_router_ids" &&
+                tensor.dtype == ninfer::DType::I32) {
+                std::vector<std::int32_t> ids(tensor.numel());
+                CUDA_CHECK(cudaMemcpy(
+                    ids.data(), tensor.data,
+                    ids.size() * sizeof(std::int32_t),
+                    cudaMemcpyDeviceToHost));
+                std::cout << "phase11.router_probe.position=6 layer=32 emitted_ids=";
+                for (std::size_t i = 0; i < ids.size(); ++i) {
+                    if (i != 0) { std::cout << ','; }
+                    std::cout << ids[i];
+                }
+                std::cout << '\n' << std::flush;
+            }
+
+            if (current_stage_trace_position == 6 &&
+                name == "L32_moe_router_alpha" &&
+                tensor.dtype == ninfer::DType::FP32) {
+                std::vector<float> alpha(tensor.numel());
+                CUDA_CHECK(cudaMemcpy(
+                    alpha.data(), tensor.data,
+                    alpha.size() * sizeof(float),
+                    cudaMemcpyDeviceToHost));
+                std::cout << std::fixed << std::setprecision(8)
+                          << "phase11.router_probe.position=6 layer=32 alpha=";
+                for (std::size_t i = 0; i < alpha.size(); ++i) {
+                    if (i != 0) { std::cout << ','; }
+                    std::cout << alpha[i];
+                }
+                std::cout << '\n' << std::flush;
+            }
+
             char pos_dir[32];
             std::snprintf(
                 pos_dir, sizeof(pos_dir), "pos%04u", current_stage_trace_position);
