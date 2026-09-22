@@ -5,6 +5,7 @@
 #include "ops/linear_attention/gated_delta_net/volta/neumann_solve.cuh"
 #include "ops/linear_attention/gated_delta_net/volta/scaling.cuh"
 #include "ops/linear_attention/gated_delta_net/volta/triangular_solve.cuh"
+#include "ops/linear_attention/gated_delta_net/volta/prepare_qk_matrices.cuh"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -13,7 +14,9 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <iostream>
+#include <vector>
 
 namespace volta = ninfer::ops::detail::gated_delta_net::volta;
 
@@ -182,6 +185,144 @@ int test_solve_primitives() {
                 std::cerr << "Neumann2 mismatch at (" << row << ',' << col << ") got="
                           << got_neumann << " expected=" << expected_neumann << "\n";
                 return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+float prepare_amplitude(int token, bool query) {
+    static constexpr float kValues[4] = {0.5F, 1.0F, 2.0F, 4.0F};
+    return kValues[(token + (query ? 1 : 0)) & 3];
+}
+
+std::uint16_t prepare_amplitude_bf16(int token, bool query) {
+    static constexpr std::uint16_t kBits[4] = {0x3f00U, 0x3f80U, 0x4000U, 0x4080U};
+    return kBits[(token + (query ? 1 : 0)) & 3];
+}
+
+int prepare_key_dimension(int head, int token) {
+    return head * 3 + token;
+}
+
+int prepare_query_dimension(int head, int token) {
+    return head * 3 + ((token * 7) & 31);
+}
+
+int test_prepare_qk() {
+    constexpr int kHeads = volta::kQkHeads;
+    constexpr int kChunks = 1;
+    constexpr int kTokens = volta::kChunkSize;
+    constexpr int kDim = volta::kStateDim;
+    const std::size_t qk_elements = static_cast<std::size_t>(kTokens) * kHeads * kDim;
+    const std::size_t norm_elements = static_cast<std::size_t>(kChunks) * kHeads * kTokens;
+    const std::size_t tile_elements =
+        static_cast<std::size_t>(kChunks) * kHeads * volta::kLowerTiles * volta::kTileElements;
+
+    std::vector<std::uint16_t> q(qk_elements, 0U);
+    std::vector<std::uint16_t> k(qk_elements, 0U);
+    for (int token = 0; token < kTokens; ++token) {
+        for (int head = 0; head < kHeads; ++head) {
+            const std::size_t base =
+                (static_cast<std::size_t>(token) * kHeads + head) * kDim;
+            q[base + prepare_query_dimension(head, token)] = prepare_amplitude_bf16(token, true);
+            k[base + prepare_key_dimension(head, token)] = prepare_amplitude_bf16(token, false);
+        }
+    }
+
+    std::uint16_t* d_q = nullptr;
+    std::uint16_t* d_k = nullptr;
+    float* d_q_inv = nullptr;
+    float* d_k_inv = nullptr;
+    float* d_kk = nullptr;
+    float* d_qk = nullptr;
+    const auto cleanup = [&] {
+        cudaFree(d_q);
+        cudaFree(d_k);
+        cudaFree(d_q_inv);
+        cudaFree(d_k_inv);
+        cudaFree(d_kk);
+        cudaFree(d_qk);
+    };
+
+    if (!cuda_ok(cudaMalloc(&d_q, q.size() * sizeof(std::uint16_t)), "cudaMalloc prep q") ||
+        !cuda_ok(cudaMalloc(&d_k, k.size() * sizeof(std::uint16_t)), "cudaMalloc prep k") ||
+        !cuda_ok(cudaMalloc(&d_q_inv, norm_elements * sizeof(float)), "cudaMalloc prep q inv") ||
+        !cuda_ok(cudaMalloc(&d_k_inv, norm_elements * sizeof(float)), "cudaMalloc prep k inv") ||
+        !cuda_ok(cudaMalloc(&d_kk, tile_elements * sizeof(float)), "cudaMalloc prep kk") ||
+        !cuda_ok(cudaMalloc(&d_qk, tile_elements * sizeof(float)), "cudaMalloc prep qk")) {
+        cleanup();
+        return 1;
+    }
+    if (!cuda_ok(cudaMemcpy(d_q, q.data(), q.size() * sizeof(std::uint16_t), cudaMemcpyHostToDevice),
+                 "copy prep q") ||
+        !cuda_ok(cudaMemcpy(d_k, k.data(), k.size() * sizeof(std::uint16_t), cudaMemcpyHostToDevice),
+                 "copy prep k")) {
+        cleanup();
+        return 1;
+    }
+
+    if (!cuda_ok(volta::launch_prepare_qk_matrices(d_q, d_k, d_q_inv, d_k_inv, d_kk, d_qk,
+                                                    kHeads, kChunks, nullptr),
+                 "launch prepare_qk_matrices") ||
+        !cuda_ok(cudaDeviceSynchronize(), "sync prepare_qk_matrices")) {
+        cleanup();
+        return 1;
+    }
+
+    std::vector<float> q_inv(norm_elements);
+    std::vector<float> k_inv(norm_elements);
+    std::vector<float> kk(tile_elements);
+    std::vector<float> qk(tile_elements);
+    if (!cuda_ok(cudaMemcpy(q_inv.data(), d_q_inv, q_inv.size() * sizeof(float),
+                            cudaMemcpyDeviceToHost), "copy prep q inv") ||
+        !cuda_ok(cudaMemcpy(k_inv.data(), d_k_inv, k_inv.size() * sizeof(float),
+                            cudaMemcpyDeviceToHost), "copy prep k inv") ||
+        !cuda_ok(cudaMemcpy(kk.data(), d_kk, kk.size() * sizeof(float),
+                            cudaMemcpyDeviceToHost), "copy prep kk") ||
+        !cuda_ok(cudaMemcpy(qk.data(), d_qk, qk.size() * sizeof(float),
+                            cudaMemcpyDeviceToHost), "copy prep qk")) {
+        cleanup();
+        return 1;
+    }
+    cleanup();
+
+    for (int head = 0; head < kHeads; ++head) {
+        for (int token = 0; token < kTokens; ++token) {
+            const float q_amp = prepare_amplitude(token, true);
+            const float k_amp = prepare_amplitude(token, false);
+            const float q_expected = 1.0F / std::sqrt(q_amp * q_amp + 1.0e-6F);
+            const float k_expected = 1.0F / std::sqrt(k_amp * k_amp + 1.0e-6F);
+            const std::size_t index = volta::prepare_norm_index(0, head, token, kHeads);
+            if (std::abs(q_inv[index] - q_expected) > 2.0e-6F ||
+                std::abs(k_inv[index] - k_expected) > 2.0e-6F) {
+                std::cerr << "inverse norm mismatch head=" << head << " token=" << token << "\n";
+                return 1;
+            }
+        }
+    }
+
+    for (int head = 0; head < kHeads; ++head) {
+        for (int tile = 0; tile < volta::kLowerTiles; ++tile) {
+            const auto coord = volta::kLowerTileCoords[tile];
+            for (int r = 0; r < volta::kTile; ++r) {
+                for (int c = 0; c < volta::kTile; ++c) {
+                    const int row = coord.row * volta::kTile + r;
+                    const int col = coord.col * volta::kTile + c;
+                    const std::size_t index = volta::prepare_tile_index(
+                        0, head, tile, r * volta::kTile + c, kHeads);
+                    const float kk_expected = row == col ? 1.0F : 0.0F;
+                    const float qk_expected = ((row * 7) & 31) == col ? 1.0F : 0.0F;
+                    if (std::bit_cast<std::uint32_t>(kk[index]) !=
+                            std::bit_cast<std::uint32_t>(kk_expected) ||
+                        std::bit_cast<std::uint32_t>(qk[index]) !=
+                            std::bit_cast<std::uint32_t>(qk_expected)) {
+                        std::cerr << "packed lower tile mismatch head=" << head << " tile=" << tile
+                                  << " local=(" << r << ',' << c << ") kk=" << kk[index]
+                                  << " qk=" << qk[index] << "\n";
+                        return 1;
+                    }
+                }
             }
         }
     }
@@ -460,6 +601,7 @@ int main() {
     failures += test_bf16_conversion();
     failures += test_macro16_fragment_mapping();
     failures += test_macro16_basis_mapping();
+    failures += test_prepare_qk();
 
     std::cout << (failures == 0 ? "PASS" : "FAIL")
               << ": GDN Volta BF16 + m8n8k4 mapping qualification\n";

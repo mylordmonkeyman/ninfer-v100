@@ -79,7 +79,7 @@ if(NINFER_VOLTA_BUILD)
     LIBRARIES CUDA::cudart)
   ninfer_add_test(ninfer_gated_delta_net_volta_math_test
     SOURCES ops/test_gated_delta_net_volta_math.cu
-    LIBRARIES CUDA::cudart)
+    LIBRARIES ninfer_ops CUDA::cudart)
 endif()
 
 # Artifact framing and model-independent runtime contracts.
