@@ -20,11 +20,13 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
 void flash_next_moe_host_shared_launch(const Tensor& input, const MoeWeights& weights,
                                        const FlashNextMoeWorkspace& workspace,
                                        cudaStream_t stream,
-                                       const Tensor* input_fp32 = nullptr);
+                                       const Tensor* input_fp32 = nullptr,
+                                       bool fp32_intermediate = false);
 void flash_next_moe_host_routed_merge_launch(const MoeWeights& weights,
                                              const FlashNextMoeWorkspace& workspace,
                                              Tensor& output, int tokens,
-                                             cudaStream_t stream);
+                                             cudaStream_t stream,
+                                             bool shared_fp32_intermediate = false);
 
 // Decode-arm (tokens <= 8) down-projection kernels. Both produce bitwise-identical BF16 output;
 // they differ only in how the eleven per-row partials are spread over warps and CTAs.
