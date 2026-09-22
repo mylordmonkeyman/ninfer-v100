@@ -123,6 +123,10 @@ required = [
     "L00_mlp_block_input",
     "L00_mlp_block_output",
     "L00_hyper_after_mlp",
+    "L03_qsa_projected",
+    "L03_qsa_gate",
+    "L03_qsa_value",
+    "L03_qsa_gated",
     "final_hidden",
     "logits",
 ]

@@ -272,7 +272,12 @@ def register_hooks(model: nn.Module):
         if hasattr(model.layers[l], "linear_attn"):
             model.layers[l].linear_attn.register_forward_hook(save_output(prefix + "attn_block_output"))
         elif hasattr(model.layers[l], "self_attn"):
-            model.layers[l].self_attn.register_forward_hook(save_output(prefix + "attn_block_output"))
+            attn = model.layers[l].self_attn
+            attn.register_forward_hook(save_output(prefix + "attn_block_output"))
+            attn.q_proj.register_forward_hook(save_output(prefix + "qsa_q_proj"))
+            attn.k_proj.register_forward_hook(save_output(prefix + "qsa_k_proj"))
+            attn.v_proj.register_forward_hook(save_output(prefix + "qsa_v_proj"))
+            attn.o_proj.register_forward_pre_hook(save_input(prefix + "qsa_gated"))
 
         # mlp_hyper_connection input & output
         model.layers[l].mlp_hyper_connection.register_forward_pre_hook(save_input(prefix + "hyper_after_attn"))
@@ -587,6 +592,24 @@ def main():
                     stages.append(("hyper_after_ple", stage_outputs[prefix + "hyper_in"][0, pos]))
 
                 stages.append((prefix + "attn_block_input", stage_outputs[prefix + "attn_block_input"][0, pos]))
+                if prefix + "qsa_q_proj" in stage_outputs:
+                    q_proj = stage_outputs[prefix + "qsa_q_proj"][0, pos]
+                    k_proj = stage_outputs[prefix + "qsa_k_proj"][0, pos]
+                    v_proj = stage_outputs[prefix + "qsa_v_proj"][0, pos]
+                    q_heads = q_proj.reshape(24, 512)
+                    stages.append((
+                        prefix + "qsa_projected",
+                        torch.cat([q_proj, k_proj, v_proj], dim=-1),
+                    ))
+                    stages.append((
+                        prefix + "qsa_gate",
+                        q_heads[:, 256:].reshape(-1),
+                    ))
+                    stages.append((prefix + "qsa_value", v_proj))
+                    stages.append((
+                        prefix + "qsa_gated",
+                        stage_outputs[prefix + "qsa_gated"][0, pos],
+                    ))
                 stages.append((prefix + "attn_block_output", stage_outputs[prefix + "attn_block_output"][0, pos]))
                 stages.append((prefix + "hyper_after_attn", stage_outputs[prefix + "hyper_after_attn"][0, pos]))
                 stages.append((prefix + "mlp_block_input", stage_outputs[prefix + "mlp_block_input"][0, pos]))

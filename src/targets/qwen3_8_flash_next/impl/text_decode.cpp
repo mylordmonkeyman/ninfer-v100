@@ -290,10 +290,17 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                 maximum_blocks, active_blocks, workspace, round_ws.selected_blocks,
                 round_ws.selected_counts, stream, aliased_recurrent_scan);
             emit_state(prefix + "selected_counts", round_ws.selected_counts);
+            QsaStageEmitter qsa_emit{};
+            if (sink && sink->on_state) {
+                qsa_emit = [&](std::string_view name, const Tensor& tensor) {
+                    emit_state(prefix + std::string(name), tensor);
+                };
+            }
             flash_next_qsa_attention_decode(
                 round_ws.block_input, model.full_attention[qsa_idx], token_indices, mrope_positions,
                 table_rows, round_ws.selected_blocks, round_ws.selected_counts,
-                state.qsa_attention_caches[qsa_idx], workspace, round_ws.block_output, stream);
+                state.qsa_attention_caches[qsa_idx], workspace, round_ws.block_output, stream,
+                qsa_emit);
         } else {
             const std::size_t gdn_idx = gdn_ordinal(layer);
             flash_next_gdn_decode(round_ws.block_input, model.gdn[gdn_idx], source_slots,
