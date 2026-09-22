@@ -275,6 +275,52 @@ std::uint16_t float_to_bf16_rn(float value) {
     return static_cast<std::uint16_t>(rounded >> 16U);
 }
 
+GdnConvIsolationMetrics compare_float_stage(
+    std::span<const float> candidate, std::span<const float> expected) {
+    if (candidate.size() != expected.size() || candidate.empty()) {
+        throw std::runtime_error(
+            "Phase 11 GDN isolation host comparison shape mismatch");
+    }
+
+    long double dot = 0.0L;
+    long double candidate_sq = 0.0L;
+    long double expected_sq = 0.0L;
+    long double error_sq = 0.0L;
+    double max_error = 0.0;
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        const long double a = candidate[i];
+        const long double b = expected[i];
+        if (!std::isfinite(static_cast<double>(a)) ||
+            !std::isfinite(static_cast<double>(b))) {
+            throw std::runtime_error(
+                "Phase 11 GDN isolation host comparison encountered a nonfinite value");
+        }
+        const long double d = a - b;
+        dot += a * b;
+        candidate_sq += a * a;
+        expected_sq += b * b;
+        error_sq += d * d;
+        max_error = std::max(
+            max_error, std::abs(static_cast<double>(d)));
+    }
+
+    const long double denom = std::sqrt(candidate_sq * expected_sq);
+    const double cosine =
+        denom > 0.0L
+            ? static_cast<double>(dot / denom)
+            : (candidate_sq == expected_sq ? 1.0 : 0.0);
+    const long double expected_rms =
+        std::sqrt(expected_sq / static_cast<long double>(expected.size()));
+    const long double error_rms =
+        std::sqrt(error_sq / static_cast<long double>(expected.size()));
+    return {
+        .cosine = cosine,
+        .nrmse = static_cast<double>(
+            error_rms / std::max(expected_rms, 1.0e-12L)),
+        .max_error = max_error,
+    };
+}
+
 GdnConvIsolationMetrics compare_bf16_stage(
     const ninfer::Tensor& candidate, std::span<const float> expected) {
     if (candidate.dtype != ninfer::DType::BF16 ||
@@ -336,6 +382,19 @@ void print_gdn_conv_isolation_metrics(
     std::string_view stage, const GdnConvIsolationMetrics& metrics) {
     std::cout << std::fixed << std::setprecision(8)
               << "phase11.gdn_conv_isolation.stage=" << stage
+              << " cosine=" << metrics.cosine
+              << " nrmse=" << metrics.nrmse
+              << " max_error=" << metrics.max_error
+              << " pass=" << (gdn_conv_isolation_passes(metrics) ? 1 : 0)
+              << '\n';
+}
+
+void print_gdn_conv_ab_metrics(
+    std::string_view variant, std::string_view stage,
+    const GdnConvIsolationMetrics& metrics) {
+    std::cout << std::fixed << std::setprecision(8)
+              << "phase11.gdn_conv_ab.variant=" << variant
+              << " stage=" << stage
               << " cosine=" << metrics.cosine
               << " nrmse=" << metrics.nrmse
               << " max_error=" << metrics.max_error
@@ -409,6 +468,77 @@ int run_layer0_gdn_conv_isolation(
         compare_bf16_stage(scratch.key, expected_key);
     const GdnConvIsolationMetrics value_metrics =
         compare_bf16_stage(scratch.value, expected_value);
+
+    // Position 0 starts from an all-zero convolution history, so the reference
+    // causal convolution reduces to one current-tap multiply followed by SiLU.
+    // This makes it possible to separate the oracle's FP32 arithmetic from the
+    // two BF16 materialization boundaries without introducing another device
+    // implementation.
+    std::vector<std::uint16_t> convolution_bf16(kConvChannels * 4);
+    CUDA_CHECK(cudaMemcpy(
+        convolution_bf16.data(), text.gdn[0].convolution.data,
+        convolution_bf16.size() * sizeof(std::uint16_t),
+        cudaMemcpyDeviceToHost));
+
+    std::vector<float> host_fp32(kConvChannels);
+    std::vector<float> host_bf16_input_fp32_output(kConvChannels);
+    std::vector<float> host_bf16_input_bf16_output(kConvChannels);
+    for (std::size_t channel = 0; channel < kConvChannels; ++channel) {
+        const float weight = bf16_to_float(
+            convolution_bf16[3 * kConvChannels + channel]);
+        const float fp32_product = expected_projected[channel] * weight;
+        host_fp32[channel] =
+            fp32_product / (1.0F + std::exp(-fp32_product));
+
+        const float bf16_input = bf16_to_float(projected_bf16[channel]);
+        const float bf16_input_product = bf16_input * weight;
+        const float fp32_output =
+            bf16_input_product / (1.0F + std::exp(-bf16_input_product));
+        host_bf16_input_fp32_output[channel] = fp32_output;
+        host_bf16_input_bf16_output[channel] =
+            bf16_to_float(float_to_bf16_rn(fp32_output));
+    }
+
+    const auto report_host_variant =
+        [&](std::string_view variant, std::span<const float> candidate) {
+            print_gdn_conv_ab_metrics(
+                variant, "L00_gdn_query",
+                compare_float_stage(
+                    candidate.subspan(0, kQuery), expected_query));
+            print_gdn_conv_ab_metrics(
+                variant, "L00_gdn_key",
+                compare_float_stage(
+                    candidate.subspan(kQuery, kKey), expected_key));
+            print_gdn_conv_ab_metrics(
+                variant, "L00_gdn_value",
+                compare_float_stage(
+                    candidate.subspan(kQuery + kKey, kValue), expected_value));
+        };
+
+    report_host_variant("fp32_input_fp32_output", host_fp32);
+    report_host_variant(
+        "bf16_input_fp32_output", host_bf16_input_fp32_output);
+    report_host_variant(
+        "bf16_input_bf16_output", host_bf16_input_bf16_output);
+
+    print_gdn_conv_ab_metrics(
+        "gpu_vs_host_bf16", "L00_gdn_query",
+        compare_bf16_stage(
+            scratch.query,
+            std::span<const float>(host_bf16_input_bf16_output)
+                .subspan(0, kQuery)));
+    print_gdn_conv_ab_metrics(
+        "gpu_vs_host_bf16", "L00_gdn_key",
+        compare_bf16_stage(
+            scratch.key,
+            std::span<const float>(host_bf16_input_bf16_output)
+                .subspan(kQuery, kKey)));
+    print_gdn_conv_ab_metrics(
+        "gpu_vs_host_bf16", "L00_gdn_value",
+        compare_bf16_stage(
+            scratch.value,
+            std::span<const float>(host_bf16_input_bf16_output)
+                .subspan(kQuery + kKey, kValue)));
 
     std::cout
         << "phase11.gdn_conv_isolation.position=0"
