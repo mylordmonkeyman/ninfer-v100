@@ -268,6 +268,10 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
     }();
+    const bool fp32_hyper_inject_apply = fp32_hyper_inject_stage && [] {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+    }();
     auto sync_hyper_shadow = [&] {
         if (fp32_hyper_state) {
             hyper_fp32_to_bf16(round_ws.hyper_hidden_fp32, round_ws.hyper_hidden, stream);
@@ -277,6 +281,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
     constexpr bool fp32_hyper_state = false;
     constexpr bool fp32_router_input = false;
     constexpr bool fp32_hyper_inject_stage = false;
+    constexpr bool fp32_hyper_inject_apply = false;
     auto sync_hyper_shadow = [&] {};
 #endif
 
@@ -372,22 +377,32 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         // Attention hyper inject
 #if defined(NINFER_VOLTA_BUILD)
         if (fp32_hyper_state) {
-            const bool emit_fp32_inject_stage =
+            const bool have_fp32_block_output =
                 fp32_hyper_inject_stage &&
                 attn_block_output_stage.data != nullptr &&
                 attn_block_output_stage.dtype == DType::FP32;
-            if (emit_fp32_inject_stage) {
+            if (have_fp32_block_output && fp32_hyper_inject_apply) {
+                // Diagnostic A/B: apply the already-validated FP32 attention injection to
+                // the real FP32 master state. The following MLP prepare is unchanged and
+                // still receives the normal BF16 shadow produced by sync_hyper_shadow().
                 hyper_inject_fp32_to_fp32_stage(
                     attn_block_output_stage, round_ws.hyper_scratch.injection,
-                    round_ws.hyper_hidden_fp32, round_ws.hyper_after_attn_stage_fp32, stream);
-                emit_state(prefix + "hyper_after_attn",
-                           round_ws.hyper_after_attn_stage_fp32);
-            }
-            hyper_inject_bf16_to_fp32(
-                round_ws.block_output, round_ws.hyper_scratch.injection,
-                round_ws.hyper_hidden_fp32, stream);
-            if (!emit_fp32_inject_stage) {
+                    round_ws.hyper_hidden_fp32, round_ws.hyper_hidden_fp32, stream);
                 emit_state(prefix + "hyper_after_attn", round_ws.hyper_hidden_fp32);
+            } else {
+                if (have_fp32_block_output) {
+                    hyper_inject_fp32_to_fp32_stage(
+                        attn_block_output_stage, round_ws.hyper_scratch.injection,
+                        round_ws.hyper_hidden_fp32, round_ws.hyper_after_attn_stage_fp32, stream);
+                    emit_state(prefix + "hyper_after_attn",
+                               round_ws.hyper_after_attn_stage_fp32);
+                }
+                hyper_inject_bf16_to_fp32(
+                    round_ws.block_output, round_ws.hyper_scratch.injection,
+                    round_ws.hyper_hidden_fp32, stream);
+                if (!have_fp32_block_output) {
+                    emit_state(prefix + "hyper_after_attn", round_ws.hyper_hidden_fp32);
+                }
             }
         } else
 #endif
