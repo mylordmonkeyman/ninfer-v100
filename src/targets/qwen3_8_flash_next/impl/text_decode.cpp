@@ -20,6 +20,7 @@
 #include "targets/qwen3_8_flash_next/impl/text_decode_workspace.h"
 
 #include <cstddef>
+#include <cstdlib>
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
