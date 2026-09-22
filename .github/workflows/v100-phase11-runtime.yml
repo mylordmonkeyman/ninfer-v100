@@ -151,50 +151,52 @@ jobs:
             --output-on-failure \
             -R '^ninfer_selected_block_attention_test$'
 
-      - name: Compare 128-position baseline
+      - name: Localize baseline positions 0-6 with CPU stage oracle
+        continue-on-error: true
+        shell: bash
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "7"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace7
+          NINFER_PHASE11_STAGE_ORACLE_ALL_POSITIONS: "1"
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+        run: |
+          set -euxo pipefail
+          test -r /oracle/phase11-stage-trace7/manifest.json
+          test -r /oracle/phase11-stage-trace7/provenance.json
+          result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$result_dir"
+          ctest --test-dir build-v100 -V \
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+            2>&1 | tee "$result_dir/stage-localize-pos0-6.log"
+
+      - name: Trace 128-position baseline logits
         continue-on-error: true
         shell: bash
         env:
           NINFER_WEIGHTS: /models/qwen3-8b-flash-next
           NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
           NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "128"
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
           NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
           NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
           NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
         run: |
           set -euxo pipefail
           test -r /oracle/phase11/manifest.json
-          test -r /oracle/phase11/token_ids.json
-          test -r /oracle/phase11/provenance.json
           python3 tools/reference/qwen3_8_flash_next/oracle/validate_phase11_oracle.py \
             --corpus /oracle/phase11/token_ids.json \
             --manifest /oracle/phase11/manifest.json \
             --minimum 4096
-
           result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$result_dir"
           ctest --test-dir build-v100 -V \
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
-            2>&1 | tee "$result_dir/oracle-128-baseline.log"
-
-      - name: Compare 128-position FP32 GDN readout
-        continue-on-error: true
-        shell: bash
-        env:
-          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
-          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
-          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "128"
-          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
-          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
-          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
-          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
-        run: |
-          set -euxo pipefail
-          result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p "$result_dir"
-          ctest --test-dir build-v100 -V \
-            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
-            2>&1 | tee "$result_dir/oracle-128-fp32-gdn.log"
+            2>&1 | tee "$result_dir/oracle-128-baseline-trace.log"
       # A [full-phase11] push opts into the expensive full-oracle qualification.
       - name: Validate full Phase 11 oracle
         if: ${{ (github.event_name == 'workflow_dispatch' && inputs.full_phase11) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[full-phase11]')) }}
