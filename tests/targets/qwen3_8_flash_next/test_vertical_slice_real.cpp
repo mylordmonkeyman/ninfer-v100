@@ -361,6 +361,25 @@ int main() {
             metrics_accumulator.observe(
                 record.position, target_token, candidate, oracle);
 
+            if (const char* trace = std::getenv("NINFER_PHASE11_TRACE_POSITIONS");
+                trace != nullptr && trace[0] != '\0') {
+                Phase11OracleAccumulator position_accumulator;
+                position_accumulator.observe(
+                    record.position, target_token, candidate, oracle);
+                const Phase11OracleMetrics position_metrics =
+                    position_accumulator.finalize();
+                std::cout << std::fixed << std::setprecision(8)
+                          << "phase11.trace.position=" << record.position
+                          << " candidate_top1=" << lower_id_argmax(candidate)
+                          << " oracle_top1=" << lower_id_argmax(oracle)
+                          << " kl=" << position_metrics.mean_kl
+                          << " relative_nll_delta="
+                          << position_metrics.relative_mean_nll_delta
+                          << " max_logit_error="
+                          << position_metrics.maximum_logit_error << '\n'
+                          << std::flush;
+            }
+
             const auto sampled = round.sampled_tokens();
             if (sampled.size() != 1 ||
                 sampled[0] != lower_id_argmax(candidate)) {
