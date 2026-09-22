@@ -3,6 +3,10 @@
 #include "core/device.h"
 #include "ops/common/math.cuh"
 #include "ops/common/warp.cuh"
+#if defined(NINFER_VOLTA_BUILD)
+#include "ops/linear/fp8/fp8_config.h"
+#include "ops/linear/fp8/fp8_gemv.cuh"
+#endif
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -27,6 +31,65 @@ __device__ __forceinline__ void store_conv_activation(OutputT* destination, floa
         *destination = __float2bfloat16_rn(value);
     }
 }
+
+#if defined(NINFER_VOLTA_BUILD)
+struct FlashNextFp32ProjectConvOutput {
+    __nv_bfloat16* projected;
+    const __nv_bfloat16* convolution;
+    const std::int32_t* source_slots;
+    const std::int32_t* destination_slots;
+    __nv_bfloat16* states;
+    float* query;
+    float* key;
+    float* value;
+    __nv_bfloat16* z;
+
+    __device__ __forceinline__ void store(std::int32_t parent_row, std::int32_t token,
+                                          float current) const {
+        (void)token;
+        const __nv_bfloat16 current_bf16 = __float2bfloat16_rn(current);
+        projected[parent_row] = current_bf16;
+
+        if (parent_row >= kConvChannels) {
+            z[parent_row - kConvChannels] = current_bf16;
+            return;
+        }
+
+        const std::int32_t source = source_slots[0];
+        const std::int32_t destination = destination_slots[0];
+        const std::int64_t source_base =
+            static_cast<std::int64_t>(source) * kConvChannels * 3;
+        const std::int64_t destination_base =
+            static_cast<std::int64_t>(destination) * kConvChannels * 3;
+
+        const float h0 = __bfloat162float(states[source_base + parent_row]);
+        const float h1 =
+            __bfloat162float(states[source_base + kConvChannels + parent_row]);
+        const float h2 =
+            __bfloat162float(states[source_base + 2LL * kConvChannels + parent_row]);
+        float sum = h0 * __bfloat162float(convolution[parent_row]);
+        sum = fmaf(h1, __bfloat162float(convolution[kConvChannels + parent_row]), sum);
+        sum = fmaf(h2, __bfloat162float(convolution[2LL * kConvChannels + parent_row]), sum);
+        sum = fmaf(current,
+                   __bfloat162float(convolution[3LL * kConvChannels + parent_row]), sum);
+
+        states[destination_base + parent_row] =
+            states[source_base + kConvChannels + parent_row];
+        states[destination_base + kConvChannels + parent_row] =
+            states[source_base + 2LL * kConvChannels + parent_row];
+        states[destination_base + 2LL * kConvChannels + parent_row] = current_bf16;
+
+        const float activated = ops::silu(sum);
+        if (parent_row < kQkRows) {
+            query[parent_row] = activated;
+        } else if (parent_row < 2 * kQkRows) {
+            key[parent_row - kQkRows] = activated;
+        } else {
+            value[parent_row - 2 * kQkRows] = activated;
+        }
+    }
+};
+#endif
 
 template <typename OutputT>
 __global__ void conv_split_kernel(
@@ -134,6 +197,51 @@ __global__ void output_gate_kernel(const RecurrentT* __restrict__ recurrent,
 }
 
 } // namespace
+
+#if defined(NINFER_VOLTA_BUILD)
+void flash_next_gdn_project_conv_fp32_launch(
+    const Tensor& input, const Weight& projection, FlashNextGdnWorkspace& scratch,
+    const Tensor& convolution, const Tensor& source_slots, const Tensor& destination_slots,
+    Tensor& convolution_states, cudaStream_t stream) {
+    using Geometry = ::ninfer::ops::detail::Fp8FlashNextGdnInputGeometry;
+    using Schedule =
+        typename ::ninfer::ops::detail::Fp8LinearDecodeProductionSchedule<Geometry>::Type;
+    if (input.dtype != DType::BF16 || input.ne[0] != Geometry::kInputRows || input.ne[1] != 1 ||
+        projection.qtype != QType::FP8_E4M3FN_ROW_F32S ||
+        projection.n != Geometry::kOutputRows || projection.k != Geometry::kInputRows ||
+        projection.scale_dtype != DType::FP32 ||
+        scratch.projected.dtype != DType::BF16 || scratch.projected.ne[0] != kProjected ||
+        scratch.projected.ne[1] != 1 ||
+        scratch.query.dtype != DType::FP32 || scratch.key.dtype != DType::FP32 ||
+        scratch.value.dtype != DType::FP32 || scratch.z.dtype != DType::BF16 ||
+        convolution.dtype != DType::BF16 || convolution.ne[0] != kConvChannels ||
+        convolution.ne[1] != 4 || source_slots.dtype != DType::I32 ||
+        destination_slots.dtype != DType::I32 || source_slots.ne[0] != 1 ||
+        destination_slots.ne[0] != 1 || convolution_states.dtype != DType::BF16) {
+        throw std::invalid_argument(
+            "Flash-Next FP32 projection-conv diagnostic received an invalid T=1 view");
+    }
+
+    constexpr int kBlocks = Geometry::kOutputRows / Schedule::kRowsPerCta;
+    const FlashNextFp32ProjectConvOutput output{
+        static_cast<__nv_bfloat16*>(scratch.projected.data),
+        static_cast<const __nv_bfloat16*>(convolution.data),
+        static_cast<const std::int32_t*>(source_slots.data),
+        static_cast<const std::int32_t*>(destination_slots.data),
+        static_cast<__nv_bfloat16*>(convolution_states.data),
+        static_cast<float*>(scratch.query.data),
+        static_cast<float*>(scratch.key.data),
+        static_cast<float*>(scratch.value.data),
+        static_cast<__nv_bfloat16*>(scratch.z.data),
+    };
+    ::ninfer::ops::detail::fp8_gemv_kernel<Geometry, Schedule>
+        <<<kBlocks, Schedule::kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(input.data),
+            static_cast<const std::uint8_t*>(projection.qdata),
+            static_cast<const float*>(projection.scales), output);
+    CUDA_CHECK(cudaGetLastError());
+}
+#endif
 
 void flash_next_gdn_conv_launch(const FlashNextGdnWorkspace& scratch, const Tensor& convolution,
                                 const Tensor& source_slots, const Tensor& destination_slots,

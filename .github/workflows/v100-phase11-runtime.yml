@@ -151,7 +151,7 @@ jobs:
             --output-on-failure \
             -R '^ninfer_selected_block_attention_test$'
 
-      - name: Localize FP32 GDN conv positions 0-6 with CPU stage oracle
+      - name: Localize FP32 GDN projection+conv positions 0-6 with CPU stage oracle
         continue-on-error: true
         shell: bash
         env:
@@ -165,6 +165,7 @@ jobs:
           NINFER_PHASE11_TRACE_POSITIONS: "1"
           NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
           NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
         run: |
           set -euxo pipefail
           test -r /oracle/phase11-stage-trace7/manifest.json

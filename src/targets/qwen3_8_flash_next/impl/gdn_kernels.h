@@ -11,6 +11,12 @@ void flash_next_gdn_conv_launch(const FlashNextGdnWorkspace& scratch, const Tens
                                 const Tensor& source_slots, const Tensor& destination_slots,
                                 Tensor& convolution_states, cudaStream_t stream,
                                 int batch_count = -1, int batch_offset = 0);
+#if defined(NINFER_VOLTA_BUILD)
+void flash_next_gdn_project_conv_fp32_launch(
+    const Tensor& input, const Weight& projection, FlashNextGdnWorkspace& scratch,
+    const Tensor& convolution, const Tensor& source_slots, const Tensor& destination_slots,
+    Tensor& convolution_states, cudaStream_t stream);
+#endif
 void flash_next_gdn_controls_launch(const Tensor& input, const GdnWeights& weights,
                                     FlashNextGdnWorkspace& scratch, cudaStream_t stream);
 void flash_next_gdn_output_gate_launch(const FlashNextGdnWorkspace& scratch, const Tensor& norm,

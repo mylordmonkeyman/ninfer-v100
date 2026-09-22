@@ -119,9 +119,17 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
 
     const auto scope              = workspace.scope();
     FlashNextGdnWorkspace scratch = allocate_flash_next_gdn_workspace(workspace, batch);
+    bool fp32_project_conv = false;
 #if defined(NINFER_VOLTA_BUILD)
-    if (const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_GDN_CONV");
-        env != nullptr && env[0] == '1' && env[1] == '\0') {
+    const bool fp32_conv = [] {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_GDN_CONV");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+    }();
+    fp32_project_conv = batch == 1 && [] {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_GDN_PROJECTION");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+    }();
+    if (fp32_conv || fp32_project_conv) {
         scratch.query = workspace.alloc(DType::FP32, {2'048, batch}, 256);
         scratch.key   = workspace.alloc(DType::FP32, {2'048, batch}, 256);
         scratch.value = workspace.alloc(DType::FP32, {6'144, batch}, 256);
@@ -131,8 +139,16 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
         scratch.recurrent_output = scratch.recurrent_output_fp32;
     }
 #endif
-    ops::linear(input, weights.query_key_value_z, scratch.projected, ops::LinearPolicy::A16Only,
-                workspace, stream);
+    if (fp32_project_conv) {
+#if defined(NINFER_VOLTA_BUILD)
+        flash_next_gdn_project_conv_fp32_launch(
+            input, weights.query_key_value_z, scratch, weights.convolution, source_slots,
+            destination_slots, convolution_states, stream);
+#endif
+    } else {
+        ops::linear(input, weights.query_key_value_z, scratch.projected,
+                    ops::LinearPolicy::A16Only, workspace, stream);
+    }
     if (emit) { emit("gdn_projected", scratch.projected); }
     flash_next_gdn_controls_launch(input, weights, scratch, stream);
     if (emit) {
@@ -157,8 +173,10 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
                                               src_r, dst_r, recurrent_output_r, stream);
         }
     } else {
-        flash_next_gdn_conv_launch(scratch, weights.convolution, source_slots, destination_slots,
-                                   convolution_states, stream);
+        if (!fp32_project_conv) {
+            flash_next_gdn_conv_launch(scratch, weights.convolution, source_slots,
+                                       destination_slots, convolution_states, stream);
+        }
         Tensor query            = scratch.query.view({128, 16, 1, batch});
         Tensor key              = scratch.key.view({128, 16, 1, batch});
         Tensor value            = scratch.value.view({128, 48, 1, batch});
