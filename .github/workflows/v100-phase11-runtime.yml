@@ -141,7 +141,8 @@ jobs:
             --output-on-failure \
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_test$'
 
-      - name: Probe real prefill against full oracle
+      - name: Compare BF16 vs FP32 expert intermediate
+        continue-on-error: true
         shell: bash
         env:
           NINFER_WEIGHTS: /models/qwen3-8b-flash-next
@@ -149,18 +150,22 @@ jobs:
           NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "16"
           NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
           NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
         run: |
           set -euxo pipefail
           result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$result_dir"
-          : > "$result_dir/prefill-probe.log"
-          for positions in 7 11 13 15 16; do
-            echo "=== prefill probe positions=$positions ===" | tee -a "$result_dir/prefill-probe.log"
-            NINFER_PHASE11_PREFILL_PROBE_POSITIONS="$positions" \
-              ctest --test-dir build-v100 -V \
-                -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
-                2>&1 | tee -a "$result_dir/prefill-probe.log"
-          done
+
+          echo "=== production BF16 expert intermediate ===" | tee "$result_dir/expert-intermediate-ab.log"
+          ctest --test-dir build-v100 -V \
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+            2>&1 | tee -a "$result_dir/expert-intermediate-ab.log" || true
+
+          echo "=== diagnostic FP32 expert intermediate ===" | tee -a "$result_dir/expert-intermediate-ab.log"
+          NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE=1 \
+            ctest --test-dir build-v100 -V \
+              -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+              2>&1 | tee -a "$result_dir/expert-intermediate-ab.log" || true
 
       # A [full-phase11] push opts into the expensive full-oracle qualification.
       - name: Validate full Phase 11 oracle

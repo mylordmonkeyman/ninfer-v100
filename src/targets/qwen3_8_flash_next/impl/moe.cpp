@@ -55,6 +55,11 @@ unsigned resolve_host_expert_worker_count() {
     return std::min(kDefaultWorkers, hardware == 0 ? 1U : hardware);
 }
 
+bool resolve_fp32_intermediate_diagnostic() {
+    const char* env = std::getenv("NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE");
+    return env != nullptr && env[0] != '\0' && std::string_view(env) != "0";
+}
+
 bool resolve_avx2_backend() {
     const char* env = std::getenv("NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND");
     if (env == nullptr || env[0] == '\0' || std::string_view(env) == "reference") {
@@ -75,13 +80,21 @@ class HostExpertWorkerPool {
   public:
     HostExpertWorkerPool()
         : avx2_(resolve_avx2_backend()),
+          fp32_intermediate_(resolve_fp32_intermediate_diagnostic()),
           worker_count_(resolve_host_expert_worker_count()) {
+        if (avx2_ && fp32_intermediate_) {
+            throw std::invalid_argument(
+                "FP32 expert-intermediate diagnostic requires reference backend");
+        }
         workers_.reserve(worker_count_);
         for (unsigned worker = 0; worker < worker_count_; ++worker) {
             workers_.emplace_back([this] { worker_loop(); });
         }
         std::fprintf(stderr, "flash_next host_expert_backend=%s workers=%u\n",
-                     avx2_ ? "avx2_fma_parallel" : "scalar_reference_parallel",
+                     avx2_ ? "avx2_fma_parallel"
+                           : (fp32_intermediate_
+                                  ? "scalar_reference_fp32_intermediate_parallel"
+                                  : "scalar_reference_parallel"),
                      worker_count_);
     }
 
@@ -157,6 +170,11 @@ class HostExpertWorkerPool {
                         task.expert,
                         std::span<const std::uint16_t>(task.input, kFlashNextExpertHidden),
                         std::span<float>(task.output, kFlashNextExpertHidden), scratch);
+                } else if (fp32_intermediate_) {
+                    flash_next_cpu_nvfp4_expert_pair_reference_fp32_intermediate(
+                        task.expert,
+                        std::span<const std::uint16_t>(task.input, kFlashNextExpertHidden),
+                        std::span<float>(task.output, kFlashNextExpertHidden), scratch);
                 } else {
                     flash_next_cpu_nvfp4_expert_pair_reference(
                         task.expert,
@@ -175,6 +193,7 @@ class HostExpertWorkerPool {
     }
 
     bool avx2_ = false;
+    bool fp32_intermediate_ = false;
     unsigned worker_count_ = 0;
     std::vector<std::thread> workers_;
     std::counting_semaphore<1'048'576> work_{0};

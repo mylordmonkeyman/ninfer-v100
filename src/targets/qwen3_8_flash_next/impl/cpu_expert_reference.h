@@ -28,6 +28,15 @@ void flash_next_cpu_nvfp4_expert_pair_reference(
     std::span<float> output,
     CpuNvfp4ExpertReferenceScratch& scratch);
 
+// Diagnostic only: matches the independent CPU-FP32 oracle's expert arithmetic by
+// retaining SiLU(gate)*up in FP32 before the down projection. Production NInfer
+// intentionally uses the BF16-rounded reference above.
+void flash_next_cpu_nvfp4_expert_pair_reference_fp32_intermediate(
+    const HostNvfp4ExpertPairView& expert,
+    std::span<const std::uint16_t> input_bf16,
+    std::span<float> output,
+    CpuNvfp4ExpertReferenceScratch& scratch);
+
 // Production-like AVX2/FMA implementation of the same compact-NVFP4 contract.
 // It preserves the BF16_RNE activation boundary and returns the unweighted FP32
 // down vector. Callers must retain deterministic routing-alpha accumulation order.
