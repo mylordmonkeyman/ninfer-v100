@@ -11,6 +11,7 @@
 
 #include "nlohmann/json.hpp"
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -482,6 +483,7 @@ int run_layer0_gdn_conv_isolation(
 
     std::vector<float> host_fp32(kConvChannels);
     std::vector<float> host_bf16_input_fp32_output(kConvChannels);
+    std::vector<float> host_bf16_input_fp16_output(kConvChannels);
     std::vector<float> host_bf16_input_bf16_output(kConvChannels);
     for (std::size_t channel = 0; channel < kConvChannels; ++channel) {
         const float weight = bf16_to_float(
@@ -495,6 +497,8 @@ int run_layer0_gdn_conv_isolation(
         const float fp32_output =
             bf16_input_product / (1.0F + std::exp(-bf16_input_product));
         host_bf16_input_fp32_output[channel] = fp32_output;
+        host_bf16_input_fp16_output[channel] =
+            __half2float(__float2half_rn(fp32_output));
         host_bf16_input_bf16_output[channel] =
             bf16_to_float(float_to_bf16_rn(fp32_output));
     }
@@ -518,6 +522,8 @@ int run_layer0_gdn_conv_isolation(
     report_host_variant("fp32_input_fp32_output", host_fp32);
     report_host_variant(
         "bf16_input_fp32_output", host_bf16_input_fp32_output);
+    report_host_variant(
+        "bf16_input_fp16_output", host_bf16_input_fp16_output);
     report_host_variant(
         "bf16_input_bf16_output", host_bf16_input_bf16_output);
 
