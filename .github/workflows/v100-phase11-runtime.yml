@@ -176,7 +176,7 @@ jobs:
           print(f"Validated mounted 14-position CPU stage trace with {len(tensors)} position-13 tensors")
           PY
 
-      - name: Isolate final mixer versus output head at position 13
+      - name: Isolate layer-24 persisted GDN state at position 13
         continue-on-error: true
         shell: bash
         env:
@@ -205,7 +205,7 @@ jobs:
           NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
         run: |
           set -euxo pipefail
-          test -r "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0013/final_hidden.bin"
+          test -r "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0013/L24_attn_block_input.bin"
           result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$result_dir"
           : > "$result_dir/stage-localize-pos13.log"
@@ -215,8 +215,8 @@ jobs:
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
             2>&1 | tee -a "$result_dir/stage-localize-pos13.log" || true
 
-          echo "=== position 13 inject oracle final_hidden ===" | tee -a "$result_dir/stage-localize-pos13.log"
-          NINFER_PHASE11_ORACLE_INJECT_STAGE=final_hidden \
+          echo "=== position 13 inject oracle L24_attn_block_input ===" | tee -a "$result_dir/stage-localize-pos13.log"
+          NINFER_PHASE11_ORACLE_INJECT_STAGE=L24_attn_block_input \
             ctest --test-dir build-v100 -V \
               -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
               2>&1 | tee -a "$result_dir/stage-localize-pos13.log" || true
