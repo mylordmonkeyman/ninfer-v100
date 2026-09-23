@@ -410,6 +410,7 @@ jobs:
           NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
           NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
           NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
           NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
           NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
           NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
@@ -427,6 +428,16 @@ jobs:
           NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
         run: |
           set -euxo pipefail
+
+          # Fail fast if the agent model was reloaded mid-run: any chat request
+          # to the agent lazy-loads qwen3.8-27b-omp back onto this V100 and
+          # would contend with the ~4.5 h qualification run.
+          if curl -s -m 10 http://127.0.0.1:9292/v1/models \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(m["id"]=="qwen3.8-27b-omp" and m.get("status",{}).get("value")=="loaded" for m in d["data"]) else 1)'; then
+            echo "ERROR: agent model qwen3.8-27b-omp is loaded on the V100; the GPU is contended." >&2
+            echo "Re-run the workflow when the agent is idle." >&2
+            exit 1
+          fi
 
           result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$result_dir"
