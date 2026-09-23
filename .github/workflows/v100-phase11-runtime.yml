@@ -65,6 +65,24 @@ jobs:
           test -r /models/qwen3-8b-flash-next
           test -r /oracle/cpu_seq/manifest.json
 
+      - name: Wait for V100 memory for model residency
+        shell: bash
+        timeout-minutes: 18
+        run: |
+          set -euo pipefail
+          # The Flash-Next model and test workspace need most of the 32 GiB card.
+          # Wait for existing GPU work to finish; never terminate other processes.
+          for attempt in $(seq 1 30); do
+            free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits | tr -d '[:space:]')
+            echo "V100 free memory: ${free_mib} MiB (attempt ${attempt}/30)"
+            if (( free_mib >= 28000 )); then
+              exit 0
+            fi
+            if (( attempt < 30 )); then sleep 30; fi
+          done
+          echo "::error::V100 has less than 28000 MiB free; Phase 11 would fail on cudaMalloc. Retry when the GPU is available."
+          exit 1
+
       - name: Validate mounted CPU oracle smoke
         shell: bash
         run: |
@@ -179,7 +197,6 @@ jobs:
           PY
 
       - name: Measure full-layer error decomposition
-        continue-on-error: true
         shell: bash
         env:
           NINFER_WEIGHTS: /models/qwen3-8b-flash-next
@@ -239,7 +256,6 @@ jobs:
             | tee "$result_dir/error-decomposition-summary.txt"
 
       - name: Replay oracle PLE injection across 14 positions
-        continue-on-error: true
         shell: bash
         env:
           NINFER_WEIGHTS: /models/qwen3-8b-flash-next
@@ -296,7 +312,6 @@ jobs:
           PY
 
       - name: Recheck 32-position best-known MLP-injection baseline
-        continue-on-error: true
         shell: bash
         env:
           NINFER_WEIGHTS: /models/qwen3-8b-flash-next
@@ -333,6 +348,13 @@ jobs:
           ctest --test-dir build-v100 -V \
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
             2>&1 | tee "$result_dir/oracle-32-best-known.log" || true
+          python3 - "$result_dir/oracle-32-best-known.log" <<'PY'
+          from pathlib import Path
+          import sys
+          data = Path(sys.argv[1]).read_text()
+          if "phase11.trace.position=31 " not in data or "phase11.top1_agreement=" not in data:
+              raise SystemExit("32-position baseline did not reach its final position and summary")
+          PY
 
       # A [full-phase11] push opts into the expensive full-oracle qualification.
       - name: Validate full Phase 11 oracle
