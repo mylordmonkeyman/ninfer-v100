@@ -196,23 +196,42 @@ jobs:
               -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
               2>&1 | tee -a "$result_dir/stage-localize-pos0-6.log" || true
 
-      - name: Generate 11-position CPU stage trace
+      - name: Discover CPU oracle generation environment
+        continue-on-error: true
         shell: bash
-        env:
-          NINFER_PHASE11_CORPUS: /oracle/phase11/token_ids.json
-          NINFER_PHASE11_STAGE_POSITIONS: "11"
         run: |
           set -euxo pipefail
 
-          test -x "$HOME/ninfer-v100/venv-oracle/bin/python"
-          test -d /srv/ninfer/source/mixed
-          test -d /srv/ninfer/source/ple/ples_int4
-          trace_root="${RUNNER_TEMP}/phase11-stage-trace11"
-          rm -rf -- "$trace_root"
-          NINFER_PHASE11_PYTHON="$HOME/ninfer-v100/venv-oracle/bin/python" NINFER_PHASE11_STAGE_TRACE_DIR="$trace_root" tools/reference/qwen3_8_flash_next/oracle/generate_phase11_stage_trace.sh
-          test -r "$trace_root/manifest.json"
-          test -r "$trace_root/provenance.json"
-          test -r "$trace_root/pos0010/logits.bin"
+          echo "=== Python candidates ==="
+          command -v python3 || true
+          python3 - <<'PY' || true
+          import sys
+          print(sys.executable)
+          for name in ("numpy", "safetensors", "torch", "transformers"):
+              try:
+                  mod = __import__(name)
+                  print(f"{name}=ok version={getattr(mod, '__version__', 'unknown')}")
+              except Exception as exc:
+                  print(f"{name}=missing error={exc!r}")
+          try:
+              from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
+              print("transformers.qwen4_exp=ok")
+          except Exception as exc:
+              print(f"transformers.qwen4_exp=missing error={exc!r}")
+          PY
+          for root in "$HOME" /srv/ninfer /opt /work; do
+            test -d "$root" || continue
+            find "$root" -maxdepth 5 -type f -path '*/bin/python*' -perm -111 -print 2>/dev/null | head -100 || true
+          done
+
+          echo "=== Source asset candidates ==="
+          for path in /srv/ninfer/source/mixed /srv/ninfer/source/ple/ples_int4 /oracle/phase11/token_ids.json; do
+            if test -e "$path"; then
+              ls -ld "$path"
+            else
+              echo "missing: $path"
+            fi
+          done
 
       - name: Localize positions 7-10 against CPU stage trace
         continue-on-error: true
