@@ -787,6 +787,10 @@ int main() {
             std::getenv("NINFER_PHASE11_ORACLE_INJECT_STAGE");
         const std::string oracle_inject_stage =
             oracle_inject_stage_env != nullptr ? oracle_inject_stage_env : "";
+        const char* second_inject_env =
+            std::getenv("NINFER_PHASE11_ORACLE_INJECT_SECOND_STAGE");
+        const std::string second_inject_stage =
+            second_inject_env != nullptr ? second_inject_env : "";
         const bool oracle_inject_all_positions =
             std::getenv("NINFER_PHASE11_ORACLE_INJECT_ALL_POSITIONS") != nullptr;
         if (!oracle_inject_stage.empty() && !stage_trace_enabled) {
@@ -797,6 +801,11 @@ int main() {
             (!stage_trace_all_positions || oracle_inject_stage.empty())) {
             throw std::invalid_argument(
                 "Phase 11 all-position injection requires all-position stage tracing and a stage name");
+        }
+        if (!second_inject_stage.empty() &&
+            (!stage_trace_enabled || second_inject_stage == oracle_inject_stage)) {
+            throw std::invalid_argument(
+                "Phase 11 second injection requires a distinct stage and stage oracle");
         }
         std::uint32_t current_stage_trace_position = stage_trace_position;
         std::vector<std::string> first_bad_stage_by_position(records.size());
@@ -1331,10 +1340,16 @@ int main() {
                           << '\n' << std::flush;
             }
 
-            if (!oracle_inject_stage.empty() &&
+            const bool inject_first =
+                !oracle_inject_stage.empty() &&
                 (oracle_inject_all_positions ||
                  current_stage_trace_position == stage_trace_position) &&
-                name == oracle_inject_stage) {
+                name == oracle_inject_stage;
+            const bool inject_second =
+                !second_inject_stage.empty() &&
+                current_stage_trace_position == stage_trace_position &&
+                name == second_inject_stage;
+            if (inject_first || inject_second) {
                 if (integer_tensor) {
                     throw std::invalid_argument(
                         "Phase 11 oracle injection does not support integer stages");
