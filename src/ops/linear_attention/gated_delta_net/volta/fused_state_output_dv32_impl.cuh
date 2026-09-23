@@ -391,6 +391,10 @@ __device__ __forceinline__ void stage_r_d_half(const float* r, const float* d,
         r_half[i] = __float2half_rn(value);
     }
 
+    // DV32's D bridge destination reaches into the first 128 bytes of the
+    // FP32 R source range. All R reads must complete before any D-half write.
+    __syncthreads();
+
     for (int i = tid; i < kDvTile * kBridgeLd; i += blockDim.x) {
         const int dv = i / kBridgeLd;
         const int t = i - dv * kBridgeLd;
@@ -498,8 +502,8 @@ __device__ __forceinline__ void phase_d_mma(const __half* a_half, const __half* 
             a_half + token_block * 16 * kBridgeLd, kBridgeLd,
             vp_half + dv_block * 16 * kBridgeLd, kBridgeLd,
             a_plan.inv * vp_plan.inv,
-            local_output + token_block * 16 * kXyLd + dv_block * 16,
-            kXyLd);
+            local_output + token_block * 16 * kDvTile + dv_block * 16,
+            kDvTile);
     }
 }
 
