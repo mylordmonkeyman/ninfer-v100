@@ -3,7 +3,7 @@ name: SM70 Flash-Next Compile
 on:
   push:
     branches:
-      - forwardport/v100-flash-next
+      - forwardport/v100-flash-next-omp
   workflow_dispatch:
 
 permissions:
