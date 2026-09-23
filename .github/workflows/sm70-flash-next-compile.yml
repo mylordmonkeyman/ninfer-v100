@@ -17,6 +17,7 @@ jobs:
   compile:
     name: SM70 Flash-Next Compile
     runs-on: ubuntu-24.04
+    environment: "Oh my pi" 
     container:
       image: nvidia/cuda:12.8.1-devel-ubuntu24.04
     timeout-minutes: 60
