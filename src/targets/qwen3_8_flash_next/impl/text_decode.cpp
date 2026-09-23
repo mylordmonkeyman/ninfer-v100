@@ -276,6 +276,10 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_ATTN_HYPER_INJECTION");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
     }();
+    const bool fp32_attn_hyper_low_rank = fp32_hyper_state && [] {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_ATTN_HYPER_LOW_RANK");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+    }();
     const bool fp32_mlp_hyper_output = [] {
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
@@ -319,6 +323,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
     constexpr bool fp32_hyper_inject_stage = false;
     constexpr bool fp32_hyper_inject_apply = false;
     constexpr bool fp32_attn_hyper_injection = false;
+    constexpr bool fp32_attn_hyper_low_rank = false;
     constexpr bool fp32_mlp_hyper_output = false;
     constexpr bool fp32_mlp_hyper_input = false;
     constexpr bool fp32_mlp_hyper_normalized = false;
@@ -378,6 +383,14 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         flash_next_hyper_prepare(round_ws.hyper_hidden, model.layers[layer].attention_hyper,
                                  round_ws.hyper_scratch, round_ws.block_input, stream);
 #if defined(NINFER_VOLTA_BUILD)
+        if (fp32_attn_hyper_low_rank) {
+            // Diagnostic A/B: recompute only the 320 attention low-rank rows
+            // from the FP32 master state while retaining production injection gates.
+            flash_next_hyper_prepare_fp32_low_rank_stage(
+                round_ws.hyper_hidden_fp32, round_ws.hyper_after_attn_stage_fp32,
+                model.layers[layer].attention_hyper, round_ws.hyper_scratch,
+                round_ws.block_input, false, stream);
+        }
         if (fp32_attn_hyper_injection) {
             flash_next_hyper_prepare_fp32_injection_stage(
                 round_ws.hyper_hidden_fp32, round_ws.hyper_after_attn_stage_fp32,

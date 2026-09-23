@@ -219,7 +219,7 @@ jobs:
           print("Validated mounted 11-position CPU stage trace")
           PY
 
-      - name: Compare MLP vs MLP plus attention injection gates at positions 7-10
+      - name: Compare MLP vs MLP plus attention low-rank at positions 7-10
         continue-on-error: true
         shell: bash
         env:
@@ -256,10 +256,10 @@ jobs:
           echo "=== 11-position FP32 MLP injection gates ===" | tee -a "$result_dir/stage-localize-pos7-10.log"
           NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION=1 ctest --test-dir build-v100 -V -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' 2>&1 | tee -a "$result_dir/stage-localize-pos7-10.log" || true
 
-          echo "=== 11-position FP32 MLP plus attention injection gates ===" | tee -a "$result_dir/stage-localize-pos7-10.log"
-          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION=1 NINFER_FLASH_NEXT_FP32_ATTN_HYPER_INJECTION=1 ctest --test-dir build-v100 -V -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' 2>&1 | tee -a "$result_dir/stage-localize-pos7-10.log" || true
+          echo "=== 11-position FP32 MLP plus attention low-rank ===" | tee -a "$result_dir/stage-localize-pos7-10.log"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION=1 NINFER_FLASH_NEXT_FP32_ATTN_HYPER_LOW_RANK=1 ctest --test-dir build-v100 -V -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' 2>&1 | tee -a "$result_dir/stage-localize-pos7-10.log" || true
 
-      - name: Compare 32-position MLP vs MLP plus attention injection gates
+      - name: Compare 32-position MLP vs MLP plus attention low-rank
         continue-on-error: true
         shell: bash
         env:
@@ -296,8 +296,8 @@ jobs:
               -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
               2>&1 | tee -a "$result_dir/oracle-32-strong-trace.log" || true
 
-          echo "=== 32-position FP32 MLP plus attention injection gates ===" | tee -a "$result_dir/oracle-32-strong-trace.log"
-          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION=1 NINFER_FLASH_NEXT_FP32_ATTN_HYPER_INJECTION=1 \
+          echo "=== 32-position FP32 MLP plus attention low-rank ===" | tee -a "$result_dir/oracle-32-strong-trace.log"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION=1 NINFER_FLASH_NEXT_FP32_ATTN_HYPER_LOW_RANK=1 \
             ctest --test-dir build-v100 -V \
               -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
               2>&1 | tee -a "$result_dir/oracle-32-strong-trace.log" || true
