@@ -151,7 +151,7 @@ jobs:
             --output-on-failure \
             -R '^ninfer_selected_block_attention_test$'
 
-      - name: Compare baseline vs shared-expert FP32 intermediate routing positions 0-6
+      - name: Compare baseline vs FP32 router input positions 0-6
         continue-on-error: true
         shell: bash
         env:
@@ -190,8 +190,8 @@ jobs:
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
             2>&1 | tee -a "$result_dir/stage-localize-pos0-6.log" || true
 
-          echo "=== shared FP32 MoE intermediate ===" | tee -a "$result_dir/stage-localize-pos0-6.log"
-          NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE=1 \
+          echo "=== FP32 router input ===" | tee -a "$result_dir/stage-localize-pos0-6.log"
+          NINFER_FLASH_NEXT_FP32_ROUTER_INPUT=1 \
             ctest --test-dir build-v100 -V \
               -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
               2>&1 | tee -a "$result_dir/stage-localize-pos0-6.log" || true
