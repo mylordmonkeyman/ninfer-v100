@@ -984,9 +984,17 @@ int main() {
                       << '\n' << std::flush;
 
             if (integer_tensor && !pass) {
+                auto expected_ids_sorted = expected_i32;
+                auto candidate_ids_sorted = candidate_i32;
+                std::sort(expected_ids_sorted.begin(), expected_ids_sorted.end());
+                std::sort(candidate_ids_sorted.begin(), candidate_ids_sorted.end());
+                const bool same_expert_set =
+                    expected_ids_sorted == candidate_ids_sorted;
                 std::cout << "phase11.router_ids_mismatch.position="
                           << current_stage_trace_position
-                          << " stage=" << name << " expected=";
+                          << " stage=" << name
+                          << " same_expert_set=" << (same_expert_set ? 1 : 0)
+                          << " expected=";
                 for (std::size_t i = 0; i < expected_i32.size(); ++i) {
                     if (i != 0) { std::cout << ','; }
                     std::cout << expected_i32[i];
