@@ -1038,7 +1038,7 @@ int main() {
                     const fs::path router_input_path =
                         stage_root / pos_dir /
                         (std::string(name.substr(0, 4)) +
-                         "_mlp_block_input.bin");
+                         "mlp_block_input.bin");
                     constexpr std::size_t kRouterHidden = 2'560;
                     constexpr std::size_t kRouterExperts = 512;
                     const std::uint64_t router_input_bytes =
