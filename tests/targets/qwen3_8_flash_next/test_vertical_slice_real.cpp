@@ -788,7 +788,7 @@ int main() {
             }
 
             if (name.size() == 21 &&
-                name.substr(3) == "moe_router_scores" &&
+                name.substr(4) == "moe_router_scores" &&
                 tensor.dtype == ninfer::DType::FP32 &&
                 tensor.numel() >= 512) {
                 last_router_scores.resize(tensor.numel());
@@ -796,7 +796,7 @@ int main() {
                     last_router_scores.data(), tensor.data,
                     last_router_scores.size() * sizeof(float),
                     cudaMemcpyDeviceToHost));
-                last_router_score_prefix = std::string(name.substr(0, 3));
+                last_router_score_prefix = std::string(name.substr(0, 4));
             }
 
             const auto is_router_probe = [&](std::string_view suffix) {
@@ -1023,8 +1023,8 @@ int main() {
                 std::cout << '\n' << std::flush;
 
                 if (name.size() == 18 &&
-                    name.substr(3) == "moe_router_ids" &&
-                    last_router_score_prefix == name.substr(0, 3) &&
+                    name.substr(4) == "moe_router_ids" &&
+                    last_router_score_prefix == name.substr(0, 4) &&
                     last_router_scores.size() >= 512) {
                     const int tens = name[1] - '0';
                     const int ones = name[2] - '0';
@@ -1037,7 +1037,7 @@ int main() {
 
                     const fs::path router_input_path =
                         stage_root / pos_dir /
-                        (std::string(name.substr(0, 3)) +
+                        (std::string(name.substr(0, 4)) +
                          "_mlp_block_input.bin");
                     constexpr std::size_t kRouterHidden = 2'560;
                     constexpr std::size_t kRouterExperts = 512;
