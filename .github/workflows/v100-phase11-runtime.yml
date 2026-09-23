@@ -259,7 +259,7 @@ jobs:
           echo "=== 11-position FP32 MLP injection gates ===" | tee -a "$result_dir/stage-localize-pos7-10.log"
           NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION=1 ctest --test-dir build-v100 -V -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' 2>&1 | tee -a "$result_dir/stage-localize-pos7-10.log" || true
 
-      - name: Compare 32-position strong baseline vs FP32 router input
+      - name: Compare 32-position strong baseline vs FP32 MLP injection gates
         continue-on-error: true
         shell: bash
         env:
@@ -295,8 +295,8 @@ jobs:
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
             2>&1 | tee -a "$result_dir/oracle-32-strong-trace.log" || true
 
-          echo "=== 32-position FP32 router input ===" | tee -a "$result_dir/oracle-32-strong-trace.log"
-          NINFER_FLASH_NEXT_FP32_ROUTER_INPUT=1 \
+          echo "=== 32-position FP32 MLP injection gates ===" | tee -a "$result_dir/oracle-32-strong-trace.log"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION=1 \
             ctest --test-dir build-v100 -V \
               -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
               2>&1 | tee -a "$result_dir/oracle-32-strong-trace.log" || true
