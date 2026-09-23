@@ -25,7 +25,7 @@ from collections import defaultdict
 from pathlib import Path
 
 LINE_RE = re.compile(
-    r"^phase11\.error_decomposition\.position=(\d+)"
+    r"^(?:\d+:\s*)?phase11\.error_decomposition\.position=(\d+)"
     r" stage=(\S+) dtype=(\w+)"
     r" nrmse=(\S+) floor_nrmse=(\S+) residual_nrmse=(\S+)"
     r" floor_ratio=(\S+)\s*$"

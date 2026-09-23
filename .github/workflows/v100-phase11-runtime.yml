@@ -267,9 +267,9 @@ jobs:
           data = Path(sys.argv[1]).read_text()
           lines = [line.strip() for line in data.splitlines()]
           decomposition = [line for line in lines
-                           if line.startswith("phase11.error_decomposition.position=")]
+                           if "phase11.error_decomposition.position=" in line]
           position_13 = [line for line in decomposition
-                         if line.startswith("phase11.error_decomposition.position=13 ")]
+                         if "phase11.error_decomposition.position=13 " in line]
           if len(decomposition) < 9000:
               raise SystemExit(
                   f"Expected full-layer decomposition coverage, got {len(decomposition)} stage lines")
@@ -283,6 +283,63 @@ jobs:
           python3 tools/reference/qwen3_8_flash_next/oracle/analyze_error_decomposition.py \
             --log "$result_log" --out-dir "$result_dir" \
             | tee "$result_dir/error-decomposition-summary.txt"
+
+      - name: Replay oracle PLE injection across 14 positions
+        continue-on-error: true
+        shell: bash
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "14"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace14
+          NINFER_PHASE11_STAGE_ORACLE_POSITION: "13"
+          NINFER_PHASE11_STAGE_ORACLE_ALL_POSITIONS: "1"
+          NINFER_PHASE11_ORACLE_INJECT_ALL_POSITIONS: "1"
+          NINFER_PHASE11_ORACLE_INJECT_STAGE: ple_injection
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
+        run: |
+          set -euxo pipefail
+          test -r "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0013/ple_injection.bin"
+          result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$result_dir"
+          result_log="$result_dir/ple-injection-all-14.log"
+          ctest --test-dir build-v100 -V \
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+            2>&1 | tee "$result_log" || true
+          python3 - "$result_log" <<'PY'
+          from pathlib import Path
+          import sys
+          data = Path(sys.argv[1]).read_text()
+          injected = [line for line in data.splitlines()
+                      if "phase11.oracle_injection.position=" in line
+                      and " stage=ple_injection " in line]
+          positions = {int(line.split("phase11.oracle_injection.position=", 1)[1].split()[0])
+                       for line in injected}
+          if positions != set(range(14)) or len(injected) != 14:
+              raise SystemExit(f"Expected 14 verified PLE injections, got {sorted(positions)}")
+          required = ("phase11.stage_trace.position=13 stage=L01_attn_block_input",
+                      "phase11.stage_trace.position=13 stage=L24_attn_block_input",
+                      "phase11.top1_agreement=")
+          if any(value not in data for value in required):
+              raise SystemExit("PLE replay did not reach the final stage and summary")
+          PY
 
       - name: Recheck 32-position best-known MLP-injection baseline
         shell: bash
