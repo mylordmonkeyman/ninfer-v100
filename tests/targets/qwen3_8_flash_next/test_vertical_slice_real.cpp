@@ -779,7 +779,97 @@ int main() {
         std::vector<double> first_bad_max_error_by_position(records.size(), 0.0);
         std::vector<float> last_router_scores;
         std::string last_router_score_prefix;
+        constexpr std::size_t kRouterHidden = 2'560;
+        constexpr std::size_t kRouterExperts = 512;
         std::array<std::vector<std::uint16_t>, 48> router_weight_words;
+
+        const auto router_layer_from_stage = [](std::string_view name) {
+            if (name.size() < 4 || name[0] != 'L' ||
+                name[1] < '0' || name[1] > '9' ||
+                name[2] < '0' || name[2] > '9' || name[3] != '_') {
+                return -1;
+            }
+            return (name[1] - '0') * 10 + (name[2] - '0');
+        };
+        const auto is_pre_router_autopsy_target =
+            [](std::uint32_t position, int layer) {
+                return (position == 0 && layer >= 7 && layer <= 10) ||
+                       (position == 1 && layer >= 12 && layer <= 15);
+            };
+        const auto router_reference_scores =
+            [&](std::uint32_t position, int layer) {
+                if (layer < 0 || layer >= 48) {
+                    throw std::runtime_error(
+                        "Phase 11 router reference has invalid layer");
+                }
+
+                char reference_pos_dir[32];
+                std::snprintf(
+                    reference_pos_dir, sizeof(reference_pos_dir),
+                    "pos%04u", position);
+                char layer_prefix[8];
+                std::snprintf(
+                    layer_prefix, sizeof(layer_prefix), "L%02d_", layer);
+                const fs::path router_input_path =
+                    stage_root / reference_pos_dir /
+                    (std::string(layer_prefix) + "mlp_block_input.bin");
+                const std::uint64_t router_input_bytes =
+                    kRouterHidden * sizeof(float);
+                if (!fs::is_regular_file(router_input_path) ||
+                    fs::file_size(router_input_path) != router_input_bytes) {
+                    throw std::runtime_error(
+                        "Phase 11 router reference is missing oracle input " +
+                        router_input_path.string());
+                }
+
+                std::vector<float> oracle_router_input(kRouterHidden);
+                {
+                    std::ifstream input(router_input_path, std::ios::binary);
+                    input.read(
+                        reinterpret_cast<char*>(oracle_router_input.data()),
+                        static_cast<std::streamsize>(router_input_bytes));
+                    if (!input) {
+                        throw std::runtime_error(
+                            "Phase 11 failed to read oracle router input " +
+                            router_input_path.string());
+                    }
+                }
+
+                auto& weight_words =
+                    router_weight_words[static_cast<std::size_t>(layer)];
+                if (weight_words.empty()) {
+                    const auto& router =
+                        model.text_view().layers[
+                            static_cast<std::size_t>(layer)].moe.router;
+                    if (router.qtype != ninfer::QType::BF16_CTRL ||
+                        router.n != static_cast<std::int32_t>(kRouterExperts) ||
+                        router.k != static_cast<std::int32_t>(kRouterHidden) ||
+                        router.qdata == nullptr) {
+                        throw std::runtime_error(
+                            "Phase 11 router reference expected BF16 router weights");
+                    }
+                    weight_words.resize(kRouterExperts * kRouterHidden);
+                    CUDA_CHECK(cudaMemcpy(
+                        weight_words.data(), router.qdata,
+                        weight_words.size() * sizeof(std::uint16_t),
+                        cudaMemcpyDeviceToHost));
+                }
+
+                std::array<double, kRouterExperts> reference_scores{};
+                for (std::size_t expert = 0;
+                     expert < kRouterExperts; ++expert) {
+                    long double acc = 0.0L;
+                    const std::size_t row = expert * kRouterHidden;
+                    for (std::size_t k = 0; k < kRouterHidden; ++k) {
+                        acc +=
+                            static_cast<long double>(
+                                bf16_to_float(weight_words[row + k])) *
+                            static_cast<long double>(oracle_router_input[k]);
+                    }
+                    reference_scores[expert] = static_cast<double>(acc);
+                }
+                return reference_scores;
+            };
 
         FlashNextDecodeStateSink stage_sink;
         stage_sink.on_state = [&](std::string_view name, const ninfer::Tensor& tensor) {
@@ -797,6 +887,69 @@ int main() {
                     last_router_scores.size() * sizeof(float),
                     cudaMemcpyDeviceToHost));
                 last_router_score_prefix = std::string(name.substr(0, 4));
+
+                const int layer = router_layer_from_stage(name);
+                if (is_pre_router_autopsy_target(
+                        current_stage_trace_position, layer)) {
+                    const auto reference_scores =
+                        router_reference_scores(
+                            current_stage_trace_position, layer);
+                    long double dot = 0.0L;
+                    long double candidate_sq = 0.0L;
+                    long double reference_sq = 0.0L;
+                    long double error_sq = 0.0L;
+                    double max_error = 0.0;
+                    for (std::size_t expert = 0;
+                         expert < kRouterExperts; ++expert) {
+                        const long double candidate =
+                            last_router_scores[expert];
+                        const long double reference =
+                            reference_scores[expert];
+                        const long double error = candidate - reference;
+                        dot += candidate * reference;
+                        candidate_sq += candidate * candidate;
+                        reference_sq += reference * reference;
+                        error_sq += error * error;
+                        max_error = std::max(
+                            max_error,
+                            std::abs(static_cast<double>(error)));
+                    }
+                    const long double denom =
+                        std::sqrt(candidate_sq * reference_sq);
+                    const double cosine =
+                        denom > 0.0L
+                            ? static_cast<double>(dot / denom)
+                            : (candidate_sq == reference_sq ? 1.0 : 0.0);
+                    const long double reference_rms =
+                        std::sqrt(
+                            reference_sq /
+                            static_cast<long double>(kRouterExperts));
+                    const long double error_rms =
+                        std::sqrt(
+                            error_sq /
+                            static_cast<long double>(kRouterExperts));
+                    const double nrmse = static_cast<double>(
+                        error_rms /
+                        std::max(reference_rms, 1.0e-12L));
+                    const int branch_layer =
+                        current_stage_trace_position == 0 ? 10 : 15;
+                    std::cout << std::fixed << std::setprecision(8)
+                              << "phase11.pre_router_autopsy.position="
+                              << current_stage_trace_position
+                              << " layer=" << layer
+                              << " checkpoint=router_scores"
+                              << " branch_state="
+                              << (layer == branch_layer ? "decision" : "pre")
+                              << " cosine=" << cosine
+                              << " nrmse=" << nrmse
+                              << " rms_error="
+                              << static_cast<double>(error_rms)
+                              << " max_error=" << max_error
+                              << " pass="
+                              << ((cosine >= 0.99999 && nrmse <= 2.0e-3)
+                                      ? 1 : 0)
+                              << '\n' << std::flush;
+                }
             }
 
             const auto is_router_probe = [&](std::string_view suffix) {
@@ -886,8 +1039,14 @@ int main() {
             char pos_dir[32];
             std::snprintf(
                 pos_dir, sizeof(pos_dir), "pos%04u", current_stage_trace_position);
+            std::string oracle_stage_name(name);
+            if (name.size() > 4 &&
+                name.substr(4) == "mlp_block_input_fp32") {
+                oracle_stage_name =
+                    std::string(name.substr(0, 4)) + "mlp_block_input";
+            }
             const fs::path expected_path =
-                stage_root / pos_dir / (std::string(name) + ".bin");
+                stage_root / pos_dir / (oracle_stage_name + ".bin");
             if (!fs::is_regular_file(expected_path)) {
                 return;
             }
@@ -999,6 +1158,29 @@ int main() {
                       << " pass=" << (pass ? 1 : 0)
                       << '\n' << std::flush;
 
+            const int autopsy_layer = router_layer_from_stage(name);
+            const std::string_view autopsy_checkpoint =
+                autopsy_layer >= 0 ? name.substr(4) : std::string_view{};
+            if (is_pre_router_autopsy_target(
+                    current_stage_trace_position, autopsy_layer) &&
+                (autopsy_checkpoint == "hyper_after_attn" ||
+                 autopsy_checkpoint == "mlp_block_input_fp32" ||
+                 autopsy_checkpoint == "mlp_block_input")) {
+                std::cout << std::fixed << std::setprecision(8)
+                          << "phase11.pre_router_autopsy.position="
+                          << current_stage_trace_position
+                          << " layer=" << autopsy_layer
+                          << " checkpoint=" << autopsy_checkpoint
+                          << " branch_state=pre"
+                          << " cosine=" << cosine
+                          << " nrmse=" << nrmse
+                          << " rms_error="
+                          << static_cast<double>(error_rms)
+                          << " max_error=" << max_error
+                          << " pass=" << (pass ? 1 : 0)
+                          << '\n' << std::flush;
+            }
+
             if (integer_tensor && !pass) {
                 auto expected_ids_sorted = expected_i32;
                 auto candidate_ids_sorted = candidate_i32;
@@ -1026,75 +1208,14 @@ int main() {
                     name.substr(4) == "moe_router_ids" &&
                     last_router_score_prefix == name.substr(0, 4) &&
                     last_router_scores.size() >= 512) {
-                    const int tens = name[1] - '0';
-                    const int ones = name[2] - '0';
-                    const int layer = tens * 10 + ones;
-                    if (tens < 0 || tens > 9 || ones < 0 || ones > 9 ||
-                        layer < 0 || layer >= 48) {
+                    const int layer = router_layer_from_stage(name);
+                    if (layer < 0 || layer >= 48) {
                         throw std::runtime_error(
                             "Phase 11 router margin diagnostic has invalid layer name");
                     }
-
-                    const fs::path router_input_path =
-                        stage_root / pos_dir /
-                        (std::string(name.substr(0, 4)) +
-                         "mlp_block_input.bin");
-                    constexpr std::size_t kRouterHidden = 2'560;
-                    constexpr std::size_t kRouterExperts = 512;
-                    const std::uint64_t router_input_bytes =
-                        kRouterHidden * sizeof(float);
-                    if (!fs::is_regular_file(router_input_path) ||
-                        fs::file_size(router_input_path) != router_input_bytes) {
-                        throw std::runtime_error(
-                            "Phase 11 router margin diagnostic is missing oracle input " +
-                            router_input_path.string());
-                    }
-
-                    std::vector<float> oracle_router_input(kRouterHidden);
-                    {
-                        std::ifstream input(router_input_path, std::ios::binary);
-                        input.read(
-                            reinterpret_cast<char*>(oracle_router_input.data()),
-                            static_cast<std::streamsize>(router_input_bytes));
-                        if (!input) {
-                            throw std::runtime_error(
-                                "Phase 11 failed to read oracle router input " +
-                                router_input_path.string());
-                        }
-                    }
-
-                    auto& weight_words =
-                        router_weight_words[static_cast<std::size_t>(layer)];
-                    if (weight_words.empty()) {
-                        const auto& router =
-                            model.text_view().layers[
-                                static_cast<std::size_t>(layer)].moe.router;
-                        if (router.qtype != ninfer::QType::BF16_CTRL ||
-                            router.n != static_cast<std::int32_t>(kRouterExperts) ||
-                            router.k != static_cast<std::int32_t>(kRouterHidden) ||
-                            router.qdata == nullptr) {
-                            throw std::runtime_error(
-                                "Phase 11 router margin diagnostic expected BF16 router weights");
-                        }
-                        weight_words.resize(kRouterExperts * kRouterHidden);
-                        CUDA_CHECK(cudaMemcpy(
-                            weight_words.data(), router.qdata,
-                            weight_words.size() * sizeof(std::uint16_t),
-                            cudaMemcpyDeviceToHost));
-                    }
-
-                    std::array<double, kRouterExperts> reference_scores{};
-                    for (std::size_t expert = 0; expert < kRouterExperts; ++expert) {
-                        long double acc = 0.0L;
-                        const std::size_t row = expert * kRouterHidden;
-                        for (std::size_t k = 0; k < kRouterHidden; ++k) {
-                            acc +=
-                                static_cast<long double>(
-                                    bf16_to_float(weight_words[row + k])) *
-                                static_cast<long double>(oracle_router_input[k]);
-                        }
-                        reference_scores[expert] = static_cast<double>(acc);
-                    }
+                    const auto reference_scores =
+                        router_reference_scores(
+                            current_stage_trace_position, layer);
 
                     std::array<std::int32_t, kRouterExperts> reference_rank{};
                     std::iota(reference_rank.begin(), reference_rank.end(), 0);

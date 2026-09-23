@@ -460,6 +460,8 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                 round_ws.hyper_hidden_fp32, round_ws.hyper_after_attn_stage_fp32,
                 model.layers[layer].mlp_hyper, round_ws.hyper_scratch,
                 round_ws.block_input, stream);
+            emit_state(prefix + "mlp_block_input_fp32",
+                       round_ws.hyper_scratch.mixed_fp32);
             emit_state(prefix + "mlp_block_input", round_ws.block_input);
         } else if (fp32_mlp_hyper_low_rank) {
             flash_next_hyper_prepare_fp32_low_rank_stage(
