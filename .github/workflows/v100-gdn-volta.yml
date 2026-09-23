@@ -1,0 +1,75 @@
+name: V100 GDN Volta Qualification
+
+on:
+  push:
+    branches:
+      - perf/v100-gdn-chunked-sm70
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v100-gdn-volta-\${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qualify:
+    name: V100 GDN substrate + fused correctness
+    if: \${{ github.actor == github.repository_owner }}
+    runs-on:
+      - self-hosted
+      - v100
+      - sm70
+      - cuda-12-8
+      - ninfer-phase11
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify V100 environment
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git rev-parse HEAD
+          nvidia-smi
+          /usr/local/cuda-12.8/bin/nvcc --version
+
+      - name: Configure CUDA 12.8 SM70
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cmake \
+            -S . \
+            -B build-v100-gdn \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF \
+            -DBUILD_TESTING=ON
+
+      - name: Build Volta GDN qualification targets
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cmake --build build-v100-gdn -j --target \
+            ninfer_volta_substrate_test \
+            ninfer_gated_delta_net_volta_math_test \
+            ninfer_gated_delta_net_volta_fused_test
+
+      - name: Run Volta GDN qualification
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ctest \
+            --test-dir build-v100-gdn \
+            --output-on-failure \
+            -R '^(ninfer_volta_substrate_test|ninfer_gated_delta_net_volta_math_test|ninfer_gated_delta_net_volta_fused_test)$'

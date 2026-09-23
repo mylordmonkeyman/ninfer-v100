@@ -60,6 +60,7 @@ jobs:
           cmake --build build-sm70 -j --target \
             ninfer_volta_substrate_test \
             ninfer_gated_delta_net_volta_math_test \
+            ninfer_gated_delta_net_volta_fused_test \
             ninfer_qwen3_8_flash_next_expert_bank_test \
             ninfer_qwen3_8_flash_next_cpu_expert_reference_test \
             ninfer_qwen3_8_flash_next_moe_test \
@@ -84,4 +85,5 @@ jobs:
           ln -sf "$stub_src" "$stub_dir/libcuda.so.1"
           LD_LIBRARY_PATH="$stub_dir:${LD_LIBRARY_PATH:-}" \
             ctest --test-dir build-sm70 --output-on-failure \
-              -R '^(ninfer_gated_delta_net_volta_math_test|ninfer_qwen3_8_flash_next_vertical_slice_test)$'
+              -R '^(ninfer_gated_delta_net_volta_math_test|ninfer_gated_delta_net_volta_fused_test|ninfer_qwen3_8_flash_next_vertical_slice_test)
+
