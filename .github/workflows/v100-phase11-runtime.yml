@@ -196,42 +196,28 @@ jobs:
               -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
               2>&1 | tee -a "$result_dir/stage-localize-pos0-6.log" || true
 
-      - name: Discover CPU oracle generation environment
-        continue-on-error: true
+      - name: Verify mounted 11-position CPU stage trace
         shell: bash
         run: |
           set -euxo pipefail
 
-          echo "=== Python candidates ==="
-          command -v python3 || true
-          python3 - <<'PY' || true
-          import sys
-          print(sys.executable)
-          for name in ("numpy", "safetensors", "torch", "transformers"):
-              try:
-                  mod = __import__(name)
-                  print(f"{name}=ok version={getattr(mod, '__version__', 'unknown')}")
-              except Exception as exc:
-                  print(f"{name}=missing error={exc!r}")
-          try:
-              from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
-              print("transformers.qwen4_exp=ok")
-          except Exception as exc:
-              print(f"transformers.qwen4_exp=missing error={exc!r}")
-          PY
-          for root in "$HOME" /srv/ninfer /opt /work; do
-            test -d "$root" || continue
-            find "$root" -maxdepth 5 -type f -path '*/bin/python*' -perm -111 -print 2>/dev/null | head -100 || true
-          done
+          test -r /oracle/phase11-stage-trace11/manifest.json
+          test -r /oracle/phase11-stage-trace11/provenance.json
+          test -r /oracle/phase11-stage-trace11/pos0007/logits.bin
+          test -r /oracle/phase11-stage-trace11/pos0010/logits.bin
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
 
-          echo "=== Source asset candidates ==="
-          for path in /srv/ninfer/source/mixed /srv/ninfer/source/ple/ples_int4 /oracle/phase11/token_ids.json; do
-            if test -e "$path"; then
-              ls -ld "$path"
-            else
-              echo "missing: $path"
-            fi
-          done
+          root = Path("/oracle/phase11-stage-trace11")
+          manifest = json.loads((root / "manifest.json").read_text())
+          positions = manifest["positions"]
+          if len(positions) != 11:
+              raise SystemExit(f"expected 11 stage-trace positions, got {len(positions)}")
+          if positions[-1]["position"] != 10:
+              raise SystemExit("stage trace does not end at position 10")
+          print("Validated mounted 11-position CPU stage trace")
+          PY
 
       - name: Localize positions 7-10 against CPU stage trace
         continue-on-error: true
@@ -260,7 +246,7 @@ jobs:
           NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
         run: |
           set -euxo pipefail
-          export NINFER_PHASE11_STAGE_ORACLE_ROOT="${RUNNER_TEMP}/phase11-stage-trace11"
+          export NINFER_PHASE11_STAGE_ORACLE_ROOT=/oracle/phase11-stage-trace11
           test -r "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0007/logits.bin"
           test -r "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0010/logits.bin"
           result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
