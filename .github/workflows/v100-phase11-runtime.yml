@@ -151,84 +151,42 @@ jobs:
             --output-on-failure \
             -R '^ninfer_selected_block_attention_test$'
 
-      - name: Compare baseline vs FP32 router input positions 0-6
-        continue-on-error: true
-        shell: bash
-        env:
-          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
-          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
-          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "7"
-          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
-          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
-          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace7
-          NINFER_PHASE11_STAGE_ORACLE_ALL_POSITIONS: "1"
-          NINFER_PHASE11_TRACE_POSITIONS: "1"
-          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
-          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
-          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
-          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
-          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
-          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
-          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
-          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
-          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
-          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
-          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
-          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
-          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
-          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
-        run: |
-          set -euxo pipefail
-          test -r /oracle/phase11-stage-trace7/manifest.json
-          test -r /oracle/phase11-stage-trace7/provenance.json
-          result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p "$result_dir"
-          : > "$result_dir/stage-localize-pos0-6.log"
-
-          echo "=== baseline MoE intermediates ===" | tee -a "$result_dir/stage-localize-pos0-6.log"
-          ctest --test-dir build-v100 -V \
-            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
-            2>&1 | tee -a "$result_dir/stage-localize-pos0-6.log" || true
-
-          echo "=== FP32 router input ===" | tee -a "$result_dir/stage-localize-pos0-6.log"
-          NINFER_FLASH_NEXT_FP32_ROUTER_INPUT=1 \
-            ctest --test-dir build-v100 -V \
-              -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
-              2>&1 | tee -a "$result_dir/stage-localize-pos0-6.log" || true
-
-      - name: Verify mounted 11-position CPU stage trace
+      - name: Verify mounted 14-position CPU stage trace
         shell: bash
         run: |
           set -euxo pipefail
 
-          test -r /oracle/phase11-stage-trace11/manifest.json
-          test -r /oracle/phase11-stage-trace11/provenance.json
-          test -r /oracle/phase11-stage-trace11/pos0007/logits.bin
-          test -r /oracle/phase11-stage-trace11/pos0010/logits.bin
+          test -r /oracle/phase11-stage-trace14/manifest.json
+          test -r /oracle/phase11-stage-trace14/provenance.json
+          test -r /oracle/phase11-stage-trace14/pos0013/logits.bin
           python3 - <<'PY'
           import json
           from pathlib import Path
 
-          root = Path("/oracle/phase11-stage-trace11")
+          root = Path("/oracle/phase11-stage-trace14")
           manifest = json.loads((root / "manifest.json").read_text())
           positions = manifest["positions"]
-          if len(positions) != 11:
-              raise SystemExit(f"expected 11 stage-trace positions, got {len(positions)}")
-          if positions[-1]["position"] != 10:
-              raise SystemExit("stage trace does not end at position 10")
-          print("Validated mounted 11-position CPU stage trace")
+          if len(positions) != 14:
+              raise SystemExit(f"expected 14 stage-trace positions, got {len(positions)}")
+          if positions[-1]["position"] != 13:
+              raise SystemExit("stage trace does not end at position 13")
+          tensors = positions[-1].get("tensors", [])
+          if len(tensors) < 800:
+              raise SystemExit(f"position 13 stage trace is unexpectedly sparse: {len(tensors)} tensors")
+          print(f"Validated mounted 14-position CPU stage trace with {len(tensors)} position-13 tensors")
           PY
 
-      - name: Compare MLP vs MLP plus attention low-rank at positions 7-10
+      - name: Localize best-known MLP-injection path at position 13
         continue-on-error: true
         shell: bash
         env:
           NINFER_WEIGHTS: /models/qwen3-8b-flash-next
           NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
-          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "11"
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "14"
           NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
           NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
-          NINFER_PHASE11_STAGE_ORACLE_ALL_POSITIONS: "1"
+          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace14
+          NINFER_PHASE11_STAGE_ORACLE_POSITION: "13"
           NINFER_PHASE11_TRACE_POSITIONS: "1"
           NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
           NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
@@ -244,22 +202,18 @@ jobs:
           NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
           NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
           NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
         run: |
           set -euxo pipefail
-          export NINFER_PHASE11_STAGE_ORACLE_ROOT=/oracle/phase11-stage-trace11
-          test -r "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0007/logits.bin"
-          test -r "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0010/logits.bin"
+          test -r "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0013/logits.bin"
           result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$result_dir"
-          : > "$result_dir/stage-localize-pos7-10.log"
 
-          echo "=== 11-position FP32 MLP injection gates ===" | tee -a "$result_dir/stage-localize-pos7-10.log"
-          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION=1 ctest --test-dir build-v100 -V -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' 2>&1 | tee -a "$result_dir/stage-localize-pos7-10.log" || true
+          ctest --test-dir build-v100 -V \
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+            2>&1 | tee "$result_dir/stage-localize-pos13.log" || true
 
-          echo "=== 11-position FP32 MLP plus attention low-rank ===" | tee -a "$result_dir/stage-localize-pos7-10.log"
-          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION=1 NINFER_FLASH_NEXT_FP32_ATTN_HYPER_LOW_RANK=1 ctest --test-dir build-v100 -V -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' 2>&1 | tee -a "$result_dir/stage-localize-pos7-10.log" || true
-
-      - name: Compare 32-position MLP vs MLP plus attention low-rank
+      - name: Recheck 32-position best-known MLP-injection baseline
         continue-on-error: true
         shell: bash
         env:
@@ -283,44 +237,20 @@ jobs:
           NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
           NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
           NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
         run: |
           set -euxo pipefail
           test -r /oracle/phase11/manifest.json
-          python3 tools/reference/qwen3_8_flash_next/oracle/validate_phase11_oracle.py --corpus /oracle/phase11/token_ids.json --manifest /oracle/phase11/manifest.json --minimum 4096
+          python3 tools/reference/qwen3_8_flash_next/oracle/validate_phase11_oracle.py \
+            --corpus /oracle/phase11/token_ids.json \
+            --manifest /oracle/phase11/manifest.json \
+            --minimum 4096
           result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$result_dir"
 
-          echo "=== 32-position FP32 MLP injection gates ===" | tee "$result_dir/oracle-32-strong-trace.log"
-          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION=1 \
-            ctest --test-dir build-v100 -V \
-              -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
-              2>&1 | tee -a "$result_dir/oracle-32-strong-trace.log" || true
-
-          echo "=== 32-position FP32 MLP plus attention low-rank ===" | tee -a "$result_dir/oracle-32-strong-trace.log"
-          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION=1 NINFER_FLASH_NEXT_FP32_ATTN_HYPER_LOW_RANK=1 \
-            ctest --test-dir build-v100 -V \
-              -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
-              2>&1 | tee -a "$result_dir/oracle-32-strong-trace.log" || true
-
-      - name: Isolate layer-0 GDN causal convolution
-        continue-on-error: true
-        shell: bash
-        env:
-          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
-          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
-          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "7"
-          NINFER_PHASE11_GDN_CONV_ISOLATION_ROOT: /oracle/phase11-stage-trace7
-        run: |
-          set -euxo pipefail
-          test -r /oracle/phase11-stage-trace7/pos0000/L00_gdn_projected.bin
-          test -r /oracle/phase11-stage-trace7/pos0000/L00_gdn_query.bin
-          test -r /oracle/phase11-stage-trace7/pos0000/L00_gdn_key.bin
-          test -r /oracle/phase11-stage-trace7/pos0000/L00_gdn_value.bin
-          result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p "$result_dir"
           ctest --test-dir build-v100 -V \
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
-            2>&1 | tee "$result_dir/gdn-conv-isolation-pos0.log"
+            2>&1 | tee "$result_dir/oracle-32-best-known.log" || true
 
       # A [full-phase11] push opts into the expensive full-oracle qualification.
       - name: Validate full Phase 11 oracle
