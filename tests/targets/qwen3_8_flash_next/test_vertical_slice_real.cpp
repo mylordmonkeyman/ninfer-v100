@@ -1317,6 +1317,38 @@ int main() {
                       << " pass=" << (pass ? 1 : 0)
                       << '\n' << std::flush;
 
+            if (name == "L00_mlp_block_input" &&
+                tensor.dtype == ninfer::DType::BF16) {
+                long double floor_error_sq = 0.0L;
+                long double residual_error_sq = 0.0L;
+                std::size_t changed_words = 0;
+                for (std::size_t i = 0; i < count; ++i) {
+                    const float rounded =
+                        bf16_to_float(round_fp32_to_bf16(expected[i]));
+                    const long double floor_error =
+                        static_cast<long double>(rounded) - expected[i];
+                    const long double residual_error =
+                        static_cast<long double>(candidate[i]) - rounded;
+                    floor_error_sq += floor_error * floor_error;
+                    residual_error_sq += residual_error * residual_error;
+                    changed_words += candidate[i] != rounded;
+                }
+                const long double scale = std::max(expected_rms, 1.0e-12L);
+                std::cout << std::fixed << std::setprecision(8)
+                          << "phase11.materialization.position="
+                          << current_stage_trace_position
+                          << " stage=" << name
+                          << " observed_nrmse=" << nrmse
+                          << " oracle_bf16_floor_nrmse="
+                          << static_cast<double>(
+                                 std::sqrt(floor_error_sq / count) / scale)
+                          << " candidate_vs_rounded_oracle_nrmse="
+                          << static_cast<double>(
+                                 std::sqrt(residual_error_sq / count) / scale)
+                          << " changed_bf16_words=" << changed_words
+                          << " total_words=" << count << '\n' << std::flush;
+            }
+
             const int autopsy_layer = router_layer_from_stage(name);
             const std::string_view autopsy_checkpoint =
                 autopsy_layer >= 0 ? name.substr(4) : std::string_view{};
