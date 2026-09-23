@@ -134,6 +134,29 @@ jobs:
               ninfer_selected_block_attention_test \
             -j "$(nproc)"
 
+      - name: Wait for GPU availability
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          required_free_mib=20480
+          deadline=$(( $(date +%s) + 1800 ))
+          while :; do
+            free_mib=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -n1 | tr -d '[:space:]')
+            echo "GPU free memory: ${free_mib} MiB (need at least ${required_free_mib} MiB)"
+            if [ "$free_mib" -ge "$required_free_mib" ]; then
+              echo "GPU is available; proceeding"
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "ERROR: GPU free memory stayed below ${required_free_mib} MiB for 30 minutes." >&2
+              echo "A foreign or leaked allocation is holding the GPU." >&2
+              echo "Free it on the runner host (stop the workload or reboot) and re-run." >&2
+              exit 1
+            fi
+            sleep 60
+          done
+
       - name: Run Phase 11 contract test
         shell: bash
         run: |
@@ -179,7 +202,6 @@ jobs:
           PY
 
       - name: Measure full-layer error decomposition
-        continue-on-error: true
         shell: bash
         env:
           NINFER_WEIGHTS: /models/qwen3-8b-flash-next
@@ -239,7 +261,6 @@ jobs:
             | tee "$result_dir/error-decomposition-summary.txt"
 
       - name: Recheck 32-position best-known MLP-injection baseline
-        continue-on-error: true
         shell: bash
         env:
           NINFER_WEIGHTS: /models/qwen3-8b-flash-next
