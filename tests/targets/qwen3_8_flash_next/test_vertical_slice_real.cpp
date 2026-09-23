@@ -787,9 +787,16 @@ int main() {
             std::getenv("NINFER_PHASE11_ORACLE_INJECT_STAGE");
         const std::string oracle_inject_stage =
             oracle_inject_stage_env != nullptr ? oracle_inject_stage_env : "";
+        const bool oracle_inject_all_positions =
+            std::getenv("NINFER_PHASE11_ORACLE_INJECT_ALL_POSITIONS") != nullptr;
         if (!oracle_inject_stage.empty() && !stage_trace_enabled) {
             throw std::invalid_argument(
                 "NINFER_PHASE11_ORACLE_INJECT_STAGE requires a stage oracle root");
+        }
+        if (oracle_inject_all_positions &&
+            (!stage_trace_all_positions || oracle_inject_stage.empty())) {
+            throw std::invalid_argument(
+                "Phase 11 all-position injection requires all-position stage tracing and a stage name");
         }
         std::uint32_t current_stage_trace_position = stage_trace_position;
         std::vector<std::string> first_bad_stage_by_position(records.size());
@@ -1325,7 +1332,8 @@ int main() {
             }
 
             if (!oracle_inject_stage.empty() &&
-                current_stage_trace_position == stage_trace_position &&
+                (oracle_inject_all_positions ||
+                 current_stage_trace_position == stage_trace_position) &&
                 name == oracle_inject_stage) {
                 if (integer_tensor) {
                     throw std::invalid_argument(
