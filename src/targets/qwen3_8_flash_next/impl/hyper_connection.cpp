@@ -132,7 +132,7 @@ void flash_next_hyper_prepare_fp32_normalized_stage(
 void flash_next_hyper_prepare_fp32_low_rank_stage(
     const Tensor& hidden_fp32, Tensor& normalized_fp32,
     const HyperConnectionWeights& weights, FlashNextHyperWorkspace& scratch,
-    Tensor& block_input, cudaStream_t stream) {
+    Tensor& block_input, bool fp32_injection, cudaStream_t stream) {
     validate_common(hidden_fp32, block_input, scratch, DType::FP32);
     const std::int32_t tokens = hidden_fp32.ne[1];
     if (tokens > 8 || normalized_fp32.dtype != DType::FP32 ||
@@ -153,7 +153,8 @@ void flash_next_hyper_prepare_fp32_low_rank_stage(
             "Flash-Next FP32 low-rank hyper diagnostic received invalid exact tensors");
     }
     flash_next_hyper_prepare_fp32_low_rank_stage_launch(
-        hidden_fp32, normalized_fp32, weights, scratch, block_input, stream);
+        hidden_fp32, normalized_fp32, weights, scratch, block_input,
+        fp32_injection, stream);
 }
 #endif
 

@@ -1261,11 +1261,12 @@ void flash_next_hyper_prepare_fp32_normalized_stage_launch(
 void flash_next_hyper_prepare_fp32_low_rank_stage_launch(
     const Tensor& hidden_fp32, Tensor& normalized_fp32,
     const HyperConnectionWeights& weights, FlashNextHyperWorkspace& scratch,
-    Tensor& block_input, cudaStream_t stream) {
+    Tensor& block_input, bool fp32_injection, cudaStream_t stream) {
     const int tokens = static_cast<int>(hidden_fp32.ne[1]);
-    // This diagnostic owns only the 320 low-rank rows. Injection gates stay exactly
-    // as produced by the preceding production hyper-prepare when the apply A/B is on.
-    constexpr int kTotalRows = kLowRank;
+    // By default this diagnostic owns only the 320 low-rank rows, preserving the
+    // production injection gates. The fp32_injection A/B extends the same FP32
+    // normalized dot-product through rows 320..323 so only those four gates change.
+    const int total_rows = fp32_injection ? (kLowRank + kStreams) : kLowRank;
     float* low_rank_fp32 = static_cast<float*>(scratch.down_split.data);
 
     group_norm_fp32_to_fp32_kernel<<<dim3(kStreams, tokens), kNormThreads, 0, stream>>>(
@@ -1275,12 +1276,12 @@ void flash_next_hyper_prepare_fp32_low_rank_stage_launch(
     CUDA_CHECK(cudaGetLastError());
 
     low_rank_and_injection_fp32_normalized_low_rank_kernel
-        <<<dim3(kTotalRows, tokens), 256, 0, stream>>>(
+        <<<dim3(total_rows, tokens), 256, 0, stream>>>(
             static_cast<const float*>(normalized_fp32.data),
             static_cast<const __nv_bfloat16*>(weights.input_mix_down.qdata),
             static_cast<const __nv_bfloat16*>(weights.block_inject.qdata),
             low_rank_fp32, static_cast<float*>(scratch.injection.data),
-            tokens, kTotalRows);
+            tokens, total_rows);
     CUDA_CHECK(cudaGetLastError());
 
     mix_up_and_reduce_fp32_normalized_low_rank_kernel

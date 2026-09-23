@@ -36,7 +36,7 @@ void flash_next_hyper_prepare_fp32_normalized_stage(
 void flash_next_hyper_prepare_fp32_low_rank_stage(
     const Tensor& hidden_fp32, Tensor& normalized_fp32,
     const HyperConnectionWeights& weights, FlashNextHyperWorkspace& scratch,
-    Tensor& block_input, cudaStream_t stream);
+    Tensor& block_input, bool fp32_injection, cudaStream_t stream);
 #endif
 
 void flash_next_hyper_inject(const Tensor& block_output, const Tensor& injection, Tensor& hidden,

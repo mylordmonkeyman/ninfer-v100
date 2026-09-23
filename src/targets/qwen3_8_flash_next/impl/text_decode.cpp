@@ -292,6 +292,10 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
     }();
+    const bool fp32_mlp_hyper_injection = fp32_mlp_hyper_apply && [] {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+    }();
     const bool fp32_moe_routed_input = fp32_mlp_hyper_apply && [] {
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
@@ -315,6 +319,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
     constexpr bool fp32_mlp_hyper_normalized = false;
     constexpr bool fp32_mlp_hyper_low_rank = false;
     constexpr bool fp32_mlp_hyper_apply = false;
+    constexpr bool fp32_mlp_hyper_injection = false;
     constexpr bool fp32_moe_routed_input = false;
     constexpr bool fp32_moe_shared_input = false;
     auto sync_hyper_shadow = [&] {};
@@ -451,15 +456,15 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         sync_hyper_shadow();
 #if defined(NINFER_VOLTA_BUILD)
         if (fp32_mlp_hyper_low_rank && fp32_mlp_hyper_apply) {
-            // Establish the production injection gates first. The FP32 low-rank
-            // diagnostic then recomputes only rows 0..319, overwriting block_input
-            // for MoE while deliberately leaving those four production gates intact.
+            // Establish production gates first. The optional injection A/B then
+            // recomputes just rows 320..323 from the FP32-normalized state while the
+            // existing low-rank path continues to own rows 0..319 and block_input.
             flash_next_hyper_prepare(round_ws.hyper_hidden, model.layers[layer].mlp_hyper,
                                      round_ws.hyper_scratch, round_ws.block_input, stream);
             flash_next_hyper_prepare_fp32_low_rank_stage(
                 round_ws.hyper_hidden_fp32, round_ws.hyper_after_attn_stage_fp32,
                 model.layers[layer].mlp_hyper, round_ws.hyper_scratch,
-                round_ws.block_input, stream);
+                round_ws.block_input, fp32_mlp_hyper_injection, stream);
             emit_state(prefix + "mlp_block_input_fp32",
                        round_ws.hyper_scratch.mixed_fp32);
             emit_state(prefix + "mlp_block_input", round_ws.block_input);
@@ -467,7 +472,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
             flash_next_hyper_prepare_fp32_low_rank_stage(
                 round_ws.hyper_hidden_fp32, round_ws.hyper_after_attn_stage_fp32,
                 model.layers[layer].mlp_hyper, round_ws.hyper_scratch,
-                round_ws.block_input, stream);
+                round_ws.block_input, false, stream);
             emit_state(prefix + "mlp_block_input", round_ws.hyper_scratch.mixed_fp32);
             // Restore the exact production tensors before MoE consumes them.
             flash_next_hyper_prepare(round_ws.hyper_hidden, model.layers[layer].mlp_hyper,
