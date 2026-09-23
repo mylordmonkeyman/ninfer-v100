@@ -272,6 +272,10 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
     }();
+    const bool fp32_attn_hyper_injection = fp32_hyper_state && [] {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_ATTN_HYPER_INJECTION");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+    }();
     const bool fp32_mlp_hyper_output = [] {
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
@@ -314,6 +318,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
     constexpr bool fp32_router_input = false;
     constexpr bool fp32_hyper_inject_stage = false;
     constexpr bool fp32_hyper_inject_apply = false;
+    constexpr bool fp32_attn_hyper_injection = false;
     constexpr bool fp32_mlp_hyper_output = false;
     constexpr bool fp32_mlp_hyper_input = false;
     constexpr bool fp32_mlp_hyper_normalized = false;
@@ -372,6 +377,13 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         sync_hyper_shadow();
         flash_next_hyper_prepare(round_ws.hyper_hidden, model.layers[layer].attention_hyper,
                                  round_ws.hyper_scratch, round_ws.block_input, stream);
+#if defined(NINFER_VOLTA_BUILD)
+        if (fp32_attn_hyper_injection) {
+            flash_next_hyper_prepare_fp32_injection_stage(
+                round_ws.hyper_hidden_fp32, round_ws.hyper_after_attn_stage_fp32,
+                model.layers[layer].attention_hyper, round_ws.hyper_scratch, stream);
+        }
+#endif
         emit_state(prefix + "attn_block_input", round_ws.block_input);
 
         // Execute QSA or GDN attention

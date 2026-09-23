@@ -129,6 +129,33 @@ void flash_next_hyper_prepare_fp32_normalized_stage(
         hidden_fp32, normalized_fp32, weights, scratch, block_input, stream);
 }
 
+void flash_next_hyper_prepare_fp32_injection_stage(
+    const Tensor& hidden_fp32, Tensor& normalized_fp32,
+    const HyperConnectionWeights& weights, FlashNextHyperWorkspace& scratch,
+    cudaStream_t stream) {
+    const std::int32_t tokens = hidden_fp32.ne[1];
+    if (hidden_fp32.dtype != DType::FP32 || hidden_fp32.ne[0] != 10'240 ||
+        hidden_fp32.ne[2] != 1 || hidden_fp32.ne[3] != 1 ||
+        tokens < 1 || tokens > 8 || !hidden_fp32.is_contiguous() ||
+        !aligned_to(hidden_fp32.data, 16) ||
+        normalized_fp32.dtype != DType::FP32 ||
+        normalized_fp32.ne[0] != 10'240 || normalized_fp32.ne[1] != tokens ||
+        normalized_fp32.ne[2] != 1 || normalized_fp32.ne[3] != 1 ||
+        !normalized_fp32.is_contiguous() || !aligned_to(normalized_fp32.data, 16) ||
+        !exact_norm(weights.norm) ||
+        !exact_bf16_weight(weights.block_inject, 4, 10'240) ||
+        scratch.injection.dtype != DType::FP32 ||
+        scratch.injection.ne[0] != 4 || scratch.injection.ne[1] != tokens ||
+        !scratch.injection.is_contiguous() ||
+        !aligned_to(scratch.injection.data, 16) ||
+        stream == nullptr) {
+        throw std::invalid_argument(
+            "Flash-Next FP32 injection-gate diagnostic received invalid exact tensors");
+    }
+    flash_next_hyper_prepare_fp32_injection_stage_launch(
+        hidden_fp32, normalized_fp32, weights, scratch, stream);
+}
+
 void flash_next_hyper_prepare_fp32_low_rank_stage(
     const Tensor& hidden_fp32, Tensor& normalized_fp32,
     const HyperConnectionWeights& weights, FlashNextHyperWorkspace& scratch,

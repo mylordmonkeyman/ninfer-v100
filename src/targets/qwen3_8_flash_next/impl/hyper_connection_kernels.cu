@@ -351,6 +351,43 @@ low_rank_and_injection_fp32_normalized_kernel(
 }
 
 __global__ void __launch_bounds__(256)
+injection_fp32_normalized_kernel(
+    const float* __restrict__ normalized,
+    const __nv_bfloat16* __restrict__ inject_weight,
+    float* __restrict__ injection,
+    int tokens) {
+    __shared__ float s_warp_sums[8];
+
+    const int row   = static_cast<int>(blockIdx.x);
+    const int token = static_cast<int>(blockIdx.y);
+    const int tid   = static_cast<int>(threadIdx.x);
+    if (token >= tokens || row >= kStreams) { return; }
+
+    const float* x_token =
+        normalized + static_cast<std::int64_t>(token) * kConcat;
+    const __nv_bfloat16* w_row =
+        inject_weight + static_cast<std::int64_t>(row) * kConcat;
+
+    float sum = 0.0F;
+#pragma unroll
+    for (int chunk = tid; chunk < (kConcat / 8); chunk += 256) {
+        const int col_base = chunk * 8;
+        const auto w_raw =
+            *reinterpret_cast<const ulonglong2*>(w_row + col_base);
+        const auto* w_bf = reinterpret_cast<const __nv_bfloat16*>(&w_raw);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            sum = fmaf(__bfloat162float(w_bf[i]), x_token[col_base + i], sum);
+        }
+    }
+    sum = ops::block_reduce_sum<256>(sum, s_warp_sums);
+    if (tid == 0) {
+        injection[static_cast<std::int64_t>(token) * kStreams + row] =
+            2.0F * ops::sigmoid(sum * 0.25F);
+    }
+}
+
+__global__ void __launch_bounds__(256)
 low_rank_and_injection_fp32_normalized_low_rank_kernel(
     const float* __restrict__ normalized,
     const __nv_bfloat16* __restrict__ down_weight,
@@ -1255,6 +1292,25 @@ void flash_next_hyper_prepare_fp32_normalized_stage_launch(
             static_cast<const __nv_bfloat16*>(weights.input_mix_up.qdata),
             static_cast<__nv_bfloat16*>(block_input.data),
             static_cast<float*>(scratch.mixed_fp32.data), tokens);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void flash_next_hyper_prepare_fp32_injection_stage_launch(
+    const Tensor& hidden_fp32, Tensor& normalized_fp32,
+    const HyperConnectionWeights& weights, FlashNextHyperWorkspace& scratch,
+    cudaStream_t stream) {
+    const int tokens = static_cast<int>(hidden_fp32.ne[1]);
+
+    group_norm_fp32_to_fp32_kernel<<<dim3(kStreams, tokens), kNormThreads, 0, stream>>>(
+        static_cast<const float*>(hidden_fp32.data),
+        static_cast<const __nv_bfloat16*>(weights.norm.data),
+        static_cast<float*>(normalized_fp32.data), tokens);
+    CUDA_CHECK(cudaGetLastError());
+
+    injection_fp32_normalized_kernel<<<dim3(kStreams, tokens), 256, 0, stream>>>(
+        static_cast<const float*>(normalized_fp32.data),
+        static_cast<const __nv_bfloat16*>(weights.block_inject.qdata),
+        static_cast<float*>(scratch.injection.data), tokens);
     CUDA_CHECK(cudaGetLastError());
 }
 

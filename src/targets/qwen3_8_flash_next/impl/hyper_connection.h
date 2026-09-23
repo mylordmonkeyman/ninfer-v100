@@ -37,6 +37,12 @@ void flash_next_hyper_prepare_fp32_low_rank_stage(
     const Tensor& hidden_fp32, Tensor& normalized_fp32,
     const HyperConnectionWeights& weights, FlashNextHyperWorkspace& scratch,
     Tensor& block_input, bool fp32_injection, cudaStream_t stream);
+// Gate-only diagnostic for attention hyper prepare: preserve the production BF16
+// block input while recomputing only the four output-injection gates from FP32 state.
+void flash_next_hyper_prepare_fp32_injection_stage(
+    const Tensor& hidden_fp32, Tensor& normalized_fp32,
+    const HyperConnectionWeights& weights, FlashNextHyperWorkspace& scratch,
+    cudaStream_t stream);
 #endif
 
 void flash_next_hyper_inject(const Tensor& block_output, const Tensor& injection, Tensor& hidden,
