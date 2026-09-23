@@ -23,6 +23,7 @@ jobs:
   v100-phase11:
     name: V100 Phase 11 Runtime
     if: ${{ github.actor == github.repository_owner }}
+    environment: "Oh my pi"
     runs-on:
       - self-hosted
       - v100
