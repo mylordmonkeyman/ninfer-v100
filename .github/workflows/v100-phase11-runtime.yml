@@ -150,8 +150,10 @@ jobs:
             "$swap_base/api/models/unload/$agent_model" || true)
           echo "unload $agent_model -> HTTP $code: $(head -c 200 /tmp/unload-response.json 2>/dev/null)"
           case "$code" in
-            200|204|404) ;;  # 404: not loaded (or unknown name); nvidia-smi poll is the real gate
-            *) echo "ERROR: llama-swap unload request failed (HTTP $code)." >&2; exit 1 ;;
+            200|204|404) ;;  # 404: not loaded (or unknown name)
+            000) echo "WARNING: llama-swap (127.0.0.1:9292) is not reachable from the runner (separate network namespace)."
+                 echo "The agent side must have pre-unloaded the model; the nvidia-smi poll below is the real gate." ;;
+            *) echo "WARNING: llama-swap unload request failed (HTTP $code); the nvidia-smi poll below is the real gate." ;;
           esac
 
           required_free_mib=20480
