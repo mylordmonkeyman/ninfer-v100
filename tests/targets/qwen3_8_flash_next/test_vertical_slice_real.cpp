@@ -6,6 +6,7 @@
 #include "targets/qwen3_8_flash_next/impl/moe.h"
 #include "targets/qwen3_8_flash_next/impl/runtime_state.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
+#include "targets/qwen3_8_flash_next/impl/text_decode_kernels.h"
 #include "targets/qwen3_8_flash_next/impl/text_executor.h"
 #include "targets/qwen3_8_flash_next/impl/vertical_slice.h"
 
@@ -19,6 +20,7 @@
 #include <bit>
 #include <cmath>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -756,6 +758,15 @@ int main() {
             stage_root_env != nullptr && stage_root_env[0] != '\0';
         const fs::path stage_root =
             stage_trace_enabled ? fs::path(stage_root_env) : fs::path{};
+        const char* conv_history_layer_env =
+            std::getenv("NINFER_PHASE11_ORACLE_GDN_CONV_HISTORY_LAYER");
+        const bool inject_conv_history =
+            conv_history_layer_env != nullptr && conv_history_layer_env[0] != '\0';
+        if (inject_conv_history &&
+            (!stage_trace_enabled || std::string_view(conv_history_layer_env) != "24")) {
+            throw std::invalid_argument(
+                "Phase 11 convolution-history diagnostic requires a stage oracle and layer 24");
+        }
         std::uint32_t stage_trace_position = 6;
         if (const char* position_env =
                 std::getenv("NINFER_PHASE11_STAGE_ORACLE_POSITION");
@@ -1329,11 +1340,29 @@ int main() {
                         tensor.data, words.data(),
                         count * sizeof(std::uint16_t),
                         cudaMemcpyHostToDevice));
+                    std::vector<std::uint16_t> verified(count);
+                    CUDA_CHECK(cudaMemcpy(verified.data(), tensor.data,
+                                          count * sizeof(std::uint16_t),
+                                          cudaMemcpyDeviceToHost));
+                    if (verified != words) {
+                        throw std::runtime_error("Phase 11 BF16 stage injection readback mismatch");
+                    }
                 } else if (tensor.dtype == ninfer::DType::FP32) {
                     CUDA_CHECK(cudaMemcpy(
                         tensor.data, expected.data(),
                         count * sizeof(float),
                         cudaMemcpyHostToDevice));
+                    std::vector<float> verified(count);
+                    CUDA_CHECK(cudaMemcpy(verified.data(), tensor.data,
+                                          count * sizeof(float),
+                                          cudaMemcpyDeviceToHost));
+                    if (!std::equal(verified.begin(), verified.end(), expected.begin(),
+                                    [](float a, float b) {
+                                        return std::bit_cast<std::uint32_t>(a) ==
+                                               std::bit_cast<std::uint32_t>(b);
+                                    })) {
+                        throw std::runtime_error("Phase 11 FP32 stage injection readback mismatch");
+                    }
                 } else {
                     throw std::invalid_argument(
                         "Phase 11 oracle injection supports only BF16/FP32 stages");
@@ -1612,6 +1641,74 @@ int main() {
 
         for (std::size_t index = 0; index < records.size(); ++index) {
             const OracleRecord& record = records[index];
+            if (inject_conv_history && record.position == 13) {
+                constexpr std::size_t kChannels = 10'240;
+                constexpr std::size_t kHistory = 3;
+                if (executor.committed_frontier(lane) != 13 || is_qsa_layer(24)) {
+                    throw std::runtime_error("Phase 11 layer-24 history requires committed position 12");
+                }
+                std::vector<std::uint16_t> oracle_history(kChannels * kHistory);
+                for (std::size_t history = 0; history < kHistory; ++history) {
+                    const std::uint32_t prior_position =
+                        13U - static_cast<std::uint32_t>(kHistory) +
+                        static_cast<std::uint32_t>(history);
+                    char directory[32];
+                    std::snprintf(directory, sizeof(directory), "pos%04u", prior_position);
+                    const fs::path projected_path =
+                        stage_root / directory / "L24_gdn_projected.bin";
+                    constexpr std::size_t kProjected = 16'384;
+                    if (!fs::is_regular_file(projected_path) ||
+                        fs::file_size(projected_path) != kProjected * sizeof(float)) {
+                        throw std::runtime_error(
+                            "Phase 11 missing L24 projected history: " +
+                            projected_path.string());
+                    }
+                    std::ifstream projected_file(projected_path, std::ios::binary);
+                    std::vector<float> projected(kProjected);
+                    projected_file.read(reinterpret_cast<char*>(projected.data()),
+                                        static_cast<std::streamsize>(kProjected * sizeof(float)));
+                    if (!projected_file) {
+                        throw std::runtime_error("Phase 11 failed reading L24 projected history");
+                    }
+                    for (std::size_t channel = 0; channel < kChannels; ++channel) {
+                        oracle_history[history * kChannels + channel] =
+                            round_fp32_to_bf16(projected[channel]);
+                    }
+                }
+                const auto active_slot = allocation.current_source_slot(0);
+                if (active_slot < 0) {
+                    throw std::runtime_error("Phase 11 has no active state slot");
+                }
+                auto& conv = allocation.state_view().gdn_convolution_states[gdn_ordinal(24)];
+                auto* slot_ptr = static_cast<std::byte*>(conv.data) +
+                    static_cast<std::size_t>(active_slot) * oracle_history.size() *
+                        sizeof(std::uint16_t);
+                std::vector<std::uint16_t> original(oracle_history.size());
+                CUDA_CHECK(cudaMemcpyAsync(original.data(), slot_ptr,
+                                           original.size() * sizeof(std::uint16_t),
+                                           cudaMemcpyDeviceToHost, device.stream));
+                device.synchronize();
+                std::size_t changed = 0;
+                for (std::size_t i = 0; i < original.size(); ++i) {
+                    changed += original[i] != oracle_history[i];
+                }
+                CUDA_CHECK(cudaMemcpyAsync(slot_ptr, oracle_history.data(),
+                                           oracle_history.size() * sizeof(std::uint16_t),
+                                           cudaMemcpyHostToDevice, device.stream));
+                std::vector<std::uint16_t> verified(oracle_history.size());
+                CUDA_CHECK(cudaMemcpyAsync(verified.data(), slot_ptr,
+                                           verified.size() * sizeof(std::uint16_t),
+                                           cudaMemcpyDeviceToHost, device.stream));
+                device.synchronize();
+                if (verified != oracle_history) {
+                    throw std::runtime_error("Phase 11 convolution-history injection did not persist");
+                }
+                std::cout << "phase11.conv_history_injection.position=13 layer=24"
+                          << " source_slot=" << active_slot
+                          << " changed_bf16_elements=" << changed
+                          << " total_elements=" << oracle_history.size() << '\n'
+                          << std::flush;
+            }
             LaneStepRequest request{
                 .handle = lane,
                 .token_id = record.token_id,
