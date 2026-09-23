@@ -26,6 +26,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <numeric>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -776,11 +777,26 @@ int main() {
         std::vector<double> first_bad_cosine_by_position(records.size(), 1.0);
         std::vector<double> first_bad_nrmse_by_position(records.size(), 0.0);
         std::vector<double> first_bad_max_error_by_position(records.size(), 0.0);
+        std::vector<float> last_router_scores;
+        std::string last_router_score_prefix;
+        std::array<std::vector<std::uint16_t>, 48> router_weight_words;
 
         FlashNextDecodeStateSink stage_sink;
         stage_sink.on_state = [&](std::string_view name, const ninfer::Tensor& tensor) {
             if (!stage_trace_enabled) {
                 return;
+            }
+
+            if (name.size() == 21 &&
+                name.substr(3) == "moe_router_scores" &&
+                tensor.dtype == ninfer::DType::FP32 &&
+                tensor.numel() >= 512) {
+                last_router_scores.resize(tensor.numel());
+                CUDA_CHECK(cudaMemcpy(
+                    last_router_scores.data(), tensor.data,
+                    last_router_scores.size() * sizeof(float),
+                    cudaMemcpyDeviceToHost));
+                last_router_score_prefix = std::string(name.substr(0, 3));
             }
 
             const auto is_router_probe = [&](std::string_view suffix) {
@@ -1005,6 +1021,180 @@ int main() {
                     std::cout << candidate_i32[i];
                 }
                 std::cout << '\n' << std::flush;
+
+                if (name.size() == 18 &&
+                    name.substr(3) == "moe_router_ids" &&
+                    last_router_score_prefix == name.substr(0, 3) &&
+                    last_router_scores.size() >= 512) {
+                    const int tens = name[1] - '0';
+                    const int ones = name[2] - '0';
+                    const int layer = tens * 10 + ones;
+                    if (tens < 0 || tens > 9 || ones < 0 || ones > 9 ||
+                        layer < 0 || layer >= 48) {
+                        throw std::runtime_error(
+                            "Phase 11 router margin diagnostic has invalid layer name");
+                    }
+
+                    const fs::path router_input_path =
+                        stage_root / pos_dir /
+                        (std::string(name.substr(0, 3)) +
+                         "_mlp_block_input.bin");
+                    constexpr std::size_t kRouterHidden = 2'560;
+                    constexpr std::size_t kRouterExperts = 512;
+                    const std::uint64_t router_input_bytes =
+                        kRouterHidden * sizeof(float);
+                    if (!fs::is_regular_file(router_input_path) ||
+                        fs::file_size(router_input_path) != router_input_bytes) {
+                        throw std::runtime_error(
+                            "Phase 11 router margin diagnostic is missing oracle input " +
+                            router_input_path.string());
+                    }
+
+                    std::vector<float> oracle_router_input(kRouterHidden);
+                    {
+                        std::ifstream input(router_input_path, std::ios::binary);
+                        input.read(
+                            reinterpret_cast<char*>(oracle_router_input.data()),
+                            static_cast<std::streamsize>(router_input_bytes));
+                        if (!input) {
+                            throw std::runtime_error(
+                                "Phase 11 failed to read oracle router input " +
+                                router_input_path.string());
+                        }
+                    }
+
+                    auto& weight_words =
+                        router_weight_words[static_cast<std::size_t>(layer)];
+                    if (weight_words.empty()) {
+                        const auto& router =
+                            model.text_view().layers[
+                                static_cast<std::size_t>(layer)].moe.router;
+                        if (router.qtype != ninfer::QType::BF16_CTRL ||
+                            router.n != static_cast<std::int32_t>(kRouterExperts) ||
+                            router.k != static_cast<std::int32_t>(kRouterHidden) ||
+                            router.qdata == nullptr) {
+                            throw std::runtime_error(
+                                "Phase 11 router margin diagnostic expected BF16 router weights");
+                        }
+                        weight_words.resize(kRouterExperts * kRouterHidden);
+                        CUDA_CHECK(cudaMemcpy(
+                            weight_words.data(), router.qdata,
+                            weight_words.size() * sizeof(std::uint16_t),
+                            cudaMemcpyDeviceToHost));
+                    }
+
+                    std::array<double, kRouterExperts> reference_scores{};
+                    for (std::size_t expert = 0; expert < kRouterExperts; ++expert) {
+                        long double acc = 0.0L;
+                        const std::size_t row = expert * kRouterHidden;
+                        for (std::size_t k = 0; k < kRouterHidden; ++k) {
+                            acc +=
+                                static_cast<long double>(
+                                    bf16_to_float(weight_words[row + k])) *
+                                static_cast<long double>(oracle_router_input[k]);
+                        }
+                        reference_scores[expert] = static_cast<double>(acc);
+                    }
+
+                    std::array<std::int32_t, kRouterExperts> reference_rank{};
+                    std::iota(reference_rank.begin(), reference_rank.end(), 0);
+                    std::stable_sort(
+                        reference_rank.begin(), reference_rank.end(),
+                        [&](std::int32_t lhs, std::int32_t rhs) {
+                            const double a =
+                                reference_scores[static_cast<std::size_t>(lhs)];
+                            const double b =
+                                reference_scores[static_cast<std::size_t>(rhs)];
+                            return a > b || (a == b && lhs < rhs);
+                        });
+
+                    std::array<bool, kRouterExperts> oracle_set{};
+                    for (const std::int32_t id : expected_i32) {
+                        if (id >= 0 &&
+                            id < static_cast<std::int32_t>(kRouterExperts)) {
+                            oracle_set[static_cast<std::size_t>(id)] = true;
+                        }
+                    }
+                    bool reference_set_matches_oracle = true;
+                    for (std::size_t i = 0; i < 10; ++i) {
+                        if (!oracle_set[
+                                static_cast<std::size_t>(reference_rank[i])]) {
+                            reference_set_matches_oracle = false;
+                            break;
+                        }
+                    }
+
+                    const double cutoff_margin =
+                        reference_scores[
+                            static_cast<std::size_t>(reference_rank[9])] -
+                        reference_scores[
+                            static_cast<std::size_t>(reference_rank[10])];
+
+                    double min_oracle_top10_gap =
+                        std::numeric_limits<double>::infinity();
+                    for (std::size_t i = 1;
+                         i < std::min<std::size_t>(10, expected_i32.size());
+                         ++i) {
+                        const auto lhs =
+                            static_cast<std::size_t>(expected_i32[i - 1]);
+                        const auto rhs =
+                            static_cast<std::size_t>(expected_i32[i]);
+                        min_oracle_top10_gap = std::min(
+                            min_oracle_top10_gap,
+                            std::abs(reference_scores[lhs] -
+                                     reference_scores[rhs]));
+                    }
+
+                    long double score_error_sq = 0.0L;
+                    double score_max_error = 0.0;
+                    for (std::size_t expert = 0;
+                         expert < kRouterExperts; ++expert) {
+                        const double error =
+                            static_cast<double>(last_router_scores[expert]) -
+                            reference_scores[expert];
+                        score_error_sq +=
+                            static_cast<long double>(error) * error;
+                        score_max_error =
+                            std::max(score_max_error, std::abs(error));
+                    }
+                    const double score_rms_error = std::sqrt(
+                        static_cast<double>(
+                            score_error_sq /
+                            static_cast<long double>(kRouterExperts)));
+                    const double cutoff_over_max_error =
+                        score_max_error > 0.0
+                            ? cutoff_margin / score_max_error
+                            : std::numeric_limits<double>::infinity();
+                    const double cutoff_over_rms_error =
+                        score_rms_error > 0.0
+                            ? cutoff_margin / score_rms_error
+                            : std::numeric_limits<double>::infinity();
+                    const double top10_gap_over_max_error =
+                        score_max_error > 0.0
+                            ? min_oracle_top10_gap / score_max_error
+                            : std::numeric_limits<double>::infinity();
+
+                    std::cout << std::fixed << std::setprecision(8)
+                              << "phase11.router_margin.position="
+                              << current_stage_trace_position
+                              << " stage=" << name
+                              << " same_expert_set="
+                              << (same_expert_set ? 1 : 0)
+                              << " reference_set_matches_oracle="
+                              << (reference_set_matches_oracle ? 1 : 0)
+                              << " cutoff_margin=" << cutoff_margin
+                              << " min_oracle_top10_gap="
+                              << min_oracle_top10_gap
+                              << " score_max_error=" << score_max_error
+                              << " score_rms_error=" << score_rms_error
+                              << " cutoff_over_max_error="
+                              << cutoff_over_max_error
+                              << " cutoff_over_rms_error="
+                              << cutoff_over_rms_error
+                              << " top10_gap_over_max_error="
+                              << top10_gap_over_max_error
+                              << '\n' << std::flush;
+                }
             }
 
             if (!pass &&
