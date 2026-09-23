@@ -35,9 +35,12 @@ struct FusedOneWindowArgs {
 
 cudaError_t launch_fused_state_output_dv16(const FusedOneWindowArgs& args,
                                             cudaStream_t stream);
+cudaError_t launch_fused_state_output_dv32(const FusedOneWindowArgs& args,
+                                            cudaStream_t stream);
 
 #if defined(__CUDACC__)
 __global__ void fused_state_output_dv16_kernel(FusedOneWindowArgs args);
+__global__ void fused_state_output_dv32_kernel(FusedOneWindowArgs args);
 #endif
 
 } // namespace ninfer::ops::detail::gated_delta_net::volta

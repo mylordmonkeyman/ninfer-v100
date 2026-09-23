@@ -215,8 +215,10 @@ struct DeviceBuffers {
     float* state_input = nullptr;
     float* state_baseline = nullptr;
     float* state_grouped = nullptr;
+    float* state_dv32 = nullptr;
     std::uint16_t* output_baseline = nullptr;
     std::uint16_t* output_grouped = nullptr;
+    std::uint16_t* output_dv32 = nullptr;
     float* q_inv = nullptr;
     float* k_inv = nullptr;
     float* kk = nullptr;
@@ -231,8 +233,10 @@ struct DeviceBuffers {
         cudaFree(state_input);
         cudaFree(state_baseline);
         cudaFree(state_grouped);
+        cudaFree(state_dv32);
         cudaFree(output_baseline);
         cudaFree(output_grouped);
+        cudaFree(output_dv32);
         cudaFree(q_inv);
         cudaFree(k_inv);
         cudaFree(kk);
@@ -262,10 +266,14 @@ bool allocate_buffers(DeviceBuffers& d, const HostCase& data) {
                 "cudaMalloc baseline state") &&
         cuda_ok(cudaMalloc(&d.state_grouped, data.state.size() * sizeof(float)),
                 "cudaMalloc grouped state") &&
+        cuda_ok(cudaMalloc(&d.state_dv32, data.state.size() * sizeof(float)),
+                "cudaMalloc dv32 state") &&
         cuda_ok(cudaMalloc(&d.output_baseline, output_elements * sizeof(std::uint16_t)),
                 "cudaMalloc baseline output") &&
         cuda_ok(cudaMalloc(&d.output_grouped, output_elements * sizeof(std::uint16_t)),
                 "cudaMalloc grouped output") &&
+        cuda_ok(cudaMalloc(&d.output_dv32, output_elements * sizeof(std::uint16_t)),
+                "cudaMalloc dv32 output") &&
         cuda_ok(cudaMalloc(&d.q_inv, norm_elements * sizeof(float)), "cudaMalloc q inv") &&
         cuda_ok(cudaMalloc(&d.k_inv, norm_elements * sizeof(float)), "cudaMalloc k inv") &&
         cuda_ok(cudaMalloc(&d.kk, tile_elements * sizeof(float)), "cudaMalloc kk") &&
@@ -320,8 +328,10 @@ bool close_enough(double got, double expected, double abs_tol, double rel_tol) {
 int compare_results(const HostCase& data, const ReferenceResult& reference,
                     const std::vector<std::uint16_t>& baseline_output,
                     const std::vector<std::uint16_t>& grouped_output,
+                    const std::vector<std::uint16_t>& dv32_output,
                     const std::vector<float>& baseline_state,
-                    const std::vector<float>& grouped_state) {
+                    const std::vector<float>& grouped_state,
+                    const std::vector<float>& dv32_state) {
     if (baseline_output != grouped_output) {
         for (std::size_t i = 0; i < baseline_output.size(); ++i) {
             if (baseline_output[i] != grouped_output[i]) {
@@ -344,49 +354,59 @@ int compare_results(const HostCase& data, const ReferenceResult& reference,
         }
     }
 
-    double worst_output_abs = 0.0;
-    double worst_state_abs = 0.0;
-    std::size_t worst_output_index = 0;
-    std::size_t worst_state_index = 0;
+    const auto check_backend =
+        [&](std::string_view name, const std::vector<std::uint16_t>& output,
+            const std::vector<float>& state) {
+            double worst_output_abs = 0.0;
+            double worst_state_abs = 0.0;
+            std::size_t worst_output_index = 0;
+            std::size_t worst_state_index = 0;
 
-    for (std::size_t i = 0; i < baseline_output.size(); ++i) {
-        const double got =
-            static_cast<double>(bf16_to_float_host(baseline_output[i]));
-        const double expected = reference.output[i];
-        const double error = std::abs(got - expected);
-        if (error > worst_output_abs) {
-            worst_output_abs = error;
-            worst_output_index = i;
-        }
-        if (!close_enough(got, expected, 0.015, 0.04)) {
-            std::cerr << "FP64 oracle output mismatch at " << i
-                      << " got=" << got << " expected=" << expected
-                      << " abs_error=" << error << "\n";
-            return 1;
-        }
+            for (std::size_t i = 0; i < output.size(); ++i) {
+                const double got =
+                    static_cast<double>(bf16_to_float_host(output[i]));
+                const double expected = reference.output[i];
+                const double error = std::abs(got - expected);
+                if (error > worst_output_abs) {
+                    worst_output_abs = error;
+                    worst_output_index = i;
+                }
+                if (!close_enough(got, expected, 0.015, 0.04)) {
+                    std::cerr << name << " FP64 oracle output mismatch at " << i
+                              << " got=" << got << " expected=" << expected
+                              << " abs_error=" << error << "\n";
+                    return false;
+                }
+            }
+
+            for (std::size_t i = 0; i < state.size(); ++i) {
+                const double got = static_cast<double>(state[i]);
+                const double expected = reference.state[i];
+                const double error = std::abs(got - expected);
+                if (error > worst_state_abs) {
+                    worst_state_abs = error;
+                    worst_state_index = i;
+                }
+                if (!close_enough(got, expected, 0.015, 0.04)) {
+                    std::cerr << name << " FP64 oracle state mismatch at " << i
+                              << " got=" << got << " expected=" << expected
+                              << " abs_error=" << error << "\n";
+                    return false;
+                }
+            }
+
+            std::cout << name << " tokens=" << data.tokens
+                      << " worst_output_abs=" << worst_output_abs
+                      << " @" << worst_output_index
+                      << " worst_state_abs=" << worst_state_abs
+                      << " @" << worst_state_index << "\n";
+            return true;
+        };
+
+    if (!check_backend("dv16", baseline_output, baseline_state) ||
+        !check_backend("dv32", dv32_output, dv32_state)) {
+        return 1;
     }
-
-    for (std::size_t i = 0; i < baseline_state.size(); ++i) {
-        const double got = static_cast<double>(baseline_state[i]);
-        const double expected = reference.state[i];
-        const double error = std::abs(got - expected);
-        if (error > worst_state_abs) {
-            worst_state_abs = error;
-            worst_state_index = i;
-        }
-        if (!close_enough(got, expected, 0.015, 0.04)) {
-            std::cerr << "FP64 oracle state mismatch at " << i
-                      << " got=" << got << " expected=" << expected
-                      << " abs_error=" << error << "\n";
-            return 1;
-        }
-    }
-
-    std::cout << "tokens=" << data.tokens
-              << " worst_output_abs=" << worst_output_abs
-              << " @" << worst_output_index
-              << " worst_state_abs=" << worst_state_abs
-              << " @" << worst_state_index << "\n";
     return 0;
 }
 
@@ -414,13 +434,19 @@ int run_case(int tokens, bool zero_state) {
                         d.state_grouped, d.output_grouped)) {
         return 1;
     }
+    if (!launch_backend(volta::launch_fused_state_output_dv32, d, data,
+                        d.state_dv32, d.output_dv32)) {
+        return 1;
+    }
 
     const std::size_t output_elements =
         static_cast<std::size_t>(tokens) * kValueHeads * kDim;
     std::vector<std::uint16_t> baseline_output(output_elements);
     std::vector<std::uint16_t> grouped_output(output_elements);
+    std::vector<std::uint16_t> dv32_output(output_elements);
     std::vector<float> baseline_state(data.state.size());
     std::vector<float> grouped_state(data.state.size());
+    std::vector<float> dv32_state(data.state.size());
 
     if (!cuda_ok(cudaMemcpy(baseline_output.data(), d.output_baseline,
                             baseline_output.size() * sizeof(std::uint16_t),
@@ -428,17 +454,23 @@ int run_case(int tokens, bool zero_state) {
         !cuda_ok(cudaMemcpy(grouped_output.data(), d.output_grouped,
                             grouped_output.size() * sizeof(std::uint16_t),
                             cudaMemcpyDeviceToHost), "copy grouped output") ||
+        !cuda_ok(cudaMemcpy(dv32_output.data(), d.output_dv32,
+                            dv32_output.size() * sizeof(std::uint16_t),
+                            cudaMemcpyDeviceToHost), "copy dv32 output") ||
         !cuda_ok(cudaMemcpy(baseline_state.data(), d.state_baseline,
                             baseline_state.size() * sizeof(float),
                             cudaMemcpyDeviceToHost), "copy baseline state") ||
         !cuda_ok(cudaMemcpy(grouped_state.data(), d.state_grouped,
                             grouped_state.size() * sizeof(float),
-                            cudaMemcpyDeviceToHost), "copy grouped state")) {
+                            cudaMemcpyDeviceToHost), "copy grouped state") ||
+        !cuda_ok(cudaMemcpy(dv32_state.data(), d.state_dv32,
+                            dv32_state.size() * sizeof(float),
+                            cudaMemcpyDeviceToHost), "copy dv32 state")) {
         return 1;
     }
 
-    return compare_results(data, reference, baseline_output, grouped_output,
-                           baseline_state, grouped_state);
+    return compare_results(data, reference, baseline_output, grouped_output, dv32_output,
+                           baseline_state, grouped_state, dv32_state);
 }
 
 void print_resources() {

@@ -68,6 +68,31 @@ cudaError_t configure_grouped_dv16() {
         &active_blocks, fused_grouped_dv16_kernel, kThreads, kDynamicSmem);
 }
 
+
+cudaError_t configure_dv32(KernelResources& out) {
+    constexpr int kThreads = GdnSchedule<32>::kThreads;
+    constexpr std::size_t kDynamicSmem = FusedSharedLayout<32>::Bytes;
+
+    cudaError_t status = cudaFuncSetAttribute(
+        fused_state_output_dv32_kernel, cudaFuncAttributePreferredSharedMemoryCarveout,
+        cudaSharedmemCarveoutMaxShared);
+    if (status != cudaSuccess) { return status; }
+
+    cudaFuncAttributes attrs{};
+    status = cudaFuncGetAttributes(&attrs, fused_state_output_dv32_kernel);
+    if (status != cudaSuccess) { return status; }
+
+    int active_blocks = 0;
+    status = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &active_blocks, fused_state_output_dv32_kernel, kThreads, kDynamicSmem);
+    if (status != cudaSuccess) { return status; }
+
+    out.registers_per_thread = attrs.numRegs;
+    out.active_blocks_per_sm = active_blocks;
+    out.dynamic_smem = kDynamicSmem;
+    return cudaSuccess;
+}
+
 cudaError_t configure_dv16(KernelResources& out) {
     constexpr int kThreads = GdnSchedule<16>::kThreads;
     constexpr std::size_t kDynamicSmem = FusedSharedLayout<16>::Bytes;
@@ -102,7 +127,7 @@ cudaError_t initialize_runtime() {
     cudaError_t status = configure_dv16(resources.dv16);
     if (status != cudaSuccess) { return status; }
 
-    status = configure_probe<32>(resources.dv32);
+    status = configure_dv32(resources.dv32);
     if (status != cudaSuccess) { return status; }
 
     status = configure_grouped_dv16();
