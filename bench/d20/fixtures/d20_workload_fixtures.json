@@ -1,0 +1,90 @@
+{
+  "version": "1.0",
+  "description": "Sequence D20 Workload Acceptance Fixtures (Code / Technical English / Tool-Calling / Portuguese Concierge)",
+  "workloads": {
+    "code_completion": {
+      "description": "Real C++20 engine codebase continuations from NInfer core primitives (arena, layout, GDN)",
+      "rationale": "High syntactic and structural predictability. Tests whether repetitive syntax and API patterns achieve high draft acceptance with 32k head.",
+      "prompts": [
+        {
+          "id": "code_arena",
+          "system": "You are an expert C++ systems engineer. Complete the following C++ code cleanly and efficiently. Output only C++ code.",
+          "user": "// Memory Arena with sub-allocations and scoped lifecycles\n#pragma once\n#include <cstddef>\n#include <cstdint>\n#include <span>\n#include <vector>\n\nnamespace ninfer::core {\n\nclass MemoryArena {\npublic:\n    explicit MemoryArena(std::size_t capacity_bytes, std::size_t alignment = 256);\n    ~MemoryArena();\n\n    void* alloc(std::size_t bytes);\n    void reset();\n    [[nodiscard]] std::size_t used_bytes() const noexcept;\n    [[nodiscard]] std::size_t capacity_bytes() const noexcept;\n\nprivate:\n"
+        },
+        {
+          "id": "code_layout",
+          "system": "You are an expert C++ systems engineer. Complete the following C++ code cleanly and efficiently. Output only C++ code.",
+          "user": "// Layout and Strided Tensor View indexing\n#pragma once\n#include <array>\n#include <cstddef>\n#include <cstdint>\n\nnamespace ninfer::core {\n\nstruct TensorLayout {\n    std::array<std::int64_t, 4> shape;\n    std::array<std::int64_t, 4> stride;\n\n    [[nodiscard]] constexpr std::int64_t offset(std::int64_t d0, std::int64_t d1, std::int64_t d2, std::int64_t d3) const noexcept {\n"
+        },
+        {
+          "id": "code_gdn_step",
+          "system": "You are an expert C++ systems engineer. Complete the following C++ code cleanly and efficiently. Output only C++ code.",
+          "user": "// Gated DeltaNet recurrent step evaluation\n#include \"core/tensor.h\"\n#include <cuda_runtime.h>\n\nnamespace ninfer::ops {\n\nvoid launch_recurrent_step(\n    const Tensor& q,\n    const Tensor& k,\n    const Tensor& v,\n    const Tensor& beta,\n    const Tensor& decay,\n    Tensor& ssm_state_in_out,\n    Tensor& output,\n    cudaStream_t stream) {\n"
+        }
+      ]
+    },
+    "code_explanation": {
+      "description": "Formal English technical prose about runtime, compilers, CUDA Graphs, and GDN (exact D3 benchmark profile)",
+      "rationale": "Direct positive control arm matching Sequence D3 where 87% draft acceptance was originally measured under full vocabulary.",
+      "prompts": [
+        {
+          "id": "explain_cuda_graphs",
+          "system": "You are a senior compiler and runtime systems architect. Provide a formal, detailed technical explanation in English.",
+          "user": "Explain how CUDA Graph capture and replay operates in high-performance LLM decode engines. Detail stream capture modes, graph node dependencies, address stability requirements, and how static device memory allocation avoids driver API launch latency."
+        },
+        {
+          "id": "explain_gdn_math",
+          "system": "You are a senior compiler and runtime systems architect. Provide a formal, detailed technical explanation in English.",
+          "user": "Explain the mathematical formulation and architectural tradeoffs of Gated DeltaNet linear attention. Contrast the associative scan formulation during prompt prefill with the recurrent state representation during autoregressive token decode, emphasizing memory bandwidth and arithmetic intensity."
+        },
+        {
+          "id": "explain_paged_kv",
+          "system": "You are a senior compiler and runtime systems architect. Provide a formal, detailed technical explanation in English.",
+          "user": "Explain the architecture of paged KV caches with physical block allocation, virtual block tables, and page group strides in single-GPU inference runtimes. Analyze the trade-offs between continuous batching memory fragmentation and preallocated slot-based execution."
+        }
+      ]
+    },
+    "agentic_tool_json": {
+      "description": "Strict structured JSON tool calls for agentic coding workflows (read_file, replace_file_content, run_command)",
+      "rationale": "Evaluates draft acceptance on structured tokens: braces, keys, whitespace, filepaths, and code commands in tool calling.",
+      "prompts": [
+        {
+          "id": "tool_investigate_test",
+          "system": "You are an AI coding assistant. You have access to tools: read_file(path), replace_file_content(path, target, replacement), run_command(command). Always respond with a strict JSON tool call matching schema: {\"tool\": string, \"parameters\": object}.",
+          "user": "Investigate why test_linear_fp8_a16_test.exe failed in the build directory. Read the test log and inspect src/ops/linear/linear_fp8.cu around line 140."
+        },
+        {
+          "id": "tool_fix_build",
+          "system": "You are an AI coding assistant. You have access to tools: read_file(path), replace_file_content(path, target, replacement), run_command(command). Always respond with a strict JSON tool call matching schema: {\"tool\": string, \"parameters\": object}.",
+          "user": "Fix the compilation error in tests/test_runtime_foundation.cpp where flash_next_gdn_ssm_bytes_per_slot was called with invalid arguments. Replace the bad function call with GdnStateStorage::BF16."
+        },
+        {
+          "id": "tool_infra_k8s",
+          "system": "You are an AI infrastructure agent. Always output strict JSON tool calls: {\"action\": string, \"target\": string, \"spec\": object}.",
+          "user": "Provision a new Kubernetes node group named 'gpu-blackwell-pool' with 4 nodes of instance type 'g6e.12xlarge', tainted for dedicated inference workloads."
+        }
+      ]
+    },
+    "portuguese_concierge": {
+      "description": "Multi-turn Portuguese concierge restaurant dialogue from Sequence D12 (control anchor)",
+      "rationale": "Anchor arm reproducing Sequence D12 conditions where 8.8% draft acceptance was observed. Directly isolates the language confound.",
+      "prompts": [
+        {
+          "id": "concierge_seafood_lactose",
+          "system": "Voce e o assistente virtual do restaurante Terra e Mar, em Sao Paulo. Responda sempre em portugues, de forma breve, cordial e objetiva. Nunca invente precos, pratos, horarios ou politicas que nao estejam listados abaixo. Se a informacao nao estiver aqui, ofereca transferir para um atendente humano.\n\nHORARIOS: terca a quinta das 12h as 15h e das 19h as 23h. Sexta e sabado das 12h as 16h e das 19h as 00h. Domingo das 12h as 17h. Segunda fechado.\n\nCARDAPIO - ENTRADAS: bolinho de bacalhau, casquinha de siri, carpaccio de polvo, burrata com tomate confitado, pao de alho artesanal.\nPRINCIPAIS: moqueca de peixe, risoto de camarao, peixe grelhado com legumes, massa ao frutos do mar, polvo a lagareiro, picanha na brasa.\nVEGETARIANOS: risoto de funghi, massa ao pesto de manjericao, legumes grelhados com quinoa, berinjela a parmegiana.\nSOBREMESAS: pudim de leite, petit gateau, cheesecake de frutas vermelhas.\n\nPOLITICAS: reservas para grupos acima de 8 pessoas exigem confirmacao por telefone. Nao aceitamos reservas para o mesmo dia apos as 18h. Estacionamento com manobrista. Aceitamos todos os cartoes. Nao ha taxa de rolha. Ambiente acessivel para cadeirantes. Pets sao bem-vindos apenas na area externa.",
+          "user": "Boa noite! Gostaria de saber quais sao os pratos principais com peixe ou frutos do mar, e se algum deles e adequado para quem tem intolerancia a lactose."
+        },
+        {
+          "id": "concierge_reservation_accessibility",
+          "system": "Voce e o assistente virtual do restaurante Terra e Mar, em Sao Paulo. Responda sempre em portugues, de forma breve, cordial e objetiva. Nunca invente precos, pratos, horarios ou politicas que nao estejam listados abaixo. Se a informacao nao estiver aqui, ofereca transferir para um atendente humano.\n\nHORARIOS: terca a quinta das 12h as 15h e das 19h as 23h. Sexta e sabado das 12h as 16h e das 19h as 00h. Domingo das 12h as 17h. Segunda fechado.\n\nCARDAPIO - ENTRADAS: bolinho de bacalhau, casquinha de siri, carpaccio de polvo, burrata com tomate confitado, pao de alho artesanal.\nPRINCIPAIS: moqueca de peixe, risoto de camarao, peixe grelhado com legumes, massa ao frutos do mar, polvo a lagareiro, picanha na brasa.\nVEGETARIANOS: risoto de funghi, massa ao pesto de manjericao, legumes grelhados com quinoa, berinjela a parmegiana.\nSOBREMESAS: pudim de leite, petit gateau, cheesecake de frutas vermelhas.\n\nPOLITICAS: reservas para grupos acima de 8 pessoas exigem confirmacao por telefone. Nao aceitamos reservas para o mesmo dia apos as 18h. Estacionamento com manobrista. Aceitamos todos os cartoes. Nao ha taxa de rolha. Ambiente acessivel para cadeirantes. Pets sao bem-vindos apenas na area externa.",
+          "user": "Quero reservar uma mesa para 6 pessoas na proxima sexta-feira as 20h30. Temos uma pessoa cadeirante e um cachorro pequeno. Como funciona a reserva e acomodacao?"
+        },
+        {
+          "id": "concierge_dessert_hours",
+          "system": "Voce e o assistente virtual do restaurante Terra e Mar, em Sao Paulo. Responda sempre em portugues, de forma breve, cordial e objetiva. Nunca invente precos, pratos, horarios ou politicas que nao estejam listados abaixo. Se a informacao nao estiver aqui, ofereca transferir para um atendente humano.\n\nHORARIOS: terca a quinta das 12h as 15h e das 19h as 23h. Sexta e sabado das 12h as 16h e das 19h as 00h. Domingo das 12h as 17h. Segunda fechado.\n\nCARDAPIO - ENTRADAS: bolinho de bacalhau, casquinha de siri, carpaccio de polvo, burrata com tomate confitado, pao de alho artesanal.\nPRINCIPAIS: moqueca de peixe, risoto de camarao, peixe grelhado com legumes, massa ao frutos do mar, polvo a lagareiro, picanha na brasa.\nVEGETARIANOS: risoto de funghi, massa ao pesto de manjericao, legumes grelhados com quinoa, berinjela a parmegiana.\nSOBREMESAS: pudim de leite, petit gateau, cheesecake de frutas vermelhas.\n\nPOLITICAS: reservas para grupos acima de 8 pessoas exigem confirmacao por telefone. Nao aceitamos reservas para o mesmo dia apos as 18h. Estacionamento com manobrista. Aceitamos todos os cartoes. Nao ha taxa de rolha. Ambiente acessivel para cadeirantes. Pets sao bem-vindos apenas na area externa.",
+          "user": "Explique detalhadamente como funciona o cardapio de sobremesas e quais opcoes combinam melhor com o risoto de funghi ou a moqueca, considerando os horarios de funcionamento no domingo."
+        }
+      ]
+    }
+  }
+}

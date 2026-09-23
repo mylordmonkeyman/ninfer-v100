@@ -1,0 +1,438 @@
+#include "targets/qwen3_8_flash_next/impl/gdn_kernels.h"
+
+#include "core/device.h"
+#include "ops/common/math.cuh"
+#include "ops/common/warp.cuh"
+#if defined(NINFER_VOLTA_BUILD)
+#include "ops/linear/fp8/fp8_config.h"
+#include "ops/linear/fp8/fp8_gemv.cuh"
+#endif
+
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
+
+#include <cstdint>
+#include <stdexcept>
+#include <type_traits>
+
+namespace ninfer::targets::qwen3_8_flash_next::detail {
+namespace {
+
+constexpr int kQkRows       = 2'048;
+constexpr int kValueRows    = 6'144;
+constexpr int kConvChannels = 10'240;
+constexpr int kProjected    = 16'384;
+
+template <typename OutputT>
+__device__ __forceinline__ void store_conv_activation(OutputT* destination, float value) {
+    if constexpr (std::is_same_v<OutputT, float>) {
+        *destination = value;
+    } else {
+        *destination = __float2bfloat16_rn(value);
+    }
+}
+
+#if defined(NINFER_VOLTA_BUILD)
+struct FlashNextFp32MirrorOutput {
+    float* fp32;
+    __nv_bfloat16* bf16;
+    std::int32_t rows;
+
+    __device__ __forceinline__ void store(std::int32_t parent_row, std::int32_t token,
+                                          float value) const {
+        const std::int64_t index =
+            static_cast<std::int64_t>(token) * rows + parent_row;
+        fp32[index] = value;
+        bf16[index] = __float2bfloat16_rn(value);
+    }
+};
+
+struct FlashNextFp32ProjectConvOutput {
+    __nv_bfloat16* projected;
+    const __nv_bfloat16* convolution;
+    const std::int32_t* source_slots;
+    const std::int32_t* destination_slots;
+    __nv_bfloat16* states;
+    float* query;
+    float* key;
+    float* value;
+    __nv_bfloat16* z;
+
+    __device__ __forceinline__ void store(std::int32_t parent_row, std::int32_t token,
+                                          float current) const {
+        (void)token;
+        const __nv_bfloat16 current_bf16 = __float2bfloat16_rn(current);
+        projected[parent_row] = current_bf16;
+
+        if (parent_row >= kConvChannels) {
+            z[parent_row - kConvChannels] = current_bf16;
+            return;
+        }
+
+        const std::int32_t source = source_slots[0];
+        const std::int32_t destination = destination_slots[0];
+        const std::int64_t source_base =
+            static_cast<std::int64_t>(source) * kConvChannels * 3;
+        const std::int64_t destination_base =
+            static_cast<std::int64_t>(destination) * kConvChannels * 3;
+
+        const float h0 = __bfloat162float(states[source_base + parent_row]);
+        const float h1 =
+            __bfloat162float(states[source_base + kConvChannels + parent_row]);
+        const float h2 =
+            __bfloat162float(states[source_base + 2LL * kConvChannels + parent_row]);
+        float sum = h0 * __bfloat162float(convolution[parent_row]);
+        sum = fmaf(h1, __bfloat162float(convolution[kConvChannels + parent_row]), sum);
+        sum = fmaf(h2, __bfloat162float(convolution[2LL * kConvChannels + parent_row]), sum);
+        sum = fmaf(current,
+                   __bfloat162float(convolution[3LL * kConvChannels + parent_row]), sum);
+
+        states[destination_base + parent_row] =
+            states[source_base + kConvChannels + parent_row];
+        states[destination_base + kConvChannels + parent_row] =
+            states[source_base + 2LL * kConvChannels + parent_row];
+        states[destination_base + 2LL * kConvChannels + parent_row] = current_bf16;
+
+        const float activated = ops::silu(sum);
+        if (parent_row < kQkRows) {
+            query[parent_row] = activated;
+        } else if (parent_row < 2 * kQkRows) {
+            key[parent_row - kQkRows] = activated;
+        } else {
+            value[parent_row - 2 * kQkRows] = activated;
+        }
+    }
+};
+#endif
+
+template <typename OutputT>
+__global__ void conv_split_kernel(
+    const __nv_bfloat16* __restrict__ projected, const __nv_bfloat16* __restrict__ convolution,
+    const std::int32_t* __restrict__ source_slots,
+    const std::int32_t* __restrict__ destination_slots, __nv_bfloat16* __restrict__ states,
+    OutputT* __restrict__ query, OutputT* __restrict__ key,
+    OutputT* __restrict__ value, __nv_bfloat16* __restrict__ z,
+    int batch_offset = 0) {
+    const int channel =
+        static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    const int batch = static_cast<int>(blockIdx.y) + batch_offset;
+    if (channel >= kConvChannels) { return; }
+    const int source               = source_slots[batch];
+    const int destination          = destination_slots[batch];
+    const std::int64_t source_base = static_cast<std::int64_t>(source) * kConvChannels * 3;
+    const std::int64_t destination_base =
+        static_cast<std::int64_t>(destination) * kConvChannels * 3;
+    const float h0          = __bfloat162float(states[source_base + channel]);
+    const float h1          = __bfloat162float(states[source_base + kConvChannels + channel]);
+    const float h2          = __bfloat162float(states[source_base + 2 * kConvChannels + channel]);
+    const auto current_bf16 = projected[static_cast<std::int64_t>(batch) * kProjected + channel];
+    const float current     = __bfloat162float(current_bf16);
+    float sum               = h0 * __bfloat162float(convolution[channel]);
+    sum                     = fmaf(h1, __bfloat162float(convolution[kConvChannels + channel]), sum);
+    sum = fmaf(h2, __bfloat162float(convolution[2 * kConvChannels + channel]), sum);
+    sum = fmaf(current, __bfloat162float(convolution[3 * kConvChannels + channel]), sum);
+    states[destination_base + channel] = states[source_base + kConvChannels + channel];
+    states[destination_base + kConvChannels + channel] =
+        states[source_base + 2 * kConvChannels + channel];
+    states[destination_base + 2 * kConvChannels + channel] = current_bf16;
+    const float activated            = ops::silu(sum);
+    const std::int64_t batch_qk = static_cast<std::int64_t>(batch) * kQkRows;
+    const std::int64_t batch_v  = static_cast<std::int64_t>(batch) * kValueRows;
+    if (channel < kQkRows) {
+        store_conv_activation(query + batch_qk + channel, activated);
+    } else if (channel < 2 * kQkRows) {
+        store_conv_activation(key + batch_qk + channel - kQkRows, activated);
+    } else {
+        store_conv_activation(value + batch_v + channel - 2 * kQkRows, activated);
+    }
+    if (channel < kValueRows) {
+        z[batch_v + channel] =
+            projected[static_cast<std::int64_t>(batch) * kProjected + kConvChannels + channel];
+    }
+}
+
+__global__ void controls_kernel(const __nv_bfloat16* __restrict__ input,
+                                const __nv_bfloat16* __restrict__ weight,
+                                const __nv_bfloat16* __restrict__ a_log,
+                                const __nv_bfloat16* __restrict__ dt_bias, float* __restrict__ g,
+                                float* __restrict__ beta) {
+    const int batch = static_cast<int>(blockIdx.y);
+    const int warp  = static_cast<int>(threadIdx.x) >> 5;
+    const int lane  = static_cast<int>(threadIdx.x) & 31;
+    const int head  = static_cast<int>(blockIdx.x) * 8 + warp;
+    const auto* x   = input + static_cast<std::int64_t>(batch) * 2'560;
+    float a         = 0.0F;
+    float b         = 0.0F;
+    for (int column = lane; column < 2'560; column += 32) {
+        const float v = __bfloat162float(x[column]);
+        a = fmaf(__bfloat162float(weight[static_cast<std::int64_t>(head) * 2'560 + column]), v, a);
+        b = fmaf(__bfloat162float(weight[static_cast<std::int64_t>(head + 48) * 2'560 + column]), v,
+                 b);
+    }
+    a = ops::warp_reduce_sum(a);
+    b = ops::warp_reduce_sum(b);
+    if (lane == 0) {
+        const std::int64_t index = static_cast<std::int64_t>(batch) * 48 + head;
+        g[index]                 = -expf(__bfloat162float(a_log[head])) *
+                   ops::softplus(a + __bfloat162float(dt_bias[head]));
+        beta[index] = ops::sigmoid(b);
+    }
+}
+
+template <typename RecurrentT>
+__device__ __forceinline__ float recurrent_to_float(RecurrentT value) {
+    if constexpr (std::is_same_v<RecurrentT, float>) {
+        return value;
+    } else {
+        return __bfloat162float(value);
+    }
+}
+
+template <typename RecurrentT>
+__global__ void output_gate_kernel(const RecurrentT* __restrict__ recurrent,
+                                   const __nv_bfloat16* __restrict__ z,
+                                   const __nv_bfloat16* __restrict__ norm,
+                                   __nv_bfloat16* __restrict__ gated) {
+    __shared__ float squares[4];
+    const int head          = static_cast<int>(blockIdx.x);
+    const int batch         = static_cast<int>(blockIdx.y);
+    const int lane          = static_cast<int>(threadIdx.x) & 31;
+    const int warp          = static_cast<int>(threadIdx.x) >> 5;
+    const int dim           = warp * 32 + lane;
+    const std::int64_t base = static_cast<std::int64_t>(batch) * kValueRows + head * 128;
+    const float x           = recurrent_to_float(recurrent[base + dim]);
+    float square            = ops::warp_reduce_sum(x * x);
+    if (lane == 0) { squares[warp] = square; }
+    __syncthreads();
+    const float sum        = squares[0] + squares[1] + squares[2] + squares[3];
+    const float normalized = x * rsqrtf(sum / 128.0F + 1.0e-6F) * __bfloat162float(norm[dim]);
+    gated[base + dim] =
+        __float2bfloat16_rn(normalized * ops::sigmoid(__bfloat162float(z[base + dim])));
+}
+
+#if defined(NINFER_VOLTA_BUILD)
+template <typename RecurrentT>
+__global__ void output_gate_fp32_mirror_kernel(
+    const RecurrentT* __restrict__ recurrent, const __nv_bfloat16* __restrict__ z,
+    const __nv_bfloat16* __restrict__ norm, float* __restrict__ gated_fp32,
+    __nv_bfloat16* __restrict__ gated_bf16) {
+    __shared__ float squares[4];
+    const int head          = static_cast<int>(blockIdx.x);
+    const int batch         = static_cast<int>(blockIdx.y);
+    const int lane          = static_cast<int>(threadIdx.x) & 31;
+    const int warp          = static_cast<int>(threadIdx.x) >> 5;
+    const int dim           = warp * 32 + lane;
+    const std::int64_t base = static_cast<std::int64_t>(batch) * kValueRows + head * 128;
+    const float x           = recurrent_to_float(recurrent[base + dim]);
+    float square            = ops::warp_reduce_sum(x * x);
+    if (lane == 0) { squares[warp] = square; }
+    __syncthreads();
+    const float sum        = squares[0] + squares[1] + squares[2] + squares[3];
+    const float normalized = x * rsqrtf(sum / 128.0F + 1.0e-6F) * __bfloat162float(norm[dim]);
+    const float gated      = normalized * ops::sigmoid(__bfloat162float(z[base + dim]));
+    gated_fp32[base + dim] = gated;
+    gated_bf16[base + dim] = __float2bfloat16_rn(gated);
+}
+#endif
+
+} // namespace
+
+#if defined(NINFER_VOLTA_BUILD)
+void flash_next_gdn_project_conv_fp32_launch(
+    const Tensor& input, const Weight& projection, FlashNextGdnWorkspace& scratch,
+    const Tensor& convolution, const Tensor& source_slots, const Tensor& destination_slots,
+    Tensor& convolution_states, cudaStream_t stream) {
+    using Geometry = ::ninfer::ops::detail::Fp8FlashNextGdnInputGeometry;
+    using Schedule =
+        typename ::ninfer::ops::detail::Fp8LinearDecodeProductionSchedule<Geometry>::Type;
+    if (input.dtype != DType::BF16 || input.ne[0] != Geometry::kInputRows || input.ne[1] != 1 ||
+        projection.qtype != QType::FP8_E4M3FN_ROW_F32S ||
+        projection.n != Geometry::kOutputRows || projection.k != Geometry::kInputRows ||
+        projection.scale_dtype != DType::FP32 ||
+        scratch.projected.dtype != DType::BF16 || scratch.projected.ne[0] != kProjected ||
+        scratch.projected.ne[1] != 1 ||
+        scratch.query.dtype != DType::FP32 || scratch.key.dtype != DType::FP32 ||
+        scratch.value.dtype != DType::FP32 || scratch.z.dtype != DType::BF16 ||
+        convolution.dtype != DType::BF16 || convolution.ne[0] != kConvChannels ||
+        convolution.ne[1] != 4 || source_slots.dtype != DType::I32 ||
+        destination_slots.dtype != DType::I32 || source_slots.ne[0] != 1 ||
+        destination_slots.ne[0] != 1 || convolution_states.dtype != DType::BF16) {
+        throw std::invalid_argument(
+            "Flash-Next FP32 projection-conv diagnostic received an invalid T=1 view");
+    }
+
+    constexpr int kBlocks = Geometry::kOutputRows / Schedule::kRowsPerCta;
+    const FlashNextFp32ProjectConvOutput output{
+        static_cast<__nv_bfloat16*>(scratch.projected.data),
+        static_cast<const __nv_bfloat16*>(convolution.data),
+        static_cast<const std::int32_t*>(source_slots.data),
+        static_cast<const std::int32_t*>(destination_slots.data),
+        static_cast<__nv_bfloat16*>(convolution_states.data),
+        static_cast<float*>(scratch.query.data),
+        static_cast<float*>(scratch.key.data),
+        static_cast<float*>(scratch.value.data),
+        static_cast<__nv_bfloat16*>(scratch.z.data),
+    };
+    ::ninfer::ops::detail::fp8_gemv_kernel<Geometry, Schedule>
+        <<<kBlocks, Schedule::kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(input.data),
+            static_cast<const std::uint8_t*>(projection.qdata),
+            static_cast<const float*>(projection.scales), output);
+    CUDA_CHECK(cudaGetLastError());
+}
+#endif
+
+void flash_next_gdn_conv_launch(const FlashNextGdnWorkspace& scratch, const Tensor& convolution,
+                                const Tensor& source_slots, const Tensor& destination_slots,
+                                Tensor& convolution_states, cudaStream_t stream,
+                                int batch_count, int batch_offset) {
+    constexpr int threads = 256;
+    const unsigned b_count = (batch_count > 0) ? static_cast<unsigned>(batch_count)
+                                               : static_cast<unsigned>(scratch.projected.ne[1]);
+    const dim3 grid((kConvChannels + threads - 1) / threads, b_count);
+    if (scratch.query.dtype == DType::BF16 && scratch.key.dtype == DType::BF16 &&
+        scratch.value.dtype == DType::BF16) {
+        conv_split_kernel<__nv_bfloat16><<<grid, threads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.projected.data),
+            static_cast<const __nv_bfloat16*>(convolution.data),
+            static_cast<const std::int32_t*>(source_slots.data),
+            static_cast<const std::int32_t*>(destination_slots.data),
+            static_cast<__nv_bfloat16*>(convolution_states.data),
+            static_cast<__nv_bfloat16*>(scratch.query.data),
+            static_cast<__nv_bfloat16*>(scratch.key.data),
+            static_cast<__nv_bfloat16*>(scratch.value.data),
+            static_cast<__nv_bfloat16*>(scratch.z.data),
+            batch_offset);
+    } else if (scratch.query.dtype == DType::FP32 && scratch.key.dtype == DType::FP32 &&
+               scratch.value.dtype == DType::FP32) {
+        conv_split_kernel<float><<<grid, threads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.projected.data),
+            static_cast<const __nv_bfloat16*>(convolution.data),
+            static_cast<const std::int32_t*>(source_slots.data),
+            static_cast<const std::int32_t*>(destination_slots.data),
+            static_cast<__nv_bfloat16*>(convolution_states.data),
+            static_cast<float*>(scratch.query.data),
+            static_cast<float*>(scratch.key.data),
+            static_cast<float*>(scratch.value.data),
+            static_cast<__nv_bfloat16*>(scratch.z.data),
+            batch_offset);
+    } else {
+        throw std::invalid_argument(
+            "Flash-Next GDN convolution requires matching BF16 or FP32 Q/K/V");
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void flash_next_gdn_controls_launch(const Tensor& input, const GdnWeights& weights,
+                                    FlashNextGdnWorkspace& scratch, cudaStream_t stream) {
+    controls_kernel<<<dim3(6, static_cast<unsigned>(input.ne[1])), 256, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(input.data),
+        static_cast<const __nv_bfloat16*>(weights.a_b_projection.qdata),
+        static_cast<const __nv_bfloat16*>(weights.a_log.data),
+        static_cast<const __nv_bfloat16*>(weights.dt_bias.data),
+        static_cast<float*>(scratch.g.data), static_cast<float*>(scratch.beta.data));
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void flash_next_gdn_output_gate_launch(const FlashNextGdnWorkspace& scratch, const Tensor& norm,
+                                       cudaStream_t stream) {
+    const dim3 grid(48, static_cast<unsigned>(scratch.recurrent_output.ne[1]));
+    if (scratch.recurrent_output.dtype == DType::BF16) {
+        output_gate_kernel<<<grid, 128, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.recurrent_output.data),
+            static_cast<const __nv_bfloat16*>(scratch.z.data),
+            static_cast<const __nv_bfloat16*>(norm.data),
+            static_cast<__nv_bfloat16*>(scratch.gated_output.data));
+    } else if (scratch.recurrent_output.dtype == DType::FP32) {
+        output_gate_kernel<<<grid, 128, 0, stream>>>(
+            static_cast<const float*>(scratch.recurrent_output.data),
+            static_cast<const __nv_bfloat16*>(scratch.z.data),
+            static_cast<const __nv_bfloat16*>(norm.data),
+            static_cast<__nv_bfloat16*>(scratch.gated_output.data));
+    } else {
+        throw std::invalid_argument("Flash-Next GDN output gate received unsupported recurrent dtype");
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
+#if defined(NINFER_VOLTA_BUILD)
+void flash_next_gdn_output_project_fp32_launch(
+    const Tensor& gated_output_bf16, const Weight& projection, Tensor& output_fp32,
+    Tensor& output_bf16, cudaStream_t stream) {
+    using Geometry = ::ninfer::ops::detail::Fp8FlashNextResidualGeometry;
+    using Schedule =
+        typename ::ninfer::ops::detail::Fp8LinearDecodeProductionSchedule<Geometry>::Type;
+    if ((gated_output_bf16.dtype != DType::BF16 &&
+         gated_output_bf16.dtype != DType::FP32) ||
+        gated_output_bf16.ne[0] != Geometry::kInputRows ||
+        gated_output_bf16.ne[1] != 1 ||
+        projection.qtype != QType::FP8_E4M3FN_ROW_F32S ||
+        projection.n != Geometry::kOutputRows ||
+        projection.k != Geometry::kInputRows ||
+        projection.scale_dtype != DType::FP32 ||
+        output_fp32.dtype != DType::FP32 ||
+        output_fp32.ne[0] != Geometry::kOutputRows ||
+        output_fp32.ne[1] != 1 ||
+        output_bf16.dtype != DType::BF16 ||
+        output_bf16.ne[0] != Geometry::kOutputRows ||
+        output_bf16.ne[1] != 1) {
+        throw std::invalid_argument(
+            "Flash-Next FP32 GDN output projection diagnostic received invalid T=1 views");
+    }
+
+    constexpr int kBlocks = Geometry::kOutputRows / Schedule::kRowsPerCta;
+    const FlashNextFp32MirrorOutput mirror{
+        static_cast<float*>(output_fp32.data),
+        static_cast<__nv_bfloat16*>(output_bf16.data),
+        Geometry::kOutputRows,
+    };
+    if (gated_output_bf16.dtype == DType::BF16) {
+        ::ninfer::ops::detail::fp8_gemv_kernel<Geometry, Schedule>
+            <<<kBlocks, Schedule::kThreads, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(gated_output_bf16.data),
+                static_cast<const std::uint8_t*>(projection.qdata),
+                static_cast<const float*>(projection.scales), mirror);
+    } else {
+        ::ninfer::ops::detail::fp8_gemv_kernel<Geometry, Schedule>
+            <<<kBlocks, Schedule::kThreads, 0, stream>>>(
+                static_cast<const float*>(gated_output_bf16.data),
+                static_cast<const std::uint8_t*>(projection.qdata),
+                static_cast<const float*>(projection.scales), mirror);
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void flash_next_gdn_output_gate_fp32_launch(const FlashNextGdnWorkspace& scratch,
+                                            const Tensor& norm, Tensor& gated_output_fp32,
+                                            cudaStream_t stream) {
+    if (gated_output_fp32.dtype != DType::FP32 ||
+        gated_output_fp32.ne[0] != kValueRows ||
+        gated_output_fp32.ne[1] != scratch.recurrent_output.ne[1] ||
+        !gated_output_fp32.is_contiguous()) {
+        throw std::invalid_argument(
+            "Flash-Next FP32 GDN gate diagnostic received invalid output");
+    }
+    const dim3 grid(48, static_cast<unsigned>(scratch.recurrent_output.ne[1]));
+    if (scratch.recurrent_output.dtype == DType::BF16) {
+        output_gate_fp32_mirror_kernel<<<grid, 128, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.recurrent_output.data),
+            static_cast<const __nv_bfloat16*>(scratch.z.data),
+            static_cast<const __nv_bfloat16*>(norm.data),
+            static_cast<float*>(gated_output_fp32.data),
+            static_cast<__nv_bfloat16*>(scratch.gated_output.data));
+    } else if (scratch.recurrent_output.dtype == DType::FP32) {
+        output_gate_fp32_mirror_kernel<<<grid, 128, 0, stream>>>(
+            static_cast<const float*>(scratch.recurrent_output.data),
+            static_cast<const __nv_bfloat16*>(scratch.z.data),
+            static_cast<const __nv_bfloat16*>(norm.data),
+            static_cast<float*>(gated_output_fp32.data),
+            static_cast<__nv_bfloat16*>(scratch.gated_output.data));
+    } else {
+        throw std::invalid_argument(
+            "Flash-Next FP32 GDN gate diagnostic received unsupported recurrent dtype");
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+#endif
+
+} // namespace ninfer::targets::qwen3_8_flash_next::detail

@@ -1,0 +1,2 @@
+// The first icon group is used by Explorer, shortcuts, and Installed apps.
+101 ICON "@PROJECT_SOURCE_DIR@/apps/windows/assets/ninfer.ico"

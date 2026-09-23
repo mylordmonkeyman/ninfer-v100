@@ -1,0 +1,101 @@
+{
+  "version": "1.0",
+  "description": "Sequence D17: Output-Head FP8 vs BF16 Greedy Divergence Benchmark Fixtures",
+  "categories": {
+    "code_generation": {
+      "description": "C++ and Python systems programming tasks requiring precise syntax and semantics",
+      "prompts": [
+        {
+          "id": "code_cuda_reduction",
+          "system": "You are an expert GPU systems engineer. Provide concise, production-grade C++/CUDA code. Output only the implementation.",
+          "user": "Write a CUDA warp-level reduction function using __shfl_down_sync for 32 threads calculating the sum of float values, followed by a block-level reduction using shared memory for 256 threads."
+        },
+        {
+          "id": "code_circular_buffer",
+          "system": "You are an expert C++ systems engineer. Provide concise, production-grade C++20 code. Output only the implementation.",
+          "user": "Implement a lock-free single-producer single-consumer (SPSC) ring buffer in C++20 with cache-line padded atomic head and tail pointers and acquire/release memory orderings."
+        },
+        {
+          "id": "code_python_trie",
+          "system": "You are an expert algorithms programmer. Provide clean, well-typed Python code. Output only the implementation.",
+          "user": "Implement a memory-efficient prefix Trie in Python supporting insert(word), search(word), and starts_with(prefix), with an autocomplete(prefix, limit) method."
+        }
+      ]
+    },
+    "technical_reasoning": {
+      "description": "Formal technical prose explaining hardware, compilers, memory layouts, and numerical representations",
+      "prompts": [
+        {
+          "id": "tech_fp8_formats",
+          "system": "You are a computer systems architect and numerical computing expert. Provide a rigorous, detailed explanation.",
+          "user": "Compare and contrast the IEEE 754 and OCP FP8 floating-point formats (E4M3 vs E5M2). Detail exponent bias, dynamic range, precision limits, representation of infinities/NaNs, and why E4M3 is standard for GEMM weight/activation tensors while E5M2 is preferred for gradient propagation."
+        },
+        {
+          "id": "tech_pcie_nvlink",
+          "system": "You are a high-performance computing hardware architect. Provide a rigorous, detailed explanation.",
+          "user": "Analyze memory interconnect bandwidth and latency in modern multi-GPU systems. Contrast PCIe Gen5 x16 unidirectional/bidirectional bandwidth with NVLink 4/5 interconnects, explaining the impact of NUMA affinity and GPUDirect P2P DMA transfers on distributed tensor parallelism."
+        },
+        {
+          "id": "tech_cache_coherency",
+          "system": "You are a computer architecture professor. Provide a rigorous, detailed explanation.",
+          "user": "Explain the MESI and MOESI cache coherency protocols. Detail the role of the Owner state in MOESI, explaining how dirty sharing between L1/L2 caches avoids main memory writebacks during inter-core cache-to-cache transfers."
+        }
+      ]
+    },
+    "structured_json": {
+      "description": "Strict structured JSON schema generation and agentic tool invocation",
+      "prompts": [
+        {
+          "id": "json_tool_edit",
+          "system": "You are an AI coding assistant. You have access to tools: read_file(path), replace_file_content(path, target, replacement), run_command(command). Always respond with a strict JSON tool call matching schema: {\"tool\": string, \"parameters\": object}. Do not include markdown formatting outside the JSON object.",
+          "user": "Edit file P:\\NInfer\\src\\core\\tensor.h to fix the stride computation on line 88. Replace 'strides[i] = strides[i+1] * dims[i+1]' with 'strides[i] = (i + 1 < dims.size()) ? strides[i+1] * dims[i+1] : 1'."
+        },
+        {
+          "id": "json_server_telemetry",
+          "system": "You are an observability pipeline assistant. Emit a valid JSON telemetry report with fields: timestamp, metric_name, dimensions (object), and metrics (object with p50, p95, p99, max). Output only the raw JSON.",
+          "user": "Emit a decode latency telemetry metric for ninfer-serve running model qwen3.8-flash-next under batch size 1 with p50=3.2ms, p95=4.8ms, p99=6.1ms, max=9.4ms."
+        },
+        {
+          "id": "json_database_schema",
+          "system": "You are a database architect. Emit a strict JSON representation of an entity-relationship schema with tables, columns (name, type, nullable, primary_key), and foreign_keys. Output only raw JSON.",
+          "user": "Generate the database schema for a multi-tenant inference platform containing 'tenants', 'api_keys', and 'usage_records' tables."
+        }
+      ]
+    },
+    "mathematics_logic": {
+      "description": "Multi-step analytical, mathematical, and algorithmic reasoning problems",
+      "prompts": [
+        {
+          "id": "math_eigenvalues",
+          "system": "You are a mathematician. Show clear, step-by-step analytical derivations.",
+          "user": "Find all eigenvalues and their corresponding eigenvectors for the 3x3 symmetric matrix A = [[2, -1, 0], [-1, 2, -1], [0, -1, 2]]. Verify orthogonality of the eigenvectors."
+        },
+        {
+          "id": "math_combinatorics",
+          "system": "You are a mathematician. Show clear, step-by-step analytical derivations.",
+          "user": "A communication channel transmits 8-bit bytes. The probability of any single bit being corrupted during transmission is p = 0.01 independently. Using a Hamming(7,4) code extended with an overall parity bit to (8,4), calculate the exact probability of an undetectable error occurring in a transmitted byte."
+        },
+        {
+          "id": "math_dynamic_prog",
+          "system": "You are an algorithms researcher. Analyze time and space complexity with formal proofs.",
+          "user": "State the formulation for the Longest Common Subsequence (LCS) problem of two strings X of length m and Y of length n. Provide the recurrence relation, space optimization to O(min(m, n)), and explain Hirschberg's divide-and-conquer algorithm to reconstruct the sequence in O(m*n) time and O(min(m, n)) space."
+        }
+      ]
+    },
+    "dialogue_multilingual": {
+      "description": "Conversational, localized, and multi-turn dialogue in English and Portuguese",
+      "prompts": [
+        {
+          "id": "dialogue_concierge_pt",
+          "system": "Você é um assistente virtual cortês e altamente profissional para um hotel boutique no Rio de Janeiro. Responda em português com clareza e elegância.",
+          "user": "Olá! Chegarei amanhã à noite com minha família. Gostaria de recomendações de restaurantes para jantar perto de Ipanema que acomodem bem crianças, e também gostaria de saber o horário do café da manhã."
+        },
+        {
+          "id": "dialogue_technical_consultant",
+          "system": "You are a seasoned enterprise software consultant advising a CTO. Maintain a professional, strategic, and constructive tone.",
+          "user": "Our engineering team wants to migrate our monolithic payment processing system to an event-driven microservices architecture using Apache Kafka. What are the top 3 architectural risks we must mitigate before approving this migration?"
+        }
+      ]
+    }
+  }
+}
