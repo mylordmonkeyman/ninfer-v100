@@ -1274,7 +1274,10 @@ int main() {
             long double candidate_sq = 0.0L;
             long double expected_sq = 0.0L;
             long double error_sq = 0.0L;
+            long double floor_error_sq = 0.0L;
+            long double residual_error_sq = 0.0L;
             double max_error = 0.0;
+            const bool bf16_stage = tensor.dtype == ninfer::DType::BF16;
             for (std::size_t i = 0; i < count; ++i) {
                 const long double a = candidate[i];
                 const long double b = expected[i];
@@ -1286,6 +1289,16 @@ int main() {
                 max_error =
                     std::max(max_error, std::abs(
                         static_cast<double>(d)));
+                if (bf16_stage) {
+                    const float rounded =
+                        bf16_to_float(round_fp32_to_bf16(expected[i]));
+                    const long double floor_error =
+                        static_cast<long double>(rounded) - b;
+                    const long double residual_error =
+                        a - static_cast<long double>(rounded);
+                    floor_error_sq += floor_error * floor_error;
+                    residual_error_sq += residual_error * residual_error;
+                }
             }
             const long double denom =
                 std::sqrt(candidate_sq * expected_sq);
@@ -1317,37 +1330,44 @@ int main() {
                       << " pass=" << (pass ? 1 : 0)
                       << '\n' << std::flush;
 
-            if (name == "L00_mlp_block_input" &&
-                tensor.dtype == ninfer::DType::BF16) {
-                long double floor_error_sq = 0.0L;
-                long double residual_error_sq = 0.0L;
-                std::size_t changed_words = 0;
-                for (std::size_t i = 0; i < count; ++i) {
-                    const float rounded =
-                        bf16_to_float(round_fp32_to_bf16(expected[i]));
-                    const long double floor_error =
-                        static_cast<long double>(rounded) - expected[i];
-                    const long double residual_error =
-                        static_cast<long double>(candidate[i]) - rounded;
-                    floor_error_sq += floor_error * floor_error;
-                    residual_error_sq += residual_error * residual_error;
-                    changed_words += candidate[i] != rounded;
-                }
-                const long double scale = std::max(expected_rms, 1.0e-12L);
-                std::cout << std::fixed << std::setprecision(8)
-                          << "phase11.materialization.position="
-                          << current_stage_trace_position
-                          << " stage=" << name
-                          << " observed_nrmse=" << nrmse
-                          << " oracle_bf16_floor_nrmse="
-                          << static_cast<double>(
-                                 std::sqrt(floor_error_sq / count) / scale)
-                          << " candidate_vs_rounded_oracle_nrmse="
-                          << static_cast<double>(
-                                 std::sqrt(residual_error_sq / count) / scale)
-                          << " changed_bf16_words=" << changed_words
-                          << " total_words=" << count << '\n' << std::flush;
-            }
+            // Error decomposition: observed NRMSE against the oracle, the
+            // rounding floor (oracle re-rounded to this stage's storage
+            // dtype), the residual beyond the floor, and their ratio. FP32
+            // and integer stages have a zero floor: any nonzero NRMSE is an
+            // implementation deviation, not storage rounding.
+            const char* dtype_name =
+                integer_tensor ? "i32"
+                : bf16_stage ? "bf16" : "fp32";
+            const double floor_nrmse =
+                bf16_stage
+                    ? static_cast<double>(
+                          std::sqrt(floor_error_sq /
+                                    static_cast<long double>(count)) /
+                          std::max(expected_rms, 1.0e-12L))
+                    : 0.0;
+            const double residual_nrmse =
+                bf16_stage
+                    ? static_cast<double>(
+                          std::sqrt(residual_error_sq /
+                                    static_cast<long double>(count)) /
+                          std::max(expected_rms, 1.0e-12L))
+                    : nrmse;
+            const double floor_ratio =
+                floor_nrmse > 0.0
+                    ? nrmse / floor_nrmse
+                    : (nrmse > 0.0
+                           ? std::numeric_limits<double>::infinity()
+                           : -1.0);
+            std::cout << std::fixed << std::setprecision(8)
+                      << "phase11.error_decomposition.position="
+                      << current_stage_trace_position
+                      << " stage=" << name
+                      << " dtype=" << dtype_name
+                      << " nrmse=" << nrmse
+                      << " floor_nrmse=" << floor_nrmse
+                      << " residual_nrmse=" << residual_nrmse
+                      << " floor_ratio=" << floor_ratio
+                      << '\n' << std::flush;
 
             const int autopsy_layer = router_layer_from_stage(name);
             const std::string_view autopsy_checkpoint =
