@@ -772,6 +772,14 @@ int main() {
         const bool stage_trace_all_positions =
             stage_trace_enabled &&
             std::getenv("NINFER_PHASE11_STAGE_ORACLE_ALL_POSITIONS") != nullptr;
+        const char* oracle_inject_stage_env =
+            std::getenv("NINFER_PHASE11_ORACLE_INJECT_STAGE");
+        const std::string oracle_inject_stage =
+            oracle_inject_stage_env != nullptr ? oracle_inject_stage_env : "";
+        if (!oracle_inject_stage.empty() && !stage_trace_enabled) {
+            throw std::invalid_argument(
+                "NINFER_PHASE11_ORACLE_INJECT_STAGE requires a stage oracle root");
+        }
         std::uint32_t current_stage_trace_position = stage_trace_position;
         std::vector<std::string> first_bad_stage_by_position(records.size());
         std::vector<double> first_bad_cosine_by_position(records.size(), 1.0);
@@ -1303,6 +1311,38 @@ int main() {
                           << " max_error=" << max_error
                           << " pass=" << (pass ? 1 : 0)
                           << '\n' << std::flush;
+            }
+
+            if (!oracle_inject_stage.empty() &&
+                current_stage_trace_position == stage_trace_position &&
+                name == oracle_inject_stage) {
+                if (integer_tensor) {
+                    throw std::invalid_argument(
+                        "Phase 11 oracle injection does not support integer stages");
+                }
+                if (tensor.dtype == ninfer::DType::BF16) {
+                    std::vector<std::uint16_t> words(count);
+                    for (std::size_t i = 0; i < count; ++i) {
+                        words[i] = round_fp32_to_bf16(expected[i]);
+                    }
+                    CUDA_CHECK(cudaMemcpy(
+                        tensor.data, words.data(),
+                        count * sizeof(std::uint16_t),
+                        cudaMemcpyHostToDevice));
+                } else if (tensor.dtype == ninfer::DType::FP32) {
+                    CUDA_CHECK(cudaMemcpy(
+                        tensor.data, expected.data(),
+                        count * sizeof(float),
+                        cudaMemcpyHostToDevice));
+                } else {
+                    throw std::invalid_argument(
+                        "Phase 11 oracle injection supports only BF16/FP32 stages");
+                }
+                std::cout << "phase11.oracle_injection.position="
+                          << current_stage_trace_position
+                          << " stage=" << name
+                          << " count=" << count << '\n'
+                          << std::flush;
             }
 
             if (integer_tensor && !pass) {
