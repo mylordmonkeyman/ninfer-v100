@@ -176,7 +176,7 @@ jobs:
           print(f"Validated mounted 14-position CPU stage trace with {len(tensors)} position-13 tensors")
           PY
 
-      - name: Localize best-known MLP-injection path at position 13
+      - name: Sweep position-13 hyper-state reset checkpoints
         continue-on-error: true
         shell: bash
         env:
@@ -215,11 +215,18 @@ jobs:
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
             2>&1 | tee -a "$result_dir/stage-localize-pos13.log" || true
 
-          echo "=== position 13 inject oracle L26_mlp_block_input ===" | tee -a "$result_dir/stage-localize-pos13.log"
-          NINFER_PHASE11_ORACLE_INJECT_STAGE=L26_mlp_block_input \
-            ctest --test-dir build-v100 -V \
-              -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
-              2>&1 | tee -a "$result_dir/stage-localize-pos13.log" || true
+          for stage in \
+            L23_hyper_after_mlp \
+            L31_hyper_after_mlp \
+            L39_hyper_after_mlp \
+            L47_hyper_after_mlp
+          do
+            echo "=== position 13 inject oracle ${stage} ===" | tee -a "$result_dir/stage-localize-pos13.log"
+            NINFER_PHASE11_ORACLE_INJECT_STAGE="$stage" \
+              ctest --test-dir build-v100 -V \
+                -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+                2>&1 | tee -a "$result_dir/stage-localize-pos13.log" || true
+          done
 
       - name: Recheck 32-position best-known MLP-injection baseline
         continue-on-error: true
