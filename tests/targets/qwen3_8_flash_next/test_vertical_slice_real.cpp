@@ -796,6 +796,130 @@ int main() {
                 return (position == 0 && layer >= 7 && layer <= 10) ||
                        (position == 1 && layer >= 12 && layer <= 15);
             };
+        const auto round_fp32_to_bf16 = [](float value) {
+            std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
+            const std::uint32_t exponent = bits & 0x7F80'0000U;
+            const std::uint32_t mantissa = bits & 0x007F'FFFFU;
+            if (exponent == 0x7F80'0000U) {
+                if (mantissa != 0U) {
+                    bits |= 0x0040'0000U;
+                }
+                return static_cast<std::uint16_t>(bits >> 16U);
+            }
+            const std::uint32_t lsb = (bits >> 16U) & 1U;
+            bits += 0x0000'7FFFU + lsb;
+            return static_cast<std::uint16_t>(bits >> 16U);
+        };
+        const auto reduce_v100_router_lanes =
+            [](std::array<float, 256> lanes) {
+                std::array<float, 8> partial{};
+                for (std::size_t warp = 0; warp < 8; ++warp) {
+                    auto* values = lanes.data() + warp * 32;
+                    for (int offset : {16, 8, 4, 2, 1}) {
+                        for (int lane = 0; lane < 32 - offset; ++lane) {
+                            values[lane] =
+                                values[lane] + values[lane + offset];
+                        }
+                    }
+                    partial[warp] = values[0];
+                }
+                std::array<float, 32> final{};
+                std::copy(partial.begin(), partial.end(), final.begin());
+                for (int offset : {16, 8, 4, 2, 1}) {
+                    for (int lane = 0; lane < 32 - offset; ++lane) {
+                        final[static_cast<std::size_t>(lane)] =
+                            final[static_cast<std::size_t>(lane)] +
+                            final[static_cast<std::size_t>(lane + offset)];
+                    }
+                }
+                return final[0];
+            };
+        const auto router_v100_tree_scores =
+            [&](std::uint32_t position, int layer, bool bf16_input) {
+                if (layer < 0 || layer >= 48) {
+                    throw std::runtime_error(
+                        "Phase 11 router tree reference has invalid layer");
+                }
+
+                char reference_pos_dir[32];
+                std::snprintf(
+                    reference_pos_dir, sizeof(reference_pos_dir),
+                    "pos%04u", position);
+                char layer_prefix[8];
+                std::snprintf(
+                    layer_prefix, sizeof(layer_prefix), "L%02d_", layer);
+                const fs::path router_input_path =
+                    stage_root / reference_pos_dir /
+                    (std::string(layer_prefix) + "mlp_block_input.bin");
+                const std::uint64_t router_input_bytes =
+                    kRouterHidden * sizeof(float);
+                if (!fs::is_regular_file(router_input_path) ||
+                    fs::file_size(router_input_path) != router_input_bytes) {
+                    throw std::runtime_error(
+                        "Phase 11 router tree reference is missing oracle input " +
+                        router_input_path.string());
+                }
+
+                std::vector<float> oracle_router_input(kRouterHidden);
+                {
+                    std::ifstream input(router_input_path, std::ios::binary);
+                    input.read(
+                        reinterpret_cast<char*>(oracle_router_input.data()),
+                        static_cast<std::streamsize>(router_input_bytes));
+                    if (!input) {
+                        throw std::runtime_error(
+                            "Phase 11 failed to read oracle router tree input " +
+                            router_input_path.string());
+                    }
+                }
+                if (bf16_input) {
+                    for (float& value : oracle_router_input) {
+                        value = bf16_to_float(round_fp32_to_bf16(value));
+                    }
+                }
+
+                auto& weight_words =
+                    router_weight_words[static_cast<std::size_t>(layer)];
+                if (weight_words.empty()) {
+                    const auto& router =
+                        model.text_view().layers[
+                            static_cast<std::size_t>(layer)].moe.router;
+                    if (router.qtype != ninfer::QType::BF16_CTRL ||
+                        router.n != static_cast<std::int32_t>(kRouterExperts) ||
+                        router.k != static_cast<std::int32_t>(kRouterHidden) ||
+                        router.qdata == nullptr) {
+                        throw std::runtime_error(
+                            "Phase 11 router tree reference expected BF16 router weights");
+                    }
+                    weight_words.resize(kRouterExperts * kRouterHidden);
+                    CUDA_CHECK(cudaMemcpy(
+                        weight_words.data(), router.qdata,
+                        weight_words.size() * sizeof(std::uint16_t),
+                        cudaMemcpyDeviceToHost));
+                }
+
+                std::array<float, kRouterExperts> scores{};
+                for (std::size_t expert = 0;
+                     expert < kRouterExperts; ++expert) {
+                    std::array<float, 256> lanes{};
+                    const std::size_t row = expert * kRouterHidden;
+                    for (std::size_t tid = 0; tid < lanes.size(); ++tid) {
+                        float acc = 0.0F;
+                        for (std::size_t column = tid;
+                             column < kRouterHidden;
+                             column += lanes.size()) {
+                            acc = std::fma(
+                                bf16_to_float(weight_words[row + column]),
+                                oracle_router_input[column],
+                                acc);
+                        }
+                        lanes[tid] = acc;
+                    }
+                    scores[expert] = reduce_v100_router_lanes(lanes);
+                }
+                return scores;
+            };
+
         const auto router_reference_scores =
             [&](std::uint32_t position, int layer) {
                 if (layer < 0 || layer >= 48) {
@@ -1295,6 +1419,103 @@ int main() {
                             ? min_oracle_top10_gap / score_max_error
                             : std::numeric_limits<double>::infinity();
 
+                    const auto fp32_tree_scores =
+                        router_v100_tree_scores(
+                            current_stage_trace_position, layer, false);
+                    const auto bf16_tree_scores =
+                        router_v100_tree_scores(
+                            current_stage_trace_position, layer, true);
+                    double association_max_error = 0.0;
+                    long double association_error_sq = 0.0L;
+                    double materialization_max_error = 0.0;
+                    long double materialization_error_sq = 0.0L;
+                    std::array<std::int32_t, kRouterExperts> fp32_tree_rank{};
+                    std::array<std::int32_t, kRouterExperts> bf16_tree_rank{};
+                    std::iota(
+                        fp32_tree_rank.begin(), fp32_tree_rank.end(), 0);
+                    std::iota(
+                        bf16_tree_rank.begin(), bf16_tree_rank.end(), 0);
+                    for (std::size_t expert = 0;
+                         expert < kRouterExperts; ++expert) {
+                        const double association_error =
+                            static_cast<double>(fp32_tree_scores[expert]) -
+                            reference_scores[expert];
+                        association_max_error = std::max(
+                            association_max_error,
+                            std::abs(association_error));
+                        association_error_sq +=
+                            static_cast<long double>(association_error) *
+                            association_error;
+                        const double materialization_error =
+                            static_cast<double>(bf16_tree_scores[expert]) -
+                            static_cast<double>(fp32_tree_scores[expert]);
+                        materialization_max_error = std::max(
+                            materialization_max_error,
+                            std::abs(materialization_error));
+                        materialization_error_sq +=
+                            static_cast<long double>(materialization_error) *
+                            materialization_error;
+                    }
+                    const auto tree_better =
+                        [](const auto& scores,
+                           std::int32_t lhs, std::int32_t rhs) {
+                            const float a =
+                                scores[static_cast<std::size_t>(lhs)];
+                            const float b =
+                                scores[static_cast<std::size_t>(rhs)];
+                            return a > b || (a == b && lhs < rhs);
+                        };
+                    std::stable_sort(
+                        fp32_tree_rank.begin(), fp32_tree_rank.end(),
+                        [&](std::int32_t lhs, std::int32_t rhs) {
+                            return tree_better(
+                                fp32_tree_scores, lhs, rhs);
+                        });
+                    std::stable_sort(
+                        bf16_tree_rank.begin(), bf16_tree_rank.end(),
+                        [&](std::int32_t lhs, std::int32_t rhs) {
+                            return tree_better(
+                                bf16_tree_scores, lhs, rhs);
+                        });
+                    const auto top10_matches_oracle =
+                        [&](const auto& rank) {
+                            for (std::size_t i = 0; i < 10; ++i) {
+                                if (!oracle_set[
+                                        static_cast<std::size_t>(rank[i])]) {
+                                    return false;
+                                }
+                            }
+                            return true;
+                        };
+                    const bool fp32_tree_set_matches_oracle =
+                        top10_matches_oracle(fp32_tree_rank);
+                    const bool bf16_tree_set_matches_oracle =
+                        top10_matches_oracle(bf16_tree_rank);
+                    const double association_rms_error = std::sqrt(
+                        static_cast<double>(
+                            association_error_sq /
+                            static_cast<long double>(kRouterExperts)));
+                    const double materialization_rms_error = std::sqrt(
+                        static_cast<double>(
+                            materialization_error_sq /
+                            static_cast<long double>(kRouterExperts)));
+                    const double cutoff_over_association_max =
+                        association_max_error > 0.0
+                            ? cutoff_margin / association_max_error
+                            : std::numeric_limits<double>::infinity();
+                    const double cutoff_over_materialization_max =
+                        materialization_max_error > 0.0
+                            ? cutoff_margin / materialization_max_error
+                            : std::numeric_limits<double>::infinity();
+                    const double top10_gap_over_association_max =
+                        association_max_error > 0.0
+                            ? min_oracle_top10_gap / association_max_error
+                            : std::numeric_limits<double>::infinity();
+                    const double top10_gap_over_materialization_max =
+                        materialization_max_error > 0.0
+                            ? min_oracle_top10_gap / materialization_max_error
+                            : std::numeric_limits<double>::infinity();
+
                     std::cout << std::fixed << std::setprecision(8)
                               << "phase11.router_margin.position="
                               << current_stage_trace_position
@@ -1314,6 +1535,26 @@ int main() {
                               << cutoff_over_rms_error
                               << " top10_gap_over_max_error="
                               << top10_gap_over_max_error
+                              << " fp32_tree_set_matches_oracle="
+                              << (fp32_tree_set_matches_oracle ? 1 : 0)
+                              << " bf16_tree_set_matches_oracle="
+                              << (bf16_tree_set_matches_oracle ? 1 : 0)
+                              << " association_max_error="
+                              << association_max_error
+                              << " association_rms_error="
+                              << association_rms_error
+                              << " materialization_max_error="
+                              << materialization_max_error
+                              << " materialization_rms_error="
+                              << materialization_rms_error
+                              << " cutoff_over_association_max="
+                              << cutoff_over_association_max
+                              << " cutoff_over_materialization_max="
+                              << cutoff_over_materialization_max
+                              << " top10_gap_over_association_max="
+                              << top10_gap_over_association_max
+                              << " top10_gap_over_materialization_max="
+                              << top10_gap_over_materialization_max
                               << '\n' << std::flush;
                 }
             }
