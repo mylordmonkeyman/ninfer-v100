@@ -223,14 +223,12 @@ jobs:
         run: |
           set -euxo pipefail
           test -r /oracle/phase11/manifest.json
-          python3 tools/reference/qwen3_8_flash_next/oracle/validate_phase11_oracle.py \
-            --corpus /oracle/phase11/token_ids.json \
-            --manifest /oracle/phase11/manifest.json \
-            --minimum 4096
+          python3 tools/reference/qwen3_8_flash_next/oracle/validate_phase11_oracle.py --corpus /oracle/phase11/token_ids.json --manifest /oracle/phase11/manifest.json --minimum 4096
           result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$result_dir"
-          ctest --test-dir build-v100 -V \
-            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test      - name: Isolate layer-0 GDN causal convolution
+          ctest --test-dir build-v100 -V -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' 2>&1 | tee "$result_dir/oracle-32-strong-trace.log"
+
+      - name: Isolate layer-0 GDN causal convolution
         continue-on-error: true
         shell: bash
         env:
