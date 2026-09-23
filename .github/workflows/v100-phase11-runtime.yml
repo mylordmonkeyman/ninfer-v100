@@ -229,7 +229,15 @@ jobs:
 
           echo "=== 32-position strong baseline ===" | tee "$result_dir/oracle-32-strong-trace.log"
           ctest --test-dir build-v100 -V \
-            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+            2>&1 | tee -a "$result_dir/oracle-32-strong-trace.log" || true
+
+          echo "=== 32-position FP32 router input ===" | tee -a "$result_dir/oracle-32-strong-trace.log"
+          NINFER_FLASH_NEXT_FP32_ROUTER_INPUT=1 \
+            ctest --test-dir build-v100 -V \
+              -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+              2>&1 | tee -a "$result_dir/oracle-32-strong-trace.log" || true
+
       - name: Isolate layer-0 GDN causal convolution
         continue-on-error: true
         shell: bash
