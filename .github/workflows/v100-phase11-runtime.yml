@@ -134,13 +134,28 @@ jobs:
               ninfer_selected_block_attention_test \
             -j "$(nproc)"
 
-      - name: Wait for GPU availability
+      - name: Reserve the GPU from llama-swap
         shell: bash
         run: |
           set -euxo pipefail
 
+          # This runner shares the V100 with the agent's own inference model,
+          # which llama-swap (127.0.0.1:9292) keeps loaded (~30 GiB). Unload it
+          # for the duration of the run; llama-swap lazily reloads it on the
+          # agent's next inference request.
+          swap_base=http://127.0.0.1:9292
+          agent_model=qwen3.8-27b-omp
+
+          code=$(curl -s -m 10 -X POST -o /tmp/unload-response.json -w '%{http_code}' \
+            "$swap_base/api/models/unload/$agent_model" || true)
+          echo "unload $agent_model -> HTTP $code: $(head -c 200 /tmp/unload-response.json 2>/dev/null)"
+          case "$code" in
+            200|204|404) ;;  # 404: not loaded (or unknown name); nvidia-smi poll is the real gate
+            *) echo "ERROR: llama-swap unload request failed (HTTP $code)." >&2; exit 1 ;;
+          esac
+
           required_free_mib=20480
-          deadline=$(( $(date +%s) + 1800 ))
+          deadline=$(( $(date +%s) + 300 ))
           while :; do
             free_mib=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -n1 | tr -d '[:space:]')
             echo "GPU free memory: ${free_mib} MiB (need at least ${required_free_mib} MiB)"
@@ -149,13 +164,13 @@ jobs:
               break
             fi
             if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "ERROR: GPU free memory stayed below ${required_free_mib} MiB for 30 minutes." >&2
-              echo "A foreign or leaked allocation is holding the GPU." >&2
-              echo "Free it on the runner host (stop the workload or reboot) and re-run." >&2
+              echo "ERROR: GPU free memory stayed below ${required_free_mib} MiB for 5 minutes after unloading the agent model." >&2
+              echo "Another allocation is holding the GPU; free it on the runner host and re-run." >&2
               exit 1
             fi
-            sleep 60
+            sleep 15
           done
+
 
       - name: Run Phase 11 contract test
         shell: bash
@@ -230,6 +245,15 @@ jobs:
           NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
         run: |
           set -euxo pipefail
+          # Fail fast if the agent model was reloaded mid-run: any chat request
+          # to the agent lazy-loads qwen3.8-27b-omp back onto this V100 and
+          # would contend with the test.
+          if curl -s -m 10 http://127.0.0.1:9292/v1/models \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(m["id"]=="qwen3.8-27b-omp" and m.get("status",{}).get("value")=="loaded" for m in d["data"]) else 1)'; then
+            echo "ERROR: agent model qwen3.8-27b-omp was reloaded during this run; the GPU is contended." >&2
+            echo "Re-run the workflow when the agent is idle." >&2
+            exit 1
+          fi
           test -r "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0013/L00_mlp_block_input.bin"
           result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$result_dir"
@@ -286,6 +310,12 @@ jobs:
           NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
         run: |
           set -euxo pipefail
+          if curl -s -m 10 http://127.0.0.1:9292/v1/models \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(m["id"]=="qwen3.8-27b-omp" and m.get("status",{}).get("value")=="loaded" for m in d["data"]) else 1)'; then
+            echo "ERROR: agent model qwen3.8-27b-omp was reloaded during this run; the GPU is contended." >&2
+            echo "Re-run the workflow when the agent is idle." >&2
+            exit 1
+          fi
           test -r /oracle/phase11/manifest.json
           python3 tools/reference/qwen3_8_flash_next/oracle/validate_phase11_oracle.py \
             --corpus /oracle/phase11/token_ids.json \
