@@ -1,9 +1,6 @@
 name: V100 GDN Volta Qualification
 
 on:
-  push:
-    branches:
-      - perf/v100-gdn-chunked-sm70
   workflow_dispatch:
 
 permissions:
