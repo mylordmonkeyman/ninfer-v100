@@ -1,11 +1,11 @@
-name: Phase 11 Layer One QSA Boundary Calibration
+name: Phase 11 Layer One GDN Boundary Calibration
 
 on:
   push:
     branches:
       - work/precision-matched-reference
     paths:
-      - .github/workflows/precision-qsa-layer1.yml
+      - .github/workflows/precision-gdn-layer1.yml
 
 permissions:
   actions: read
@@ -99,7 +99,7 @@ jobs:
             numpy safetensors 'transformers>=5.16,<6'
           echo "PRECISION_PYTHON=$GITHUB_WORKSPACE/precision-venv/bin/python" >> "$GITHUB_ENV"
 
-      - name: Recompute sequential CPU reference and layer-one attention output
+      - name: Recompute sequential CPU reference and layer-one GDN output
         shell: bash
         env:
           CUDA_VISIBLE_DEVICES: ""
@@ -115,7 +115,7 @@ jobs:
             --positions 14 \
             --trace-mlp-layer0 \
             --trace-moe-routing-layer0 \
-            --trace-qsa-layer1 \
+            --trace-gdn-layer1 \
             --out-dir "$GITHUB_WORKSPACE/cpu-reference"
 
       - name: Compile only the V100 real-model trace target
@@ -162,7 +162,7 @@ jobs:
           NINFER_PHASE11_TRACE_POSITIONS: "1"
           NINFER_PHASE11_TRACE_MLP_LAYER0: "1"
           NINFER_PHASE11_TRACE_MOE_ROUTING_LAYER0: "1"
-          NINFER_PHASE11_TRACE_QSA_LAYER1: "1"
+          NINFER_PHASE11_TRACE_GDN_LAYER1: "1"
           NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
           NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
           NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
@@ -195,7 +195,7 @@ jobs:
           echo "Recorded $stage_rows selected stages"
           test "$stage_rows" -eq 3472
 
-      - name: Compare layer-one attention with CPU and FP32 oracle
+      - name: Compare layer-one GDN with CPU and FP32 oracle
         shell: bash
         run: |
           set -euo pipefail
@@ -232,7 +232,7 @@ jobs:
           names = ('attn_block_input', 'attn_block_output', 'mlp_block_input',
                    'hyper_after_mlp')
           for pos in (0, 2, 12, 13):
-              print('QSA layer-one calibration position', pos)
+              print('GDN layer-one calibration position', pos)
               for suffix in names:
                   r = rows[pos, 'L01_' + suffix]
                   print(suffix, 'cpu-oracle', r['cpu_vs_oracle_nrmse'],
@@ -244,7 +244,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: v100-qsa-layer1-14
+          name: v100-gdn-layer1-14
           path: |
             candidate-stage
             v100-comparison
