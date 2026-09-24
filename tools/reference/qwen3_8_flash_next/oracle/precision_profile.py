@@ -111,7 +111,9 @@ def materialize_persistent_states(cache, model, profile):
                 raise RuntimeError(f"GDN cache layout unavailable at layer {layer_idx}")
             if profile.conv_state_bf16:
                 for state in cache_layer.conv_states.values():
-                    if state is not None:
+                    # The HF cache also stores integer position/history
+                    # metadata. Only floating histories have BF16 storage.
+                    if state is not None and state.is_floating_point():
                         state.copy_(round_to_bf16(state))
             if profile.ssm_state_bf16:
                 for state in cache_layer.recurrent_states.values():
@@ -132,5 +134,5 @@ def materialize_persistent_states(cache, model, profile):
                 raise RuntimeError(f"PLE cache layout unavailable at layer {layer_idx}")
             if profile.conv_state_bf16:
                 for state in cache_layer.conv_states.values():
-                    if state is not None:
+                    if state is not None and state.is_floating_point():
                         state.copy_(round_to_bf16(state))

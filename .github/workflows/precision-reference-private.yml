@@ -10,10 +10,10 @@ on:
 permissions:
   contents: read
 
-# A new push is used only if an earlier queued attempt cannot be assigned.
+# Supersede an older CPU attempt when correcting a validation bug.
 concurrency:
   group: phase11-cpu-precision-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   cpu-reference-14:
@@ -108,6 +108,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          "$PRECISION_PYTHON" tests/targets/qwen3_8_flash_next/test_precision_profile.py
+          "$PRECISION_PYTHON" tests/targets/qwen3_8_flash_next/test_precision_trace_compare.py
           "$PRECISION_PYTHON" tools/reference/qwen3_8_flash_next/oracle/run_precision_reference.py \
             --model-dir "$PRECISION_MODEL_DIR" \
             --ple-dir "$PRECISION_PLE_DIR" \

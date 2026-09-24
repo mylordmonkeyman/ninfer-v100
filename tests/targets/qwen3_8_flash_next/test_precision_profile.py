@@ -29,6 +29,17 @@ class PrecisionProfileTest(unittest.TestCase):
         self.assertNotEqual(history.item(), 1.001)
         self.assertEqual(ssm.item(), torch.tensor([1.001]).item())
 
+    def test_integer_conv_metadata_is_preserved(self):
+        history = torch.tensor([1.001], dtype=torch.float32)
+        position = torch.tensor([7], dtype=torch.long)
+        layer = SimpleNamespace(conv_states={0: history, "position": position},
+                                recurrent_states={})
+        cache = SimpleNamespace(layers=[layer])
+        model = SimpleNamespace(layers=[SimpleNamespace(linear_attn=object(), ple=None)])
+        materialize_persistent_states(cache, model, PROFILES["v100-phase11-storage"])
+        self.assertEqual(history.item(), round_to_bf16(torch.tensor([1.001])).item())
+        self.assertEqual(position.item(), 7)
+
     def test_qsa_cache_cast(self):
         cache_layer = SimpleNamespace(keys=torch.tensor([1.001]),
                                       values=torch.tensor([1.002]))
