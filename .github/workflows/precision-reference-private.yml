@@ -37,15 +37,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          echo 'Mounted data path availability:'
+          for root in /models /oracle /srv/ninfer/source /srv/ninfer/oracle \
+              /home/runner/ninfer-v100; do
+            if [[ -d "$root" ]]; then
+              echo "Directory: $root"
+              find "$root" -maxdepth 3 -type f \( -name model.safetensors.index.json \
+                  -o -name 'shard_*.safetensors' -o -name token_ids.json \) \
+                  -print -quit 2>/dev/null || true
+            else
+              echo "Absent: $root"
+            fi
+          done
           model_dir="${NINFER_PHASE11_MODEL_DIR:-/srv/ninfer/source/mixed}"
           ple_dir="${NINFER_PHASE11_PLE_DIR:-/srv/ninfer/source/ple/ples_int4}"
           oracle_dir="${NINFER_PHASE11_STAGE_ORACLE_ROOT:-/oracle/phase11-stage-trace14}"
           ids_file="${NINFER_PHASE11_IDS_FILE:-/oracle/phase11/token_ids.json}"
+          missing=0
           for path in "$model_dir/model.safetensors.index.json" "$ple_dir" \
               "$oracle_dir/manifest.json" "$ids_file"; do
             if [[ ! -r "$path" ]]; then
               echo "::error::Missing readable CPU reference input: $path"
-              exit 1
+              missing=1
+              continue
             fi
             echo "Readable: $path"
           done
@@ -64,8 +78,9 @@ jobs:
           if [[ -z "$python_bin" ]] || ! "$python_bin" -c \
               'import numpy, torch, transformers, safetensors' >/dev/null 2>&1; then
             echo '::error::No CPU Python environment with numpy, torch, transformers, and safetensors'
-            exit 1
+            missing=1
           fi
+          if (( missing )); then exit 1; fi
           echo "CPU Python: $python_bin"
           {
             echo "PRECISION_PYTHON=$python_bin"
