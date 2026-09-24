@@ -1,0 +1,55 @@
+name: Phase 11 PLE Boundary Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-ple-boundary-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Download calibrated three-way prefix comparison
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36073386852 --repo "$GITHUB_REPOSITORY" \
+            --name cpu-precision-reference-14 --dir calibrated
+      - name: Locate layer-zero to layer-one divergence
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee ple-boundary-report.txt
+          import csv
+          from pathlib import Path
+
+          path = Path('calibrated/comparison/stage_comparison.csv')
+          rows = {(int(row['position']), row['stage']): row
+                  for row in csv.DictReader(path.open())}
+          for p in (0, 1, 2, 6, 10, 12, 13):
+              print('POSITION', p)
+              for stage in ('L00_mlp_block_input', 'L00_moe_router_alpha',
+                            'L00_moe_shared_scale', 'L00_mlp_block_output',
+                            'L00_hyper_after_mlp', 'ple_injection',
+                            'L01_attn_block_input', 'L01_mlp_block_input',
+                            'L02_attn_block_input'):
+                  row = rows.get((p, stage))
+                  if row is None:
+                      print('STAGE', stage, 'absent')
+                      continue
+                  print('STAGE', stage, 'cpu/oracle', row['cpu_vs_oracle_nrmse'],
+                        'v100/oracle', row['v100_vs_oracle_nrmse'],
+                        'v100/cpu', row['v100_vs_cpu_nrmse'])
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ple-boundary-report
+          path: ple-boundary-report.txt
+          retention-days: 14
