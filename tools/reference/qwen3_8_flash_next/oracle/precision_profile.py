@@ -72,6 +72,12 @@ def install_projection_boundaries(model, profile):
                 lambda _module, _args, output: round_to_bf16(output)
             ))
         if hasattr(layer, "self_attn"):
+            # QSA gates its selected-attention value before the output
+            # projection. V100 stores that 6144-wide input as BF16; rounding
+            # only o_proj's output misses the amplified input error.
+            handles.append(layer.self_attn.o_proj.register_forward_pre_hook(
+                lambda _module, args: (round_to_bf16(args[0]),)
+            ))
             projections.extend((layer.self_attn.q_proj, layer.self_attn.k_proj,
                                 layer.self_attn.v_proj, layer.self_attn.o_proj))
             handles.append(layer.self_attn.register_forward_hook(
