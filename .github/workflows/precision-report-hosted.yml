@@ -1,0 +1,57 @@
+name: Phase 11 Precision Report Summary
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-report-hosted.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  summarize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Download completed CPU reference artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 36014366398 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name cpu-precision-reference-14 \
+            --dir cpu-report
+      - name: Print and retain concise diagnostics
+        run: |
+          python3 - <<'PY'
+          import csv
+          import json
+          from pathlib import Path
+
+          root = Path('cpu-report')
+          report = json.loads((root / 'precision_report.json').read_text())
+          stage = report['stage_comparison']
+          print('Profile:', report['profile'])
+          print('Status:', report['status'])
+          print('FP32 decode worst KL:', report['fp32_decode_worst_kl'])
+          print('Profile mean KL:', report['mean_kl'])
+          print('Top-1 agreement:', report['top1_agreement'])
+          print('Stage summary:', json.dumps(stage))
+          print('Per-position metrics:')
+          for pos, row in enumerate(report['per_position']):
+              print(pos, json.dumps(row, sort_keys=True))
+          concise = Path('concise-report')
+          concise.mkdir(exist_ok=True)
+          for source in (root / 'precision_report.json',
+                         root / 'comparison/stage_comparison.json',
+                         root / 'comparison/stage_comparison.csv'):
+              (concise / source.name).write_bytes(source.read_bytes())
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cpu-precision-summary-14
+          path: concise-report
+          retention-days: 14
