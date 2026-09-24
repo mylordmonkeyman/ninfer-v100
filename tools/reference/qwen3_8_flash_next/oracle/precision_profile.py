@@ -62,6 +62,7 @@ def _attention_hyper_from_bf16_shadow(self, hyper_input):
     the pass-through value so the CPU model does not round persistent state.
     This does not reproduce the CUDA dot-product reduction association.
     """
+    import torch
     import torch.nn.functional as F
 
     shadow = round_to_bf16(hyper_input)
