@@ -70,6 +70,7 @@ def _analyze_chunk(rows):
     flip_explainable = 0
     flip_explainable10 = 0
     nonflip_margins: list[float] = []
+    flip_details: list[tuple] = []
     mismatched_top1 = 0
     errors: list[str] = []
 
@@ -108,11 +109,13 @@ def _analyze_chunk(rows):
             top10 = heapq.nlargest(10, logits)[-1]
             margin10 = top1_value - top10
             flip_margins10.append(margin10)
-            flip_ranks.append(1 + sum(1 for x in logits if x > logits[cand]))
+            rank = 1 + sum(1 for x in logits if x > logits[cand])
+            flip_ranks.append(rank)
             if margin <= mxe:
                 flip_explainable += 1
             if margin10 <= mxe:
                 flip_explainable10 += 1
+            flip_details.append((index, margin, mxe, rank, cand, orac_top1))
 
     return {
         "flip_margins": flip_margins,
@@ -121,6 +124,7 @@ def _analyze_chunk(rows):
         "flip_explainable": flip_explainable,
         "flip_explainable10": flip_explainable10,
         "nonflip_margins": nonflip_margins,
+        "flip_details": flip_details,
         "mismatched_top1": mismatched_top1,
         "errors": errors,
     }
@@ -194,6 +198,7 @@ def main() -> int:
     flip_explainable = 0
     flip_explainable10 = 0
     nonflip_margins: list[float] = []
+    flip_details: list[tuple] = []
     mismatched_top1 = 0
     for result in results:
         if result["errors"]:
@@ -204,6 +209,7 @@ def main() -> int:
         flip_explainable += result["flip_explainable"]
         flip_explainable10 += result["flip_explainable10"]
         nonflip_margins.extend(result["nonflip_margins"])
+        flip_details.extend(result["flip_details"])
         mismatched_top1 += result["mismatched_top1"]
 
     report: list[str] = []
@@ -252,6 +258,21 @@ def main() -> int:
          f"({100.0 * flip_explainable / flips:.1f}%)")
     emit(f"margin(top1-top10) <= mxe: {flip_explainable10}/{flips} "
          f"({100.0 * flip_explainable10 / flips:.1f}%)")
+
+    emit("== per-flip detail ==")
+    anomalies = [d for d in flip_details if d[1] > d[2]]
+    emit(f"anomalies (margin > mxe): {len(anomalies)}")
+    for pos, margin, mxe, rank, cand, orac in sorted(
+            anomalies, key=lambda d: d[1] - d[2], reverse=True):
+        emit(f"  pos={pos} margin={margin:.4f} mxe={mxe:.4f} "
+             f"gap={margin - mxe:.4f} rank={rank} "
+             f"cand={cand} oracle={orac}")
+    emit("top-15 flips by oracle top-1 margin:")
+    for pos, margin, mxe, rank, cand, orac in sorted(
+            flip_details, key=lambda d: d[1], reverse=True)[:15]:
+        emit(f"  pos={pos} margin={margin:.4f} mxe={mxe:.4f} "
+             f"rank={rank} cand={cand} oracle={orac}")
+    emit(f"max flip margin: {max(d[1] for d in flip_details):.4f}")
 
     text = "\n".join(report) + "\n"
     sys.stdout.write(text)
