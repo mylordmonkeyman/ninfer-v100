@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Compare FP32 oracle, CPU storage profile, and optional V100 stage traces."""
+
+import argparse
+import csv
+import json
+from pathlib import Path
+
+import numpy as np
+
+
+def manifest_entries(root):
+    manifest = json.loads((root / "manifest.json").read_text())
+    return {(p["position"], item["name"]): root / item["file"]
+            for p in manifest["positions"] for item in p["tensors"]}
+
+
+def candidate_entries(root):
+    lines = (root / "stages.jsonl").read_text().splitlines()
+    entries = {}
+    for line in lines:
+        record = json.loads(line)
+        key = (record["position"], record["name"])
+        if key in entries:
+            raise ValueError(f"duplicate V100 candidate stage {key}")
+        entries[key] = root / record["file"]
+    return entries
+
+
+def load(path):
+    if path.stat().st_size % 4:
+        raise ValueError(f"invalid FP32 stage byte count: {path}")
+    value = np.fromfile(path, dtype="<f4")
+    if not value.size or not np.isfinite(value).all():
+        raise ValueError(f"empty or nonfinite stage: {path}")
+    return value.astype(np.float64)
+
+
+def nrmse(reference, candidate):
+    if reference.shape != candidate.shape:
+        raise ValueError(f"stage size mismatch: {reference.size} vs {candidate.size}")
+    scale = max(float(np.sqrt(np.mean(reference * reference))), 1e-12)
+    return float(np.sqrt(np.mean((reference - candidate) ** 2)) / scale)
+
+
+def compare(oracle_root, cpu_root, out_dir, v100_root=None):
+    oracle = manifest_entries(oracle_root)
+    cpu = manifest_entries(cpu_root)
+    v100 = candidate_entries(v100_root) if v100_root is not None else {}
+    if v100_root is not None and not v100:
+        raise ValueError("V100 candidate trace is empty")
+    rows = []
+    for (position, name), cpu_path in sorted(cpu.items()):
+        key = (position, name)
+        if key not in oracle:
+            raise ValueError(f"FP32 oracle is missing CPU stage {key}")
+        expected = load(oracle[key])
+        profiled = load(cpu_path)
+        row = {"position": position, "stage": name,
+               "cpu_vs_oracle_nrmse": "", "v100_vs_oracle_nrmse": "",
+               "v100_vs_cpu_nrmse": "", "cpu_same_expert_set": "",
+               "v100_same_expert_set": ""}
+        if name.endswith("moe_router_ids"):
+            if expected.shape != profiled.shape:
+                raise ValueError(f"router shape mismatch at {key}")
+            row["cpu_same_expert_set"] = int(set(expected) == set(profiled))
+            if key in v100:
+                value = load(v100[key])
+                row["v100_same_expert_set"] = int(set(expected) == set(value))
+        else:
+            row["cpu_vs_oracle_nrmse"] = nrmse(expected, profiled)
+            if key in v100:
+                value = load(v100[key])
+                row["v100_vs_oracle_nrmse"] = nrmse(expected, value)
+                row["v100_vs_cpu_nrmse"] = nrmse(profiled, value)
+        rows.append(row)
+    if v100_root is not None:
+        missing = set(cpu) - set(v100)
+        if missing:
+            raise ValueError(f"V100 candidate trace lacks {len(missing)} CPU stages; "
+                             f"first: {sorted(missing)[0]}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with (out_dir / "stage_comparison.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    report = {"positions": len({row["position"] for row in rows}),
+              "stage_rows": len(rows), "has_v100": v100_root is not None,
+              "worst_cpu_stage": max((row for row in rows
+                                      if isinstance(row["cpu_vs_oracle_nrmse"], float)),
+                                     key=lambda row: row["cpu_vs_oracle_nrmse"]),
+              "router_set_flips_cpu": sum(row["cpu_same_expert_set"] == 0
+                                          for row in rows if row["cpu_same_expert_set"] != ""),
+              "router_set_flips_v100": sum(row["v100_same_expert_set"] == 0
+                                           for row in rows if row["v100_same_expert_set"] != "")}
+    (out_dir / "stage_comparison.json").write_text(json.dumps(report, indent=2))
+    return report
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--oracle", type=Path, required=True)
+    parser.add_argument("--cpu", type=Path, required=True)
+    parser.add_argument("--v100", type=Path)
+    parser.add_argument("--out-dir", type=Path, required=True)
+    args = parser.parse_args()
+    print(json.dumps(compare(args.oracle, args.cpu, args.out_dir, args.v100), indent=2))
+
+
+if __name__ == "__main__":
+    main()

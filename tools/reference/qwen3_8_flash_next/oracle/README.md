@@ -2,6 +2,51 @@
 
 This directory provides the authoritative CPU FP32 reference forward pass and state divergence analysis harness for Qwen3.8-Flash-Next.
 
+## Phase 11 sequential storage-profile experiment
+
+`run_precision_reference.py` is a CPU-only supplementary diagnostic. It first
+decodes the frozen tokens with FP32 state and requires agreement with the
+independent full-sequence oracle. It then repeats sequential decoding with
+explicit BF16 materialization for selected projections, convolution history,
+attention KV, and logits, while retaining FP32 hyper and GDN SSM state. It
+writes position-indexed FP32 stage dumps and KL/top-1 summaries.
+
+The experiment is **not** an exact V100 precision oracle or a proven lower
+bound. It currently computes CPU FP32 arithmetic between materialization
+boundaries, and does not reproduce the reduction order of FP8 GEMV or fused
+GDN readout. Only stage agreement with V100 can justify attributing final
+errors to the precision profile. The authoritative mathematical oracle remains
+`run_oracle.py`.
+
+With the existing oracle environment and read-only source assets, the small
+14-position experiment is invoked as follows:
+
+```bash
+python run_precision_reference.py \
+  --model-dir /srv/ninfer/source/mixed \
+  --ple-dir /srv/ninfer/source/ple/ples_int4 \
+  --ids-file /srv/ninfer/oracle/phase11/token_ids.json \
+  --fp32-oracle /srv/ninfer/oracle/phase11-stage-trace14 \
+  --positions 14 \
+  --out-dir /srv/ninfer/precision-reference/phase11-14
+```
+
+The V100 test can optionally write pre-injection selected tensors using
+`NINFER_PHASE11_CANDIDATE_TRACE_ROOT`, with the existing all-position stage
+trace enabled. Compare the three sets with:
+
+```bash
+python compare_precision_traces.py \
+  --oracle /srv/ninfer/oracle/phase11-stage-trace14 \
+  --cpu /srv/ninfer/precision-reference/phase11-14/v100-phase11-storage \
+  --v100 /path/to/candidate-trace \
+  --out-dir /path/to/comparison
+```
+
+Until a real-model run establishes incremental FP32 parity and V100 stage
+agreement, these scripts produce diagnostic hypotheses rather than Phase 11
+qualification results.
+
 ## 1. Environment Setup
 
 Run the setup script using Python 3.14 to create the isolated virtual environment:

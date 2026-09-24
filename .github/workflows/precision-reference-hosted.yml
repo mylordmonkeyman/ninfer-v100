@@ -1,0 +1,61 @@
+name: Precision Reference Hosted Checks
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+
+permissions:
+  contents: read
+
+jobs:
+  cpu-tools:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Run independent CPU tool checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv .precision-venv
+          .precision-venv/bin/pip install numpy
+          .precision-venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+          .precision-venv/bin/python -m py_compile \
+            tools/reference/qwen3_8_flash_next/oracle/precision_profile.py \
+            tools/reference/qwen3_8_flash_next/oracle/precision_metrics.py \
+            tools/reference/qwen3_8_flash_next/oracle/run_precision_reference.py \
+            tools/reference/qwen3_8_flash_next/oracle/compare_precision_traces.py
+          .precision-venv/bin/python tests/targets/qwen3_8_flash_next/test_precision_profile.py
+          .precision-venv/bin/python tests/targets/qwen3_8_flash_next/test_precision_trace_compare.py
+
+  sm70-compile:
+    runs-on: ubuntu-24.04
+    container:
+      image: nvidia/cuda:12.8.1-devel-ubuntu24.04
+    timeout-minutes: 60
+    steps:
+      - name: Install build tools
+        shell: bash
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git ca-certificates python3 python3-pip pkg-config
+          python3 -m pip install --break-system-packages 'cmake>=3.28,<4' ninja
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Compile modified Phase 11 trace test for SM70
+        shell: bash
+        run: |
+          cmake -S . -B build-sm70 -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF \
+            -DBUILD_TESTING=ON
+          cmake --build build-sm70 -j --target \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test

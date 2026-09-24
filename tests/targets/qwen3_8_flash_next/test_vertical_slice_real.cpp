@@ -758,6 +758,24 @@ int main() {
             stage_root_env != nullptr && stage_root_env[0] != '\0';
         const fs::path stage_root =
             stage_trace_enabled ? fs::path(stage_root_env) : fs::path{};
+        const char* candidate_root_env =
+            std::getenv("NINFER_PHASE11_CANDIDATE_TRACE_ROOT");
+        const bool dump_candidate_trace =
+            candidate_root_env != nullptr && candidate_root_env[0] != '\0';
+        if (dump_candidate_trace && !stage_trace_enabled) {
+            throw std::invalid_argument(
+                "Phase 11 candidate trace requires a stage oracle root");
+        }
+        const fs::path candidate_root = dump_candidate_trace
+            ? fs::path(candidate_root_env) : fs::path{};
+        std::ofstream candidate_index;
+        if (dump_candidate_trace) {
+            fs::create_directories(candidate_root);
+            candidate_index.open(candidate_root / "stages.jsonl", std::ios::trunc);
+            if (!candidate_index) {
+                throw std::runtime_error("cannot create Phase 11 candidate trace index");
+            }
+        }
         const char* conv_history_layer_env =
             std::getenv("NINFER_PHASE11_ORACLE_GDN_CONV_HISTORY_LAYER");
         const bool inject_conv_history =
@@ -1268,6 +1286,37 @@ int main() {
                     cudaMemcpyDeviceToHost));
             } else {
                 return;
+            }
+
+            // The CPU precision experiment compares these same stage values
+            // against the FP32 oracle and the live V100.  Dump before any
+            // diagnostic oracle injection modifies the device tensor.
+            const std::string_view suffix = name.size() > 4 ? name.substr(4) : name;
+            const bool selected_stage =
+                name == "embedding" || name == "ple_injection" ||
+                name == "final_hidden" || name == "logits" ||
+                suffix == "attn_block_input" ||
+                suffix == "mlp_block_input" ||
+                suffix == "hyper_after_mlp" ||
+                suffix == "moe_router_ids";
+            if (dump_candidate_trace && selected_stage) {
+                const fs::path folder = candidate_root / pos_dir;
+                fs::create_directories(folder);
+                const fs::path path = folder / (std::string(name) + ".bin");
+                std::ofstream output_file(path, std::ios::binary | std::ios::trunc);
+                output_file.write(
+                    reinterpret_cast<const char*>(candidate.data()),
+                    static_cast<std::streamsize>(count * sizeof(float)));
+                if (!output_file) {
+                    throw std::runtime_error("failed to write Phase 11 candidate stage");
+                }
+                candidate_index << json{{"position", current_stage_trace_position},
+                                        {"name", std::string(name)},
+                                        {"dtype", "FP32"},
+                                        {"count", count},
+                                        {"file", (fs::path(pos_dir) /
+                                                  (std::string(name) + ".bin")).string()}}
+                                << '\n' << std::flush;
             }
 
             long double dot = 0.0L;
