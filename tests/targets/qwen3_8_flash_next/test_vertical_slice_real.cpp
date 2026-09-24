@@ -1300,6 +1300,11 @@ int main() {
                 suffix == "hyper_after_mlp" ||
                 suffix == "moe_router_ids" ||
                 ([&] {
+                    const char* extra = std::getenv("NINFER_PHASE11_TRACE_HYPER_LAYER0");
+                    return extra != nullptr && extra[0] == '1' && extra[1] == '\0' &&
+                           name == "L00_hyper_after_attn";
+                }()) ||
+                ([&] {
                     const char* extra = std::getenv("NINFER_PHASE11_TRACE_GDN_LAYER0");
                     if (extra == nullptr || extra[0] != '1' || extra[1] != '\0' ||
                         name.substr(0, 4) != "L00_") {
