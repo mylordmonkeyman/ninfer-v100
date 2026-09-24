@@ -151,6 +151,12 @@ jobs:
                                         'moe_router_scores', 'hyper_after_mlp'))]
           print('Position-2 upstream checkpoints:', len(upstream))
           for line in upstream: print(line[:1500])
+          focus = [line for line in lines if
+                   'phase11.error_decomposition.position=2 ' in line and
+                   any(f'stage=L{layer:02d}_' in line
+                       for layer in (14, 15, 16))]
+          print('Position-2 layers 14-16 full checkpoints:', len(focus))
+          for line in focus: print(line[:1500])
           out = Path('concise-v100-report')
           out.mkdir(exist_ok=True)
           for source in (root / 'v100-comparison/stage_comparison.csv',
@@ -159,6 +165,7 @@ jobs:
           (out / 'test-summary.txt').write_text('\n'.join(
               summaries[-20:] + lines[-40:] + probes))
           (out / 'upstream-position2.txt').write_text('\n'.join(upstream) + '\n')
+          (out / 'layer15-position2.txt').write_text('\n'.join(focus) + '\n')
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
