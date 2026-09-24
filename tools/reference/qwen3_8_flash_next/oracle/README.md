@@ -41,8 +41,13 @@ python compare_precision_traces.py \
   --oracle /srv/ninfer/oracle/phase11-stage-trace14 \
   --cpu /srv/ninfer/precision-reference/phase11-14/v100-phase11-storage \
   --v100 /path/to/candidate-trace \
+  --incremental-fp32 /srv/ninfer/precision-reference/phase11-14/fp32 \
   --out-dir /path/to/comparison
 ```
+
+The frozen full-sequence oracle does not contain raw router scores. The
+incremental FP32 trace supplies those scores as an explicitly labeled
+supplement; its logits must first pass the frozen oracle parity check.
 
 The first real-model 14-position CPU run succeeded on September 24, 2026
 ([workflow](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36014366398),
@@ -93,6 +98,52 @@ This **does not establish a precision floor** or exonerate all kernels.
 Further work should first explain the missing V100-only flips and the excess
 CPU-only flips at the earliest divergent layers, then rerun the same stage
 comparison before using the profile to change acceptance thresholds.
+
+### Corrected profile and raw-score comparison
+
+The first CPU experiment above BF16-rounded the GDN QKV projection output.
+The selected V100 diagnostic uses `NINFER_FLASH_NEXT_FP32_GDN_PROJECTION=1`
+and `NINFER_FLASH_NEXT_FP32_GDN_CONV=1`; the corresponding CPU profile now
+feeds the unrounded QKV output into convolution, while preserving its other
+materialization boundaries. The revised CPU run
+([workflow](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36017907847))
+passed incremental FP32 parity at worst KL 2.99e-11 and emitted 3,416 stage
+rows and 672 complete router-score vectors. The V100 trace
+([workflow](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36018385552))
+and [compact score comparison](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36019037272)
+used the same 14 frozen positions.
+
+| Measurement against FP32 reference | Corrected CPU profile | V100 candidate |
+| --- | ---: | ---: |
+| Mean logits KL | 0.0259998 | 0.057752 |
+| Top-1 agreement | 14 / 14 | 13 / 14 |
+| Expert-set flips / 672 layer-position cells | 54 | 97 |
+| Median router-score NRMSE / 672 cells | 0.0003662 | 0.0004753 |
+| P95 router-score NRMSE / 672 cells | 0.0086096 | 0.0131782 |
+
+Of the expert-set flips, 39 are shared, 15 occur only on CPU, and 58 only
+on V100. The first V100-only flip at position 2, layer 20 exchanges experts
+489 and 388, whose FP32 cutoff gap is just 0.0002737; CPU and GPU router-score
+RMS errors are 0.001506 and 0.002002 respectively. At position 13, layer 39,
+the gap is 0.04668, while CPU and GPU router-score RMS errors are 0.02987
+and 0.06394. The median GPU/CPU score-error ratio is 1.196 across cells.
+These scores show how near ties amplify divergence but also show that the CPU
+profile does not quantitatively match the V100 candidate.
+
+A controlled V100 probe changed only
+`NINFER_FLASH_NEXT_FP32_ROUTER_INPUT=1`
+([workflow](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36019645369)).
+It still flips the position 2, layer 20 expert set, has 93 expert-set flips,
+13 / 14 top-1 agreement, and mean KL 0.06444803. The diagnostic CTest
+continues to fail its original Phase 11 acceptance gate; the probe workflow
+completed successfully and uploaded its trace. This result does not support
+BF16 router-input materialization as the dominant source of the mismatch.
+
+The precision-matched reference remains a calibration effort. Before
+relaxing the gate, isolate the earliest V100-only score divergence upstream
+of the layer 20 near tie and verify it against an independently reproduced
+arithmetic path or a closer GPU-matched reference. Neither this CPU profile
+nor the router-input probe establishes a mathematical lower bound on KL.
 
 ## 1. Environment Setup
 
