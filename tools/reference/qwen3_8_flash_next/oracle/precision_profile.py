@@ -141,9 +141,14 @@ def install_projection_boundaries(model, profile):
         handles.append(layer.mlp.register_forward_hook(
             lambda _module, _args, output: round_to_bf16(output)
         ))
-        projections.extend((layer.mlp.shared_expert.gate_proj,
-                            layer.mlp.shared_expert.up_proj,
-                            layer.mlp.shared_expert.down_proj))
+        # The V100 host-backed shared path keeps gate/up dot products in FP32
+        # and rounds only SiLU(gate)*up to BF16 before shared_down. Its FP32
+        # down result joins the routed FP32 sum before the final BF16 output.
+        # Rounding gate/up outputs and shared_down separately at these points
+        # creates extra, non-candidate precision loss in the CPU reference.
+        handles.append(layer.mlp.shared_expert.down_proj.register_forward_pre_hook(
+            lambda _module, args: (round_to_bf16(args[0]),)
+        ))
         for module in projections:
             if not isinstance(module, torch.nn.Linear):
                 raise TypeError(f"expected a projection, got {type(module)}")

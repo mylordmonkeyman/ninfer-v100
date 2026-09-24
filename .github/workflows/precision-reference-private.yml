@@ -44,8 +44,8 @@ jobs:
       - name: Download completed V100 prefix trace
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: v100-hyper-layer0-calibration-14
-          run-id: 36062874657
+          name: v100-moe-routing-layer0-14
+          run-id: 36072336918
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           path: v100-input
@@ -129,7 +129,8 @@ jobs:
             --ids-file "$PRECISION_IDS_FILE" \
             --fp32-oracle "$PRECISION_ORACLE_DIR" \
             --positions 14 \
-            --trace-hyper-layer0 \
+            --trace-mlp-layer0 \
+            --trace-moe-routing-layer0 \
             --v100-trace "$GITHUB_WORKSPACE/v100-input/candidate-stage" \
             --out-dir "$GITHUB_WORKSPACE/precision-reference-results"
 
@@ -147,8 +148,10 @@ jobs:
                                                    sort_keys=True)[:2500])
           rows = list(csv.DictReader((root / 'comparison/stage_comparison.csv').open()))
           for position in (0, 12, 13):
-              for stage in ('L00_attn_block_input', 'L00_hyper_after_attn',
-                            'L00_mlp_block_input', 'L01_attn_block_input',
+              for stage in ('L00_attn_block_input', 'L00_mlp_block_input',
+                            'L00_moe_router_alpha', 'L00_moe_shared_scale',
+                            'L00_mlp_block_output', 'L00_hyper_after_mlp',
+                            'L01_attn_block_input',
                             'L02_attn_block_input', 'L02_mlp_block_input', 'logits'):
                   item = next(r for r in rows if int(r['position']) == position
                               and r['stage'] == stage)
