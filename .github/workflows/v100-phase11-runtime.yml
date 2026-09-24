@@ -169,7 +169,7 @@ jobs:
             fi
             if [ "$(date +%s)" -ge "$deadline" ]; then
               echo "ERROR: GPU free memory stayed below ${required_free_mib} MiB for 5 minutes after unloading the agent model." >&2
-              echo "Another allocation is holding the GPU; free it on the runner host and re-run." >&2
+              echo "The runner cannot reach llama-swap from its network namespace (HTTP 000 above), so the agent host must pre-unload the model: POST http://127.0.0.1:9292/api/models/unload/qwen3.8-27b-omp, then keep the agent silent (any agent inference lazy-loads it back) and re-run this workflow." >&2
               exit 1
             fi
             sleep 15
