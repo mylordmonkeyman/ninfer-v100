@@ -9,9 +9,9 @@ audits are complete: at exact input no implementation error above
 and all 366 flips satisfy the margin-limited necessary condition
 (oracle margin < 2x the per-position max logit error). The spec §7
 initial thresholds are refuted; the margin-aware v2 gate family is
-calibrated (M = 20; unambiguous tier 35/35, zero flips) in
-"Documented error analysis". Remaining: user acceptance of the v2
-gate family.
+calibrated (M = 20) and fully measured in "Documented error
+analysis": unambiguous tier 35/35 top-1, tier KL 0.000000,
+`tier_gate=pass`. Remaining: user acceptance of the v2 gate family.
 
 Phase 11 is the first whole-model numerical acceptance gate. It is deliberately a
 correctness path, not a performance path.
@@ -358,7 +358,7 @@ flip-margin analysis, independent of the candidate):
 
 | tier | gate | status |
 |---|---|---|
-| unambiguous (oracle margin ≥ 20) | top-1 = 100% (hard); per-position KL ≤ 1e-2 | M = 20 calibrated: 63% headroom above the observed max flip margin (12.31); top-1 measured 35/35 with zero flips; tier KL self-check is instrumented in `analyze_flip_margins.py` (`tier_gate` verdict) and emits on the next verification run |
+| unambiguous (oracle margin ≥ 20) | top-1 = 100% (hard); per-position KL ≤ 1e-2 | M = 20 calibrated: 63% headroom above the observed max flip margin (12.31). Measured on verification run 35988765257: top-1 35/35, `tier_kl_max` 0.000000, `tier_gate=pass` |
 | margin-fragile (oracle margin < 20) | flips permitted; profile consistency: ≥ 90% of flips at oracle rank ≤ 10 (measured 97.3%); flip max-logit-error p50 ≤ 1.25× non-flip p50 (measured 1.02×); flip rate flat across 1024-position blocks (measured 119/104/115/28, no upward trend) | calibrated from the 4,096-position run |
 | whole run | NaN/Inf = 0; exact host-expert counters; non-expert VRAM ledger reconciled; corpus-weighted relative NLL delta reported (measured 3.647%) | hard; all measured values available |
 
@@ -366,9 +366,14 @@ A flip at an unambiguous-tier position, or an upward flip-rate trend
 across the run, would be a defect signature and reopens the phase.
 Calibration of M = 20: the unambiguous tier is non-trivial (35
 positions, 0.85% of the corpus) and every measured flip falls in the
-margin-fragile tier. The existing 4,096-position run (f6ba1ed3)
-satisfies the v2 gate as calibrated, except the unambiguous-tier KL
-component, which the next verification run emits.
+margin-fragile tier. The 4,096-position measurement is now complete
+and re-verified: verification run 35988765257 re-measured the tier
+component (pass, above), re-confirmed the margin-limited necessary
+condition at 366/366 (100.0%), reproduced the flip count exactly
+(366 flips / 3,730 non-flips, 0 manifest mismatches), and re-ran the
+32-position smoke deterministically (top-1 31/32, mean KL 0.027374,
+P99 KL 0.615417, NLL delta 0.3489%, first divergence at position 13,
+oracle top-1 37027). The run satisfies the v2 gate in every component.
 
 
 ## CI versus physical qualification
