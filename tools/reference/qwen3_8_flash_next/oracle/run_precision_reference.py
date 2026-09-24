@@ -65,6 +65,11 @@ def _stage_hooks(model, captured):
             captured[name] = select(output).detach().to(torch.float32).cpu().clone()
         return hook
 
+    def capture_input(name):
+        def hook(_module, args):
+            captured[name] = args[0].detach().to(torch.float32).cpu().clone()
+        return hook
+
     handles.append(model.embed_tokens.register_forward_hook(capture("embedding")))
     for index, layer in enumerate(model.layers):
         prefix = f"L{index:02d}_"
@@ -73,6 +78,18 @@ def _stage_hooks(model, captured):
         handles.append(layer.attn_hyper_connection.register_forward_hook(
             capture(prefix + "attn_block_input", lambda output: output[0])
         ))
+        if hasattr(layer, "linear_attn"):
+            gdn = layer.linear_attn
+            handles.append(gdn.register_forward_hook(capture(prefix + "attn_block_output")))
+            for module, name in ((gdn.in_proj_qkv, "qkv"),
+                                 (gdn.in_proj_z, "z"),
+                                 (gdn.in_proj_a, "a"),
+                                 (gdn.in_proj_b, "b")):
+                handles.append(module.register_forward_hook(capture(prefix + "_raw_" + name)))
+            handles.append(gdn.norm.register_forward_pre_hook(
+                capture_input(prefix + "gdn_recurrent_output")))
+            handles.append(gdn.out_proj.register_forward_pre_hook(
+                capture_input(prefix + "gdn_gated_output")))
         handles.append(layer.mlp_hyper_connection.register_forward_hook(
             capture(prefix + "mlp_block_input", lambda output: output[0])
         ))
@@ -105,6 +122,22 @@ def run_decode(model, head, token_ids, profile, out_root):
                 captured.clear()
                 output = model(input_ids=torch.tensor([[token_id]], dtype=torch.long),
                                past_key_values=cache, use_cache=True)
+                # Match the independent oracle's controls and projection
+                # materializations without replaying the recurrent kernel.
+                for index, layer in enumerate(model.layers):
+                    if not hasattr(layer, "linear_attn"):
+                        continue
+                    prefix = f"L{index:02d}_"
+                    qkv = captured.pop(prefix + "_raw_qkv")
+                    z = captured.pop(prefix + "_raw_z")
+                    a = captured.pop(prefix + "_raw_a")
+                    b = captured.pop(prefix + "_raw_b")
+                    gdn = layer.linear_attn
+                    captured[prefix + "gdn_projected"] = torch.cat((qkv, z), dim=-1)
+                    captured[prefix + "gdn_z"] = z
+                    captured[prefix + "gdn_g"] = (-torch.exp(gdn.A_log.detach().cpu().float())
+                        * F.softplus(a + gdn.dt_bias.detach().cpu().float()))
+                    captured[prefix + "gdn_beta"] = torch.sigmoid(b)
                 cache = output.past_key_values
                 if cache is None:
                     raise RuntimeError("model did not return a persistent decode cache")
