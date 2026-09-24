@@ -16,25 +16,48 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - name: Download calibrated three-way prefix comparison
+      - name: Download before and after three-way prefix comparisons
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           gh run download 36073386852 --repo "$GITHUB_REPOSITORY" \
-            --name cpu-precision-reference-14 --dir calibrated
+            --name cpu-precision-reference-14 --dir before
+          gh run download 36074175598 --repo "$GITHUB_REPOSITORY" \
+            --name cpu-precision-reference-14 --dir after
       - name: Locate layer-zero to layer-one divergence
         run: |
           set -euo pipefail
           python3 - <<'PY' | tee ple-boundary-report.txt
           import csv
+          import json
           from pathlib import Path
 
-          path = Path('calibrated/comparison/stage_comparison.csv')
-          rows = {(int(row['position']), row['stage']): row
-                  for row in csv.DictReader(path.open())}
+          def read(root):
+              report = json.loads((root / 'precision_report.json').read_text())
+              rows = {(int(row['position']), row['stage']): row for row in
+                      csv.DictReader((root / 'comparison/stage_comparison.csv').open())}
+              cpu = {(pos, stage) for (pos, stage), row in rows.items()
+                     if stage.endswith('moe_router_ids') and row['cpu_same_expert_set'] == '0'}
+              gpu = {(pos, stage) for (pos, stage), row in rows.items()
+                     if stage.endswith('moe_router_ids') and row['v100_same_expert_set'] == '0'}
+              return report, rows, cpu, gpu
+
+          previous, old_rows, old_cpu, old_gpu = read(Path('before'))
+          current, rows, cpu, gpu = read(Path('after'))
+          assert old_gpu == gpu and len(rows) == 3458
+          print('CPU mean KL before/after', previous['mean_kl'], current['mean_kl'])
+          print('V100 mean KL', current['three_way']['oracle_vs_v100_mean_kl'])
+          print('CPU/V100 mean KL before/after',
+                previous['three_way']['cpu_vs_v100_mean_kl'],
+                current['three_way']['cpu_vs_v100_mean_kl'])
+          print('Router flips before shared/cpu-only/v100-only',
+                len(old_cpu & gpu), len(old_cpu - gpu), len(gpu - old_cpu))
+          print('Router flips after shared/cpu-only/v100-only',
+                len(cpu & gpu), len(cpu - gpu), len(gpu - cpu))
           for p in (0, 1, 2, 6, 10, 12, 13):
-              print('POSITION', p)
+              print('POSITION', p, 'CPU KL before/after',
+                    previous['per_position'][p]['kl'], current['per_position'][p]['kl'])
               for stage in ('L00_mlp_block_input', 'L00_moe_router_alpha',
                             'L00_moe_shared_scale', 'L00_mlp_block_output',
                             'L00_hyper_after_mlp', 'ple_injection',
@@ -44,9 +67,12 @@ jobs:
                   if row is None:
                       print('STAGE', stage, 'absent')
                       continue
+                  old = old_rows.get((p, stage))
                   print('STAGE', stage, 'cpu/oracle', row['cpu_vs_oracle_nrmse'],
                         'v100/oracle', row['v100_vs_oracle_nrmse'],
-                        'v100/cpu', row['v100_vs_cpu_nrmse'])
+                        'v100/cpu before/after',
+                        old['v100_vs_cpu_nrmse'] if old else 'absent',
+                        row['v100_vs_cpu_nrmse'])
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
