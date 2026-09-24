@@ -120,6 +120,28 @@ jobs:
           print('CPU flips per position:', sorted(collections.Counter(p for p, _ in cpu).items()))
           print('V100 flips per position:', sorted(collections.Counter(p for p, _ in v100).items()))
           print('V100-only flips per layer:', sorted(collections.Counter(s[:3] for _, s in v100 - cpu).items()))
+          score_rows = {(int(r['position']), int(r['layer'])): r
+                        for r in csv.DictReader((Path('concise-v100-report') /
+                                                  'router_scores.csv').open())}
+          print('Earliest V100-only flips (layer, position, cutoff, score RMS):')
+          for position, stage in sorted(v100 - cpu, key=lambda item:
+                                        (int(item[1][1:3]), item[0]))[:12]:
+              layer = int(stage[1:3])
+              score = score_rows[(position, layer)]
+              print('flip', 'L%02d' % layer, 'position', position,
+                    'cutoff', score['cutoff'],
+                    'cpu_rms', score['cpu_rms_error'],
+                    'gpu_rms', score['gpu_rms_error'])
+              for stage_name in (f'L{layer:02d}_attn_block_input',
+                                 f'L{layer:02d}_mlp_block_input',
+                                 f'L{layer:02d}_hyper_after_mlp'):
+                  item = next((r for r in rows if
+                               int(r['position']) == position and
+                               r['stage'] == stage_name), None)
+                  if item:
+                      print(' preceding', stage_name,
+                            'cpu_nrmse', item['cpu_vs_oracle_nrmse'],
+                            'gpu_nrmse', item['v100_vs_oracle_nrmse'])
           for stage in ('embedding', 'L00_attn_block_input', 'L00_mlp_block_input',
                         'L24_attn_block_input', 'L24_mlp_block_input',
                         'L43_mlp_block_input', 'final_hidden', 'logits'):
