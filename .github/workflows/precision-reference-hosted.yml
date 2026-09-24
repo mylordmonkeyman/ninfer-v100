@@ -1,9 +1,7 @@
 name: Precision Reference Hosted Checks
 
 on:
-  push:
-    branches:
-      - work/precision-matched-reference
+  workflow_dispatch:
 
 permissions:
   contents: read
