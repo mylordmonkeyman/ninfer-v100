@@ -63,7 +63,11 @@ def install_projection_boundaries(model, profile):
     for layer in model.layers:
         projections = []
         if hasattr(layer, "linear_attn"):
-            projections.extend((layer.linear_attn.in_proj_qkv, layer.linear_attn.in_proj_z))
+            # The selected V100 diagnostic's FP32_GDN_PROJECTION path feeds
+            # unrounded QKV directly into its fused convolution. It still
+            # writes a BF16 projection mirror and uses BF16 for z. Rounding
+            # QKV here would change the conv input before that fused step.
+            projections.append(layer.linear_attn.in_proj_z)
             handles.append(layer.linear_attn.register_forward_hook(
                 lambda _module, _args, output: round_to_bf16(output)
             ))

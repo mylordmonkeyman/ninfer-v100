@@ -6,6 +6,8 @@ on:
       - work/precision-matched-reference
     paths:
       - .github/workflows/precision-reference-private.yml
+      - tools/reference/qwen3_8_flash_next/oracle/precision_profile.py
+      - tools/reference/qwen3_8_flash_next/oracle/run_precision_reference.py
 
 permissions:
   contents: read
