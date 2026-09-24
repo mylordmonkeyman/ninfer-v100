@@ -193,6 +193,20 @@ CPU-to-V100 NRMSE, before PLE and layer one. The next test should compare
 Position 12 also has a residual GDN-history difference before this MLP
 boundary. The §7 acceptance gate remains unchanged and unpassed.
 
+The [layer-zero MoE output trace](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36064757282)
+locates the first large position-zero discrepancy inside the MoE: the CPU-to-V100
+`L00_mlp_block_input` NRMSE is 4.28e-5, `L00_mlp_block_output` is 0.004072,
+and `L00_hyper_after_mlp` is 0.003256. At position two the corresponding
+values are 9.87e-5, 0.002779, and 0.001785. The V100 MoE output at position
+zero is closer to the independent oracle than the CPU profile (0.001715 versus
+0.005091 NRMSE), so the CPU reference's weight dequantization, router alpha,
+shared path, and expert arithmetic must be separated before blaming a V100
+kernel. The V100 host-expert reference rounds BF16 input and intermediate
+activations; the CPU reference models these casts but still uses different
+arithmetic and accumulation. A focused router-alpha/shared-scale and routed
+versus shared output trace is the next calibration step. The precision floor
+has not been established.
+
 ### Layer 15 QSA projection replay and input boundary
 
 The [upstream stage extraction](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36020859990)
