@@ -1,0 +1,52 @@
+name: Phase 11 CPU Layer 15 QSA Precision Replay
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-qsa-cpu-replay.yml
+      - tools/reference/qwen3_8_flash_next/oracle/analyze_qsa_output_precision.py
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 30
+    env:
+      CUDA_VISIBLE_DEVICES: ""
+      OMP_NUM_THREADS: "16"
+      MKL_NUM_THREADS: "16"
+      OPENBLAS_NUM_THREADS: "16"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Replay frozen gate through dequantized FP8 projection
+        run: |
+          set -euo pipefail
+          test -r /srv/ninfer/source/mixed/model.safetensors.index.json
+          test -r /oracle/phase11-stage-trace14/pos0002/L15_qsa_gated.bin
+          python_bin=''
+          for candidate in "$HOME/ninfer-v100/venv-oracle/bin/python" \
+              /srv/ninfer/venv-oracle/bin/python python3; do
+            if command -v "$candidate" >/dev/null 2>&1 && \
+                "$candidate" -c 'import numpy, torch, safetensors' >/dev/null 2>&1; then
+              python_bin="$candidate"
+              break
+            fi
+          done
+          test -n "$python_bin"
+          "$python_bin" tools/reference/qwen3_8_flash_next/oracle/analyze_qsa_output_precision.py \
+            --model-dir /srv/ninfer/source/mixed \
+            --oracle /oracle/phase11-stage-trace14 \
+            --position 2 --layer 15 | tee precision-replay.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: qsa-layer15-cpu-precision-replay
+          path: precision-replay.json
+          if-no-files-found: ignore
+          retention-days: 14
