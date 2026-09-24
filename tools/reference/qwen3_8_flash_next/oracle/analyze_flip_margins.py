@@ -45,6 +45,11 @@ from pathlib import Path
 PERCENTILES = (1, 5, 10, 25, 50, 75, 90, 95, 99)
 MARGIN_THRESHOLDS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0)
 RANK_BOUNDS = (2, 3, 5, 10, 50, 100)
+# Unambiguous-tier gate (v2): positions where the oracle's own top-1
+# margin is this wide must agree on top-1 and stay under the KL limit.
+# Calibrated 2026-09-24: max measured flip margin 12.3132 (63% headroom).
+TIER_MARGIN = 20.0
+TIER_KL_LIMIT = 1e-2
 
 
 def percentile(values: list[float], p: float) -> float:
@@ -63,18 +68,21 @@ def percentile(values: list[float], p: float) -> float:
 
 
 def _analyze_chunk(rows):
-    """rows: list of (index, record, root, vocabulary, cand, orac_top1, mxe)."""
+    """rows: list of (index, record, root, vocabulary, cand, orac_top1,
+                       mxe, kl)."""
     flip_margins: list[float] = []
     flip_margins10: list[float] = []
     flip_ranks: list[int] = []
     flip_explainable = 0
     flip_explainable10 = 0
+    flip_explainable2 = 0
     nonflip_margins: list[float] = []
     flip_details: list[tuple] = []
+    tier: list[tuple] = []
     mismatched_top1 = 0
     errors: list[str] = []
 
-    for index, record, root, vocabulary, cand, orac_top1, mxe in rows:
+    for index, record, root, vocabulary, cand, orac_top1, mxe, kl in rows:
         if record["position"] != index:
             errors.append(f"manifest position {index} is not contiguous")
             continue
@@ -115,7 +123,11 @@ def _analyze_chunk(rows):
                 flip_explainable += 1
             if margin10 <= mxe:
                 flip_explainable10 += 1
+            if margin < 2.0 * mxe:
+                flip_explainable2 += 1
             flip_details.append((index, margin, mxe, rank, cand, orac_top1))
+        if margin >= TIER_MARGIN:
+            tier.append((index, margin, kl, cand != orac_top1))
 
     return {
         "flip_margins": flip_margins,
@@ -123,7 +135,9 @@ def _analyze_chunk(rows):
         "flip_ranks": flip_ranks,
         "flip_explainable": flip_explainable,
         "flip_explainable10": flip_explainable10,
+        "flip_explainable2": flip_explainable2,
         "nonflip_margins": nonflip_margins,
+        "tier": tier,
         "flip_details": flip_details,
         "mismatched_top1": mismatched_top1,
         "errors": errors,
@@ -179,9 +193,9 @@ def main() -> int:
     for index, record in enumerate(positions):
         if index not in trace:
             raise SystemExit(f"trace lacks position {index}")
-        cand, orac_top1, _kl, _nll, mxe = trace[index]
+        cand, orac_top1, kl, _nll, mxe = trace[index]
         rows.append(
-            (index, record, root, vocabulary, cand, orac_top1, mxe))
+            (index, record, root, vocabulary, cand, orac_top1, mxe, kl))
 
     workers = args.workers or min(16, os.cpu_count() or 1)
     workers = max(1, min(workers, len(rows)))
@@ -197,8 +211,10 @@ def main() -> int:
     flip_ranks: list[int] = []
     flip_explainable = 0
     flip_explainable10 = 0
+    flip_explainable2 = 0
     nonflip_margins: list[float] = []
     flip_details: list[tuple] = []
+    tier: list[tuple] = []
     mismatched_top1 = 0
     for result in results:
         if result["errors"]:
@@ -208,8 +224,10 @@ def main() -> int:
         flip_ranks.extend(result["flip_ranks"])
         flip_explainable += result["flip_explainable"]
         flip_explainable10 += result["flip_explainable10"]
+        flip_explainable2 += result["flip_explainable2"]
         nonflip_margins.extend(result["nonflip_margins"])
         flip_details.extend(result["flip_details"])
+        tier.extend(result["tier"])
         mismatched_top1 += result["mismatched_top1"]
 
     report: list[str] = []
@@ -258,6 +276,9 @@ def main() -> int:
          f"({100.0 * flip_explainable / flips:.1f}%)")
     emit(f"margin(top1-top10) <= mxe: {flip_explainable10}/{flips} "
          f"({100.0 * flip_explainable10 / flips:.1f}%)")
+    emit(f"margin < 2*mxe (necessary condition for any flip): "
+         f"{flip_explainable2}/{flips} "
+         f"({100.0 * flip_explainable2 / flips:.1f}%)")
 
     emit("== per-flip detail ==")
     anomalies = [d for d in flip_details if d[1] > d[2]]
@@ -273,6 +294,30 @@ def main() -> int:
         emit(f"  pos={pos} margin={margin:.4f} mxe={mxe:.4f} "
              f"rank={rank} cand={cand} oracle={orac}")
     emit(f"max flip margin: {max(d[1] for d in flip_details):.4f}")
+    emit(f"== unambiguous tier (oracle margin >= {TIER_MARGIN:g}) ==")
+    tier_flips = [t for t in tier if t[3]]
+    tier_kls = [t[2] for t in tier]
+    emit(f"positions: {len(tier)} flips: {len(tier_flips)}")
+    if tier_kls:
+        emit("per-position KL: "
+             + " ".join(f"p{p}={percentile(tier_kls, p):.6f}"
+                        for p in (50, 90, 95, 99))
+             + f" max={max(tier_kls):.6f} "
+             f"mean={statistics.fmean(tier_kls):.6f}")
+    tier_kl_violations = [t for t in tier
+                          if not t[3] and t[2] > TIER_KL_LIMIT]
+    emit(f"KL > {TIER_KL_LIMIT:g}: {len(tier_kl_violations)}")
+    for pos, margin, kl, _flipped in sorted(tier_flips):
+        emit(f"  FLIP pos={pos} margin={margin:.4f} kl={kl:.6f}")
+    for pos, margin, kl, _flipped in sorted(tier_kl_violations):
+        emit(f"  KLVIOL pos={pos} margin={margin:.4f} kl={kl:.6f}")
+    tier_verdict = ("pass" if not tier_flips and not tier_kl_violations
+                    else "fail")
+    emit(f"phase11.flip_margins.tier_top1="
+         f"{len(tier) - len(tier_flips)}/{len(tier)} "
+         f"tier_kl_max="
+         f"{max(tier_kls) if tier_kls else 0.0:.6f} "
+         f"tier_gate={tier_verdict}")
 
     text = "\n".join(report) + "\n"
     sys.stdout.write(text)

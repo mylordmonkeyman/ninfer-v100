@@ -3,10 +3,15 @@
 Status: physical V100 execution established; non-expert VRAM ledger
 reconciled (+5.6 MiB / 0.08%); the full 4,096-position teacher-forced
 run is complete (commit f6ba1ed3): top-1 91.06% (366 flips), mean KL
-0.1236, P99 KL 2.446, relative mean-NLL delta 3.65%. The spec §7 initial
-thresholds and the first proposed relaxation are both refuted by this
-measurement; the revised margin-aware gate family and the remaining
-evidence steps are documented in "Documented error analysis".
+0.1236, P99 KL 2.446, relative mean-NLL delta 3.65%. All component
+audits are complete: at exact input no implementation error above
+~1.6x its rounding floor (LM head 1.27x, QSA projections 1.3-1.6x),
+and all 366 flips satisfy the margin-limited necessary condition
+(oracle margin < 2x the per-position max logit error). The spec §7
+initial thresholds are refuted; the margin-aware v2 gate family is
+calibrated (M = 20; unambiguous tier 35/35, zero flips) in
+"Documented error analysis". Remaining: user acceptance of the v2
+gate family.
 
 Phase 11 is the first whole-model numerical acceptance gate. It is deliberately a
 correctness path, not a performance path.
@@ -233,24 +238,40 @@ frozen precision configuration above: the 14-position stage-trace run
 | expert output materialization | BF16 rounding RMS 1.31e-3, max 3.96e-3 | at the BF16 floor |
 | hyper-connection apply/inject | stage pass-through ≈ 1.0× (hyper_after_attn NRMSE ≈ its input error) | not an amplifier |
 | PLE path | 14/14 oracle injections verified; candidate PLE NRMSE 0.0036; injecting exact PLE reduces downstream router drift (L44 pos-13 router NRMSE 0.631 → 0.246) | small contributor, not the cause |
+| LM-head (output-head GEMM + logit path) | exact `final_hidden` injected at all 14 positions: candidate `logits` NRMSE 0.00211, max error 0.0534 = 1.27× the BF16 logit floor (0.00166) | at floor; exonerated. The position-13 max logit error (2.88) is the upstream final-hidden drift (0.24 NRMSE) amplified through the head GEMM |
+| QSA sparse Q/K/V projections | exact `L03_attn_block_input` injected at position 13: query/key/value NRMSE 0.00269/0.00257/0.00214 (1.3–1.6× floor) vs 0.00365/0.00378/0.00393 (2.2×) on drifted input; the sparse kernel itself is FP64-oracle-validated (`ninfer_selected_block_attention_test`, passed in the same run) | near floor, not an amplifier |
 
-Two component-local audits and one mechanism check are in flight (CI
-steps "Analyze oracle top-1 margins at measured flip positions" and
-"Measure QSA block and LM-head local error under exact-input
-injection"):
+All three audits are complete (run 35981902518; audit steps from
+daa1d0af, decomposition dataset from 3a464fbb):
 
-- **LM-head local error**: exact `final_hidden` injected at all 14 trace
-  positions; the candidate `logits` NRMSE against the oracle then
-  isolates the output-head GEMM and logit path on exact input.
-- **QSA block local error**: exact `L03_attn_block_input` injected at
-  position 13; the `L03_qsa_query/key/value` stages isolate the sparse
-  attention Q/K/V projection GEMMs on exact input (the sparse kernel
-  itself is separately validated by the FP64 selected-block attention
-  test). `L03_qsa_gated/attended/attn_block_output` additionally carry
-  the small positions-0–12 historical BF16 KV-cache drift.
-- **flip-margin check**: the oracle's own top-1 margin at every
-  position, compared against the 366 measured flips and the per-position
-  max logit error, to test the margin-limited mechanism at corpus scale.
+- **LM-head local error** (exact `final_hidden` injected at all 14
+  positions): candidate `logits` NRMSE 0.00211, max error 0.0534 —
+  1.27× the BF16 logit floor. The output head is at its rounding floor;
+  the position-13 max logit error (2.88) is the upstream
+  `final_hidden` drift (0.24 NRMSE) amplified through the head GEMM.
+- **QSA block local error** (exact `L03_attn_block_input` injected at
+  position 13): query/key/value NRMSE 0.00269/0.00257/0.00214
+  (1.3–1.6× floor) vs 0.00365/0.00378/0.00393 (2.2×) on drifted input —
+  near floor, not an amplifier. The sparse kernel is separately
+  FP64-oracle-validated.
+- **flip-margin check**: confirmed at corpus scale — see
+  "Flip-margin analysis (corpus scale)" below.
+
+The same run produced the full-layer per-stage floor-ratio dataset
+(`analyze_error_decomposition.py`): for every stage, the NRMSE against
+the rounding floor (NRMSE of the oracle value rounded to the stage's
+storage dtype) at all 14 positions. Two structural findings:
+
+- the position-0 profile (no teacher-forced drift) is at or below
+  ~2.5× the floor for every local stage, except one discrete event: an
+  L10 router flip at the first position (L10 block input 1.44× floor,
+  router-ID mismatch with max expert-ID delta 108, block output 24.3%
+  NRMSE at max absolute error 0.0076, propagating 3.7× floor to the
+  L11 input). The discrete-flip mechanism is thus observable from
+  position zero; the >2× ratios at deep positions are dominated by
+  post-flip cascade plus teacher-forced drift, not by local error.
+- no stage shows local error above ~2.5× its floor at exact or
+  near-exact input.
 
 
 ### Mechanism: floor compounding plus discrete top-k amplification
@@ -293,6 +314,28 @@ per-position logit error magnitude is nearly identical on flip and
 non-flip positions (p50 1.879 vs 1.834), so flips are set by the local
 oracle margin, not by locally larger error.
 
+### Flip-margin analysis (corpus scale)
+
+The 4,096-position trace was analyzed against the oracle's own top-1
+margin (`analyze_flip_margins.py`, run 35981902518):
+
+- 366 flips / 3,730 non-flips. Max flip margin 12.3132 (position
+  2196). Non-flip margin p50 = 5.5257, p95 = 13.5936, p99 = 19.4247;
+  35 non-flips (0.9%) have margin ≥ 20.
+- **Necessary condition.** The per-position full-vocabulary max logit
+  error m bounds every logit: cand[t] ∈ [oracle[t] − m, oracle[t] + m].
+  A top-1 flip therefore requires margin = oracle[top1] −
+  oracle[top2] < 2m. All 366/366 flips satisfy this; 356/366 (97.3%)
+  satisfy the stricter margin ≤ m. The 10 flips above the stricter
+  bound all have oracle top-1 = 248046 (EOS), and the largest gap is
+  1.13 (position 374: margin 3.99, m = 2.85, 2m = 5.71). No flip
+  contradicts the measured per-position error.
+- **Rank profile.** 85.2% of flips select the oracle rank-2 token,
+  97.3% select within the oracle top-10; the deepest flip selects
+  rank 31219 at margin 0.35 (m = 0.42).
+- **Wide-margin tier.** Zero flips with margin ≥ 20; all 35 tier
+  positions agree on top-1.
+
 
 ### Proposed relaxed gate (v2, after the 4,096-position measurement)
 
@@ -315,14 +358,17 @@ flip-margin analysis, independent of the candidate):
 
 | tier | gate | status |
 |---|---|---|
-| unambiguous (oracle margin ≥ M) | top-1 = 100%; per-position KL ≤ 1e-2 | pending flip-margin data (zero measured flips in the wide-margin tail 3404–4095) |
-| margin-fragile (oracle margin < M) | flips permitted; reported as a profile-consistency metric, not hard-gated | pending flip-margin data |
-| whole run | NaN/Inf = 0; exact host-expert counters; non-expert VRAM ledger reconciled; flip rate flat across 1024-position blocks (no upward trend); corpus-weighted relative NLL delta reported (measured 3.647%) | hard; all measured values available |
+| unambiguous (oracle margin ≥ 20) | top-1 = 100% (hard); per-position KL ≤ 1e-2 | M = 20 calibrated: 63% headroom above the observed max flip margin (12.31); top-1 measured 35/35 with zero flips; tier KL self-check is instrumented in `analyze_flip_margins.py` (`tier_gate` verdict) and emits on the next verification run |
+| margin-fragile (oracle margin < 20) | flips permitted; profile consistency: ≥ 90% of flips at oracle rank ≤ 10 (measured 97.3%); flip max-logit-error p50 ≤ 1.25× non-flip p50 (measured 1.02×); flip rate flat across 1024-position blocks (measured 119/104/115/28, no upward trend) | calibrated from the 4,096-position run |
+| whole run | NaN/Inf = 0; exact host-expert counters; non-expert VRAM ledger reconciled; corpus-weighted relative NLL delta reported (measured 3.647%) | hard; all measured values available |
 
 A flip at an unambiguous-tier position, or an upward flip-rate trend
-across the run, would be a defect signature and reopens the phase. The
-calibration of M requires that the unambiguous tier is non-trivial and
-that (pending data) all measured flips fall in the margin-fragile tier.
+across the run, would be a defect signature and reopens the phase.
+Calibration of M = 20: the unambiguous tier is non-trivial (35
+positions, 0.85% of the corpus) and every measured flip falls in the
+margin-fragile tier. The existing 4,096-position run (f6ba1ed3)
+satisfies the v2 gate as calibrated, except the unambiguous-tier KL
+component, which the next verification run emits.
 
 
 ## CI versus physical qualification
@@ -347,10 +393,10 @@ Two workflows cover the two surfaces:
 ## Boundary
 
 Phase 11 closes only after (a) the flip-margin analysis and the
-LM-head/QSA local-error audits land consistent with the mechanism above,
-(b) the user accepts the v2 margin-aware gate family, and (c) the
-non-expert VRAM ledger is reconciled — the latter is already satisfied
-(+5.6 MiB / 0.08%).
+LM-head/QSA local-error audits land consistent with the mechanism above
+- satisfied (all audits complete and consistent), (b) the user accepts
+the v2 margin-aware gate family, and (c) the non-expert VRAM ledger is
+reconciled — satisfied (+5.6 MiB / 0.08%).
 
 Phase 12 (MTP correctness) and Phase 13 (expert cache) must not be inferred
 from a Phase-11 compile pass or from the 32-position smoke.
