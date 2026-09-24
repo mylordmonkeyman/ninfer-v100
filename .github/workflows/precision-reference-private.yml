@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+# A new push is used only if an earlier queued attempt cannot be assigned.
+concurrency:
+  group: phase11-cpu-precision-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   cpu-reference-14:
     name: CPU-only 14-position reference
