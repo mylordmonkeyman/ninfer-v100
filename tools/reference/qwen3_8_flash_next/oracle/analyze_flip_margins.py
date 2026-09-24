@@ -19,24 +19,111 @@ consequences of accumulated drift (the documented error-analysis
 mechanism), not a systematic bias in the candidate. A flip at a
 position with a large oracle margin that the measured error cannot
 explain would be a defect signature.
+
+Pure standard library (array + heapq + multiprocessing): the runner's
+python3 has no third-party packages. The reported values are
+numerically identical to the numpy definitions (argmax = first max,
+partition(-k)[-k] = k-th largest value with multiplicity, percentile
+= linear interpolation).
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import heapq
 import json
+import math
+import os
+import statistics
 import sys
+from array import array
 from collections import Counter
+from multiprocessing import Pool
 from pathlib import Path
 
-import numpy as np
+PERCENTILES = (1, 5, 10, 25, 50, 75, 90)
+MARGIN_THRESHOLDS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0)
+RANK_BOUNDS = (2, 3, 5, 10, 50, 100)
 
 
-def percentile(values: np.ndarray, p: float) -> float:
-    if values.size == 0:
+def percentile(values: list[float], p: float) -> float:
+    """numpy.percentile with the default 'linear' interpolation."""
+    if not values:
         return float("nan")
-    return float(np.percentile(values, p))
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return float(ordered[0])
+    rank = (len(ordered) - 1) * (p / 100.0)
+    low = int(math.floor(rank))
+    high = int(math.ceil(rank))
+    if low == high:
+        return float(ordered[low])
+    return float(ordered[low] + (ordered[high] - ordered[low]) * (rank - low))
+
+
+def _analyze_chunk(rows):
+    """rows: list of (index, record, root, vocabulary, cand, orac_top1, mxe)."""
+    flip_margins: list[float] = []
+    flip_margins10: list[float] = []
+    flip_ranks: list[int] = []
+    flip_explainable = 0
+    flip_explainable10 = 0
+    nonflip_margins: list[float] = []
+    mismatched_top1 = 0
+    errors: list[str] = []
+
+    for index, record, root, vocabulary, cand, orac_top1, mxe in rows:
+        if record["position"] != index:
+            errors.append(f"manifest position {index} is not contiguous")
+            continue
+        entry = next(
+            (t for t in record["tensors"] if t["name"] == "logits"), None)
+        if entry is None or entry["dtype"] != "FP32":
+            errors.append(f"manifest position {index} lacks FP32 logits")
+            continue
+        path = root / entry["file"]
+        expected_bytes = int(entry["shape"][0]) * 4
+        if not path.is_file() or path.stat().st_size != expected_bytes:
+            errors.append(f"oracle logits file is invalid: {path}")
+            continue
+        with open(path, "rb") as handle:
+            logits = array("f")
+            logits.frombytes(handle.read())
+        if len(logits) != vocabulary:
+            errors.append(f"position {index} has a different vocabulary")
+            continue
+
+        top1_value = max(logits)
+        top1 = logits.index(top1_value)
+        if top1 != orac_top1:
+            mismatched_top1 += 1
+            continue
+        rest = logits[:top1] + logits[top1 + 1:]
+        margin = top1_value - max(rest)
+        if cand == orac_top1:
+            nonflip_margins.append(margin)
+        else:
+            flip_margins.append(margin)
+            top10 = heapq.nlargest(10, logits)[-1]
+            margin10 = top1_value - top10
+            flip_margins10.append(margin10)
+            flip_ranks.append(1 + sum(1 for x in logits if x > logits[cand]))
+            if margin <= mxe:
+                flip_explainable += 1
+            if margin10 <= mxe:
+                flip_explainable10 += 1
+
+    return {
+        "flip_margins": flip_margins,
+        "flip_margins10": flip_margins10,
+        "flip_ranks": flip_ranks,
+        "flip_explainable": flip_explainable,
+        "flip_explainable10": flip_explainable10,
+        "nonflip_margins": nonflip_margins,
+        "mismatched_top1": mismatched_top1,
+        "errors": errors,
+    }
 
 
 def main() -> int:
@@ -47,6 +134,9 @@ def main() -> int:
                         help="per-position trace CSV from a physical run")
     parser.add_argument("--out", default=None,
                         help="optional path to write the report")
+    parser.add_argument("--workers", type=int, default=0,
+                        help="parallel position workers (default: "
+                        "min(16, cpu count))")
     args = parser.parse_args()
 
     manifest = json.loads(Path(args.manifest).read_text())
@@ -68,6 +158,36 @@ def main() -> int:
         raise SystemExit(
             f"trace has {len(trace)} positions, manifest has {len(positions)}")
 
+    vocabulary = -1
+    for record in positions:
+        entry = next(
+            (t for t in record["tensors"] if t["name"] == "logits"), None)
+        if entry is None or entry["dtype"] != "FP32":
+            raise SystemExit(f"manifest position {record['position']} "
+                             "lacks FP32 logits")
+        shape0 = int(entry["shape"][0])
+        if vocabulary < 0:
+            vocabulary = shape0
+        elif shape0 != vocabulary:
+            raise SystemExit("manifest positions have different vocabularies")
+
+    rows = []
+    for index, record in enumerate(positions):
+        if index not in trace:
+            raise SystemExit(f"trace lacks position {index}")
+        cand, orac_top1, _kl, _nll, mxe = trace[index]
+        rows.append(
+            (index, record, root, vocabulary, cand, orac_top1, mxe))
+
+    workers = args.workers or min(16, os.cpu_count() or 1)
+    workers = max(1, min(workers, len(rows)))
+    chunks = [rows[i::workers] for i in range(workers)]
+    if workers == 1:
+        results = [_analyze_chunk(chunks[0])]
+    else:
+        with Pool(workers) as pool:
+            results = pool.map(_analyze_chunk, chunks)
+
     flip_margins: list[float] = []
     flip_margins10: list[float] = []
     flip_ranks: list[int] = []
@@ -75,46 +195,16 @@ def main() -> int:
     flip_explainable10 = 0
     nonflip_margins: list[float] = []
     mismatched_top1 = 0
-    vocabulary = -1
-
-    for index, record in enumerate(positions):
-        if record["position"] != index:
-            raise SystemExit(f"manifest position {index} is not contiguous")
-        logits_entry = next(
-            (t for t in record["tensors"] if t["name"] == "logits"), None)
-        if logits_entry is None or logits_entry["dtype"] != "FP32":
-            raise SystemExit(f"manifest position {index} lacks FP32 logits")
-        path = root / logits_entry["file"]
-        expected_bytes = int(logits_entry["shape"][0]) * 4
-        if not path.is_file() or path.stat().st_size != expected_bytes:
-            raise SystemExit(f"oracle logits file is invalid: {path}")
-        with open(path, "rb") as handle:
-            logits = np.frombuffer(handle.read(), dtype=np.float32)
-        if vocabulary < 0:
-            vocabulary = logits.size
-        elif logits.size != vocabulary:
-            raise SystemExit(f"position {index} has a different vocabulary")
-
-        cand, orac_top1, _kl, _nll, mxe = trace[index]
-        top1 = int(np.argmax(logits))
-        if top1 != orac_top1:
-            mismatched_top1 += 1
-            continue
-        top2 = float(np.partition(logits, -2)[-2])
-        margin = float(logits[top1] - top2)
-        top10 = float(np.partition(logits, -10)[-10])
-        margin10 = float(logits[top1] - top10)
-        if cand == orac_top1:
-            nonflip_margins.append(margin)
-        else:
-            flip_margins.append(margin)
-            flip_margins10.append(margin10)
-            cand_rank = 1 + int(np.count_nonzero(logits > logits[cand]))
-            flip_ranks.append(cand_rank)
-            if margin <= mxe:
-                flip_explainable += 1
-            if margin10 <= mxe:
-                flip_explainable10 += 1
+    for result in results:
+        if result["errors"]:
+            raise SystemExit(result["errors"][0])
+        flip_margins.extend(result["flip_margins"])
+        flip_margins10.extend(result["flip_margins10"])
+        flip_ranks.extend(result["flip_ranks"])
+        flip_explainable += result["flip_explainable"]
+        flip_explainable10 += result["flip_explainable10"]
+        nonflip_margins.extend(result["nonflip_margins"])
+        mismatched_top1 += result["mismatched_top1"]
 
     report: list[str] = []
     emit = report.append
@@ -135,30 +225,28 @@ def main() -> int:
     emit(f"phase11.flip_margins.flips={flips} non_flips={nonflips}")
 
     def distribution(values: list[float], label: str) -> None:
-        arr = np.asarray(values, dtype=np.float64)
-        emit(f"== {label} (n={arr.size}) ==")
-        emit(f"oracle top-1 margin: "
-             + " ".join(f"p{p}={percentile(arr, p):.4f}"
-                        for p in (1, 5, 10, 25, 50, 75, 90))
-             + f" mean={arr.mean():.4f}")
-        for threshold in (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0):
-            below = int(np.count_nonzero(arr < threshold))
+        emit(f"== {label} (n={len(values)}) ==")
+        emit("oracle top-1 margin: "
+             + " ".join(f"p{p}={percentile(values, p):.4f}"
+                        for p in PERCENTILES)
+             + f" mean={statistics.fmean(values):.4f}")
+        for threshold in MARGIN_THRESHOLDS:
+            below = sum(1 for value in values if value < threshold)
             emit(f"margin < {threshold:g}: {below} "
-                 f"({100.0 * below / arr.size:.1f}%)")
+                 f"({100.0 * below / len(values):.1f}%)")
 
     distribution(flip_margins, "flips")
     distribution(nonflip_margins, "non-flips")
 
     emit("== flip candidate rank in oracle logits ==")
-    ranks = np.asarray(flip_ranks, dtype=np.int64)
-    rank_counts = Counter(ranks.tolist())
-    for bound in (2, 3, 5, 10, 50, 100):
-        within = int(np.count_nonzero(ranks <= bound))
-        emit(f"rank <= {bound}: {within} ({100.0 * within / ranks.size:.1f}%)")
+    for bound in RANK_BOUNDS:
+        within = sum(1 for rank in flip_ranks if rank <= bound)
+        emit(f"rank <= {bound}: {within} ({100.0 * within / len(flip_ranks):.1f}%)")
+    rank_counts = Counter(flip_ranks)
     emit("rank histogram (rank: count): "
          + ", ".join(f"{rank}:{count}" for rank, count
                      in sorted(rank_counts.items())[:20]))
-    emit(f"max rank observed: {int(ranks.max())}")
+    emit(f"max rank observed: {max(flip_ranks)}")
     emit("== flip explainability by measured max logit error ==")
     emit(f"margin(top1-top2) <= mxe: {flip_explainable}/{flips} "
          f"({100.0 * flip_explainable / flips:.1f}%)")

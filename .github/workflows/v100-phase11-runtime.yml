@@ -227,13 +227,7 @@ jobs:
           test -r /oracle/phase11/manifest.json
           result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$result_dir"
-          if [[ -x "$HOME/ninfer-v100/venv-oracle/bin/python" ]]; then
-            oracle_python="$HOME/ninfer-v100/venv-oracle/bin/python"
-          else
-            oracle_python="$(command -v python3)"
-          fi
-          "$oracle_python" -c 'import numpy'
-          "$oracle_python" tools/reference/qwen3_8_flash_next/oracle/analyze_flip_margins.py \
+          python3 tools/reference/qwen3_8_flash_next/oracle/analyze_flip_margins.py \
             --manifest /oracle/phase11/manifest.json \
             --trace tools/reference/qwen3_8_flash_next/oracle/phase11_trace_4096_f6ba1ed3.csv \
             --out "$result_dir/flip-margins.txt"

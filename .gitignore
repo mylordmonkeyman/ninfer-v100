@@ -1,2 +1,6 @@
 # Ignore all oh my pi context files
 omp-context/
+
+# Local build artifacts and caches
+build-v100/
+__pycache__/
