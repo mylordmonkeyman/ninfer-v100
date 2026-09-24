@@ -70,6 +70,15 @@ jobs:
                  if r['v100_same_expert_set'] == '0'}
           print('Router flip cells shared/cpu-only/v100-only',
                 len(cpu & gpu), len(cpu - gpu), len(gpu - cpu))
+          for position in (0, 2, 12):
+              print('FIRST LAYER DETAIL', position)
+              for (p, stage), r in rows.items():
+                  if p == position and (stage in ('embedding', 'hyper_init')
+                                        or stage.startswith('L00_')):
+                      if r['v100_vs_cpu_nrmse']:
+                          print(stage, 'cpu_oracle', r['cpu_vs_oracle_nrmse'],
+                                'v100_oracle', r['v100_vs_oracle_nrmse'],
+                                'cpu_v100', r['v100_vs_cpu_nrmse'])
           if len(rows) != 3416 or not all(
               rows[(p, 'L00_attn_block_input')]['v100_vs_cpu_nrmse'] == '0.0'
               for p in range(14)
