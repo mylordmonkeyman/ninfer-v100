@@ -64,6 +64,36 @@ does not reproduce the observed V100 top-1 flip at position 13. Stage parity
 against a V100 candidate trace is required before treating these values as a
 precision floor or revising Phase 11 acceptance thresholds.
 
+### V100 calibration result
+
+A single 14-position V100 candidate trace was collected
+([GPU workflow](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36015694540),
+[compact comparison](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36016286612)).
+All 2,744 selected stages were compared with both the CPU profile and the
+independent oracle. The GPU diagnostic CTest exited nonzero because the
+teacher-forced qualification gate failed; the stage export and comparison
+completed successfully.
+
+| Measurement | CPU profile | V100 candidate |
+| --- | ---: | ---: |
+| Mean logits KL against FP32 oracle | 0.038748 | 0.057752 |
+| Top-1 agreement across 14 positions | 14 / 14 | 13 / 14 |
+| Expert-set flips across 672 layer-position cells | 82 | 97 |
+
+The router flips overlap in only 57 cells: 25 are CPU-only and 40 are
+V100-only. At position 2, the CPU profile has no flips while the V100 has
+seven. At position 13, the CPU profile predicts the oracle top-1 token, but
+the V100 predicts a different token. The embedding agrees exactly across all
+three traces, and the initial layer differences are small; later divergences
+depend strongly on position and router trajectory. For example, at position 2
+the `L40_mlp_block_input` NRMSE is 0.00354 for CPU versus oracle and 0.04466
+for V100 versus oracle; at position 10 those values are 0.21268 and 0.12543.
+
+This **does not establish a precision floor** or exonerate all kernels.
+Further work should first explain the missing V100-only flips and the excess
+CPU-only flips at the earliest divergent layers, then rerun the same stage
+comparison before using the profile to change acceptance thresholds.
+
 ## 1. Environment Setup
 
 Run the setup script using Python 3.14 to create the isolated virtual environment:
