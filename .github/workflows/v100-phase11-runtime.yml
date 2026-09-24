@@ -49,6 +49,7 @@ jobs:
             tools/reference/qwen3_8_flash_next/oracle/analyze_flip_margins.py \
             tools/reference/qwen3_8_flash_next/oracle/run_oracle.py \
             tools/reference/qwen3_8_flash_next/oracle/make_phase11_corpus.py \
+            tools/reference/qwen3_8_flash_next/oracle/audit_qsa_oproj_host.py \
             tools/reference/qwen3_8_flash_next/oracle/validate_phase11_oracle.py
           bash -n tools/reference/qwen3_8_flash_next/oracle/generate_phase11_oracle.sh
 
@@ -299,6 +300,37 @@ jobs:
           python3 tools/reference/qwen3_8_flash_next/oracle/analyze_error_decomposition.py \
             --log "$result_log" --out-dir "$result_dir" \
             | tee "$result_dir/error-decomposition-summary.txt"
+
+      - name: Audit QSA o_proj stage error on host (pure FP64)
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          result_log="$result_dir/error-decomposition.log"
+          test -r "$result_log"
+          # Fresh device NRMSE for the audited stage from this run's decomposition
+          # (same configuration, same position), so the host/device comparison is
+          # self-consistent.
+          device_nrmse=$(sed -n 's/^phase11\.stage_trace\.position=2 stage=L15_attn_block_output cosine=[^ ]* nrmse=\([0-9.]*\).*/\1/p' "$result_log")
+          if [ -z "$device_nrmse" ]; then
+            echo "ERROR: no stage_trace line for position=2 stage=L15_attn_block_output in $result_log" >&2
+            exit 1
+          fi
+          echo "device nrmse(L15_attn_block_output, position=2) = $device_nrmse"
+          model_dir="${NINFER_AUDIT_MODEL:-/srv/ninfer/source/mixed}"
+          stage_root="${NINFER_AUDIT_STAGES:-/oracle/phase11-stage-trace14}"
+          test -r "$stage_root/pos0002/L15_qsa_gated.bin"
+          test -r "$stage_root/pos0002/L15_attn_block_output.bin"
+          test -r "$stage_root/pos0002/L15_attn_block_input.bin"
+          if ! ls "$model_dir"/*.safetensors >/dev/null 2>&1; then
+            echo "ERROR: no readable safetensors under $model_dir; make the mixed source checkpoint readable to the runner user" >&2
+            exit 1
+          fi
+          python3 tools/reference/qwen3_8_flash_next/oracle/audit_qsa_oproj_host.py \
+            15 2 --device-nrmse "$device_nrmse" \
+            | tee "$result_dir/qsa-oproj-audit-l15-pos2.txt"
 
       - name: Replay oracle PLE injection across 14 positions
         continue-on-error: true
