@@ -313,7 +313,7 @@ jobs:
           # Fresh device NRMSE for the audited stage from this run's decomposition
           # (same configuration, same position), so the host/device comparison is
           # self-consistent.
-          device_nrmse=$(sed -n 's/^phase11\.stage_trace\.position=2 stage=L15_attn_block_output cosine=[^ ]* nrmse=\([0-9.]*\).*/\1/p' "$result_log")
+          device_nrmse=$(sed -n 's/^[0-9]\{1,\}: *phase11\.stage_trace\.position=2 stage=L15_attn_block_output cosine=[^ ]* nrmse=\([0-9.]*\).*/\1/p' "$result_log")
           if [ -z "$device_nrmse" ]; then
             echo "ERROR: no stage_trace line for position=2 stage=L15_attn_block_output in $result_log" >&2
             exit 1
