@@ -1298,7 +1298,19 @@ int main() {
                 suffix == "attn_block_input" ||
                 suffix == "mlp_block_input" ||
                 suffix == "hyper_after_mlp" ||
-                suffix == "moe_router_ids";
+                suffix == "moe_router_ids" ||
+                ([&] {
+                    const char* extra = std::getenv("NINFER_PHASE11_TRACE_GDN_LAYER0");
+                    if (extra == nullptr || extra[0] != '1' || extra[1] != '\0' ||
+                        name.substr(0, 4) != "L00_") {
+                        return false;
+                    }
+                    return suffix == "gdn_projected" || suffix == "gdn_z" ||
+                           suffix == "gdn_g" || suffix == "gdn_beta" ||
+                           suffix == "gdn_recurrent_output" ||
+                           suffix == "gdn_gated_output" ||
+                           suffix == "attn_block_output";
+                }());
             if (dump_candidate_trace && selected_stage) {
                 const fs::path folder = candidate_root / pos_dir;
                 fs::create_directories(folder);
