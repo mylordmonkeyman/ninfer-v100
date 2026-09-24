@@ -175,6 +175,24 @@ to change precision policy or the §7 gate. The expanded GDN tracing option
 is diagnostic only; the default 14-prefix reference continues comparing the
 original common set of V100 stages.
 
+The [post-attention hyper trace](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36062874657)
+then identified a rule missing from the CPU profile: the selected V100
+diagnostic applies the **FP32 GDN output projection** to the FP32 hyper master,
+not its BF16 mirror. After correcting that rule, the
+[14-position three-way run](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36063434889)
+has CPU mean KL 0.02179401 against the oracle, V100 mean KL 0.05775240,
+and CPU-to-V100 mean KL 0.03587110. At position zero the CPU-to-V100
+`L00_hyper_after_attn` NRMSE drops from 0.001488 to 4.82e-7;
+`L00_mlp_block_input` drops from 0.002997 to 4.28e-5. This verifies the
+specific precision rule locally, but the complete reference still does not
+track V100: 47 router flips are shared, 22 CPU-only and 50 V100-only.
+The [next-boundary report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36063853923)
+shows that at position zero `L00_hyper_after_mlp` is already 0.003256
+CPU-to-V100 NRMSE, before PLE and layer one. The next test should compare
+`L00_mlp_block_output` to distinguish MoE output from MLP hyper injection.
+Position 12 also has a residual GDN-history difference before this MLP
+boundary. The §7 acceptance gate remains unchanged and unpassed.
+
 ### Layer 15 QSA projection replay and input boundary
 
 The [upstream stage extraction](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36020859990)
