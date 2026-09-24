@@ -35,7 +35,8 @@ jobs:
             fi
           done
           python_bin=''
-          for candidate in "$HOME/ninfer-v100/venv-oracle/bin/python" \
+          for candidate in "$GITHUB_WORKSPACE/precision-venv/bin/python" \
+              "$HOME/ninfer-v100/venv-oracle/bin/python" \
               /srv/ninfer/venv-oracle/bin/python python3; do
             if command -v "$candidate" >/dev/null 2>&1 && \
                 "$candidate" -c 'import numpy, torch, safetensors' >/dev/null 2>&1; then
@@ -43,7 +44,13 @@ jobs:
               break
             fi
           done
-          test -n "$python_bin"
+          if [[ -z "$python_bin" ]]; then
+            python3 -m venv "$GITHUB_WORKSPACE/qsa-venv"
+            "$GITHUB_WORKSPACE/qsa-venv/bin/pip" install \
+              torch --index-url https://download.pytorch.org/whl/cpu
+            "$GITHUB_WORKSPACE/qsa-venv/bin/pip" install numpy safetensors
+            python_bin="$GITHUB_WORKSPACE/qsa-venv/bin/python"
+          fi
           "$python_bin" tools/reference/qwen3_8_flash_next/oracle/analyze_qsa_output_precision.py \
             --model-dir /srv/ninfer/source/mixed \
             --oracle /oracle/phase11-stage-trace14 \
