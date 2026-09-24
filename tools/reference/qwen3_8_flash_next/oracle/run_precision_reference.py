@@ -23,7 +23,7 @@ from precision_profile import (
     round_to_bf16,
 )
 from precision_metrics import compare_logits
-from compare_precision_traces import compare as compare_stages
+from compare_precision_traces import candidate_entries, compare as compare_stages
 from run_oracle import build_oracle
 
 
@@ -198,9 +198,40 @@ def main():
         args.out_dir / "comparison", args.v100_trace,
         incremental_fp32_root=args.out_dir / "fp32"
     )
+    if args.v100_trace is not None:
+        candidate = candidate_entries(args.v100_trace)
+        candidate_logits = []
+        for position, (reference, _) in enumerate(oracle):
+            path = candidate.get((position, "logits"))
+            if path is None:
+                raise ValueError(f"V100 trace lacks logits at position {position}")
+            logits = np.fromfile(path, dtype="<f4")
+            if logits.shape != reference.shape or not np.isfinite(logits).all():
+                raise ValueError(f"invalid V100 logits at position {position}")
+            candidate_logits.append(logits)
+        v100_rows = [compare_logits(item[0], logits)
+                     for item, logits in zip(oracle, candidate_logits)]
+        cpu_v100_rows = [compare_logits(cpu, gpu)
+                         for cpu, gpu in zip(matched, candidate_logits)]
+        report["three_way"] = {
+            "oracle_vs_cpu_mean_kl": report["mean_kl"],
+            "oracle_vs_v100_mean_kl": sum(r["kl"] for r in v100_rows) / len(v100_rows),
+            "cpu_vs_v100_mean_kl": sum(r["kl"] for r in cpu_v100_rows) / len(cpu_v100_rows),
+            "oracle_vs_v100_top1_agreement": sum(r["top1_agree"] for r in v100_rows) / len(v100_rows),
+            "cpu_vs_v100_top1_agreement": sum(r["top1_agree"] for r in cpu_v100_rows) / len(cpu_v100_rows),
+            "per_position_v100": v100_rows,
+            "per_position_cpu_v100": cpu_v100_rows,
+        }
     (args.out_dir / "precision_report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps({key: report[key] for key in
                       ("status", "top1_agreement", "mean_kl")}, indent=2))
+    if "three_way" in report:
+        print("Three-way mean KL:", json.dumps({
+            key: report["three_way"][key] for key in (
+                "oracle_vs_cpu_mean_kl", "oracle_vs_v100_mean_kl",
+                "cpu_vs_v100_mean_kl"
+            )
+        }))
 
 
 if __name__ == "__main__":

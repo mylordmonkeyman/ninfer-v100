@@ -11,12 +11,12 @@ on:
       - tools/reference/qwen3_8_flash_next/oracle/compare_precision_traces.py
 
 permissions:
+  actions: read
   contents: read
 
-# Supersede an older CPU attempt when correcting a validation bug.
 concurrency:
   group: phase11-cpu-precision-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   cpu-reference-14:
@@ -40,6 +40,15 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+
+      - name: Download completed V100 prefix trace
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-precision-trace-14
+          run-id: 36022821822
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: v100-input
 
       - name: Locate read-only input assets and CPU Python
         shell: bash
@@ -84,6 +93,7 @@ jobs:
             done
           fi
           if (( missing )); then exit 1; fi
+          test -s "$GITHUB_WORKSPACE/v100-input/candidate-stage/stages.jsonl"
           {
             echo "PRECISION_PYTHON=$python_bin"
             echo "PRECISION_MODEL_DIR=$model_dir"
@@ -107,7 +117,7 @@ jobs:
             numpy safetensors 'transformers>=5.16,<6'
           echo "PRECISION_PYTHON=$GITHUB_WORKSPACE/precision-venv/bin/python" >> "$GITHUB_ENV"
 
-      - name: Run FP32 gate and CPU storage profile at 14 positions
+      - name: Recompute three 14-position prefixes and compare stages
         shell: bash
         run: |
           set -euo pipefail
@@ -119,7 +129,32 @@ jobs:
             --ids-file "$PRECISION_IDS_FILE" \
             --fp32-oracle "$PRECISION_ORACLE_DIR" \
             --positions 14 \
+            --v100-trace "$GITHUB_WORKSPACE/v100-input/candidate-stage" \
             --out-dir "$GITHUB_WORKSPACE/precision-reference-results"
+
+      - name: Summarize early V100 calibration
+        if: success()
+        run: |
+          python3 - <<'PY'
+          import csv
+          import json
+          from pathlib import Path
+
+          root = Path('precision-reference-results')
+          report = json.loads((root / 'precision_report.json').read_text())
+          print('Three-way prefix results:', json.dumps(report['three_way'],
+                                                   sort_keys=True)[:2500])
+          rows = list(csv.DictReader((root / 'comparison/stage_comparison.csv').open()))
+          for position in (0, 12, 13):
+              for stage in ('L00_attn_block_input', 'L01_attn_block_input',
+                            'L02_attn_block_input', 'L02_mlp_block_input', 'logits'):
+                  item = next(r for r in rows if int(r['position']) == position
+                              and r['stage'] == stage)
+                  print('Calibration', position, stage,
+                        'cpu-oracle', item['cpu_vs_oracle_nrmse'],
+                        'v100-oracle', item['v100_vs_oracle_nrmse'],
+                        'cpu-v100', item['v100_vs_cpu_nrmse'])
+          PY
 
       - name: Upload CPU results and mismatch diagnostics
         if: always()

@@ -8,6 +8,7 @@ used to attribute a qualification failure to precision alone.
 """
 
 from dataclasses import dataclass
+from types import MethodType
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,43 @@ def round_to_bf16(value):
     return value.to(torch.bfloat16).to(torch.float32)
 
 
+class _RestoreForward:
+    def __init__(self, module, forward):
+        self.module = module
+        self.forward = forward
+
+    def remove(self):
+        self.module.forward = self.forward
+
+
+def _attention_hyper_from_bf16_shadow(self, hyper_input):
+    """Decode attention prepare with the selected V100 storage boundaries.
+
+    The V100 diagnostic retains the master hyper state in FP32, but the
+    attention prepare consumes a BF16 shadow. Its normalized streams and
+    SiLU low-rank mixer output are also BF16. Return the original master as
+    the pass-through value so the CPU model does not round persistent state.
+    This does not reproduce the CUDA dot-product reduction association.
+    """
+    import torch.nn.functional as F
+
+    shadow = round_to_bf16(hyper_input)
+    normalized = round_to_bf16(self.hc_norm(shadow))
+    low_rank = round_to_bf16(F.silu(
+        self.input_mix_weight_down(normalized) / self.hc_count
+    ))
+    mix_gate = torch.sigmoid(self.input_mix_weight_up(low_rank))
+    mix_gate = mix_gate.unflatten(-1, (self.hc_count, self.hidden_size))
+    mixed = (mix_gate * normalized.unflatten(
+        -1, (self.hc_count, self.hidden_size))).mean(dim=-2)
+    if self.block_inject_weight is None:
+        return round_to_bf16(mixed)
+    injection = 2 * torch.sigmoid(
+        self.block_inject_weight(normalized) / self.hc_count
+    )
+    return round_to_bf16(mixed), hyper_input, injection
+
+
 def install_projection_boundaries(model, profile):
     """Materialize selected projection outputs; return removable hook handles.
 
@@ -62,6 +100,9 @@ def install_projection_boundaries(model, profile):
     ))
     for layer in model.layers:
         projections = []
+        hyper = layer.attn_hyper_connection
+        handles.append(_RestoreForward(hyper, hyper.forward))
+        hyper.forward = MethodType(_attention_hyper_from_bf16_shadow, hyper)
         if hasattr(layer, "linear_attn"):
             # The selected V100 diagnostic's FP32_GDN_PROJECTION path feeds
             # unrounded QKV directly into its fused convolution. It still
