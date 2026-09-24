@@ -42,8 +42,8 @@ from collections import Counter
 from multiprocessing import Pool
 from pathlib import Path
 
-PERCENTILES = (1, 5, 10, 25, 50, 75, 90)
-MARGIN_THRESHOLDS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0)
+PERCENTILES = (1, 5, 10, 25, 50, 75, 90, 95, 99)
+MARGIN_THRESHOLDS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0)
 RANK_BOUNDS = (2, 3, 5, 10, 50, 100)
 
 
