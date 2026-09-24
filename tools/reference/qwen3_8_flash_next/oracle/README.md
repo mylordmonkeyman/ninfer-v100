@@ -44,9 +44,25 @@ python compare_precision_traces.py \
   --out-dir /path/to/comparison
 ```
 
-Until a real-model run establishes incremental FP32 parity and V100 stage
-agreement, these scripts produce diagnostic hypotheses rather than Phase 11
-qualification results.
+The first real-model 14-position CPU run succeeded on September 24, 2026
+([workflow](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36014366398),
+[compact report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36015048672)):
+
+| Measurement against independent FP32 oracle | Result |
+| --- | ---: |
+| Worst incremental FP32 decode KL | 2.99e-11 |
+| Storage-profile mean KL | 0.038748 |
+| Storage-profile top-1 agreement | 14 / 14 |
+| Storage-profile expert-set flips | 82 / 672 layer-position cells |
+| Flips in layers 00–19 / 20–47 | 6 / 76 |
+| Largest per-position KL (position 13) | 0.340838 |
+
+This supports the precision-compounding hypothesis as a **CPU storage-profile
+experiment**, while leaving the V100 cause unresolved. The profile is
+uncalibrated: it models more expert-set flips at depth than near the input, but
+does not reproduce the observed V100 top-1 flip at position 13. Stage parity
+against a V100 candidate trace is required before treating these values as a
+precision floor or revising Phase 11 acceptance thresholds.
 
 ## 1. Environment Setup
 
