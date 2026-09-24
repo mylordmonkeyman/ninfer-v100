@@ -20,10 +20,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh run download 36014366398 \
+          gh run download 36016917524 \
             --repo "$GITHUB_REPOSITORY" \
             --name cpu-precision-reference-14 \
             --dir cpu-report
+          gh run download 36015048672 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name cpu-precision-summary-14 \
+            --dir previous-report
+          gh run download 36016286612 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name v100-precision-summary-14 \
+            --dir v100-report
       - name: Print and retain concise diagnostics
         run: |
           python3 - <<'PY'
@@ -33,13 +41,53 @@ jobs:
 
           root = Path('cpu-report')
           report = json.loads((root / 'precision_report.json').read_text())
+          previous = json.loads(Path('previous-report/precision_report.json').read_text())
           stage = report['stage_comparison']
+          previous_rows = list(csv.DictReader(
+              Path('previous-report/stage_comparison.csv').open()))
+          current_rows = list(csv.DictReader(
+              (root / 'comparison/stage_comparison.csv').open()))
+          v100_rows = list(csv.DictReader(
+              Path('v100-report/stage_comparison.csv').open()))
+          def flips(rows, column):
+              return {(int(r['position']), r['stage']) for r in rows
+                      if r[column] == '0'}
+          old = flips(previous_rows, 'cpu_same_expert_set')
+          now = flips(current_rows, 'cpu_same_expert_set')
+          gpu = flips(v100_rows, 'v100_same_expert_set')
           print('Profile:', report['profile'])
           print('Status:', report['status'])
           print('FP32 decode worst KL:', report['fp32_decode_worst_kl'])
           print('Profile mean KL:', report['mean_kl'])
           print('Top-1 agreement:', report['top1_agreement'])
           print('Stage summary:', json.dumps(stage))
+          print('Mean KL old/new/V100:', previous['mean_kl'],
+                report['mean_kl'], 0.05775208)
+          print('Flips old/new/V100:', len(old), len(now), len(gpu))
+          print('Shared flips old/new:', len(old & gpu), len(now & gpu))
+          print('CPU-only old/new:', len(old - gpu), len(now - gpu))
+          print('V100-only old/new:', len(gpu - old), len(gpu - now))
+          for position in (0, 2, 6, 10, 13):
+              print('flips at', position, 'old/new/V100',
+                    sum(p == position for p, _ in old),
+                    sum(p == position for p, _ in now),
+                    sum(p == position for p, _ in gpu))
+          for position, name in ((0, 'L00_mlp_block_input'),
+                                 (2, 'L20_mlp_block_input'),
+                                 (2, 'L40_mlp_block_input'),
+                                 (10, 'L05_mlp_block_input'),
+                                 (13, 'L43_mlp_block_input')):
+              key = (str(position), name)
+              previous_row = next(r for r in previous_rows
+                                  if (r['position'], r['stage']) == key)
+              current_row = next(r for r in current_rows
+                                 if (r['position'], r['stage']) == key)
+              v100_row = next(r for r in v100_rows
+                              if (r['position'], r['stage']) == key)
+              print('stage', position, name, 'old/new/V100 vs oracle',
+                    previous_row['cpu_vs_oracle_nrmse'],
+                    current_row['cpu_vs_oracle_nrmse'],
+                    v100_row['v100_vs_oracle_nrmse'])
           print('Per-position metrics:')
           for pos, row in enumerate(report['per_position']):
               print(pos, json.dumps(row, sort_keys=True))
@@ -49,6 +97,8 @@ jobs:
                          root / 'comparison/stage_comparison.json',
                          root / 'comparison/stage_comparison.csv'):
               (concise / source.name).write_bytes(source.read_bytes())
+          (concise / 'previous_precision_report.json').write_bytes(
+              Path('previous-report/precision_report.json').read_bytes())
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
