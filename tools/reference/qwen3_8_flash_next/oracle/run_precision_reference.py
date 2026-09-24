@@ -58,7 +58,7 @@ def read_oracle(root, token_ids):
 
 
 def _stage_hooks(model, captured, trace_gdn_internals=False,
-                 trace_hyper_layer0=False):
+                 trace_hyper_layer0=False, trace_mlp_layer0=False):
     handles = []
 
     def capture(name, select=lambda output: output):
@@ -97,6 +97,9 @@ def _stage_hooks(model, captured, trace_gdn_internals=False,
         if index == 0 and trace_hyper_layer0:
             handles.append(layer.mlp_hyper_connection.register_forward_pre_hook(
                 capture_input(prefix + "hyper_after_attn")))
+        if index == 0 and trace_mlp_layer0:
+            handles.append(layer.mlp.register_forward_hook(
+                capture(prefix + "mlp_block_output")))
         handles.append(layer.register_forward_hook(capture(prefix + "hyper_after_mlp")))
         handles.append(layer.mlp.gate.register_forward_hook(
             capture(prefix + "moe_router_ids", lambda output: output[2])
@@ -111,14 +114,15 @@ def _stage_hooks(model, captured, trace_gdn_internals=False,
 
 
 def run_decode(model, head, token_ids, profile, out_root,
-               trace_gdn_internals=False, trace_hyper_layer0=False):
+               trace_gdn_internals=False, trace_hyper_layer0=False,
+               trace_mlp_layer0=False):
     # One token per forward, with one cache for the entire prefix.  Rounding a
     # cache tensor after the update changes all later positions, unlike
     # independently rounding tensors from the completed FP32 oracle.
     captured = {}
     handles = install_projection_boundaries(model, profile)
     handles.extend(_stage_hooks(model, captured, trace_gdn_internals,
-                                trace_hyper_layer0))
+                                trace_hyper_layer0, trace_mlp_layer0))
     cache = None
     logits = []
     manifest = {"profile": profile.name, "positions": []}
@@ -195,6 +199,8 @@ def main():
                         help="collect extended GDN stages; requires matching V100 trace coverage")
     parser.add_argument("--trace-hyper-layer0", action="store_true",
                         help="collect post-attention layer-zero hyper state")
+    parser.add_argument("--trace-mlp-layer0", action="store_true",
+                        help="collect layer-zero MoE output before hyper injection")
     args = parser.parse_args()
     if args.positions < 1:
         parser.error("--positions must be positive")
@@ -206,7 +212,8 @@ def main():
 
     fp32 = run_decode(model, head, token_ids, PROFILES["fp32"], args.out_dir / "fp32",
                       trace_gdn_internals=args.trace_gdn_internals,
-                      trace_hyper_layer0=args.trace_hyper_layer0)
+                      trace_hyper_layer0=args.trace_hyper_layer0,
+                      trace_mlp_layer0=args.trace_mlp_layer0)
     baseline = [compare_logits(item[0], logits)
                 for item, logits in zip(oracle, fp32)]
     worst = max(row["kl"] for row in baseline)
@@ -223,7 +230,8 @@ def main():
     matched = run_decode(model, head, token_ids, PROFILES["v100-phase11-storage"],
                          args.out_dir / "v100-phase11-storage",
                          trace_gdn_internals=args.trace_gdn_internals,
-                         trace_hyper_layer0=args.trace_hyper_layer0)
+                         trace_hyper_layer0=args.trace_hyper_layer0,
+                         trace_mlp_layer0=args.trace_mlp_layer0)
     comparison = [compare_logits(item[0], logits)
                   for item, logits in zip(oracle, matched)]
     report = {
