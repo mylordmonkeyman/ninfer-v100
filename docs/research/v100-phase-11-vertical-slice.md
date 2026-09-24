@@ -1,10 +1,12 @@
 # V100 forward-port Phase 11: whole-model vertical slice
 
 Status: physical V100 execution established; non-expert VRAM ledger
-reconciled (+5.6 MiB / 0.08%); 32-position smoke at 31/32 top-1 (mean KL
-0.0274, single top-1 flip at position 13). The full 4,096-position
-acceptance run is pending against the relaxed gate family documented in
-"Documented error analysis".
+reconciled (+5.6 MiB / 0.08%); the full 4,096-position teacher-forced
+run is complete (commit f6ba1ed3): top-1 91.06% (366 flips), mean KL
+0.1236, P99 KL 2.446, relative mean-NLL delta 3.65%. The spec §7 initial
+thresholds and the first proposed relaxation are both refuted by this
+measurement; the revised margin-aware gate family and the remaining
+evidence steps are documented in "Documented error analysis".
 
 Phase 11 is the first whole-model numerical acceptance gate. It is deliberately a
 correctness path, not a performance path.
@@ -165,6 +167,46 @@ content window of the smoke is 15 positions. Per-position KL inside the
 content window: pos 2–5 ≤ 0.0007, pos 6 = 0.0082, pos 7 = 0.0173, pos 8–9
 ≈ 0, pos 10 = 0.0746, pos 11 = 0.0135, pos 12 = 0.0781, pos 14 = 0.0232.
 
+### 4,096-position qualification run (commit f6ba1ed3, 2026-09-24)
+
+The full spec §7.2 run (4,096 teacher-forced positions, frozen precision
+configuration, 4.58 h at 0.248 pos/s):
+
+| metric | measured | spec §7 initial gate | verdict |
+|---|---|---|---|
+| positions | 4096 | ≥ 4096 | pass |
+| NaN/Inf | 0 | 0 | pass |
+| top-1 agreement | 3730/4096 (91.06%) | ≥ 99% | fail |
+| mean KL | 0.12363 | ≤ 1e-3 | fail (124×) |
+| P99 KL | 2.4458 | ≤ 1e-2 | fail (245×) |
+| relative mean-NLL delta | 3.647% | ≤ 0.5% | fail (7.3×) |
+| mean top-5 overlap | 0.8619 | — | — |
+| mean top-10 overlap | 0.8552 | — | — |
+| maximum logit error | 23.800 | — | — |
+| first top-1 divergence | pos 13 (12688 vs 37027) | — | same flip as the 32-position smoke |
+| worst KL | pos 766 (14.342) | — | — |
+| host-expert counters | 196608 layer calls; 1966080 expert pairs = 48·4096·10 | exact | pass |
+
+Trajectory structure of the 366 flips (8.94%):
+
+- all flips lie in positions 13–3403; positions 3404–4095 (the
+  high-confidence tail, where the oracle repeatedly emits 248046 with a
+  wide margin) have zero flips;
+- flips cluster in three regions — 13–916 (113), 987–2789 (225),
+  3085–3403 (28) — i.e. localized cascades, not monotonic runaway: after
+  the first divergence at position 13, top-1 still agrees at 91.06% of
+  positions;
+- KL is bimodal: median 4.8e-3; 41.7% of non-flip positions have
+  KL ≤ 1e-3 and 62.6% have KL ≤ 1e-2; the mean (0.1236) is carried by
+  the flip clusters (worst 14.342 at position 766);
+- the max-logit-error distribution is nearly identical on flip (p50
+  1.879) and non-flip (p50 1.834) positions: after the cascade develops,
+  per-position error magnitude is roughly constant and a flip occurs
+  where the local oracle margin falls below that error, not where the
+  global error is largest — the margin-limited mechanism at corpus
+  scale.
+
+
 
 ## Documented error analysis (spec §7 gate relaxation)
 
@@ -191,6 +233,25 @@ frozen precision configuration above: the 14-position stage-trace run
 | expert output materialization | BF16 rounding RMS 1.31e-3, max 3.96e-3 | at the BF16 floor |
 | hyper-connection apply/inject | stage pass-through ≈ 1.0× (hyper_after_attn NRMSE ≈ its input error) | not an amplifier |
 | PLE path | 14/14 oracle injections verified; candidate PLE NRMSE 0.0036; injecting exact PLE reduces downstream router drift (L44 pos-13 router NRMSE 0.631 → 0.246) | small contributor, not the cause |
+
+Two component-local audits and one mechanism check are in flight (CI
+steps "Analyze oracle top-1 margins at measured flip positions" and
+"Measure QSA block and LM-head local error under exact-input
+injection"):
+
+- **LM-head local error**: exact `final_hidden` injected at all 14 trace
+  positions; the candidate `logits` NRMSE against the oracle then
+  isolates the output-head GEMM and logit path on exact input.
+- **QSA block local error**: exact `L03_attn_block_input` injected at
+  position 13; the `L03_qsa_query/key/value` stages isolate the sparse
+  attention Q/K/V projection GEMMs on exact input (the sparse kernel
+  itself is separately validated by the FP64 selected-block attention
+  test). `L03_qsa_gated/attended/attn_block_output` additionally carry
+  the small positions-0–12 historical BF16 KV-cache drift.
+- **flip-margin check**: the oracle's own top-1 margin at every
+  position, compared against the 366 measured flips and the per-position
+  max logit error, to test the margin-limited mechanism at corpus scale.
+
 
 ### Mechanism: floor compounding plus discrete top-k amplification
 
@@ -225,24 +286,43 @@ order of magnitude above the initial 1e-3 gate. The top-1 failure rate and
 the P99 KL are set by the discrete flip rate on drifted input, which the
 precision profile (BF16 activations, top-k routing) does not suppress.
 
-### Proposed relaxed gate
+The 4,096-position run confirms the mechanism at corpus scale: the flip
+rate is flat across 1024-position blocks (119/104/115, then 28 in the
+final block, which is dominated by the wide-margin tail) and the
+per-position logit error magnitude is nearly identical on flip and
+non-flip positions (p50 1.879 vs 1.834), so flips are set by the local
+oracle margin, not by locally larger error.
 
-User-facing guarantees (top-1, NLL) stay hard; the KL statistics are
-relaxed to values consistent with the mechanism above:
 
-| metric | spec §7 initial | proposed | rationale |
-|---|---|---|---|
-| positions | ≥ 4096 | ≥ 4096 | unchanged |
-| NaN/Inf | 0 | 0 | unchanged |
-| top-1 agreement | ≥ 99% | ≥ 99% | unchanged; primary guarantee |
-| relative mean-NLL delta | ≤ 0.5% | ≤ 0.5% | unchanged; currently 0.349% |
-| mean KL | ≤ 1e-3 | ≤ 2e-2 | non-flipped content-window mean is ≈ 0.008–0.03 (measured); the corpus content fraction sets the overall mean, calibrated by the 4,096-position run |
-| P99 KL | ≤ 1e-2 | ≤ 1e-1 | one top-1 flip contributes KL ≈ 0.3–0.6, so P99 ≤ 1e-2 is mathematically incompatible with a top-1 flip rate above ≈ 0.1%; 1e-1 is consistent with the hard top-1 ≥ 99% gate (≤ 41 flips in 4,096 positions) |
+### Proposed relaxed gate (v2, after the 4,096-position measurement)
 
-The 4,096-position acceptance run calibrates the final mean/P99 values
-against the measured distribution. The calibration must remain consistent
-with the per-layer floor profile above: a relaxation justified only by the
-measured mean, not by the floor mechanism, is not acceptable.
+The 4,096-position run refutes both the spec §7 initial thresholds
+(top-1 91.06% < 99%, mean KL 124×, P99 245×, NLL 7.3×) and the first
+relaxation proposed above (mean KL ≤ 2e-2, P99 ≤ 1e-1, with top-1 ≥ 99%
+and NLL ≤ 0.5% held hard). The 14-position window's single flip
+(1/14 ≈ 7%) was not an outlier: it is the steady-state margin-limited
+flip rate, measured at 8.94% over 4,096 positions. Inside the
+14-position window the drift is still growing (position 13 is its first
+flip); at corpus scale the drift reaches an approximate steady state in
+which the flip rate settles where the oracle margin is small and is zero
+where the margin is wide.
+
+No windowed variant of the initial gate is reachable: every window
+containing position 13 fails top-1 ≥ 99%, and a window excluding it is
+not a defensible gate. The v2 gate family therefore splits positions by
+the oracle's own top-1 decision margin M (calibrated from the
+flip-margin analysis, independent of the candidate):
+
+| tier | gate | status |
+|---|---|---|
+| unambiguous (oracle margin ≥ M) | top-1 = 100%; per-position KL ≤ 1e-2 | pending flip-margin data (zero measured flips in the wide-margin tail 3404–4095) |
+| margin-fragile (oracle margin < M) | flips permitted; reported as a profile-consistency metric, not hard-gated | pending flip-margin data |
+| whole run | NaN/Inf = 0; exact host-expert counters; non-expert VRAM ledger reconciled; flip rate flat across 1024-position blocks (no upward trend); corpus-weighted relative NLL delta reported (measured 3.647%) | hard; all measured values available |
+
+A flip at an unambiguous-tier position, or an upward flip-rate trend
+across the run, would be a defect signature and reopens the phase. The
+calibration of M requires that the unambiguous tier is non-trivial and
+that (pending data) all measured flips fall in the margin-fragile tier.
 
 
 ## CI versus physical qualification
@@ -266,11 +346,11 @@ Two workflows cover the two surfaces:
 
 ## Boundary
 
-Phase 11 closes only after a physical V100 run passes the teacher-forced
-whole-model oracle under the relaxed gate family above (the initial §7
-thresholds are unreachable for this precision profile per the documented
-error analysis) with the non-expert VRAM ledger reconciled — the latter is
-already satisfied (+5.6 MiB / 0.08%).
+Phase 11 closes only after (a) the flip-margin analysis and the
+LM-head/QSA local-error audits land consistent with the mechanism above,
+(b) the user accepts the v2 margin-aware gate family, and (c) the
+non-expert VRAM ledger is reconciled — the latter is already satisfied
+(+5.6 MiB / 0.08%).
 
 Phase 12 (MTP correctness) and Phase 13 (expert cache) must not be inferred
 from a Phase-11 compile pass or from the 32-position smoke.

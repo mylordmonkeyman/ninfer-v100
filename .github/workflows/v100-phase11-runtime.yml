@@ -46,6 +46,7 @@ jobs:
           set -euxo pipefail
           python3 -m py_compile \
             tools/reference/qwen3_8_flash_next/oracle/analyze_error_decomposition.py \
+            tools/reference/qwen3_8_flash_next/oracle/analyze_flip_margins.py \
             tools/reference/qwen3_8_flash_next/oracle/run_oracle.py \
             tools/reference/qwen3_8_flash_next/oracle/make_phase11_corpus.py \
             tools/reference/qwen3_8_flash_next/oracle/validate_phase11_oracle.py
@@ -218,6 +219,19 @@ jobs:
           print(f"Validated mounted 14-position CPU stage trace with {len(tensors)} position-13 tensors")
           PY
 
+      - name: Analyze oracle top-1 margins at measured flip positions
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          test -r /oracle/phase11/manifest.json
+          result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$result_dir"
+          python3 tools/reference/qwen3_8_flash_next/oracle/analyze_flip_margins.py \
+            --manifest /oracle/phase11/manifest.json \
+            --trace tools/reference/qwen3_8_flash_next/oracle/phase11_trace_4096_f6ba1ed3.csv \
+            --out "$result_dir/flip-margins.txt"
+
       - name: Measure full-layer error decomposition
         shell: bash
         env:
@@ -341,6 +355,82 @@ jobs:
                       "phase11.top1_agreement=")
           if any(value not in data for value in required):
               raise SystemExit("PLE replay did not reach the final stage and summary")
+          PY
+
+      - name: Measure QSA block and LM-head local error under exact-input injection
+        continue-on-error: true
+        shell: bash
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "14"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace14
+          NINFER_PHASE11_STAGE_ORACLE_POSITION: "13"
+          NINFER_PHASE11_STAGE_ORACLE_ALL_POSITIONS: "1"
+          NINFER_PHASE11_ORACLE_INJECT_ALL_POSITIONS: "1"
+          NINFER_PHASE11_ORACLE_INJECT_STAGE: final_hidden
+          NINFER_PHASE11_ORACLE_INJECT_SECOND_STAGE: L03_attn_block_input
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
+        run: |
+          set -euxo pipefail
+
+          test -r "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0013/final_hidden.bin"
+          test -r "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0013/L03_attn_block_input.bin"
+          result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$result_dir"
+          result_log="$result_dir/local-error-injection.log"
+          ctest --test-dir build-v100 -V \
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+            2>&1 | tee "$result_log" || true
+          python3 - "$result_log" <<'PY'
+          from pathlib import Path
+          import sys
+          data = Path(sys.argv[1]).read_text()
+          fh = [line for line in data.splitlines()
+                if "phase11.oracle_injection.position=" in line
+                and " stage=final_hidden " in line]
+          positions = {int(line.split("phase11.oracle_injection.position=", 1)[1].split()[0])
+                       for line in fh}
+          if positions != set(range(14)) or len(fh) != 14:
+              raise SystemExit(
+                  f"Expected 14 verified final_hidden injections, got {sorted(positions)}")
+          l03 = [line for line in data.splitlines()
+                 if "phase11.oracle_injection.position=" in line
+                 and " stage=L03_attn_block_input " in line]
+          if len(l03) != 1 or "position=13" not in l03[0]:
+              raise SystemExit(f"Expected exactly one L03 injection at position 13, got {l03}")
+          logits_lines = [line for line in data.splitlines()
+                          if "phase11.error_decomposition.position=" in line
+                          and " stage=logits " in line]
+          if len(logits_lines) != 14:
+              raise SystemExit(
+                  f"Expected 14 logits decomposition lines, got {len(logits_lines)}")
+          required = (
+              "phase11.error_decomposition.position=13 stage=L03_qsa_query",
+              "phase11.error_decomposition.position=13 stage=L03_qsa_key",
+              "phase11.error_decomposition.position=13 stage=L03_qsa_value",
+              "phase11.error_decomposition.position=13 stage=L03_attn_block_output",
+              "phase11.top1_agreement=",
+          )
+          if any(value not in data for value in required):
+              raise SystemExit("local-error run did not produce the QSA stage lines")
           PY
 
       - name: Recheck 32-position best-known MLP-injection baseline
