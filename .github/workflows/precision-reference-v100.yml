@@ -26,10 +26,17 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Verify frozen inputs and obtain completed CPU trace
+      - name: Download completed CPU trace
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-precision-reference-14
+          run-id: 36014366398
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: cpu-reference
+
+      - name: Verify frozen inputs and CPU trace
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test -r /models/qwen3-8b-flash-next
@@ -37,25 +44,9 @@ jobs:
           test -r /oracle/phase11-stage-trace14/manifest.json
           python3 - <<'PY'
           import json
-          import os
           from pathlib import Path
-          from urllib.request import Request, urlopen
-          from zipfile import ZipFile
 
           root = Path('cpu-reference')
-          root.mkdir(exist_ok=True)
-          url = ('https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY'] +
-                 '/actions/artifacts/10814182236/zip')
-          req = Request(url, headers={
-              'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
-              'Accept': 'application/vnd.github+json',
-              'X-GitHub-Api-Version': '2022-11-28',
-          })
-          with urlopen(req, timeout=120) as response, open('cpu-reference.zip', 'wb') as dest:
-              while chunk := response.read(4 * 1024 * 1024):
-                  dest.write(chunk)
-          with ZipFile('cpu-reference.zip') as archive:
-              archive.extractall(root)
           report = json.loads((root / 'precision_report.json').read_text())
           if report['positions'] != 14 or report['fp32_decode_worst_kl'] > 1e-4:
               raise SystemExit('CPU artifact does not pass its 14-position FP32 gate')
