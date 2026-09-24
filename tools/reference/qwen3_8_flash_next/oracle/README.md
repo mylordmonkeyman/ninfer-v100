@@ -233,6 +233,22 @@ storage profile. The 13-position injected runs still fail the original Phase
 These injection runs are causal diagnostics, not substitute qualification
 scores; the 14-position uninjected V100 mean KL remains 0.05775208.
 
+A [paired GDN replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36057324550)
+held the position-12 layer-2 attention input at oracle BF16 values and then
+injected one more oracle stage. Injecting the FP32 recurrent output reduced
+the gated-output NRMSE from 0.00340667 to 0.00180051 and the attention-output
+NRMSE from 0.00328082 to 0.00155192. Injecting the FP32 gated output instead
+reduced attention-output NRMSE to 0.00000024: the V100 output projection
+reproduced the independent oracle when given the oracle's gated input. The
+recurrent-output discrepancy contributes substantially to this layer's local
+output error, while other upstream gate/input errors remain. These injections
+cannot distinguish recurrence arithmetic from the pre-existing GDN state
+history. Both runs retained the oracle expert set but still failed Phase 11
+(13-position mean KL 0.01281534 and 0.01281434, respectively). Further
+calibration should compare recurrence with matched input **and** matched
+prior state before attributing the difference to a kernel or precision
+profile; the output projection at this boundary needs no further replay.
+
 ## 1. Environment Setup
 
 Run the setup script using Python 3.14 to create the isolated virtual environment:
