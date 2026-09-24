@@ -57,7 +57,7 @@ def read_oracle(root, token_ids):
     return result
 
 
-def _stage_hooks(model, captured):
+def _stage_hooks(model, captured, trace_gdn_internals=False):
     handles = []
 
     def capture(name, select=lambda output: output):
@@ -78,7 +78,7 @@ def _stage_hooks(model, captured):
         handles.append(layer.attn_hyper_connection.register_forward_hook(
             capture(prefix + "attn_block_input", lambda output: output[0])
         ))
-        if hasattr(layer, "linear_attn"):
+        if trace_gdn_internals and hasattr(layer, "linear_attn"):
             gdn = layer.linear_attn
             handles.append(gdn.register_forward_hook(capture(prefix + "attn_block_output")))
             for module, name in ((gdn.in_proj_qkv, "qkv"),
@@ -106,13 +106,14 @@ def _stage_hooks(model, captured):
     return handles
 
 
-def run_decode(model, head, token_ids, profile, out_root):
+def run_decode(model, head, token_ids, profile, out_root,
+               trace_gdn_internals=False):
     # One token per forward, with one cache for the entire prefix.  Rounding a
     # cache tensor after the update changes all later positions, unlike
     # independently rounding tensors from the completed FP32 oracle.
     captured = {}
     handles = install_projection_boundaries(model, profile)
-    handles.extend(_stage_hooks(model, captured))
+    handles.extend(_stage_hooks(model, captured, trace_gdn_internals))
     cache = None
     logits = []
     manifest = {"profile": profile.name, "positions": []}
@@ -124,7 +125,7 @@ def run_decode(model, head, token_ids, profile, out_root):
                                past_key_values=cache, use_cache=True)
                 # Match the independent oracle's controls and projection
                 # materializations without replaying the recurrent kernel.
-                for index, layer in enumerate(model.layers):
+                for index, layer in enumerate(model.layers if trace_gdn_internals else ()):
                     if not hasattr(layer, "linear_attn"):
                         continue
                     prefix = f"L{index:02d}_"
@@ -185,6 +186,8 @@ def main():
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--v100-trace", type=Path,
                         help="optional selected-stage dump from the V100 test")
+    parser.add_argument("--trace-gdn-internals", action="store_true",
+                        help="collect extended GDN stages; requires matching V100 trace coverage")
     args = parser.parse_args()
     if args.positions < 1:
         parser.error("--positions must be positive")
@@ -194,7 +197,8 @@ def main():
     model.eval()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    fp32 = run_decode(model, head, token_ids, PROFILES["fp32"], args.out_dir / "fp32")
+    fp32 = run_decode(model, head, token_ids, PROFILES["fp32"], args.out_dir / "fp32",
+                      trace_gdn_internals=args.trace_gdn_internals)
     baseline = [compare_logits(item[0], logits)
                 for item, logits in zip(oracle, fp32)]
     worst = max(row["kl"] for row in baseline)
@@ -209,7 +213,8 @@ def main():
     for layer in model.layers:
         layer.mlp.experts.round_activations_to_bf16 = True
     matched = run_decode(model, head, token_ids, PROFILES["v100-phase11-storage"],
-                         args.out_dir / "v100-phase11-storage")
+                         args.out_dir / "v100-phase11-storage",
+                         trace_gdn_internals=args.trace_gdn_internals)
     comparison = [compare_logits(item[0], logits)
                   for item, logits in zip(oracle, matched)]
     report = {
