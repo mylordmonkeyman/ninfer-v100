@@ -139,11 +139,63 @@ continues to fail its original Phase 11 acceptance gate; the probe workflow
 completed successfully and uploaded its trace. This result does not support
 BF16 router-input materialization as the dominant source of the mismatch.
 
-The precision-matched reference remains a calibration effort. Before
-relaxing the gate, isolate the earliest V100-only score divergence upstream
-of the layer 20 near tie and verify it against an independently reproduced
-arithmetic path or a closer GPU-matched reference. Neither this CPU profile
-nor the router-input probe establishes a mathematical lower bound on KL.
+The precision-matched reference remains a calibration effort. Neither this
+CPU profile nor the router-input probe establishes a mathematical lower bound
+on KL. The following replay examines an earlier attention boundary upstream
+of the layer-20 near tie.
+
+### Layer 15 QSA projection replay and input boundary
+
+The [upstream stage extraction](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36020859990)
+locates a smaller position-2 jump before the layer-20 router flip. At layer
+15, the oracle-relative `qsa_gated` input has 0.00303482 NRMSE, while the
+BF16 `attn_block_output` reaches 0.01295645 (8.09 times its output-rounding
+floor). The [V100 oracle injection replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36021150400)
+isolated that projection with two independently verified injection points:
+
+| Position-2 layer-15 replay | Attention output NRMSE | Layer-20 expert-set flip |
+| --- | ---: | --- |
+| Uninjected V100 baseline | 0.01295645 | Yes |
+| Inject oracle `qsa_gated` before output projection | 0.00866809 | No |
+| Inject oracle `attn_block_output` after projection | Stage replaced after 0.01295645 measurement | Yes |
+
+The three-position injection runs reached the logits check; the diagnostic
+CTest still exited nonzero under the original Phase 11 gate. The different
+router decisions after the two injections show sensitivity to the pattern of
+upstream errors, not a monotone relationship with attention-output NRMSE.
+
+The [independent CPU projection replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36022091981)
+used the frozen oracle `qsa_gated` tensor and the model's dequantized FP8
+output weight. Its full-FP32 result reproduces the frozen attention output to
+1.74e-6 NRMSE. Rounding only the output to BF16 yields 0.00160245 NRMSE;
+rounding the **input and output** to BF16 yields 0.00866697, within about
+0.0000011 NRMSE of the V100 oracle-input replay. This explains the local
+projection error through input materialization and amplification; it does
+not require a defective QSA output projection kernel.
+
+The sequential CPU storage profile now rounds the QSA output projection
+input as well. Its [14-position run](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36022333498)
+passed incremental FP32 parity (worst KL 2.99e-11). A new
+[V100 comparison](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36022821822)
+and [compact score report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36023418921)
+measured:
+
+| Measurement against FP32 oracle | CPU with QSA input BF16 | V100 candidate |
+| --- | ---: | ---: |
+| Mean logits KL | 0.01925582 | 0.057752 |
+| Top-1 agreement | 13 / 14 (flip at position 10) | 13 / 14 (flip at position 13) |
+| Expert-set flips / 672 cells | 46 | 97 |
+| Median router-score NRMSE / 672 cells | 0.00036674 | 0.00047534 |
+| P95 router-score NRMSE / 672 cells | 0.00697020 | 0.01317816 |
+
+Only 33 expert-set flips are shared (13 CPU-only, 64 V100-only). The layer-20
+position-2 cutoff remains 0.0002737: the corrected CPU score RMS error is
+0.0023354 and retains oracle expert 489, while V100 has 0.0020022 and picks
+388. This shows why a smaller aggregate error does not predict the membership
+at a near tie. The profile is closer on mean KL but still not a quantitative
+precision match or an acceptance floor. Remaining calibration should compare
+the QSA input path and other internal materialization boundaries before
+changing the Phase 11 gate.
 
 ## 1. Environment Setup
 
