@@ -59,7 +59,7 @@ def read_oracle(root, token_ids):
 
 def _stage_hooks(model, captured, trace_gdn_internals=False,
                  trace_hyper_layer0=False, trace_mlp_layer0=False,
-                 trace_moe_routing_layer0=False):
+                 trace_moe_routing_layer0=False, trace_qsa_layer1=False):
     handles = []
 
     def capture(name, select=lambda output: output):
@@ -77,6 +77,9 @@ def _stage_hooks(model, captured, trace_gdn_internals=False,
         prefix = f"L{index:02d}_"
         if layer.ple is not None:
             handles.append(layer.ple.register_forward_hook(capture("ple_injection")))
+        if index == 1 and trace_qsa_layer1:
+            handles.append(layer.self_attn.register_forward_hook(
+                capture(prefix + "attn_block_output", lambda output: output[0])))
         handles.append(layer.attn_hyper_connection.register_forward_hook(
             capture(prefix + "attn_block_input", lambda output: output[0])
         ))
@@ -123,7 +126,8 @@ def _stage_hooks(model, captured, trace_gdn_internals=False,
 
 def run_decode(model, head, token_ids, profile, out_root,
                trace_gdn_internals=False, trace_hyper_layer0=False,
-               trace_mlp_layer0=False, trace_moe_routing_layer0=False):
+               trace_mlp_layer0=False, trace_moe_routing_layer0=False,
+               trace_qsa_layer1=False):
     # One token per forward, with one cache for the entire prefix.  Rounding a
     # cache tensor after the update changes all later positions, unlike
     # independently rounding tensors from the completed FP32 oracle.
@@ -131,7 +135,7 @@ def run_decode(model, head, token_ids, profile, out_root,
     handles = install_projection_boundaries(model, profile)
     handles.extend(_stage_hooks(model, captured, trace_gdn_internals,
                                 trace_hyper_layer0, trace_mlp_layer0,
-                                trace_moe_routing_layer0))
+                                trace_moe_routing_layer0, trace_qsa_layer1))
     cache = None
     logits = []
     manifest = {"profile": profile.name, "positions": []}
@@ -212,6 +216,8 @@ def main():
                         help="collect layer-zero MoE output before hyper injection")
     parser.add_argument("--trace-moe-routing-layer0", action="store_true",
                         help="collect layer-zero expert weights and shared scale")
+    parser.add_argument("--trace-qsa-layer1", action="store_true",
+                        help="collect layer-one attention output before hyper injection")
     args = parser.parse_args()
     if args.positions < 1:
         parser.error("--positions must be positive")
@@ -225,7 +231,8 @@ def main():
                       trace_gdn_internals=args.trace_gdn_internals,
                       trace_hyper_layer0=args.trace_hyper_layer0,
                       trace_mlp_layer0=args.trace_mlp_layer0,
-                      trace_moe_routing_layer0=args.trace_moe_routing_layer0)
+                      trace_moe_routing_layer0=args.trace_moe_routing_layer0,
+                      trace_qsa_layer1=args.trace_qsa_layer1)
     baseline = [compare_logits(item[0], logits)
                 for item, logits in zip(oracle, fp32)]
     worst = max(row["kl"] for row in baseline)
@@ -244,7 +251,8 @@ def main():
                          trace_gdn_internals=args.trace_gdn_internals,
                          trace_hyper_layer0=args.trace_hyper_layer0,
                          trace_mlp_layer0=args.trace_mlp_layer0,
-                         trace_moe_routing_layer0=args.trace_moe_routing_layer0)
+                         trace_moe_routing_layer0=args.trace_moe_routing_layer0,
+                         trace_qsa_layer1=args.trace_qsa_layer1)
     comparison = [compare_logits(item[0], logits)
                   for item, logits in zip(oracle, matched)]
     report = {
