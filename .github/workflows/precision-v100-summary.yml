@@ -20,11 +20,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh run download 36018385552 \
+          gh run download 36022821822 \
             --repo "$GITHUB_REPOSITORY" \
             --name v100-precision-trace-14 \
             --dir v100-artifact
-          gh run download 36017907847 \
+          gh run download 36022333498 \
             --repo "$GITHUB_REPOSITORY" \
             --name cpu-precision-reference-14 \
             --dir cpu-artifact
@@ -41,6 +41,15 @@ jobs:
 
           cpu = Path('cpu-artifact')
           gpu = Path('v100-artifact/candidate-stage')
+          cpu_report = json.loads((cpu / 'precision_report.json').read_text())
+          print('CPU precision summary:', json.dumps({
+              'positions': cpu_report['positions'],
+              'fp32_decode_worst_kl': cpu_report['fp32_decode_worst_kl'],
+              'mean_kl': cpu_report['mean_kl'],
+              'top1_agreement': cpu_report['top1_agreement'],
+              'top1_flips': [i for i, row in enumerate(cpu_report['per_position'])
+                             if not row['top1_agree']],
+          }))
           details = []
           for pos in range(14):
               for layer in range(48):
