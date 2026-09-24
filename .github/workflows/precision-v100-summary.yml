@@ -63,12 +63,24 @@ jobs:
           for line in summaries[-20:]: print(line[:700])
           print('V100 test log tail:')
           for line in lines[-40:]: print(line[:700])
+          probes = [line for line in lines if any(
+              marker in line for marker in (
+                  'phase11.router_margin.position=2 stage=L20_moe_router_ids',
+                  'phase11.router_ids_mismatch.position=2 stage=L20_moe_router_ids',
+                  'phase11.pre_router_autopsy.position=2 layer=20',
+                  'phase11.router_probe.position=2 layer=20',
+                  'phase11.router_margin.position=10 stage=L05_moe_router_ids',
+                  'phase11.pre_router_autopsy.position=10 layer=5',
+                  'phase11.router_margin.position=13 stage=L39_moe_router_ids'))]
+          print('First divergent router probes:')
+          for line in probes: print(line[:1500])
           out = Path('concise-v100-report')
           out.mkdir(exist_ok=True)
           for source in (root / 'v100-comparison/stage_comparison.csv',
                          root / 'v100-comparison/stage_comparison.json'):
               (out / source.name).write_bytes(source.read_bytes())
-          (out / 'test-summary.txt').write_text('\n'.join(summaries[-20:] + lines[-40:]))
+          (out / 'test-summary.txt').write_text('\n'.join(
+              summaries[-20:] + lines[-40:] + probes))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
