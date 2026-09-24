@@ -1,0 +1,76 @@
+name: Phase 11 Shared Expert Boundary Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-shared-boundary-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Download completed CPU profile comparisons
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36063434889 --repo "$GITHUB_REPOSITORY" \
+            --name cpu-precision-reference-14 --dir previous
+          gh run download 36073386852 --repo "$GITHUB_REPOSITORY" \
+            --name cpu-precision-reference-14 --dir corrected
+      - name: Summarize cumulative effect of shared expert boundary
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee shared-boundary-report.txt
+          import csv
+          import json
+          from pathlib import Path
+
+          def read(root):
+              report = json.loads((root / 'precision_report.json').read_text())
+              rows = {(int(row['position']), row['stage']): row for row in
+                      csv.DictReader((root / 'comparison/stage_comparison.csv').open())}
+              cpu = {(pos, stage) for (pos, stage), row in rows.items()
+                     if stage.endswith('moe_router_ids') and row['cpu_same_expert_set'] == '0'}
+              gpu = {(pos, stage) for (pos, stage), row in rows.items()
+                     if stage.endswith('moe_router_ids') and row['v100_same_expert_set'] == '0'}
+              return report, rows, cpu, gpu
+
+          before, old_rows, old_flips, old_gpu = read(Path('previous'))
+          after, new_rows, new_flips, new_gpu = read(Path('corrected'))
+          assert old_gpu == new_gpu and len(new_rows) == 3458
+          print('CPU mean KL before/after', before['mean_kl'], after['mean_kl'])
+          print('CPU/V100 mean KL before/after',
+                before['three_way']['cpu_vs_v100_mean_kl'],
+                after['three_way']['cpu_vs_v100_mean_kl'])
+          print('V100 mean KL', after['three_way']['oracle_vs_v100_mean_kl'])
+          print('Router flips before shared/cpu-only/v100-only',
+                len(old_flips & old_gpu), len(old_flips - old_gpu), len(old_gpu - old_flips))
+          print('Router flips after shared/cpu-only/v100-only',
+                len(new_flips & new_gpu), len(new_flips - new_gpu), len(new_gpu - new_flips))
+          print('CPU router memberships changed by boundary', len(old_flips ^ new_flips))
+          for p in range(14):
+              print('POSITION', p, 'CPU KL before', before['per_position'][p]['kl'],
+                    'after', after['per_position'][p]['kl'],
+                    'V100 KL', after['three_way']['per_position_v100'][p]['kl'],
+                    'CPU-to-V100 KL', after['three_way']['per_position_cpu_v100'][p]['kl'])
+          for p in (0, 2, 12, 13):
+              for stage in ('L00_mlp_block_input', 'L00_hyper_after_mlp',
+                            'L01_attn_block_input', 'L01_mlp_block_input',
+                            'L02_attn_block_input', 'logits'):
+                  print('STAGE', p, stage, 'CPU/V100 before',
+                        old_rows[p, stage]['v100_vs_cpu_nrmse'], 'after',
+                        new_rows[p, stage]['v100_vs_cpu_nrmse'])
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: shared-boundary-report
+          path: shared-boundary-report.txt
+          retention-days: 14
