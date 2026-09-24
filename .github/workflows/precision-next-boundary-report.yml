@@ -1,0 +1,67 @@
+name: Phase 11 Next Reference Boundary
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-next-boundary-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Download completed three-way CPU comparison
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36063434889 --repo "$GITHUB_REPOSITORY" \
+            --name cpu-precision-reference-14 --dir calibrated
+      - name: Find first layer-zero and layer-one separation
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee next-boundary.txt
+          import csv
+          import json
+          from pathlib import Path
+
+          root = Path('calibrated')
+          report = json.loads((root / 'precision_report.json').read_text())
+          print('Full-prefix CPU mean KL', report['mean_kl'])
+          print('Full-prefix CPU/V100 mean KL', report['three_way']['cpu_vs_v100_mean_kl'])
+          rows = {(int(r['position']), r['stage']): r for r in
+                  csv.DictReader((root / 'comparison/stage_comparison.csv').open())}
+          for position in (0, 2, 12, 13):
+              print('POSITION', position,
+                    'CPU oracle KL', report['per_position'][position]['kl'],
+                    'V100 oracle KL', report['three_way']['per_position_v100'][position]['kl'])
+              for stage in ('embedding', 'L00_attn_block_input',
+                            'L00_hyper_after_attn', 'L00_mlp_block_input',
+                            'L00_hyper_after_mlp', 'ple_injection',
+                            'L01_attn_block_input', 'L01_mlp_block_input',
+                            'L01_hyper_after_mlp', 'L02_attn_block_input'):
+                  r = rows[position, stage]
+                  print(stage, 'cpu-oracle', r['cpu_vs_oracle_nrmse'],
+                        'gpu-oracle', r['v100_vs_oracle_nrmse'],
+                        'cpu-gpu', r['v100_vs_cpu_nrmse'])
+          flips = [r for r in rows.values() if r['stage'].endswith('moe_router_ids')]
+          cpu = {(int(r['position']), r['stage']) for r in flips
+                 if r['cpu_same_expert_set'] == '0'}
+          gpu = {(int(r['position']), r['stage']) for r in flips
+                 if r['v100_same_expert_set'] == '0'}
+          print('Router set flips: shared', len(cpu & gpu), 'CPU-only', len(cpu - gpu),
+                'V100-only', len(gpu - cpu))
+          if len(rows) != 3430 or rows[0, 'L00_attn_block_input']['v100_vs_cpu_nrmse'] != '0.0':
+              raise SystemExit('unexpected trace coverage or first boundary')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: next-reference-boundary-summary
+          path: next-boundary.txt
+          retention-days: 14
