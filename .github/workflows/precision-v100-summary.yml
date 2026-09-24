@@ -139,6 +139,18 @@ jobs:
                   'phase11.router_margin.position=13 stage=L39_moe_router_ids'))]
           print('First divergent router probes:')
           for line in probes: print(line[:1500])
+          # Follow position 2 upstream of its first V100-only router flip.
+          # The raw V100 test log already contains oracle-relative errors at
+          # these checkpoints; extracting it does not need another GPU run.
+          upstream = [line for line in lines if
+                      'phase11.error_decomposition.position=2 ' in line and
+                      any(f'stage=L{layer:02d}_{stage} ' in line
+                          for layer in range(21)
+                          for stage in ('attn_block_input', 'hyper_after_attn',
+                                        'mlp_block_input_fp32', 'mlp_block_input',
+                                        'moe_router_scores', 'hyper_after_mlp'))]
+          print('Position-2 upstream checkpoints:', len(upstream))
+          for line in upstream: print(line[:1500])
           out = Path('concise-v100-report')
           out.mkdir(exist_ok=True)
           for source in (root / 'v100-comparison/stage_comparison.csv',
@@ -146,6 +158,7 @@ jobs:
               (out / source.name).write_bytes(source.read_bytes())
           (out / 'test-summary.txt').write_text('\n'.join(
               summaries[-20:] + lines[-40:] + probes))
+          (out / 'upstream-position2.txt').write_text('\n'.join(upstream) + '\n')
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
