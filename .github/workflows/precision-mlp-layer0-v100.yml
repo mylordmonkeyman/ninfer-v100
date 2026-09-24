@@ -1,0 +1,178 @@
+name: Phase 11 V100 Layer Zero MoE Calibration
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-mlp-layer0-v100.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  trace-14:
+    name: Compare one V100 14-position trace
+    runs-on:
+      - self-hosted
+      - v100
+      - sm70
+      - cuda-12-8
+      - ninfer-phase11
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Download completed CPU trace
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-mlp-layer0-reference-14
+          run-id: 36064093855
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: cpu-reference
+
+      - name: Verify frozen inputs and CPU trace
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -r /models/qwen3-8b-flash-next
+          test -r /oracle/phase11/manifest.json
+          test -r /oracle/phase11-stage-trace14/manifest.json
+          test -r cpu-reference/fp32/manifest.json
+          test -r cpu-reference/v100-phase11-storage/manifest.json
+          # The CPU job collected the full prefix but its final comparison
+          # rejected stages missing from the earlier frozen V100 export.
+      - name: Compile only the V100 real-model trace target
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-precision-v100 -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF \
+            -DBUILD_TESTING=ON
+          cmake --build build-precision-v100 -j --target \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test
+
+      - name: Wait for model residency without evicting other GPU work
+        shell: bash
+        timeout-minutes: 19
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free \
+              --format=csv,noheader,nounits | tr -d '[:space:]')
+            echo "V100 free memory: ${free_mib} MiB (attempt ${attempt}/30)"
+            if (( free_mib >= 28000 )); then exit 0; fi
+            if (( attempt < 30 )); then sleep 30; fi
+          done
+          echo '::error::V100 needs at least 28000 MiB free for this model test'
+          exit 1
+
+      - name: Dump pre-injection candidate stages for all 14 positions
+        shell: bash
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "14"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace14
+          NINFER_PHASE11_STAGE_ORACLE_POSITION: "13"
+          NINFER_PHASE11_STAGE_ORACLE_ALL_POSITIONS: "1"
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_PHASE11_TRACE_MLP_LAYER0: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
+        run: |
+          set -euo pipefail
+          export NINFER_PHASE11_CANDIDATE_TRACE_ROOT="$GITHUB_WORKSPACE/candidate-stage"
+          set +e
+          ctest --test-dir build-precision-v100 -V \
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+            > v100-trace.log 2>&1
+          test_status=$?
+          set -e
+          echo "V100 diagnostic test exit status: $test_status"
+          rg 'phase11.(top1_agreement|mean_kl|error_decomposition.position=13)' \
+            v100-trace.log | tail -12 || true
+          test -s candidate-stage/stages.jsonl
+          stage_rows=$(wc -l < candidate-stage/stages.jsonl)
+          echo "Recorded $stage_rows selected stages"
+          test "$stage_rows" -eq 3430
+
+      - name: Compare layer-zero MoE output to CPU and FP32 oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          records = [json.loads(line) for line in Path('candidate-stage/stages.jsonl').read_text().splitlines()]
+          selected = {(r['position'], r['name']) for r in records}
+          for folder in ('cpu-reference/fp32', 'cpu-reference/v100-phase11-storage'):
+              path = Path(folder) / 'manifest.json'
+              manifest = json.loads(path.read_text())
+              for position in manifest['positions']:
+                  position['tensors'] = [t for t in position['tensors']
+                                         if (position['position'], t['name']) in selected]
+              path.write_text(json.dumps(manifest))
+          PY
+          python3 -m venv compare-venv
+          compare-venv/bin/pip install numpy
+          mkdir -p v100-comparison
+          compare-venv/bin/python \
+            tools/reference/qwen3_8_flash_next/oracle/compare_precision_traces.py \
+            --oracle /oracle/phase11-stage-trace14 \
+            --cpu cpu-reference/v100-phase11-storage \
+            --v100 candidate-stage \
+            --incremental-fp32 cpu-reference/fp32 \
+            --out-dir v100-comparison \
+            | tee v100-comparison/summary.log
+          python3 - <<'PY'
+          import csv
+          from pathlib import Path
+          rows = {(int(r['position']), r['stage']): r for r in
+                  csv.DictReader(Path('v100-comparison/stage_comparison.csv').open())}
+          names = ('mlp_block_input', 'mlp_block_output', 'hyper_after_mlp')
+          for pos in (0, 2, 12, 13):
+              print('MOE calibration position', pos)
+              for suffix in names:
+                  r = rows[pos, 'L00_' + suffix]
+                  print(suffix, 'cpu-oracle', r['cpu_vs_oracle_nrmse'],
+                        'gpu-oracle', r['v100_vs_oracle_nrmse'],
+                        'cpu-gpu', r['v100_vs_cpu_nrmse'])
+          PY
+
+      - name: Upload trace and comparison
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: v100-mlp-layer0-calibration-14
+          path: |
+            candidate-stage
+            v100-comparison
+            v100-trace.log
+          if-no-files-found: ignore
+          retention-days: 14
