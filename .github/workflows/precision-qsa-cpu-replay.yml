@@ -27,8 +27,13 @@ jobs:
       - name: Replay frozen gate through dequantized FP8 projection
         run: |
           set -euo pipefail
-          test -r /srv/ninfer/source/mixed/model.safetensors.index.json
-          test -r /oracle/phase11-stage-trace14/pos0002/L15_qsa_gated.bin
+          for path in /srv/ninfer/source/mixed/model.safetensors.index.json \
+              /oracle/phase11-stage-trace14/pos0002/L15_qsa_gated.bin; do
+            if [[ ! -r "$path" ]]; then
+              echo "::error::Missing CPU replay input: $path"
+              exit 1
+            fi
+          done
           python_bin=''
           for candidate in "$HOME/ninfer-v100/venv-oracle/bin/python" \
               /srv/ninfer/venv-oracle/bin/python python3; do
