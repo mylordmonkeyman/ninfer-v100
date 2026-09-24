@@ -1,0 +1,83 @@
+name: Phase 11 Attention Shadow Calibration
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-attention-calibration-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Download completed CPU prefix results
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36059468003 --repo "$GITHUB_REPOSITORY" \
+            --name cpu-precision-reference-14 --dir calibrated
+          gh run download 36022333498 --repo "$GITHUB_REPOSITORY" \
+            --name cpu-precision-reference-14 --dir previous
+      - name: Identify the first remaining CPU to V100 stage mismatch
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee calibration-summary.txt
+          import csv
+          import json
+          from pathlib import Path
+
+          new = Path('calibrated')
+          old = Path('previous')
+          report = json.loads((new / 'precision_report.json').read_text())
+          previous = json.loads((old / 'precision_report.json').read_text())
+          three = report['three_way']
+          print('Old CPU mean KL', previous['mean_kl'])
+          print('Corrected CPU mean KL', report['mean_kl'])
+          print('V100 mean KL', three['oracle_vs_v100_mean_kl'])
+          print('CPU to V100 mean KL', three['cpu_vs_v100_mean_kl'])
+          rows = {(int(r['position']), r['stage']): r for r in csv.DictReader(
+              (new / 'comparison/stage_comparison.csv').open())}
+          old_rows = {(int(r['position']), r['stage']): r for r in csv.DictReader(
+              (old / 'comparison/stage_comparison.csv').open())}
+          stages = ('embedding', 'L00_attn_block_input',
+                    'L00_mlp_block_input', 'L00_hyper_after_mlp',
+                    'L01_attn_block_input', 'L01_mlp_block_input',
+                    'L01_hyper_after_mlp', 'L02_attn_block_input',
+                    'L02_mlp_block_input', 'L02_hyper_after_mlp', 'logits')
+          for position in (0, 2, 10, 12, 13):
+              print('POSITION', position,
+                    'old_kl', previous['per_position'][position]['kl'],
+                    'new_kl', report['per_position'][position]['kl'],
+                    'v100_kl', three['per_position_v100'][position]['kl'])
+              for stage in stages:
+                  key = position, stage
+                  r = rows[key]
+                  print(stage, 'old_cpu_oracle', old_rows[key]['cpu_vs_oracle_nrmse'],
+                        'new_cpu_oracle', r['cpu_vs_oracle_nrmse'],
+                        'v100_oracle', r['v100_vs_oracle_nrmse'],
+                        'cpu_v100', r['v100_vs_cpu_nrmse'])
+          router = [r for (p, s), r in rows.items() if s.endswith('moe_router_ids')]
+          cpu = {(int(r['position']), r['stage']) for r in router
+                 if r['cpu_same_expert_set'] == '0'}
+          gpu = {(int(r['position']), r['stage']) for r in router
+                 if r['v100_same_expert_set'] == '0'}
+          print('Router flip cells shared/cpu-only/v100-only',
+                len(cpu & gpu), len(cpu - gpu), len(gpu - cpu))
+          if len(rows) != 3416 or not all(
+              rows[(p, 'L00_attn_block_input')]['v100_vs_cpu_nrmse'] == '0.0'
+              for p in range(14)
+          ):
+              raise SystemExit('calibrated trace does not match the expected V100 first boundary')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: attention-shadow-calibration-summary
+          path: calibration-summary.txt
+          retention-days: 14
