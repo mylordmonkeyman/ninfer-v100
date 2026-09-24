@@ -1,0 +1,63 @@
+name: Phase 11 GDN Projection Rounding Check
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-gdn-projection-rounding-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Download completed CPU and V100 diagnostic traces
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36060502061 --repo "$GITHUB_REPOSITORY" \
+            --name cpu-precision-reference-14 --dir cpu
+          gh run download 36061122886 --repo "$GITHUB_REPOSITORY" \
+            --name v100-gdn-layer0-calibration-14 --dir gpu
+      - name: Compare exact materialization at layer zero
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet numpy
+          python3 - <<'PY' | tee projection-rounding.txt
+          import json
+          from pathlib import Path
+          import numpy as np
+
+          cpu = Path('cpu/v100-phase11-storage')
+          gpu = Path('gpu/candidate-stage')
+          entries = {(r['position'], r['name']): gpu / r['file'] for r in map(
+              json.loads, (gpu / 'stages.jsonl').read_text().splitlines())}
+          for pos in (0, 2, 12, 13):
+              print('POSITION', pos)
+              for stage in ('gdn_projected', 'gdn_gated_output', 'attn_block_output'):
+                  key = f'L00_{stage}'
+                  left = np.fromfile(cpu / f'pos{pos:04d}/{key}.bin', dtype='<f4')
+                  right = np.fromfile(entries[pos, key], dtype='<f4')
+                  # NumPy does not provide a portable native BF16 dtype.
+                  bits = right.view(np.uint32)
+                  bias = np.uint32(0x7fff) + ((bits >> 16) & 1)
+                  rounded = ((bits + bias) & np.uint32(0xffff0000)).view(np.float32)
+                  def err(v):
+                      return float(np.sqrt(np.mean((left.astype(np.float64) -
+                                v.astype(np.float64)) ** 2)) /
+                                max(np.sqrt(np.mean(left.astype(np.float64) ** 2)), 1e-12))
+                  print(key, 'cpu-v100-raw', err(right),
+                        'cpu-v100-rounded', err(rounded),
+                        'exact-rounded-fraction', float(np.mean(left == rounded)))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gdn-projection-rounding-summary
+          path: projection-rounding.txt
+          retention-days: 14
