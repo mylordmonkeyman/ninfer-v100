@@ -1,0 +1,119 @@
+name: Phase 11 V100 FP32 Router Input Probe
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-router-fp32-v100.yml
+
+permissions:
+  contents: read
+
+jobs:
+  trace-14:
+    runs-on:
+      - self-hosted
+      - v100
+      - sm70
+      - cuda-12-8
+      - ninfer-phase11
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build one diagnostic target
+        run: |
+          set -euo pipefail
+          test -r /models/qwen3-8b-flash-next
+          test -r /oracle/phase11-stage-trace14/manifest.json
+          cmake -S . -B build-precision-v100 -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF \
+            -DBUILD_TESTING=ON
+          cmake --build build-precision-v100 -j --target \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test
+      - name: Wait for free V100 memory
+        timeout-minutes: 19
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free \
+              --format=csv,noheader,nounits | tr -d '[:space:]')
+            echo "V100 free memory: ${free_mib} MiB (attempt ${attempt}/30)"
+            if (( free_mib >= 28000 )); then exit 0; fi
+            if (( attempt < 30 )); then sleep 30; fi
+          done
+          echo '::error::V100 needs at least 28000 MiB free'
+          exit 1
+      - name: Run 14-position FP32 router-input probe
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "14"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace14
+          NINFER_PHASE11_STAGE_ORACLE_POSITION: "13"
+          NINFER_PHASE11_STAGE_ORACLE_ALL_POSITIONS: "1"
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+          NINFER_FLASH_NEXT_FP32_ROUTER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
+        run: |
+          set -euo pipefail
+          export NINFER_PHASE11_CANDIDATE_TRACE_ROOT="$GITHUB_WORKSPACE/fp32-router-stage"
+          set +e
+          ctest --test-dir build-precision-v100 -V \
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+            > fp32-router.log 2>&1
+          test_status=$?
+          set -e
+          echo "Probe CTest status: $test_status"
+          python3 - <<'PY'
+          from pathlib import Path
+          lines = Path('fp32-router.log').read_text().splitlines()
+          for line in lines:
+              if any(marker in line for marker in (
+                  'phase11.top1_agreement=', 'phase11.mean_kl=',
+                  'phase11.worst_kl.value=', 'phase11.first_divergence.position=',
+                  'phase11.router_probe.position=2 stage=L20_',
+              )):
+                  print(line[:750])
+          flips = [line for line in lines if 'phase11.router_ids_mismatch.position=' in line
+                   and ' same_expert_set=0 ' in line]
+          print('Router expert-set flips:', len(flips))
+          print('Position-2 L20 flip:', any(
+              'position=2 stage=L20_moe_router_ids ' in line for line in flips))
+          if 'phase11.positions=14' not in '\n'.join(lines):
+              raise SystemExit('V100 probe did not complete 14 positions')
+          PY
+          test -s fp32-router-stage/stages.jsonl
+          test "$(wc -l < fp32-router-stage/stages.jsonl)" -eq 3416
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: v100-fp32-router-probe-14
+          path: |
+            fp32-router.log
+            fp32-router-stage
+          if-no-files-found: ignore
+          retention-days: 14
