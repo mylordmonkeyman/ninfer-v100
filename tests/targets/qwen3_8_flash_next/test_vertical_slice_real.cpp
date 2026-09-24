@@ -1317,6 +1317,32 @@ int main() {
                                         {"file", (fs::path(pos_dir) /
                                                   (std::string(name) + ".bin")).string()}}
                                 << '\n' << std::flush;
+                // The frozen oracle has router IDs but no full score vector.
+                // Scores were captured before top-k and before any diagnostic
+                // injection. Export them alongside the ID stage so the CPU
+                // storage profile can compare near-tie decisions directly.
+                if (suffix == "moe_router_ids" &&
+                    last_router_score_prefix == name.substr(0, 4) &&
+                    last_router_scores.size() >= kRouterExperts) {
+                    const std::string score_name =
+                        std::string(name.substr(0, 4)) + "moe_router_scores";
+                    const fs::path score_path = folder / (score_name + ".bin");
+                    std::ofstream scores_file(
+                        score_path, std::ios::binary | std::ios::trunc);
+                    scores_file.write(
+                        reinterpret_cast<const char*>(last_router_scores.data()),
+                        static_cast<std::streamsize>(kRouterExperts * sizeof(float)));
+                    if (!scores_file) {
+                        throw std::runtime_error("failed to write Phase 11 router scores");
+                    }
+                    candidate_index << json{{"position", current_stage_trace_position},
+                                            {"name", score_name},
+                                            {"dtype", "FP32"},
+                                            {"count", kRouterExperts},
+                                            {"file", (fs::path(pos_dir) /
+                                                      (score_name + ".bin")).string()}}
+                                    << '\n' << std::flush;
+                }
             }
 
             long double dot = 0.0L;

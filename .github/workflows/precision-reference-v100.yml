@@ -30,7 +30,7 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: cpu-precision-reference-14
-          run-id: 36014366398
+          run-id: 36017907847
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           path: cpu-reference
@@ -48,7 +48,8 @@ jobs:
 
           root = Path('cpu-reference')
           report = json.loads((root / 'precision_report.json').read_text())
-          if report['positions'] != 14 or report['fp32_decode_worst_kl'] > 1e-4:
+          if (report['positions'] != 14 or report['fp32_decode_worst_kl'] > 1e-4 or
+                  report['stage_comparison']['incremental_router_score_rows'] != 672):
               raise SystemExit('CPU artifact does not pass its 14-position FP32 gate')
           print('Read completed CPU storage trace and FP32 gate')
           PY
@@ -123,7 +124,9 @@ jobs:
           rg 'phase11.(top1_agreement|mean_kl|error_decomposition.position=13)' \
             v100-trace.log | tail -12 || true
           test -s candidate-stage/stages.jsonl
-          echo "Recorded $(wc -l < candidate-stage/stages.jsonl) selected stages"
+          stage_rows=$(wc -l < candidate-stage/stages.jsonl)
+          echo "Recorded $stage_rows selected stages"
+          test "$stage_rows" -eq 3416
 
       - name: Compare CPU, V100, and independent FP32 stages
         shell: bash
@@ -137,6 +140,7 @@ jobs:
             --oracle /oracle/phase11-stage-trace14 \
             --cpu cpu-reference/v100-phase11-storage \
             --v100 candidate-stage \
+            --incremental-fp32 cpu-reference/fp32 \
             --out-dir v100-comparison \
             | tee v100-comparison/summary.log
 
