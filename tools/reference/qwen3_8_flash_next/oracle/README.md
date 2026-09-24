@@ -144,6 +144,37 @@ CPU profile nor the router-input probe establishes a mathematical lower bound
 on KL. The following replay examines an earlier attention boundary upstream
 of the layer-20 near tie.
 
+### Sequential reference calibration at the first layer
+
+The independent CPU decoder recomputes all 14 prefixes and carries rounded
+cache and hyper state forward, rather than rounding completed FP32 traces.
+An added BF16 attention-prepare shadow matches the V100 `L00_attn_block_input`
+exactly at every position. The resulting
+[three-way run](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36059468003)
+has mean logits KL against FP32 of 0.03544772 for CPU and 0.05775240 for V100;
+CPU versus V100 KL is 0.02770246. The CPU and V100 expert-set flips overlap
+in 53 cells, with 17 CPU-only and 44 V100-only flips
+([stage report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36060137188)).
+These differences preclude attributing the V100 gate failure solely to the
+precision profile.
+
+A [focused layer-zero GDN trace](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36061122886)
+compares the independent CPU recurrence with the V100 before the first MLP.
+At position 0, CPU versus V100 NRMSE is 0 at the attention input, 2.03e-7
+at recurrent output and 3.25e-7 at the gated output. The raw attention
+projection trace differs by 0.001668 because the V100 diagnostic exposes
+its FP32 accumulator while the CPU stage holds BF16. Rounding the V100
+accumulator drops this error to 2.33e-6, with 99.92% of elements identical
+([rounding report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36061643827)).
+At position 12 the gated-output difference is 0.000266 and the rounded
+projection difference is 0.000769; history and its readout need further
+calibration. Despite the close position-zero projection, `L00_mlp_block_input`
+still differs by 0.002997. The next focused test should capture the post-GDN
+hyper update and MLP hyper prepare on both implementations before attempting
+to change precision policy or the §7 gate. The expanded GDN tracing option
+is diagnostic only; the default 14-prefix reference continues comparing the
+original common set of V100 stages.
+
 ### Layer 15 QSA projection replay and input boundary
 
 The [upstream stage extraction](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36020859990)
