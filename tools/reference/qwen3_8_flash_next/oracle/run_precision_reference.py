@@ -23,6 +23,7 @@ from precision_profile import (
     round_to_bf16,
 )
 from precision_metrics import compare_logits
+from compare_precision_traces import compare as compare_stages
 from run_oracle import build_oracle
 
 
@@ -146,6 +147,8 @@ def main():
     parser.add_argument("--positions", type=int, default=14)
     parser.add_argument("--max-fp32-kl", type=float, default=1e-4)
     parser.add_argument("--out-dir", type=Path, required=True)
+    parser.add_argument("--v100-trace", type=Path,
+                        help="optional selected-stage dump from the V100 test")
     args = parser.parse_args()
     if args.positions < 1:
         parser.error("--positions must be positive")
@@ -167,6 +170,8 @@ def main():
                            f"worst KL {worst:.6g} > {args.max_fp32_kl}; "
                            "precision-profile conclusions are blocked")
 
+    for layer in model.layers:
+        layer.mlp.experts.round_activations_to_bf16 = True
     matched = run_decode(model, head, token_ids, PROFILES["v100-phase11-storage"],
                          args.out_dir / "v100-phase11-storage")
     comparison = [compare_logits(item[0], logits)
@@ -181,9 +186,14 @@ def main():
         "per_position": comparison,
         "limitations": ["FP32 CPU arithmetic between materialization boundaries",
                         "FP8 GEMV reduction order and fused GDN readout unmodeled",
-                        "prepared V100 output-head weights not independently checked",
+                        "prepared V100 expert and output-head weights not independently checked",
+                        "PLE and QSA internal materializations not fully represented",
                         "V100 stage parity still required"],
     }
+    report["stage_comparison"] = compare_stages(
+        args.fp32_oracle, args.out_dir / "v100-phase11-storage",
+        args.out_dir / "comparison", args.v100_trace
+    )
     (args.out_dir / "precision_report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps({key: report[key] for key in
                       ("status", "top1_agreement", "mean_kl")}, indent=2))

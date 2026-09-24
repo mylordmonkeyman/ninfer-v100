@@ -7,8 +7,9 @@ This directory provides the authoritative CPU FP32 reference forward pass and st
 `run_precision_reference.py` is a CPU-only supplementary diagnostic. It first
 decodes the frozen tokens with FP32 state and requires agreement with the
 independent full-sequence oracle. It then repeats sequential decoding with
-explicit BF16 materialization for selected projections, convolution history,
-attention KV, and logits, while retaining FP32 hyper and GDN SSM state. It
+explicit BF16 materialization for selected projections, attention and MLP
+inputs, expert intermediate values, convolution history, attention KV, and
+logits, while retaining FP32 hyper and GDN SSM state. It
 writes position-indexed FP32 stage dumps and KL/top-1 summaries.
 
 The experiment is **not** an exact V100 precision oracle or a proven lower

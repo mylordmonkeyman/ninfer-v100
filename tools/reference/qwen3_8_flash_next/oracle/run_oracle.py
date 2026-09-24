@@ -81,6 +81,10 @@ class LazyExperts(nn.Module):
         self.exp_f = None
         self.cache_gate_up = {}
         self.cache_down = {}
+        # Disabled for the authoritative FP32 oracle. The supplementary
+        # storage-profile experiment enables the two materialization boundaries
+        # used by the CPU NVFP4 expert path.
+        self.round_activations_to_bf16 = False
 
     def get_exp_file(self):
         if self.exp_f is None:
@@ -131,9 +135,13 @@ class LazyExperts(nn.Module):
                 continue
             top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
             current_state = hidden_states[token_idx]
+            if self.round_activations_to_bf16:
+                current_state = current_state.to(torch.bfloat16).float()
             gate_up, down = self.get_expert_weights(expert_idx)
             gate, up = F.linear(current_state, gate_up).chunk(2, dim=-1)
             current_hidden_states = self.act_fn(gate) * up
+            if self.round_activations_to_bf16:
+                current_hidden_states = current_hidden_states.to(torch.bfloat16).float()
             current_hidden_states = F.linear(current_hidden_states, down)
             current_hidden_states = current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
             final_hidden_states.index_add_(0, token_idx, current_hidden_states.to(final_hidden_states.dtype))

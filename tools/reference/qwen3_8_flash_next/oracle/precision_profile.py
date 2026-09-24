@@ -54,15 +54,39 @@ def install_projection_boundaries(model, profile):
     if not profile.activation_bf16:
         return []
     handles = []
+    handles.append(model.embed_tokens.register_forward_hook(
+        lambda _module, _args, output: round_to_bf16(output)
+    ))
+    handles.append(model.hyper_connection_mixer.register_forward_hook(
+        lambda _module, _args, output: round_to_bf16(output)
+    ))
     for layer in model.layers:
         projections = []
         if hasattr(layer, "linear_attn"):
             projections.extend((layer.linear_attn.in_proj_qkv, layer.linear_attn.in_proj_z))
+            handles.append(layer.linear_attn.register_forward_hook(
+                lambda _module, _args, output: round_to_bf16(output)
+            ))
         if hasattr(layer, "self_attn"):
             projections.extend((layer.self_attn.q_proj, layer.self_attn.k_proj,
                                 layer.self_attn.v_proj, layer.self_attn.o_proj))
+            handles.append(layer.self_attn.register_forward_hook(
+                lambda _module, _args, output:
+                    (round_to_bf16(output[0]), output[1])
+            ))
         if layer.ple is not None:
             projections.extend((layer.ple.key_proj, layer.ple.value_proj))
+            handles.append(layer.ple.register_forward_hook(
+                lambda _module, _args, output: round_to_bf16(output)
+            ))
+        for hyper in (layer.attn_hyper_connection, layer.mlp_hyper_connection):
+            handles.append(hyper.register_forward_hook(
+                lambda _module, _args, output:
+                    (round_to_bf16(output[0]), output[1], output[2])
+            ))
+        handles.append(layer.mlp.register_forward_hook(
+            lambda _module, _args, output: round_to_bf16(output)
+        ))
         projections.extend((layer.mlp.shared_expert.gate_proj,
                             layer.mlp.shared_expert.up_proj,
                             layer.mlp.shared_expert.down_proj))
