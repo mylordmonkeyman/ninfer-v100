@@ -20,10 +20,75 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh run download 36015694540 \
+          gh run download 36018385552 \
             --repo "$GITHUB_REPOSITORY" \
             --name v100-precision-trace-14 \
             --dir v100-artifact
+          gh run download 36017907847 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name cpu-precision-reference-14 \
+            --dir cpu-artifact
+      - name: Compare router scores and near-tie decisions
+        run: |
+          python3 -m venv score-venv
+          score-venv/bin/pip install numpy
+          score-venv/bin/python - <<'PY'
+          import collections
+          import csv
+          import json
+          from pathlib import Path
+          import numpy as np
+
+          cpu = Path('cpu-artifact')
+          gpu = Path('v100-artifact/candidate-stage')
+          details = []
+          for pos in range(14):
+              for layer in range(48):
+                  name = f'L{layer:02d}_moe_router_scores.bin'
+                  rel = Path(f'pos{pos:04d}') / name
+                  fp32 = np.fromfile(cpu / 'fp32' / rel, dtype='<f4')
+                  storage = np.fromfile(cpu / 'v100-phase11-storage' / rel, dtype='<f4')
+                  candidate = np.fromfile(gpu / rel, dtype='<f4')
+                  if (fp32.size, storage.size, candidate.size) != (512, 512, 512):
+                      raise SystemExit(f'incomplete 512-score vector: {rel}')
+                  rank = np.argsort(-fp32, kind='stable')
+                  ref_set = set(rank[:10])
+                  cpu_set = set(np.argsort(-storage, kind='stable')[:10])
+                  gpu_set = set(np.argsort(-candidate, kind='stable')[:10])
+                  scale = max(float(np.sqrt(np.mean(fp32.astype('f8')**2))), 1e-12)
+                  row = {
+                      'position': pos, 'layer': layer,
+                      'cutoff': float(fp32[rank[9]] - fp32[rank[10]]),
+                      'cpu_rms_error': float(np.sqrt(np.mean((storage.astype('f8')-fp32)**2))),
+                      'gpu_rms_error': float(np.sqrt(np.mean((candidate.astype('f8')-fp32)**2))),
+                      'cpu_nrmse': float(np.sqrt(np.mean((storage.astype('f8')-fp32)**2))/scale),
+                      'gpu_nrmse': float(np.sqrt(np.mean((candidate.astype('f8')-fp32)**2))/scale),
+                      'cpu_gpu_nrmse': float(np.sqrt(np.mean((storage.astype('f8')-candidate)**2))/scale),
+                      'cpu_flip': int(cpu_set != ref_set),
+                      'gpu_flip': int(gpu_set != ref_set),
+                      'cpu_only_ids': ','.join(map(str, sorted(cpu_set-ref_set))),
+                      'gpu_only_ids': ','.join(map(str, sorted(gpu_set-ref_set))),
+                  }
+                  details.append(row)
+                  if (pos, layer) in ((2,20), (2,38), (10,5), (13,39)):
+                      print('Router focus', json.dumps(row))
+                      print('  oracle 10th/11th IDs', rank[9], rank[10])
+                      print('  oracle/cpu/gpu 10th/11th scores',
+                            [(int(i),float(fp32[i]),float(storage[i]),float(candidate[i]))
+                             for i in rank[9:11]])
+          print('Score vectors:', len(details))
+          print('GPU flip count from raw scores:', sum(r['gpu_flip'] for r in details))
+          print('CPU flip count from raw scores:', sum(r['cpu_flip'] for r in details))
+          for label in ('cpu_nrmse','gpu_nrmse','cpu_gpu_nrmse'):
+              print(label, 'median=',float(np.median([r[label] for r in details])),
+                    'p95=',float(np.percentile([r[label] for r in details], 95)))
+          out = Path('concise-v100-report')
+          out.mkdir(exist_ok=True)
+          with (out / 'router_scores.csv').open('w', newline='') as handle:
+              writer = csv.DictWriter(handle, fieldnames=list(details[0]))
+              writer.writeheader()
+              writer.writerows(details)
+          PY
       - name: Summarize matched and unmatched stage errors
         run: |
           python3 - <<'PY'
