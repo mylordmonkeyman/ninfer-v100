@@ -43,6 +43,30 @@ class TraceComparisonTest(unittest.TestCase):
             self.assertGreater(report["worst_cpu_stage"]["cpu_vs_oracle_nrmse"], 0)
             self.assertTrue((root / "report" / "stage_comparison.csv").is_file())
 
+    def test_router_scores_use_labeled_incremental_fp32_reference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = "L20_moe_router_scores"
+            for name, values in (("incremental", [1.0, 0.5]),
+                                 ("cpu", [1.0, 0.6])):
+                place = root / name / "pos0000"
+                place.mkdir(parents=True)
+                np.asarray(values, dtype="<f4").tofile(place / (stage + ".bin"))
+                (root / name / "manifest.json").write_text(json.dumps({
+                    "positions": [{"position": 0, "token_id": 42, "tensors": [
+                        {"name": stage, "file": f"pos0000/{stage}.bin"}]}]
+                }))
+            (root / "oracle").mkdir()
+            (root / "oracle" / "manifest.json").write_text(
+                json.dumps({"positions": []}))
+            report = compare(root / "oracle", root / "cpu", root / "report",
+                             incremental_fp32_root=root / "incremental")
+            self.assertEqual(report["incremental_router_score_rows"], 1)
+            import csv
+            with (root / "report" / "stage_comparison.csv").open() as handle:
+                row = next(csv.DictReader(handle))
+            self.assertEqual(row["reference_source"], "incremental-fp32-scores")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -80,6 +80,9 @@ def _stage_hooks(model, captured):
         handles.append(layer.mlp.gate.register_forward_hook(
             capture(prefix + "moe_router_ids", lambda output: output[2])
         ))
+        handles.append(layer.mlp.gate.register_forward_hook(
+            capture(prefix + "moe_router_scores", lambda output: output[0])
+        ))
     handles.append(model.hyper_connection_mixer.register_forward_hook(
         capture("final_hidden")
     ))
@@ -192,7 +195,8 @@ def main():
     }
     report["stage_comparison"] = compare_stages(
         args.fp32_oracle, args.out_dir / "v100-phase11-storage",
-        args.out_dir / "comparison", args.v100_trace
+        args.out_dir / "comparison", args.v100_trace,
+        incremental_fp32_root=args.out_dir / "fp32"
     )
     (args.out_dir / "precision_report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps({key: report[key] for key in

@@ -43,20 +43,32 @@ def nrmse(reference, candidate):
     return float(np.sqrt(np.mean((reference - candidate) ** 2)) / scale)
 
 
-def compare(oracle_root, cpu_root, out_dir, v100_root=None):
+def compare(oracle_root, cpu_root, out_dir, v100_root=None, incremental_fp32_root=None):
     oracle = manifest_entries(oracle_root)
     cpu = manifest_entries(cpu_root)
+    incremental = (manifest_entries(incremental_fp32_root)
+                   if incremental_fp32_root is not None else {})
     v100 = candidate_entries(v100_root) if v100_root is not None else {}
     if v100_root is not None and not v100:
         raise ValueError("V100 candidate trace is empty")
     rows = []
     for (position, name), cpu_path in sorted(cpu.items()):
         key = (position, name)
-        if key not in oracle:
+        reference_source = "independent-fp32"
+        if key in oracle:
+            reference_path = oracle[key]
+        elif name.endswith("moe_router_scores") and key in incremental:
+            # The frozen stage oracle contains selected router IDs but no
+            # 512-score vector. Incremental FP32 has already passed its
+            # independent-oracle logits gate; label this auxiliary reference.
+            reference_path = incremental[key]
+            reference_source = "incremental-fp32-scores"
+        else:
             raise ValueError(f"FP32 oracle is missing CPU stage {key}")
-        expected = load(oracle[key])
+        expected = load(reference_path)
         profiled = load(cpu_path)
         row = {"position": position, "stage": name,
+               "reference_source": reference_source,
                "cpu_vs_oracle_nrmse": "", "v100_vs_oracle_nrmse": "",
                "v100_vs_cpu_nrmse": "", "cpu_same_expert_set": "",
                "v100_same_expert_set": ""}
@@ -86,6 +98,9 @@ def compare(oracle_root, cpu_root, out_dir, v100_root=None):
         writer.writerows(rows)
     report = {"positions": len({row["position"] for row in rows}),
               "stage_rows": len(rows), "has_v100": v100_root is not None,
+              "incremental_router_score_rows": sum(
+                  row["reference_source"] == "incremental-fp32-scores"
+                  for row in rows),
               "worst_cpu_stage": max((row for row in rows
                                       if isinstance(row["cpu_vs_oracle_nrmse"], float)),
                                      key=lambda row: row["cpu_vs_oracle_nrmse"]),
@@ -102,9 +117,12 @@ def main():
     parser.add_argument("--oracle", type=Path, required=True)
     parser.add_argument("--cpu", type=Path, required=True)
     parser.add_argument("--v100", type=Path)
+    parser.add_argument("--incremental-fp32", type=Path,
+                        help="FP32 decode scores when frozen oracle lacks router scores")
     parser.add_argument("--out-dir", type=Path, required=True)
     args = parser.parse_args()
-    print(json.dumps(compare(args.oracle, args.cpu, args.out_dir, args.v100), indent=2))
+    print(json.dumps(compare(args.oracle, args.cpu, args.out_dir, args.v100,
+                             args.incremental_fp32), indent=2))
 
 
 if __name__ == "__main__":

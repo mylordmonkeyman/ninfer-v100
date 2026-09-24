@@ -8,6 +8,7 @@ on:
       - .github/workflows/precision-reference-private.yml
       - tools/reference/qwen3_8_flash_next/oracle/precision_profile.py
       - tools/reference/qwen3_8_flash_next/oracle/run_precision_reference.py
+      - tools/reference/qwen3_8_flash_next/oracle/compare_precision_traces.py
 
 permissions:
   contents: read
