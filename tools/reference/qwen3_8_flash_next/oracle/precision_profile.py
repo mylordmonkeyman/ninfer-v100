@@ -8,6 +8,7 @@ used to attribute a qualification failure to precision alone.
 """
 
 from dataclasses import dataclass
+import math
 from types import MethodType
 
 
@@ -82,6 +83,27 @@ def _attention_hyper_from_bf16_shadow(self, hyper_input):
     return round_to_bf16(mixed), hyper_input, injection
 
 
+def _ple_from_bf16_shadow(self, hidden_states, input_ids, past_key_values,
+                          conv_mask=None):
+    """Decode PLE with the V100 BF16 query, gate and convolution inputs."""
+    import torch
+    embedding = self.ple_embedding(input_ids, past_key_values)
+    key = self.norm_key(self.key_proj(embedding)).unflatten(
+        -1, (self.hc_count, self.hidden_size))
+    value = self.value_proj(embedding)
+    query = self.norm_query(round_to_bf16(hidden_states)).unflatten(
+        -1, (self.hc_count, self.hidden_size))
+    gate = (key * query).sum(dim=-1, keepdim=True) / math.sqrt(self.hidden_size)
+    gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
+    gated = round_to_bf16(torch.sigmoid(gate) * value.unsqueeze(-2))
+    gated = gated.flatten(-2)
+    normalized = self.norm_conv(gated)
+    if conv_mask is not None:
+        gated = (gated * conv_mask[:, :, None]).to(gated.dtype)
+        normalized = (normalized * conv_mask[:, :, None]).to(normalized.dtype)
+    return gated + self._short_conv(normalized, past_key_values)
+
+
 def install_projection_boundaries(model, profile):
     """Materialize selected projection outputs; return removable hook handles.
 
@@ -129,6 +151,16 @@ def install_projection_boundaries(model, profile):
                     (round_to_bf16(output[0]), output[1])
             ))
         if layer.ple is not None:
+            ple = layer.ple
+            handles.append(_RestoreForward(ple, ple.forward))
+            ple.forward = MethodType(_ple_from_bf16_shadow, ple)
+            handles.append(ple.ple_embedding.register_forward_hook(
+                lambda _module, _args, output: round_to_bf16(output)
+            ))
+            for norm in (ple.norm_key, ple.norm_query, ple.norm_conv):
+                handles.append(norm.register_forward_hook(
+                    lambda _module, _args, output: round_to_bf16(output)
+                ))
             projections.extend((layer.ple.key_proj, layer.ple.value_proj))
             handles.append(layer.ple.register_forward_hook(
                 lambda _module, _args, output: round_to_bf16(output)
