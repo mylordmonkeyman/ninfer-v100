@@ -197,6 +197,42 @@ precision match or an acceptance floor. Remaining calibration should compare
 the QSA input path and other internal materialization boundaries before
 changing the Phase 11 gate.
 
+### Earliest V100-only routing change: position 12, layer 2
+
+The [14-position stage comparison](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36055511685)
+found the first V100-only expert-set change at position 12, layer 2. The
+oracle cutoff margin there is 0.00155973; the CPU storage profile retains
+the oracle expert set, while V100 replaces one expert. The layer-2 input
+already differs from the FP32 oracle by 0.00502061 NRMSE on V100 versus
+0.00369965 on CPU, and its BF16 rounding floor is 0.00166790. Layer 2 uses
+GDN; the first QSA layer is layer 3.
+
+The [V100 early-boundary replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36056206949)
+injected the independent FP32 oracle at position 12, rounded to each BF16
+target stage. Each of these single-stage injections restored the oracle
+layer-2 expert set:
+
+| Injected stage | Layer-2 MLP input NRMSE before injection, if applicable | Layer-2 MLP output NRMSE |
+| --- | ---: | ---: |
+| None (14-position baseline) | 0.00421120 | 0.08765496 |
+| Layer-1 attention input | 0.00370279 | 0.00419515 |
+| Layer-2 attention input | 0.00400110 | 0.00475658 |
+| Layer-2 MLP/router input | 0.00421120 | 0.00241739 |
+
+The diagnostic records its stage comparison **before** injection. Direct
+router-input injection therefore leaves the reported pre-injection input
+NRMSE unchanged while changing the values consumed by the router. Injection
+at layer-2 attention input reduces its subsequent GDN projection to 1.07
+times the output BF16 rounding floor, although the recurrent output still
+differs from the oracle by 0.00221696 NRMSE with the existing state history.
+This supports accumulated upstream error and a near-tie router decision as
+the immediate cause of this flip. It does not isolate every earlier rounding
+boundary or establish that the V100 GDN state transition matches the CPU
+storage profile. The 13-position injected runs still fail the original Phase
+11 gate (mean KL 0.01113936, 0.01281500, and 0.01411181 respectively).
+These injection runs are causal diagnostics, not substitute qualification
+scores; the 14-position uninjected V100 mean KL remains 0.05775208.
+
 ## 1. Environment Setup
 
 Run the setup script using Python 3.14 to create the isolated virtual environment:
