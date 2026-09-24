@@ -5,8 +5,11 @@ reconciled (+5.6 MiB / 0.08%); the full 4,096-position teacher-forced
 run is complete (commit f6ba1ed3): top-1 91.06% (366 flips), mean KL
 0.1236, P99 KL 2.446, relative mean-NLL delta 3.65%. All component
 audits are complete: at exact input no implementation error above
-~1.6x its rounding floor (LM head 1.27x, QSA projections 1.3-1.6x),
-and all 366 flips satisfy the margin-limited necessary condition
+~1.6x its rounding floor (LM head 1.27x, QSA Q/K/V projections
+1.3-1.6x), and the QSA o_proj FP8 path is exonerated with its stage
+error closed to three digits by the 5.1x-gain BF16 input floor plus
+upstream drift amplification (run 36045997371), and all 366 flips satisfy the
+margin-limited necessary condition
 (oracle margin < 2x the per-position max logit error). The spec §7
 initial thresholds are refuted; the margin-aware v2 gate family is
 calibrated (M = 20) and fully measured in "Documented error
@@ -240,9 +243,11 @@ frozen precision configuration above: the 14-position stage-trace run
 | PLE path | 14/14 oracle injections verified; candidate PLE NRMSE 0.0036; injecting exact PLE reduces downstream router drift (L44 pos-13 router NRMSE 0.631 → 0.246) | small contributor, not the cause |
 | LM-head (output-head GEMM + logit path) | exact `final_hidden` injected at all 14 positions: candidate `logits` NRMSE 0.00211, max error 0.0534 = 1.27× the BF16 logit floor (0.00166) | at floor; exonerated. The position-13 max logit error (2.88) is the upstream final-hidden drift (0.24 NRMSE) amplified through the head GEMM |
 | QSA sparse Q/K/V projections | exact `L03_attn_block_input` injected at position 13: query/key/value NRMSE 0.00269/0.00257/0.00214 (1.3–1.6× floor) vs 0.00365/0.00378/0.00393 (2.2×) on drifted input; the sparse kernel itself is FP64-oracle-validated (`ninfer_selected_block_attention_test`, passed in the same run) | near floor, not an amplifier |
+| QSA o_proj (FP8 2560×6144, L15 `attn_block_output`) | pure-FP64 host audit on the mixed checkpoint's E4M3 codes + F32 row scales (run 36045997371): exact-input GEMM reproduces the oracle stage to 1.1e-6 (decode/scale/GEMM path exonerated; the stage is the pure o_proj output). With the production BF16 boundary input the GEMM error is 8.484e-3 — 65% of the device error (12.956e-3) — the local input rounding floor amplified 5.125× by this weight (the rounding delta lies in a 1.144-gain direction vs 0.223 signal gain). The remaining 35% is consistent with the upstream `qsa_gated` drift (3.035e-3 at this boundary) through the same weight at an intermediate gain (≈0.72, inside the observed 0.223–1.144 range); the quadrature sum closes the device error to three digits (√(8.484²+9.792²)·1e-3 = 12.956e-3), so no o_proj kernel error term is required | at the data-specific input floor + upstream drift amplification; FP8 path exonerated |
 
-All three audits are complete (run 35981902518; audit steps from
-daa1d0af, decomposition dataset from 3a464fbb):
+All audits are complete (run 35981902518; audit steps from daa1d0af,
+decomposition dataset from 3a464fbb; the o_proj host audit from run
+36045997371, script and extraction fix 3f34e273):
 
 - **LM-head local error** (exact `final_hidden` injected at all 14
   positions): candidate `logits` NRMSE 0.00211, max error 0.0534 —
@@ -254,6 +259,16 @@ daa1d0af, decomposition dataset from 3a464fbb):
   (1.3–1.6× floor) vs 0.00365/0.00378/0.00393 (2.2×) on drifted input —
   near floor, not an amplifier. The sparse kernel is separately
   FP64-oracle-validated.
+- **QSA o_proj host audit** (pure FP64 GEMM, run 36045997371): the
+  decoded weight reproduces the oracle L15 `attn_block_output` stage
+  to 1.1e-6 at exact input (FP8 decode/scale/GEMM exonerated). At the
+  production BF16 boundary input the GEMM error is 8.484e-3 — 65% of
+  the device error (12.956e-3) — the local input floor amplified
+  5.125× by this weight's direction-dependent gain. The remaining 35%
+  is consistent with the upstream `qsa_gated` drift (3.035e-3)
+  amplified through the same weight (effective gain ≈ 0.72 from the
+  closure); the quadrature sum reproduces the device error to three
+  digits, so no o_proj kernel error is implied.
 - **flip-margin check**: confirmed at corpus scale — see
   "Flip-margin analysis (corpus scale)" below.
 
