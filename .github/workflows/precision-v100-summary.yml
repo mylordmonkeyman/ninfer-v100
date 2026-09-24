@@ -1,0 +1,77 @@
+name: Phase 11 V100 Trace Summary
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-v100-summary.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  summarize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Download completed V100 candidate and comparison
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 36015694540 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name v100-precision-trace-14 \
+            --dir v100-artifact
+      - name: Summarize matched and unmatched stage errors
+        run: |
+          python3 - <<'PY'
+          import collections
+          import csv
+          import json
+          from pathlib import Path
+
+          root = Path('v100-artifact')
+          rows = list(csv.DictReader((root / 'v100-comparison/stage_comparison.csv').open()))
+          router = [r for r in rows if r['stage'].endswith('moe_router_ids')]
+          cpu = {(int(r['position']), r['stage']) for r in router
+                 if r['cpu_same_expert_set'] == '0'}
+          v100 = {(int(r['position']), r['stage']) for r in router
+                  if r['v100_same_expert_set'] == '0'}
+          print('Router cells:', len(router))
+          print('Shared flips:', len(cpu & v100))
+          print('CPU-only flips:', len(cpu - v100))
+          print('V100-only flips:', len(v100 - cpu))
+          print('CPU flips per position:', sorted(collections.Counter(p for p, _ in cpu).items()))
+          print('V100 flips per position:', sorted(collections.Counter(p for p, _ in v100).items()))
+          print('V100-only flips per layer:', sorted(collections.Counter(s[:3] for _, s in v100 - cpu).items()))
+          for stage in ('embedding', 'L00_attn_block_input', 'L00_mlp_block_input',
+                        'L24_attn_block_input', 'L24_mlp_block_input',
+                        'L43_mlp_block_input', 'final_hidden', 'logits'):
+              matches = [r for r in rows if r['stage'] == stage and r['position'] in ('0','13')]
+              for r in matches:
+                  print('stage', stage, 'pos', r['position'],
+                        'cpu_oracle', r['cpu_vs_oracle_nrmse'],
+                        'v100_oracle', r['v100_vs_oracle_nrmse'],
+                        'v100_cpu', r['v100_vs_cpu_nrmse'])
+          log = (root / 'v100-trace.log').read_text(errors='replace')
+          lines = log.splitlines()
+          summaries = [line for line in lines if 'phase11.top1_agreement=' in line or
+                       'phase11.mean_kl=' in line or 'phase11.qualification' in line]
+          print('V100 test summaries:')
+          for line in summaries[-20:]: print(line[:700])
+          print('V100 test log tail:')
+          for line in lines[-40:]: print(line[:700])
+          out = Path('concise-v100-report')
+          out.mkdir(exist_ok=True)
+          for source in (root / 'v100-comparison/stage_comparison.csv',
+                         root / 'v100-comparison/stage_comparison.json'):
+              (out / source.name).write_bytes(source.read_bytes())
+          (out / 'test-summary.txt').write_text('\n'.join(summaries[-20:] + lines[-40:]))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: v100-precision-summary-14
+          path: concise-v100-report
+          retention-days: 14
