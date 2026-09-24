@@ -110,9 +110,11 @@ def install_projection_boundaries(model, profile):
             # writes a BF16 projection mirror and uses BF16 for z. Rounding
             # QKV here would change the conv input before that fused step.
             projections.append(layer.linear_attn.in_proj_z)
-            handles.append(layer.linear_attn.register_forward_hook(
-                lambda _module, _args, output: round_to_bf16(output)
-            ))
+            # With FP32_GDN_OUTPUT_INPUT and FP32_HYPER_INJECT_APPLY enabled,
+            # the selected V100 decode applies the FP32 projection accumulator
+            # to the FP32 hyper master. Its separate BF16 output mirror is
+            # emitted for the normal kernel path but is not the injected value.
+            # Keep the independent CPU projection unrounded at this boundary.
         if hasattr(layer, "self_attn"):
             # QSA gates its selected-attention value before the output
             # projection. V100 stores that 6144-wide input as BF16; rounding
