@@ -203,9 +203,43 @@ zero is closer to the independent oracle than the CPU profile (0.001715 versus
 shared path, and expert arithmetic must be separated before blaming a V100
 kernel. The V100 host-expert reference rounds BF16 input and intermediate
 activations; the CPU reference models these casts but still uses different
-arithmetic and accumulation. A focused router-alpha/shared-scale and routed
-versus shared output trace is the next calibration step. The precision floor
-has not been established.
+arithmetic and accumulation. The precision floor has not been established.
+
+The [layer-zero routing trace](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36072336918)
+shows that router alpha and shared scale already match CPU-to-V100 at
+position zero (NRMSE 8.58e-6 and 2.61e-6). Inspection of the selected V100
+shared expert found that its FP32 gate/up projections multiply before a BF16
+activation boundary; the CPU reference previously rounded both projections
+separately. With that corrected, the
+[14-prefix reference](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36073386852)
+reduces position-zero CPU-to-V100 MoE output NRMSE from 0.004072 to 0.000245.
+Its CPU mean KL against the independent FP32 oracle nevertheless rises from
+0.021794 to 0.102301 because different rounded trajectories change router
+membership. This local calibration does not establish a global precision
+floor.
+
+The [PLE boundary report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36073960605)
+then locates a repeatable next mismatch: position-zero CPU-to-V100 NRMSE is
+0.000196 after layer-zero MLP, but 0.004260 at PLE injection. The V100 PLE
+reads the BF16 hyper shadow and materializes normalized query/key, gated
+value, and normalized gated value in BF16. After independently recomputing
+those boundaries in the CPU reference, the
+[updated 14-prefix run](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36074175598)
+and [before/after report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36074509683)
+put the position-zero CPU-to-V100 PLE output NRMSE at 0.000326 and the
+layer-one attention input at 0.000693. At position one PLE output matches
+exactly; position two drops from 0.004028 to 0.000058. CPU mean oracle KL
+falls from 0.102301 to 0.031902, while V100 oracle KL remains 0.057752;
+CPU-to-V100 mean KL changes from 0.032852 to 0.039455. Router-set flips
+across 672 layer-position cells are 49 shared, 19 CPU-only, and 48 V100-only,
+compared with 65 shared, 18 CPU-only, and 32 V100-only before the PLE fix.
+These nonmonotone whole-prefix results reflect discrete routing sensitivity,
+and substantial V100-only divergence remains. The next focused boundary is
+layer-one attention through its MLP input: at position zero, CPU-to-V100
+NRMSE grows from 0.000693 at attention input to 0.001328 at MLP input and
+0.002450 at layer-two attention input. The Phase 11 §7 gate is unchanged and
+still fails; do not infer a precision-only explanation until further
+CPU/V100 calibration and controlled routing comparisons agree.
 
 ### Layer 15 QSA projection replay and input boundary
 
