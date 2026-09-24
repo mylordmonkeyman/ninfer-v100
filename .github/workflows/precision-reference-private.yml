@@ -75,13 +75,7 @@ jobs:
               fi
             done
           fi
-          if [[ -z "$python_bin" ]] || ! "$python_bin" -c \
-              'import numpy, torch, transformers, safetensors' >/dev/null 2>&1; then
-            echo '::error::No CPU Python environment with numpy, torch, transformers, and safetensors'
-            missing=1
-          fi
           if (( missing )); then exit 1; fi
-          echo "CPU Python: $python_bin"
           {
             echo "PRECISION_PYTHON=$python_bin"
             echo "PRECISION_MODEL_DIR=$model_dir"
@@ -89,6 +83,21 @@ jobs:
             echo "PRECISION_ORACLE_DIR=$oracle_dir"
             echo "PRECISION_IDS_FILE=$ids_file"
           } >> "$GITHUB_ENV"
+
+      - name: Prepare CPU Python if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$PRECISION_PYTHON" ]]; then
+            echo "CPU Python: $PRECISION_PYTHON"
+            exit 0
+          fi
+          python3 -m venv "$GITHUB_WORKSPACE/precision-venv"
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            torch --index-url https://download.pytorch.org/whl/cpu
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            numpy safetensors 'transformers>=5.16,<6'
+          echo "PRECISION_PYTHON=$GITHUB_WORKSPACE/precision-venv/bin/python" >> "$GITHUB_ENV"
 
       - name: Run FP32 gate and CPU storage profile at 14 positions
         shell: bash
@@ -100,13 +109,13 @@ jobs:
             --ids-file "$PRECISION_IDS_FILE" \
             --fp32-oracle "$PRECISION_ORACLE_DIR" \
             --positions 14 \
-            --out-dir "$GITHUB_WORKSPACE/.precision-reference-results"
+            --out-dir "$GITHUB_WORKSPACE/precision-reference-results"
 
       - name: Upload CPU results and mismatch diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: cpu-precision-reference-14
-          path: .precision-reference-results
+          path: precision-reference-results
           if-no-files-found: ignore
           retention-days: 14
