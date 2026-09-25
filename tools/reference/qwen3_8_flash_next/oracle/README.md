@@ -257,6 +257,41 @@ or explain the remaining whole-prefix router divergence. The V100 diagnostic
 test still returns failure under the unchanged Phase 11 acceptance gate;
 the selected-stage capture and comparison completed successfully.
 
+The [unrounded layer-one MLP trace](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36078905618)
+compares the mixer's FP32 result before BF16 storage with both CPU and V100.
+At position zero the CPU-to-V100 NRMSE is 0.000567 before storage and
+0.001328 after storage; both unrounded implementations have similar error
+against the independent oracle (0.002172 CPU, 0.002131 V100). The
+[storage report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36087485926)
+checks all 35,840 V100 values over 14 positions: the stored block input is
+exactly the BF16 round-to-nearest-even of the captured FP32 result, with zero
+bit mismatches. Position-zero V100 storage NRMSE against its own FP32 value
+is 0.001660. The CPU/V100 gap across this boundary is sensitive to BF16
+rounding of their already different FP32 results; this is not evidence of an
+incorrect V100 storage kernel.
+
+The [controlled full-prefix router replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36087743583)
+and [KL report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36088144919)
+hold expert membership fixed while **recomputing routing weights from each
+CPU trajectory's own scores** and carrying all state forward. The ordinary
+CPU reference has mean oracle KL 0.031902, P99 KL 0.287952 and 14/14 top-1;
+V100 has mean 0.057752, P99 0.545568 and 13/14 top-1. Forcing the frozen
+oracle membership in CPU lowers mean oracle KL to 0.000301 and P99 to
+0.001579 with 14/14 top-1. Forcing V100 membership instead gives CPU mean
+oracle KL 0.059429 and CPU-to-V100 KL 0.000221 (ordinary CPU-to-V100:
+0.039455). Thus expert-set choices explain most of the observed logits
+separation *in this controlled 14-position replay*. Oracle membership is
+offline information and cannot qualify the deployable V100 implementation;
+the original Phase 11 §7 gate remains unchanged and unpassed.
+
+The [current router map](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36088243015)
+compares both implementations with the incremental FP32 router trace (whose
+logits separately reproduce the frozen FP32 oracle). Across 672 cells,
+49 oracle-relative expert-set flips are shared, 19 CPU-only and 48 V100-only;
+CPU and V100 differ in 91 cells. At position 12 the first V100-only flip is
+at layer 2, where the CPU still selects the FP32 set. A targeted V100
+position-12 boundary injection is the next check on that early mismatch.
+
 ### Layer 15 QSA projection replay and input boundary
 
 The [upstream stage extraction](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36020859990)
