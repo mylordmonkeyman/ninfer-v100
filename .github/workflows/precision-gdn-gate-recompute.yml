@@ -100,6 +100,20 @@ jobs:
                     f'input-gap={nrmse(expected,gate(cx,cz)):.9g} '
                     f'cpu-x-v100-z={nrmse(expected,gate(cx,z)):.9g} '
                     f'v100-x-cpu-z={nrmse(expected,gate(x,cz)):.9g}', flush=True)
+              if pos in (12, 13):
+                  contributions = []
+                  for head in range(48):
+                      start = head * 128
+                      end = start + 128
+                      a, b = x[start:end], cx[start:end]
+                      rms = math.sqrt(sum(v*v for v in a)/128)
+                      difference = math.sqrt(sum((u-v)**2 for u,v in zip(a,b))/128)
+                      gated_gap = math.sqrt(sum((u-v)**2 for u,v in
+                                           zip(expected[start:end],gate(cx,z)[start:end])))
+                      contributions.append((gated_gap,head,rms,difference))
+                  for gap,head,rms,difference in sorted(contributions,reverse=True)[:5]:
+                      print(f'head position={pos} head={head} gated_l2={gap:.9g} '
+                            f'recurrent_rms={rms:.9g} recurrent_rmse={difference:.9g}', flush=True)
               if not math.isfinite(measured):
                   raise RuntimeError('Nonfinite gate recomputation')
           PY
