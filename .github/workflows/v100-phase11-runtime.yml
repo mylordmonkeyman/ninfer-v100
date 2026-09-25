@@ -298,12 +298,22 @@ jobs:
           ctest --test-dir build-v100 -V \
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
             2>&1 | tee "$result_log" || true
+          gpu_end=$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader 2>/dev/null | head -1)
+          models_end=$(curl -s -m 10 http://127.0.0.1:9292/v1/models \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(",".join(m["id"] for m in d["data"] if m.get("status",{}).get("value")=="loaded") or "none")' \
+            2>/dev/null || echo "llama-swap unreachable")
+          mem_end=$(free -m 2>/dev/null | awk '/^Mem:/{print $3"MiB/"$2"MiB used"}')
+          NINFER_DIAG_GPU="${gpu_end:-n/a}" NINFER_DIAG_MODELS="${models_end:-n/a}" NINFER_DIAG_MEM="${mem_end:-n/a}" \
           python3 - "$result_log" <<'PY'
           from pathlib import Path
+          import os
           import sys
+          diag = (f"gpu: {os.environ.get('NINFER_DIAG_GPU', 'n/a')}; "
+                  f"loaded models after run: {os.environ.get('NINFER_DIAG_MODELS', 'n/a')}; "
+                  f"host mem: {os.environ.get('NINFER_DIAG_MEM', 'n/a')}")
           log_path = Path(sys.argv[1])
           if not log_path.exists():
-              print("::error file=.github/workflows/v100-phase11-runtime.yml::decomposition log missing; ctest produced no file at " + sys.argv[1])
+              print("::error file=.github/workflows/v100-phase11-runtime.yml::decomposition log missing; ctest produced no file at " + sys.argv[1] + "; " + diag)
               raise SystemExit("error-decomposition.log missing")
           data = log_path.read_text()
           lines = [line.strip() for line in data.splitlines()]
@@ -314,18 +324,18 @@ jobs:
                          if "phase11.error_decomposition.position=13 " in line]
           if len(decomposition) < 9000:
               print("::error file=.github/workflows/v100-phase11-runtime.yml::decomposition coverage "
-                    f"{len(decomposition)}/9000 (log {len(data)} bytes); tail: {tail}")
+                    f"{len(decomposition)}/9000 (log {len(data)} bytes); {diag}; tail: {tail}")
               raise SystemExit(
                   f"Expected full-layer decomposition coverage, got {len(decomposition)} stage lines")
           if len(position_13) < 700:
               print("::error file=.github/workflows/v100-phase11-runtime.yml::position-13 coverage "
-                    f"{len(position_13)}/700 (decomposition {len(decomposition)}); tail: {tail}")
+                    f"{len(position_13)}/700 (decomposition {len(decomposition)}); {diag}; tail: {tail}")
               raise SystemExit(
                   f"Position-13 decomposition coverage is unexpectedly sparse: {len(position_13)} stages")
           if "phase11.stage_trace.position=13 stage=L24_attn_block_input" not in data or \
              "phase11.top1_agreement=" not in data:
               print("::error file=.github/workflows/v100-phase11-runtime.yml::decomposition run did not reach position 13 (log "
-                    f"{len(data)} bytes); tail: {tail}")
+                    f"{len(data)} bytes); {diag}; tail: {tail}")
               raise SystemExit("Error decomposition run did not reach position 13")
           PY
           python3 tools/reference/qwen3_8_flash_next/oracle/analyze_error_decomposition.py \
