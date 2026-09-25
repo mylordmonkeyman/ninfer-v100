@@ -191,7 +191,7 @@ def run_decode(model, head, token_ids, profile, out_root,
                trace_mlp_layer0=False, trace_moe_routing_layer0=False,
                trace_gdn_layer1=False, trace_hyper_layer1=False,
                trace_mlp_raw_layer1=False, forced_router_ids=None,
-               mlp_block_input_fp32=False):
+               mlp_block_input_fp32=False, mlp_block_input_fp32_layers=()):
     # One token per forward, with one cache for the entire prefix.  Rounding a
     # cache tensor after the update changes all later positions, unlike
     # independently rounding tensors from the completed FP32 oracle.
@@ -211,7 +211,8 @@ def run_decode(model, head, token_ids, profile, out_root,
             handles.append(model.layers[layer_index].mlp_hyper_connection.register_forward_hook(
                 capture_unrounded_mlp))
     handles.extend(install_projection_boundaries(
-        model, profile, mlp_block_input_fp32=mlp_block_input_fp32))
+        model, profile, mlp_block_input_fp32=mlp_block_input_fp32,
+        mlp_block_input_fp32_layers=mlp_block_input_fp32_layers))
     handles.extend(_stage_hooks(model, captured, trace_gdn_internals,
                                 trace_hyper_layer0, trace_mlp_layer0,
                                 trace_moe_routing_layer0, trace_gdn_layer1,
@@ -335,6 +336,8 @@ def main():
                         help="recompute complete prefixes with frozen oracle and V100 expert IDs")
     parser.add_argument("--ablate-mlp-block-input-bf16", action="store_true",
                         help="recompute complete prefixes with FP32 MLP input, retaining all other storage boundaries")
+    parser.add_argument("--ablate-mlp-layer1-input-bf16", action="store_true",
+                        help="recompute complete prefixes with only layer-one MLP input in FP32")
     args = parser.parse_args()
     if args.positions < 1:
         parser.error("--positions must be positive")
@@ -474,6 +477,37 @@ def main():
             "oracle_top1_agreement": sum(row["top1_agree"] for row in upgraded_rows),
             "per_position_oracle": upgraded_rows,
             "router_set_counts": router_counts,
+        }
+    if args.ablate_mlp_layer1_input_bf16:
+        upgraded_root = args.out_dir / "mlp-layer1-input-fp32"
+        upgraded_logits = run_decode(
+            model, head, token_ids, PROFILES["v100-phase11-storage"], upgraded_root,
+            mlp_block_input_fp32_layers=(1,))
+        upgraded_rows = [compare_logits(item[0], logits)
+                         for item, logits in zip(oracle, upgraded_logits)]
+        upgraded_stages = manifest_entries(upgraded_root)
+        baseline_stages = manifest_entries(args.out_dir / "v100-phase11-storage")
+        fp32_stages = manifest_entries(args.out_dir / "fp32")
+        candidate_stages = (candidate_entries(args.v100_trace)
+                            if args.v100_trace is not None else {})
+        counts = {"oracle_flip": 0, "baseline_difference": 0, "v100_difference": 0}
+        for position in range(args.positions):
+            for layer in range(len(model.layers)):
+                key = (position, f"L{layer:02d}_moe_router_ids")
+                chosen = set(np.fromfile(upgraded_stages[key], dtype="<f4").tolist())
+                oracle_ids = set(np.fromfile(fp32_stages[key], dtype="<f4").tolist())
+                baseline_ids = set(np.fromfile(baseline_stages[key], dtype="<f4").tolist())
+                counts["oracle_flip"] += chosen != oracle_ids
+                counts["baseline_difference"] += chosen != baseline_ids
+                if candidate_stages:
+                    v100_ids = set(np.fromfile(candidate_stages[key], dtype="<f4").tolist())
+                    counts["v100_difference"] += chosen != v100_ids
+        report["mlp_layer1_input_fp32_ablation"] = {
+            "meaning": "hypothetical FP32 layer-one MLP input only; other storage retained",
+            "oracle_mean_kl": sum(row["kl"] for row in upgraded_rows) / len(upgraded_rows),
+            "oracle_top1_agreement": sum(row["top1_agree"] for row in upgraded_rows),
+            "per_position_oracle": upgraded_rows,
+            "router_set_counts": counts,
         }
     (args.out_dir / "precision_report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps({key: report[key] for key in
