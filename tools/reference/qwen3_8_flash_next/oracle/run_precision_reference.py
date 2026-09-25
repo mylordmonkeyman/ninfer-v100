@@ -189,17 +189,16 @@ def run_decode(model, head, token_ids, profile, out_root,
     replay_position = [-1]
     originals = (force_router_membership(model, forced_router_ids, replay_position)
                  if forced_router_ids is not None else [])
-    if trace_mlp_raw_layer1:
-        # Register before the profile's BF16 output hook. This captures the
-        # independently computed FP32 mixer result that the V100 diagnostic
-        # emits as L01_mlp_block_input_fp32 before storing block_input.
-        def capture_unrounded_mlp(_module, _args, output):
-            captured["L01_mlp_block_input_fp32"] = (
-                output[0].detach().to(torch.float32).cpu().clone()
-            )
-
-        handles.append(model.layers[1].mlp_hyper_connection.register_forward_hook(
-            capture_unrounded_mlp))
+    for layer_index, enabled in ((0, trace_hyper_layer0), (1, trace_mlp_raw_layer1)):
+        if enabled:
+            # Register before the profile's BF16 output hook so the raw
+            # mixer result is compared separately from stored block_input.
+            def capture_unrounded_mlp(_module, _args, output, index=layer_index):
+                captured[f"L{index:02d}_mlp_block_input_fp32"] = (
+                    output[0].detach().to(torch.float32).cpu().clone()
+                )
+            handles.append(model.layers[layer_index].mlp_hyper_connection.register_forward_hook(
+                capture_unrounded_mlp))
     handles.extend(install_projection_boundaries(
         model, profile, mlp_block_input_fp32=mlp_block_input_fp32))
     handles.extend(_stage_hooks(model, captured, trace_gdn_internals,

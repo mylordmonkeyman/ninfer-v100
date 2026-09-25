@@ -57,12 +57,12 @@ def compare(oracle_root, cpu_root, out_dir, v100_root=None, incremental_fp32_roo
         reference_source = "independent-fp32"
         if key in oracle:
             reference_path = oracle[key]
-        elif name == "L01_mlp_block_input_fp32" and \
-                (position, "L01_mlp_block_input") in oracle:
+        elif name in ("L00_mlp_block_input_fp32", "L01_mlp_block_input_fp32") and \
+                (position, name.replace("_fp32", "")) in oracle:
             # Both are the same mathematical mixer output. The diagnostic
             # suffix distinguishes its FP32 value before candidate BF16
             # storage from the separately compared BF16 block input.
-            reference_path = oracle[position, "L01_mlp_block_input"]
+            reference_path = oracle[position, name.replace("_fp32", "")]
             reference_source = "independent-fp32-unrounded-mixer"
         elif name.endswith("moe_router_scores") and key in incremental:
             # The frozen stage oracle contains selected router IDs but no
