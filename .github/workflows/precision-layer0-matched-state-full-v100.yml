@@ -1,0 +1,180 @@
+name: Phase 11 V100 Full Prefix Matched Layer Zero GDN State
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-layer0-matched-state-full-v100.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  matched-gdn-state-full:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-layer0-gdn-conv-14
+          run-id: 36180901574
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-layer0-gdn-state-v100-layout-13
+          run-id: 36184956447
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: state
+      - name: Validate CPU input and compile real-model diagnostic
+        run: |
+          set -euo pipefail
+          test -r /models/qwen3-8b-flash-next
+          test -s /oracle/phase11-stage-trace14/pos0012/L00_attn_block_output.bin
+          test -s cpu/cpu-boundary/pos0012/L00_attn_block_output.bin
+          test "$(stat -c %s cpu/cpu-boundary/pos0012/L00_attn_block_output.bin)" -eq 10240
+          python3 - <<'PY'
+          from pathlib import Path
+          cpu=Path('cpu/cpu-boundary/pos0012/L00_attn_block_output.bin').read_bytes()
+          oracle=Path('/oracle/phase11-stage-trace14/pos0012/L00_attn_block_output.bin').read_bytes()
+          assert len(cpu)==len(oracle)==10240
+          print('Independent CPU attention output and oracle have matching shape')
+          PY
+          cmake -S . -B build-precision-v100 -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-precision-v100 -j --target \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test
+      - name: Check V100 memory before model loading
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free \
+              --format=csv,noheader,nounits | tr -d '[:space:]')
+            echo "V100 free memory: ${free_mib} MiB (attempt ${attempt}/30)"
+            [[ "$free_mib" =~ ^[0-9]+$ ]] || exit 1
+            if (( free_mib >= 28000 )); then exit 0; fi
+            if (( attempt < 30 )); then sleep 30; fi
+          done
+          exit 1
+      - name: Assess position-13 continuation after matched CPU state and key at position 12
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "14"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace14
+          NINFER_PHASE11_STAGE_ORACLE_POSITION: "12"
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_PHASE11_TRACE_HYPER_LAYER0: "1"
+          NINFER_PHASE11_TRACE_GDN_LAYER0: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
+        run: |
+          set -euo pipefail
+          export NINFER_PHASE11_STATE_COMPARE_ROOT="$GITHUB_WORKSPACE/state/cpu-state-v100-layout"
+          export NINFER_PHASE11_TRACE_GDN_STATE=1
+          test "$(stat -c %s "$NINFER_PHASE11_STATE_COMPARE_ROOT/pos0012/L00_gdn_ssm_source_state.bin")" -eq 3145728
+          test "$(stat -c %s cpu/cpu-boundary/pos0012/L00_gdn_key.bin)" -eq 8192
+          mkdir -p matched-input
+          for mode in baseline both; do
+            export NINFER_PHASE11_CANDIDATE_TRACE_ROOT="$GITHUB_WORKSPACE/matched-input/$mode"
+            if [[ "$mode" == baseline ]]; then
+              unset NINFER_PHASE11_ORACLE_INJECT_STAGE NINFER_PHASE11_INJECT_SOURCE_ROOT \
+                NINFER_PHASE11_ORACLE_INJECT_SECOND_STAGE NINFER_PHASE11_INJECT_SECOND_SOURCE_ROOT
+            else
+              export NINFER_PHASE11_ORACLE_INJECT_STAGE=L00_gdn_ssm_source_state
+              export NINFER_PHASE11_INJECT_SOURCE_ROOT="$NINFER_PHASE11_STATE_COMPARE_ROOT"
+              if [[ "$mode" == both ]]; then
+                export NINFER_PHASE11_ORACLE_INJECT_SECOND_STAGE=L00_gdn_key
+                export NINFER_PHASE11_INJECT_SECOND_SOURCE_ROOT="$GITHUB_WORKSPACE/cpu/cpu-boundary"
+              else
+                unset NINFER_PHASE11_ORACLE_INJECT_SECOND_STAGE NINFER_PHASE11_INJECT_SECOND_SOURCE_ROOT
+              fi
+            fi
+            set +e
+            ctest --test-dir build-precision-v100 -V \
+              -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+              > "matched-input/$mode.log" 2>&1
+            status=$?
+            set -e
+            echo "$mode: unchanged Phase 11 CTest status $status"
+            python3 - "$mode" <<'PY'
+          import sys
+          from pathlib import Path
+          mode=sys.argv[1]
+          root=Path('matched-input')/mode/'pos0012'
+          log=Path(f'matched-input/{mode}.log').read_text()
+          assert 'phase11.positions=14' in log, f'{mode} incomplete prefix'
+          if mode!='baseline':
+              assert 'phase11.oracle_injection.position=12 stage=L00_gdn_ssm_source_state source=independent-cpu ' in log
+          if mode=='both':
+              assert 'phase11.oracle_injection.position=12 stage=L00_gdn_key source=independent-cpu ' in log
+          for stage,size in [('L00_gdn_ssm_source_state',3145728),
+                             ('L00_gdn_key',8192),('L00_gdn_recurrent_output',24576),
+                             ('L00_gdn_gated_output',24576),('L00_attn_block_output',10240)]:
+              assert (root/(stage+'.bin')).stat().st_size==size, (mode,stage)
+          for line in log.splitlines():
+              if ('phase11.oracle_injection.position=12 stage=L00_gdn_' in line or
+                  'phase11.mean_kl=' in line):
+                  print(line[:350])
+          PY
+          done
+          python3 - <<'PY' | tee matched-input/report.txt
+          from array import array
+          from pathlib import Path
+          from math import fsum,sqrt
+          cpu=Path('cpu/cpu-boundary/pos0012')
+          roots={mode:Path('matched-input')/mode/'pos0012'
+                 for mode in ('baseline','both')}
+          def values(root,stage):
+              a=array('f');a.frombytes((root/(stage+'.bin')).read_bytes());return a
+          def nrmse(a,b):
+              return sqrt(fsum((float(x)-float(y))**2 for x,y in zip(a,b)) /
+                          max(fsum(float(x)**2 for x in a),1e-24))
+          for stage in ('L00_gdn_key','L00_gdn_recurrent_output',
+                        'L00_gdn_gated_output','L00_attn_block_output'):
+              c=values(cpu,stage)
+              b=values(roots['baseline'],stage)
+              x=values(roots['both'],stage)
+              assert len(c)==len(b)==len(x)>0
+              print(stage,'cpu_vs_baseline',nrmse(c,b),'cpu_vs_state_key',nrmse(c,x))
+          for mode in ('baseline','both'):
+              log=Path(f'matched-input/{mode}.log').read_text()
+              for line in log.splitlines():
+                  if ('phase11.mean_kl=' in line or
+                      'phase11.top1_agreement=' in line or
+                      'phase11.positions=' in line):
+                      print(mode,line[:350])
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: v100-layer0-matched-state-full-14
+          path: matched-input
+          if-no-files-found: ignore
+          retention-days: 14
