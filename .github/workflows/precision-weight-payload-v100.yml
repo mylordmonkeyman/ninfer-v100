@@ -42,6 +42,7 @@ jobs:
           done
           exit 1
       - name: Compare loaded device planes with pinned source tensors
+        # This diagnostic exits after model loading, before the qualification gate.
         env:
           NINFER_WEIGHTS: /models/qwen3-8b-flash-next
           NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json

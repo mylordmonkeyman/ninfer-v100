@@ -633,6 +633,10 @@ int main() {
 
         if (const char* audit_root = std::getenv("NINFER_PHASE11_WEIGHT_AUDIT_ROOT");
             audit_root != nullptr && audit_root[0] != '\0') {
+            using ninfer::DType;
+            using ninfer::QType;
+            using ninfer::QuantLayout;
+            using ninfer::Weight;
             const fs::path root(audit_root);
             const auto write_plane = [&](std::string_view object,
                                          std::string_view plane, const void* data,
