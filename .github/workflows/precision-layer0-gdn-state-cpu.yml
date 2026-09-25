@@ -90,6 +90,13 @@ jobs:
                                     'finite',bool(torch.isfinite(x).all()),flush=True)
                           assert any(state is not None and state.numel()==48*128*128
                                      for state in states.values())
+                          state=states[0]
+                          assert tuple(state.shape)==(1,48,128,128)
+                          target=Path('cpu-state/pos0012/L00_gdn_ssm_source_state.bin')
+                          target.parent.mkdir(parents=True,exist_ok=True)
+                          state.detach().cpu().contiguous().numpy().astype('<f4',copy=False).tofile(target)
+                          assert target.stat().st_size==48*128*128*4
+                          print('state_file_bytes=',target.stat().st_size,flush=True)
                       out=model(input_ids=torch.tensor([[token]],dtype=torch.long),
                                 past_key_values=cache,use_cache=True)
                       cache=out.past_key_values
@@ -102,6 +109,8 @@ jobs:
         if: always()
         with:
           name: cpu-layer0-gdn-prior-state-shape
-          path: prior-state-shape.txt
+          path: |
+            prior-state-shape.txt
+            cpu-state
           if-no-files-found: ignore
           retention-days: 14
