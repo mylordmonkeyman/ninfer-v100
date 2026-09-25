@@ -144,6 +144,11 @@ def _stage_hooks(model, captured, trace_gdn_internals=False,
         handles.append(layer.mlp_hyper_connection.register_forward_hook(
             capture(prefix + "mlp_block_input", lambda output: output[0])
         ))
+        if index == 0 and trace_hyper_layer0:
+            handles.append(layer.attn_hyper_connection.register_forward_pre_hook(
+                capture_input(prefix + "hyper_before_attn")))
+            handles.append(layer.attn_hyper_connection.register_forward_hook(
+                capture(prefix + "attn_injection", lambda output: output[2])))
         if (index == 0 and trace_hyper_layer0) or (index == 1 and trace_hyper_layer1):
             handles.append(layer.mlp_hyper_connection.register_forward_pre_hook(
                 capture_input(prefix + "hyper_after_attn")))
