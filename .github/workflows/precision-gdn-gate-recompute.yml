@@ -30,23 +30,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python_bin="${NINFER_PHASE11_PYTHON:-}"
-          if [[ -z "$python_bin" ]]; then
-            for candidate in "$HOME/ninfer-v100/venv-oracle/bin/python" \
-                /srv/ninfer/venv-oracle/bin/python python3; do
-              if "$candidate" -c 'import numpy, torch, safetensors' 2>/dev/null; then
-                python_bin="$candidate"
-                break
-              fi
-            done
-          fi
-          test -n "$python_bin"
-          "$python_bin" - <<'PY'
+          python3 - <<'PY'
           import json
+          import math
           from pathlib import Path
-          import numpy as np
-          import torch
-          from safetensors import safe_open
+          import struct
 
           model = Path('/srv/ninfer/source/mixed')
           index = json.loads((model/'model.safetensors.index.json').read_text())['weight_map']
@@ -54,29 +42,44 @@ jobs:
           if len(keys) != 1:
               raise RuntimeError(f'Expected one layer-zero GDN norm weight; got {keys}')
           key = keys[0]
-          with safe_open(model/index[key], framework='pt') as shard:
-              norm = shard.get_tensor(key).float().numpy()
-          if norm.shape != (128,):
-              raise RuntimeError(f'Unexpected GDN norm shape {norm.shape}')
+          with (model/index[key]).open('rb') as shard:
+              header_size = struct.unpack('<Q', shard.read(8))[0]
+              header = json.loads(shard.read(header_size))
+              entry = header[key]
+              if entry['shape'] != [128]:
+                  raise RuntimeError(f'Unexpected GDN norm shape {entry["shape"]}')
+              start, end = entry['data_offsets']
+              shard.seek(8 + header_size + start)
+              raw = shard.read(end - start)
+          if entry['dtype'] == 'BF16':
+              norm = [struct.unpack('<f', struct.pack('<I', word << 16))[0]
+                      for word in struct.unpack('<128H', raw)]
+          elif entry['dtype'] == 'F32':
+              norm = struct.unpack('<128f', raw)
+          else:
+              raise RuntimeError(f'Unexpected norm dtype {entry["dtype"]}')
           root = Path('v100-input/candidate-stage')
           for pos in (0, 2, 12, 13):
               directory = root/f'pos{pos:04d}'
               def stage(name):
-                  return np.fromfile(directory/f'L00_{name}.bin', dtype='<f4').reshape(48, 128)
+                  raw = (directory/f'L00_{name}.bin').read_bytes()
+                  return struct.unpack('<6144f', raw)
               x = stage('gdn_recurrent_output')
               z = stage('gdn_z')
               actual = stage('gdn_gated_output')
               # Mirrors the FP32 diagnostic kernel: per-head RMSNorm then
               # sigmoid(BF16 z), retaining the unrounded gate product.
-              mean_squares = np.mean(x.astype('f8')**2, axis=1, keepdims=True)
-              expected = (x.astype('f8') / np.sqrt(mean_squares + 1e-6)
-                          * norm.astype('f8')[None, :]
-                          / (1 + np.exp(-z.astype('f8'))))
-              error = expected - actual
-              nrmse = np.sqrt(np.mean(error**2)) / np.sqrt(np.mean(expected**2))
+              expected = []
+              for head in range(48):
+                  start = head * 128
+                  rms = math.sqrt(sum(value*value for value in x[start:start+128])/128 + 1e-6)
+                  expected.extend(x[start+d] / rms * norm[d] /
+                                  (1 + math.exp(-z[start+d])) for d in range(128))
+              error = [a-b for a,b in zip(expected, actual)]
+              nrmse = math.sqrt(sum(e*e for e in error) / sum(e*e for e in expected))
               print(f'gate position={pos} nrmse={nrmse:.9g} '
-                    f'max_abs={np.max(np.abs(error)):.9g} '
-                    f'count={error.size}', flush=True)
-              if not np.isfinite(nrmse):
+                    f'max_abs={max(map(abs,error)):.9g} '
+                    f'count={len(error)}', flush=True)
+              if not math.isfinite(nrmse):
                   raise RuntimeError('Nonfinite gate recomputation')
           PY
