@@ -70,7 +70,7 @@ jobs:
               tail -100 cpu-boundary.log
               exit 1
             }
-      - name: Export only position-12 matched-input stages
+      - name: Export position-12 stages including reconstructed convolution inputs
         run: |
           set -euo pipefail
           mkdir -p cpu-boundary/pos0012
