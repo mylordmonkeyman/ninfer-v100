@@ -158,6 +158,12 @@ jobs:
               gpu_projected = projected
               projected_flips = [i for i,(a,b) in enumerate(zip(gpu_projected,cpu_projected))
                                  if a != bf16_round(b)]
+              for index in projected_flips:
+                  print(f'projection-flip position={pos} index={index} '
+                        f'key-head={(index-2048)//128 if 2048 <= index < 4096 else -1} '
+                        f'cpu-fp32={cpu_projected[index]:.9g} '
+                        f'cpu-bf16={bf16_round(cpu_projected[index]):.9g} '
+                        f'v100-bf16={gpu_projected[index]:.9g}', flush=True)
               for label,lo,hi in (('query',0,2048),('key',2048,4096),
                                   ('value',4096,10240),('value_heads24_26',7168,7552)):
                   print(f'projection-round position={pos} part={label} '
