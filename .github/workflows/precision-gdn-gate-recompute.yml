@@ -116,4 +116,15 @@ jobs:
                             f'recurrent_rms={rms:.9g} recurrent_rmse={difference:.9g}', flush=True)
               if not math.isfinite(measured):
                   raise RuntimeError('Nonfinite gate recomputation')
+          for pos in range(14):
+              def recurrent(base):
+                  raw = (base/f'pos{pos:04d}'/'L00_gdn_recurrent_output.bin').read_bytes()
+                  return struct.unpack('<6144f',raw)
+              x, cx = recurrent(root), recurrent(cpu_root)
+              for head in (24, 25, 26):
+                  a, b = x[head*128:(head+1)*128], cx[head*128:(head+1)*128]
+                  rms = math.sqrt(sum(v*v for v in a)/128)
+                  rmse = math.sqrt(sum((u-v)**2 for u,v in zip(a,b))/128)
+                  print(f'history position={pos} head={head} recurrent_rms={rms:.9g} '
+                        f'recurrent_rmse={rmse:.9g}', flush=True)
           PY
