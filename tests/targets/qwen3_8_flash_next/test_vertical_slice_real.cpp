@@ -1335,8 +1335,15 @@ int main() {
                 oracle_stage_name =
                     std::string(name.substr(0, 4)) + "mlp_block_input";
             }
-            const fs::path expected_path =
+            fs::path expected_path =
                 stage_root / pos_dir / (oracle_stage_name + ".bin");
+            if (name == "L00_gdn_ssm_source_state") {
+                const char* state_root = std::getenv("NINFER_PHASE11_STATE_COMPARE_ROOT");
+                if (state_root != nullptr && state_root[0] != '\\0') {
+                    expected_path = fs::path(state_root) / pos_dir /
+                        (oracle_stage_name + ".bin");
+                }
+            }
             if (!fs::is_regular_file(expected_path)) {
                 return;
             }
@@ -1450,7 +1457,8 @@ int main() {
                         name.substr(0, 4) != "L00_") {
                         return false;
                     }
-                    return suffix == "gdn_projected" || suffix == "gdn_query" ||
+                    return suffix == "gdn_ssm_source_state" ||
+                           suffix == "gdn_projected" || suffix == "gdn_query" ||
                            suffix == "gdn_key" || suffix == "gdn_value" ||
                            suffix == "gdn_z" ||
                            suffix == "gdn_g" || suffix == "gdn_beta" ||
