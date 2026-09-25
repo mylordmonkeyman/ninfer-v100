@@ -363,6 +363,45 @@ expert substitution. The blanket FP32 MLP-input change is therefore
 rejected as a corrective precision setting for this sample. No deployable
 V100 precision change has been qualified, and §7 thresholds are unchanged.
 
+### Layer-zero GDN convolution-history rounding at token 10
+
+A [current-profile 14-position GDN comparison](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36097496115)
+finds that CPU and V100 layer-zero attention inputs match exactly at position
+12. The recurrent outputs differ by 1.32e-5 NRMSE, which grows to 2.66e-4
+at the gated output and 0.001124 at the MLP input. A separate
+[gate recomputation](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36098095302)
+matches the actual V100 FP32 gate output from its captured recurrent input,
+BF16 `z`, and BF16 norm weights within 6.85e-8 NRMSE at position 12. A
+CPU/V100 input swap attributes most of the gate gap to recurrent heads
+24–26, rather than `z` or the gate formula.
+
+The [history and projection trace](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36098533496)
+shows that these heads match the CPU within about 1e-10 RMSE through position
+10 and diverge at position 11. At position 10 the CPU FP32 key projection's
+element 3097 is -29.0625019, near the BF16 midpoint: the CPU model stores
+-29.125 and the V100 stores -29.0. The V100 `z` mirror separately equals
+BF16 round-to-nearest-even of its captured FP32 accumulator. A
+[controlled CPU replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36098696999)
+changes only convolution history channel 3097 at position 10 to the observed
+V100 value. Position-11 total recurrent NRMSE against V100 falls from
+1.39e-5 to 2.47e-6; relative errors in heads 24–26 fall from about 0.1%
+to below 5e-7. This identifies one causal format-conversion difference,
+amplified by low-amplitude recurrent heads and normalization. It is not an
+incorrect V100 gate kernel or an independently deployable correction.
+
+An [FP32 convolution-history ablation over all 14 prefixes](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36099041700)
+worsens CPU mean oracle KL from 0.031902 to 0.092104, P99 KL from
+0.287952 to 0.828227, and top-1 agreement from 14/14 to 12/14. Reject this
+broad precision change. The ordinary CPU profile already exceeds the §7 mean
+KL limit on this sample, but the CPU profile still does not reproduce all
+V100 arithmetic and router decisions. These experiments establish a local
+rounding cause, not a proof that all Phase 11 failure is due to unavoidable
+rounding or that no alternative precision policy can pass. The unchanged
+qualification gate remains unpassed. The next decision should address the
+position-10 and position-13 complete-prefix KL outliers while retaining the
+measured convolution-history boundary, and validate on the required larger
+teacher-forced sample.
+
 ### Layer 15 QSA projection replay and input boundary
 
 The [upstream stage extraction](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36020859990)
