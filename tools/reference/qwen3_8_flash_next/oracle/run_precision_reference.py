@@ -218,6 +218,7 @@ def run_decode(model, head, token_ids, profile, out_root,
                                 trace_hyper_layer1))
     cache = None
     logits = []
+    conv_projection_history = {}
     manifest = {"profile": profile.name, "positions": []}
     try:
         with torch.inference_mode():
@@ -237,6 +238,31 @@ def run_decode(model, head, token_ids, profile, out_root,
                     a = captured.pop(prefix + "_raw_a")
                     b = captured.pop(prefix + "_raw_b")
                     gdn = layer.linear_attn
+                    if index == 0 and prefix + "gdn_query" not in captured:
+                        # Optimized one-token decode updates convolution state
+                        # directly, bypassing Conv1d.forward and its hook.
+                        # Reconstruct the same depthwise window from the raw
+                        # current projection and the prior stored projections.
+                        weight = gdn.conv1d.weight.detach().float().cpu()
+                        width = weight.shape[-1]
+                        if (weight.shape[:2] != (10240, 1) or width != 4 or
+                            tuple(qkv.shape) != (1, 1, 10240)):
+                            raise ValueError("unexpected GDN convolution dimensions")
+                        prior = conv_projection_history.setdefault(index, [])
+                        zero = torch.zeros_like(qkv)
+                        frames = ([zero] * max(0, width - 1 - len(prior)) +
+                                  prior[-(width - 1):] + [qkv])
+                        window = torch.stack([frame.reshape(10240) for frame in frames], dim=-1)
+                        bias = (None if gdn.conv1d.bias is None else
+                                gdn.conv1d.bias.detach().float().cpu())
+                        conv = F.silu(F.conv1d(window[None], weight, bias,
+                                               groups=10240)).transpose(1, 2)
+                        for name, chunk in zip(("gdn_query", "gdn_key", "gdn_value"),
+                                               conv.split((2048, 2048, 6144), dim=-1)):
+                            captured[prefix + name] = chunk.detach().clone()
+                        prior.append((round_to_bf16(qkv) if profile.conv_state_bf16
+                                      else qkv).clone())
+                        del prior[:max(0, len(prior) - (width - 1))]
                     captured[prefix + "gdn_projected"] = torch.cat((qkv, z), dim=-1)
                     captured[prefix + "gdn_z"] = z
                     captured[prefix + "gdn_g"] = (-torch.exp(gdn.A_log.detach().cpu().float())
