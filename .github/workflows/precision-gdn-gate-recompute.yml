@@ -136,4 +136,22 @@ jobs:
                   a,b = load(root),load(cpu_root)
                   print(f'boundary position={pos} stage={name} nrmse={nrmse(a,b):.9g} '
                         f'count={len(a)}', flush=True)
+              def load(base,name):
+                  raw = (base/f'pos{pos:04d}'/f'L00_{name}.bin').read_bytes()
+                  return struct.unpack(f'<{len(raw)//4}f',raw)
+              gpu_z, cpu_z = load(root,'gdn_z'), load(cpu_root,'gdn_z')
+              projected = load(root,'gdn_projected')
+              # Projected layout is [q, k, v, z]; z starts at 10240.
+              raw_z = projected[10240:]
+              def bf16_round(x):
+                  bits = struct.unpack('<I',struct.pack('<f',x))[0]
+                  bits += 0x7fff + ((bits >> 16) & 1)
+                  return struct.unpack('<f',struct.pack('<I',bits & 0xffff0000))[0]
+              mismatches = [i for i,(a,b) in enumerate(zip(gpu_z,cpu_z)) if a != b]
+              raw_mismatch = [i for i,(a,b) in enumerate(zip(raw_z,gpu_z))
+                              if bf16_round(a) != b]
+              print(f'z-round position={pos} cpu-gpu-mismatches={len(mismatches)} '
+                    f'gpu-round-mismatches={len(raw_mismatch)} '
+                    f'critical-head-mismatches={sum(24*128 <= i < 27*128 for i in mismatches)}',
+                    flush=True)
           PY
