@@ -897,6 +897,11 @@ int main() {
             std::getenv("NINFER_PHASE11_ORACLE_INJECT_SECOND_STAGE");
         const std::string second_inject_stage =
             second_inject_env != nullptr ? second_inject_env : "";
+        const char* second_inject_source_env =
+            std::getenv("NINFER_PHASE11_INJECT_SECOND_SOURCE_ROOT");
+        const fs::path second_inject_source_root =
+            second_inject_source_env != nullptr && second_inject_source_env[0] != '\0'
+                ? fs::path(second_inject_source_env) : fs::path{};
         const bool oracle_inject_all_positions =
             std::getenv("NINFER_PHASE11_ORACLE_INJECT_ALL_POSITIONS") != nullptr;
         const bool replay_oracle_router_ids =
@@ -919,9 +924,14 @@ int main() {
             throw std::invalid_argument(
                 "Phase 11 second injection requires a distinct stage and stage oracle");
         }
+        if (!second_inject_source_root.empty() && second_inject_stage.empty()) {
+            throw std::invalid_argument(
+                "NINFER_PHASE11_INJECT_SECOND_SOURCE_ROOT requires a second injection stage");
+        }
         if (replay_oracle_router_ids &&
             (!stage_trace_all_positions || !oracle_inject_stage.empty() ||
-             !second_inject_stage.empty() || !inject_source_root.empty())) {
+             !second_inject_stage.empty() || !inject_source_root.empty() ||
+             !second_inject_source_root.empty())) {
             throw std::invalid_argument(
                 "Phase 11 oracle-membership replay requires all-position tracing and no other injection");
         }
@@ -1629,8 +1639,10 @@ int main() {
                         "Phase 11 oracle injection does not support integer stages");
                 }
                 std::vector<float> injected = expected;
-                if (inject_first && !inject_source_root.empty()) {
-                    const fs::path source_path = inject_source_root / pos_dir /
+                const fs::path& selected_source_root =
+                    inject_second ? second_inject_source_root : inject_source_root;
+                if (!selected_source_root.empty()) {
+                    const fs::path source_path = selected_source_root / pos_dir /
                         (oracle_stage_name + ".bin");
                     if (!fs::is_regular_file(source_path) ||
                         fs::file_size(source_path) != expected_bytes) {
@@ -1687,7 +1699,7 @@ int main() {
                 std::cout << "phase11.oracle_injection.position="
                           << current_stage_trace_position
                           << " stage=" << name
-                          << " source=" << (inject_first && !inject_source_root.empty()
+                          << " source=" << (!selected_source_root.empty()
                                               ? "independent-cpu" : "oracle")
                           << " count=" << count << '\n'
                           << std::flush;
