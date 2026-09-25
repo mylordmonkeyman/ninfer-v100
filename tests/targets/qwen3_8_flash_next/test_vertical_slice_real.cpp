@@ -1450,7 +1450,9 @@ int main() {
                         name.substr(0, 4) != "L00_") {
                         return false;
                     }
-                    return suffix == "gdn_projected" || suffix == "gdn_z" ||
+                    return suffix == "gdn_projected" || suffix == "gdn_query" ||
+                           suffix == "gdn_key" || suffix == "gdn_value" ||
+                           suffix == "gdn_z" ||
                            suffix == "gdn_g" || suffix == "gdn_beta" ||
                            suffix == "gdn_recurrent_output" ||
                            suffix == "gdn_gated_output" ||
