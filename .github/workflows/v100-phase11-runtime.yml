@@ -283,26 +283,28 @@ jobs:
             loaded=$(curl -s -m 10 http://127.0.0.1:9292/v1/models \
               | python3 -c 'import json,sys; d=json.load(sys.stdin); print(",".join(m["id"] for m in d["data"] if m.get("status",{}).get("value")=="loaded") or "none")' \
               2>/dev/null || echo "llama-swap unreachable")
-            gpu=$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader 2>/dev/null | head -1)
+            gpu=$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader 2>/dev/null | head -1 || true)
             echo "::error file=.github/workflows/v100-phase11-runtime.yml::GPU contended at decomposition preflight; loaded models: ${loaded}; gpu: ${gpu:-n/a}"
             exit 1
           fi
-          if ! test -r "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0013/L00_mlp_block_input.bin"; then
-            echo "ERROR: stage oracle file is unreadable: $NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0013/L00_mlp_block_input.bin" >&2
-            ls -la "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0013/" >&2 | head -20
-            listing=$(ls -la "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0013/" 2>/dev/null | head -20 | tr '\n' ';' | tr -s ' ')
-            echo "::error file=.github/workflows/v100-phase11-runtime.yml::stage oracle unreadable: ${NINFER_PHASE11_STAGE_ORACLE_ROOT}/pos0013; listing: ${listing}"
+          oracle_root="${NINFER_PHASE11_STAGE_ORACLE_ROOT:-UNSET}"
+          if ! test -r "${oracle_root}/pos0013/L00_mlp_block_input.bin"; then
+            root_listing=$(ls -la "${oracle_root}/" 2>/dev/null | head -12 | tr '\n' ';' | tr -s ' ' || true)
+            pos_listing=$(ls -la "${oracle_root}/pos0013/" 2>/dev/null | head -20 | tr '\n' ';' | tr -s ' ' || true)
+            mounts=$(grep oracle /proc/mounts 2>/dev/null | head -5 | tr '\n' ';' || true)
+            echo "::error file=.github/workflows/v100-phase11-runtime.yml::stage oracle unreadable: ${oracle_root}/pos0013/L00_mlp_block_input.bin; root: ${root_listing:-<unlistable>}; pos0013: ${pos_listing:-<unlistable>}; mounts: ${mounts:-<no oracle entry in /proc/mounts>}"
+            echo "ERROR: stage oracle file is unreadable: ${oracle_root}/pos0013/L00_mlp_block_input.bin" >&2
             exit 1
           fi
           result_log="$result_dir/error-decomposition.log"
           ctest --test-dir build-v100 -V \
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
             2>&1 | tee "$result_log" || true
-          gpu_end=$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader 2>/dev/null | head -1)
+          gpu_end=$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader 2>/dev/null | head -1 || true)
           models_end=$(curl -s -m 10 http://127.0.0.1:9292/v1/models \
             | python3 -c 'import json,sys; d=json.load(sys.stdin); print(",".join(m["id"] for m in d["data"] if m.get("status",{}).get("value")=="loaded") or "none")' \
             2>/dev/null || echo "llama-swap unreachable")
-          mem_end=$(free -m 2>/dev/null | awk '/^Mem:/{print $3"MiB/"$2"MiB used"}')
+          mem_end=$(free -m 2>/dev/null | awk '/^Mem:/{print $3"MiB/"$2"MiB used"}' || true)
           NINFER_DIAG_GPU="${gpu_end:-n/a}" NINFER_DIAG_MODELS="${models_end:-n/a}" NINFER_DIAG_MEM="${mem_end:-n/a}" \
           python3 - "$result_log" <<'PY'
           from pathlib import Path
