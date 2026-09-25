@@ -389,6 +389,14 @@ to below 5e-7. This identifies one causal format-conversion difference,
 amplified by low-amplitude recurrent heads and normalization. It is not an
 incorrect V100 gate kernel or an independently deployable correction.
 
+The [extended 14-position replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36099417852)
+confirms that the single key-history patch does not resolve qualification.
+CPU mean oracle KL changes from 0.031902 to 0.030146, while CPU-to-V100
+mean KL worsens from 0.040648 to 0.047474. The position-10 KL outlier
+precedes the intervention and remains 0.115576. V100 remains at 0.057752
+mean oracle KL and 13/14 top-1. This local rounding tie is causally real,
+but is not the main source of complete-prefix KL failure.
+
 An [FP32 convolution-history ablation over all 14 prefixes](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36099041700)
 worsens CPU mean oracle KL from 0.031902 to 0.092104, P99 KL from
 0.287952 to 0.828227, and top-1 agreement from 14/14 to 12/14. Reject this
@@ -401,6 +409,23 @@ qualification gate remains unpassed. The next decision should address the
 position-10 and position-13 complete-prefix KL outliers while retaining the
 measured convolution-history boundary, and validate on the required larger
 teacher-forced sample.
+
+The [per-position router map](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36132036935)
+shows that position 10 first diverges by a **CPU-only** expert-set change at
+layer 5; V100 still selects the independent oracle set there. At position
+13, the CPU's first-only change is at layer 14, and the first V100-only
+change is at layer 26. The [position-13 matched-input V100 replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36132670825)
+supplies the independent CPU profile's own layer-26 MLP/router input. The
+V100 router then selects the oracle expert set, as it does with an oracle
+input positive control. CPU-input injection lowers full-prefix mean V100
+oracle KL from 0.057752 to 0.046971, but position-13 KL remains 0.464482,
+top-1 remains 13/14, and expert sets diverge again at layer 30. Oracle-input
+injection yields 0.048437 mean KL and also fails. The candidate router is
+working on these matched inputs; cumulative upstream differences and
+subsequent discrete routing choices remain. Neither intervention qualifies
+the original engine. Earlier full-prefix forced-membership CPU replays
+demonstrate how much router sets affect logits, but their oracle IDs are
+offline information unavailable to the serving engine.
 
 ### Layer 15 QSA projection replay and input boundary
 
