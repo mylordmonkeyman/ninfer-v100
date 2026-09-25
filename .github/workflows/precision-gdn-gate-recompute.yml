@@ -26,6 +26,13 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           path: v100-input
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-gdn-history-reference-14
+          run-id: 36097496115
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: cpu-input
       - name: Recompute FP32 gate from captured recurrent output
         shell: bash
         run: |
@@ -59,27 +66,40 @@ jobs:
           else:
               raise RuntimeError(f'Unexpected norm dtype {entry["dtype"]}')
           root = Path('v100-input/candidate-stage')
-          for pos in (0, 2, 12, 13):
-              directory = root/f'pos{pos:04d}'
-              def stage(name):
-                  raw = (directory/f'L00_{name}.bin').read_bytes()
-                  return struct.unpack('<6144f', raw)
-              x = stage('gdn_recurrent_output')
-              z = stage('gdn_z')
-              actual = stage('gdn_gated_output')
-              # Mirrors the FP32 diagnostic kernel: per-head RMSNorm then
-              # sigmoid(BF16 z), retaining the unrounded gate product.
+          cpu_root = Path('cpu-input/precision-reference-results/v100-phase11-storage')
+          def gate(x, z):
               expected = []
               for head in range(48):
                   start = head * 128
                   rms = math.sqrt(sum(value*value for value in x[start:start+128])/128 + 1e-6)
                   expected.extend(x[start+d] / rms * norm[d] /
                                   (1 + math.exp(-z[start+d])) for d in range(128))
+              return expected
+          def nrmse(a,b):
+              return math.sqrt(sum((x-y)**2 for x,y in zip(a,b)) / sum(x*x for x in a))
+          for pos in (0, 2, 12, 13):
+              directory = root/f'pos{pos:04d}'
+              def stage(base,name):
+                  raw = (base/f'pos{pos:04d}'/f'L00_{name}.bin').read_bytes()
+                  return struct.unpack('<6144f', raw)
+              x = stage(root, 'gdn_recurrent_output')
+              z = stage(root, 'gdn_z')
+              actual = stage(root, 'gdn_gated_output')
+              cx = stage(cpu_root, 'gdn_recurrent_output')
+              cz = stage(cpu_root, 'gdn_z')
+              cpu_actual = stage(cpu_root, 'gdn_gated_output')
+              # Mirrors the FP32 diagnostic kernel: per-head RMSNorm then
+              # sigmoid(BF16 z), retaining the unrounded gate product.
+              expected = gate(x,z)
               error = [a-b for a,b in zip(expected, actual)]
-              nrmse = math.sqrt(sum(e*e for e in error) / sum(e*e for e in expected))
-              print(f'gate position={pos} nrmse={nrmse:.9g} '
+              measured = nrmse(expected, actual)
+              print(f'gate position={pos} nrmse={measured:.9g} '
                     f'max_abs={max(map(abs,error)):.9g} '
                     f'count={len(error)}', flush=True)
-              if not math.isfinite(nrmse):
+              print(f'swap position={pos} cpu-own={nrmse(gate(cx,cz),cpu_actual):.9g} '
+                    f'input-gap={nrmse(expected,gate(cx,cz)):.9g} '
+                    f'cpu-x-v100-z={nrmse(expected,gate(cx,z)):.9g} '
+                    f'v100-x-cpu-z={nrmse(expected,gate(x,cz)):.9g}', flush=True)
+              if not math.isfinite(measured):
                   raise RuntimeError('Nonfinite gate recomputation')
           PY
