@@ -105,6 +105,55 @@ jobs:
           print("Validated 4-position independent CPU FP32 oracle")
           PY
 
+      - name: Reserve the GPU from llama-swap
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # This runner shares the V100 with the agent's own inference model,
+          # which llama-swap (127.0.0.1:9292) keeps loaded (~30 GiB). Unload it
+          # for the duration of the run; llama-swap lazily reloads it on the
+          # agent's next inference request. This runs before the build so a
+          # contended GPU fails fast and the auto-retry job can re-dispatch.
+          swap_base=http://127.0.0.1:9292
+          agent_model=qwen3.8-27b-omp
+
+          unload() {
+            code=$(curl -s -m 10 -X POST -o /tmp/unload-response.json -w '%{http_code}' \
+              "$swap_base/api/models/unload/$agent_model" || true)
+            echo "unload $agent_model -> HTTP $code: $(head -c 200 /tmp/unload-response.json 2>/dev/null)"
+          }
+          unload
+          case "$code" in
+            200|204|404) ;;  # 404: not loaded (or unknown name)
+            000) echo "WARNING: llama-swap (127.0.0.1:9292) is not reachable from the runner (separate network namespace)."
+                 echo "The agent side must have pre-unloaded the model; the nvidia-smi poll below is the real gate." ;;
+            *) echo "WARNING: llama-swap unload request failed (HTTP $code); the nvidia-smi poll below is the real gate." ;;
+          esac
+
+          required_free_mib=20480
+          deadline=$(( $(date +%s) + 900 ))
+          last_unload=0
+          while :; do
+            free_mib=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -n1 | tr -d '[:space:]')
+            echo "GPU free memory: ${free_mib} MiB (need at least ${required_free_mib} MiB)"
+            if [ "$free_mib" -ge "$required_free_mib" ]; then
+              echo "GPU is available; proceeding"
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "ERROR: GPU free memory stayed below ${required_free_mib} MiB for 15 minutes after unloading the agent model." >&2
+              echo "The V100 is contended (the agent model is loaded or the agent is actively in use). The auto-retry job will re-dispatch this workflow after a cooldown; keep the agent on this V100 idle so the retry can reserve the GPU." >&2
+              exit 1
+            fi
+            now=$(date +%s)
+            if [ $(( now - last_unload )) -ge 60 ]; then
+              last_unload=$now
+              unload
+            fi
+            sleep 15
+          done
+
       - name: Configure CUDA 12.8 SM70
         shell: bash
         run: |
@@ -135,46 +184,6 @@ jobs:
               ninfer_qwen3_8_flash_next_load_plan_test \
               ninfer_selected_block_attention_test \
             -j "$(nproc)"
-
-      - name: Reserve the GPU from llama-swap
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          # This runner shares the V100 with the agent's own inference model,
-          # which llama-swap (127.0.0.1:9292) keeps loaded (~30 GiB). Unload it
-          # for the duration of the run; llama-swap lazily reloads it on the
-          # agent's next inference request.
-          swap_base=http://127.0.0.1:9292
-          agent_model=qwen3.8-27b-omp
-
-          code=$(curl -s -m 10 -X POST -o /tmp/unload-response.json -w '%{http_code}' \
-            "$swap_base/api/models/unload/$agent_model" || true)
-          echo "unload $agent_model -> HTTP $code: $(head -c 200 /tmp/unload-response.json 2>/dev/null)"
-          case "$code" in
-            200|204|404) ;;  # 404: not loaded (or unknown name)
-            000) echo "WARNING: llama-swap (127.0.0.1:9292) is not reachable from the runner (separate network namespace)."
-                 echo "The agent side must have pre-unloaded the model; the nvidia-smi poll below is the real gate." ;;
-            *) echo "WARNING: llama-swap unload request failed (HTTP $code); the nvidia-smi poll below is the real gate." ;;
-          esac
-
-          required_free_mib=20480
-          deadline=$(( $(date +%s) + 300 ))
-          while :; do
-            free_mib=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -n1 | tr -d '[:space:]')
-            echo "GPU free memory: ${free_mib} MiB (need at least ${required_free_mib} MiB)"
-            if [ "$free_mib" -ge "$required_free_mib" ]; then
-              echo "GPU is available; proceeding"
-              break
-            fi
-            if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "ERROR: GPU free memory stayed below ${required_free_mib} MiB for 5 minutes after unloading the agent model." >&2
-              echo "The runner cannot reach llama-swap from its network namespace (HTTP 000 above), so the agent host must pre-unload the model: POST http://127.0.0.1:9292/api/models/unload/qwen3.8-27b-omp, then keep the agent silent (any agent inference lazy-loads it back) and re-run this workflow." >&2
-              exit 1
-            fi
-            sleep 15
-          done
-
 
       - name: Run Phase 11 contract test
         shell: bash
@@ -640,3 +649,57 @@ jobs:
           path: ${{ github.workspace }}/.v100-phase11-results/${{ github.run_id }}-${{ github.run_attempt }}/
           if-no-files-found: warn
           retention-days: 14
+
+  retry-v100-on-contention:
+    name: Retry V100 Phase 11 Runtime (auto)
+    needs: v100-phase11
+    if: needs.v100-phase11.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      workflows: write
+    steps:
+      - name: Re-dispatch after cooldown (capped at 2 consecutive failures)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Count failed completed runs of this same head SHA, excluding the
+          # current one. The cap stops an auto-retry storm from a single push;
+          # failures of other commits (e.g. from before the reserve step was
+          # fixed) do not count against this push.
+          n=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/v100-phase11-runtime.yml/runs?per_page=8" \
+            | python3 -c '
+          import json, sys
+          d = json.load(sys.stdin)
+          current_id = int(sys.argv[1])
+          current_sha = sys.argv[2]
+          c = 0
+          for r in d["workflow_runs"]:
+              if r["id"] == current_id:
+                  continue
+              if r.get("head_sha") != current_sha:
+                  continue
+              if r["status"] != "completed" or r["conclusion"] == "success":
+                  continue
+              if r["conclusion"] == "cancelled":
+                  continue
+              c += 1
+              if c >= 2:
+                  break
+          print(c)
+          ' "$GITHUB_RUN_ID" "$GITHUB_SHA")
+          if [ "$n" -ge 2 ]; then
+            echo "Two or more consecutive failures: skipping auto-retry; needs human review."
+            exit 0
+          fi
+          echo "Re-dispatching after a 10 minute cooldown so the V100 agent can go idle."
+          sleep 600
+          curl -s -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/v100-phase11-runtime.yml/dispatches" \
+            -d '{"ref":"'"${GITHUB_REF_NAME}"'"}' \
+            -o /tmp/dispatch-response.json -w 'dispatch -> HTTP %{http_code}\n'
