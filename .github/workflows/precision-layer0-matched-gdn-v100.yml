@@ -1,0 +1,173 @@
+name: Phase 11 V100 Layer Zero Matched GDN Replay
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-layer0-matched-gdn-v100.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  gdn-boundary-replay:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-layer0-matched-input-14
+          run-id: 36177462927
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-layer0-matched-attn-13
+          run-id: 36176940353
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: previous-gpu
+      - name: Validate CPU input and compile real-model diagnostic
+        run: |
+          set -euo pipefail
+          test -r /models/qwen3-8b-flash-next
+          for stage in L00_gdn_recurrent_output L00_gdn_gated_output; do
+            test -s "/oracle/phase11-stage-trace14/pos0012/${stage}.bin"
+            test -s "cpu/cpu-boundary/pos0012/${stage}.bin"
+            test "$(stat -c %s "cpu/cpu-boundary/pos0012/${stage}.bin")" -eq 24576
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+          matches=[p for p in Path('previous-gpu').rglob('L00_gdn_gated_output.bin')
+                   if p.parent.parent.name=='baseline']
+          assert len(matches)==1, matches
+          print('Baseline GPU gated-output trace:', matches[0])
+          PY
+          cmake -S . -B build-precision-v100 -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-precision-v100 -j --target \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test
+      - name: Check V100 memory before model loading
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free \
+              --format=csv,noheader,nounits | tr -d '[:space:]')
+            echo "V100 free memory: ${free_mib} MiB (attempt ${attempt}/30)"
+            [[ "$free_mib" =~ ^[0-9]+$ ]] || exit 1
+            if (( free_mib >= 28000 )); then exit 0; fi
+            if (( attempt < 30 )); then sleep 30; fi
+          done
+          exit 1
+      - name: Replay CPU recurrent and gated outputs at position 12
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "13"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace14
+          NINFER_PHASE11_STAGE_ORACLE_POSITION: "12"
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_PHASE11_TRACE_HYPER_LAYER0: "1"
+          NINFER_PHASE11_TRACE_GDN_LAYER0: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
+        run: |
+          set -euo pipefail
+          mkdir -p matched-input
+          for mode in recurrent gated; do
+            export NINFER_PHASE11_CANDIDATE_TRACE_ROOT="$GITHUB_WORKSPACE/matched-input/$mode"
+            if [[ "$mode" == recurrent ]]; then
+              export NINFER_PHASE11_ORACLE_INJECT_STAGE=L00_gdn_recurrent_output
+            else
+              export NINFER_PHASE11_ORACLE_INJECT_STAGE=L00_gdn_gated_output
+            fi
+            export NINFER_PHASE11_INJECT_SOURCE_ROOT="$GITHUB_WORKSPACE/cpu/cpu-boundary"
+            set +e
+            ctest --test-dir build-precision-v100 -V \
+              -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+              > "matched-input/$mode.log" 2>&1
+            status=$?
+            set -e
+            echo "$mode: unchanged Phase 11 CTest status $status"
+            python3 - "$mode" <<'PY'
+          import sys
+          from pathlib import Path
+          mode=sys.argv[1]
+          root=Path('matched-input')/mode
+          log=Path(f'matched-input/{mode}.log').read_text()
+          assert 'phase11.positions=13' in log, f'{mode} prefix replay did not finish'
+          injection='L00_gdn_recurrent_output' if mode=='recurrent' else 'L00_gdn_gated_output'
+          assert f'phase11.oracle_injection.position=12 stage={injection} source=independent-cpu ' in log
+          for stage,size in [('L00_gdn_recurrent_output',24576),
+                             ('L00_gdn_gated_output',24576),
+                             ('L00_attn_block_output',10240),
+                             ('L00_hyper_after_attn',40960),
+                             ('L00_mlp_block_input_fp32',10240),
+                             ('L00_mlp_block_input',10240)]:
+              assert (root/'pos0012'/f'{stage}.bin').stat().st_size==size
+          for line in log.splitlines():
+              if (f'phase11.oracle_injection.position=12 stage={injection} ' in line or
+                  'phase11.mean_kl=' in line or 'phase11.top1_agreement=' in line):
+                  print(line[:350])
+          PY
+          done
+          python3 - <<'PY' | tee matched-input/report.txt
+          from array import array
+          import math
+          from pathlib import Path
+          cpu=Path('cpu/cpu-boundary/pos0012')
+          roots=[p.parent for p in Path('previous-gpu').rglob('L00_gdn_gated_output.bin')
+                 if p.parent.parent.name=='baseline']
+          assert len(roots)==1, roots
+          baseline=roots[0]
+          recurrent=Path('matched-input/recurrent/pos0012')
+          gated=Path('matched-input/gated/pos0012')
+          def read(root,stage):
+              a=array('f');a.frombytes((root/(stage+'.bin')).read_bytes());return a
+          def nrmse(reference,actual):
+              return math.sqrt(math.fsum((float(a)-float(b))**2
+                                        for a,b in zip(reference,actual)) /
+                               max(math.fsum(float(a)**2 for a in reference),1e-24))
+          for stage in ('L00_gdn_recurrent_output','L00_gdn_gated_output',
+                        'L00_attn_block_output','L00_hyper_after_attn',
+                        'L00_mlp_block_input_fp32',
+                        'L00_mlp_block_input'):
+              c=read(cpu,stage);b=read(baseline,stage)
+              r=read(recurrent,stage);g=read(gated,stage)
+              assert len(c)==len(b)==len(r)==len(g)>0
+              print(stage,'count',len(c),'CPU-vs-baseline',nrmse(c,b),
+                    'CPU-vs-recurrent',nrmse(c,r),'CPU-vs-gated',nrmse(c,g))
+          print('Injected stages are captured before replacement; compare downstream rows.')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: v100-layer0-matched-gdn-13
+          path: matched-input
+          if-no-files-found: ignore
+          retention-days: 14
