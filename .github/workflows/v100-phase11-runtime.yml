@@ -262,6 +262,16 @@ jobs:
           NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
         run: |
           set -euxo pipefail
+          result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$result_dir"
+          preflight_log="$result_dir/error-decomposition-preflight.log"
+          {
+            echo "llama-swap /v1/models:"
+            curl -s -m 10 http://127.0.0.1:9292/v1/models || echo "(llama-swap unreachable)"
+            echo
+            echo "nvidia-smi:"
+            nvidia-smi
+          } > "$preflight_log" 2>&1 || true
           # Fail fast if the agent model was reloaded mid-run: any chat request
           # to the agent lazy-loads qwen3.8-27b-omp back onto this V100 and
           # would contend with the test.
@@ -269,11 +279,14 @@ jobs:
             | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(m["id"]=="qwen3.8-27b-omp" and m.get("status",{}).get("value")=="loaded" for m in d["data"]) else 1)'; then
             echo "ERROR: agent model qwen3.8-27b-omp was reloaded during this run; the GPU is contended." >&2
             echo "Re-run the workflow when the agent is idle." >&2
+            cat "$preflight_log" >&2
             exit 1
           fi
-          test -r "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0013/L00_mlp_block_input.bin"
-          result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p "$result_dir"
+          if ! test -r "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0013/L00_mlp_block_input.bin"; then
+            echo "ERROR: stage oracle file is unreadable: $NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0013/L00_mlp_block_input.bin" >&2
+            ls -la "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0013/" >&2 | head -20
+            exit 1
+          fi
           result_log="$result_dir/error-decomposition.log"
           ctest --test-dir build-v100 -V \
             -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
@@ -551,6 +564,17 @@ jobs:
         run: |
           set -euxo pipefail
 
+          result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$result_dir"
+          preflight_log="$result_dir/oracle-full-preflight.log"
+          {
+            echo "llama-swap /v1/models:"
+            curl -s -m 10 http://127.0.0.1:9292/v1/models || echo "(llama-swap unreachable)"
+            echo
+            echo "nvidia-smi:"
+            nvidia-smi
+          } > "$preflight_log" 2>&1 || true
+
           # Fail fast if the agent model was reloaded mid-run: any chat request
           # to the agent lazy-loads qwen3.8-27b-omp back onto this V100 and
           # would contend with the ~4.5 h qualification run.
@@ -558,11 +582,9 @@ jobs:
             | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(m["id"]=="qwen3.8-27b-omp" and m.get("status",{}).get("value")=="loaded" for m in d["data"]) else 1)'; then
             echo "ERROR: agent model qwen3.8-27b-omp is loaded on the V100; the GPU is contended." >&2
             echo "Re-run the workflow when the agent is idle." >&2
+            cat "$preflight_log" >&2
             exit 1
           fi
-
-          result_dir="${GITHUB_WORKSPACE}/.v100-phase11-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p "$result_dir"
 
           ctest \
             --test-dir build-v100 \
