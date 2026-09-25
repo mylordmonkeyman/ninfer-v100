@@ -1,0 +1,85 @@
+name: Phase 11 Position Ten Router Cutoff Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-router-position10-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Download frozen CPU and V100 prefix traces
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36087743583 --repo "$GITHUB_REPOSITORY" \
+            --name cpu-router-replay-14 --dir cpu
+          gh run download 36078905618 --repo "$GITHUB_REPOSITORY" \
+            --name v100-mlp-raw-layer1-14 --dir v100
+      - name: Identify position-ten routing decisions and score margins
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee position10-router-report.txt
+          import csv,json,struct
+          from pathlib import Path
+          position=10
+          def entries(path,candidate=False):
+              if candidate:
+                  return {(r['position'],r['name']):path/r['file']
+                          for r in map(json.loads,(path/'stages.jsonl').read_text().splitlines())}
+              manifest=json.loads((path/'manifest.json').read_text())
+              return {(r['position'],t['name']):path/t['file']
+                      for r in manifest['positions'] for t in r['tensors']}
+          def values(path):
+              return [v[0] for v in struct.iter_unpack('<f',path.read_bytes())]
+          paths={'fp32':entries(Path('cpu/fp32')),
+                 'cpu':entries(Path('cpu/v100-phase11-storage')),
+                 'v100':entries(Path('v100/candidate-stage'),True)}
+          rows={(int(r['position']),r['stage']):r for r in
+                csv.DictReader(Path('cpu/comparison/stage_comparison.csv').open())}
+          print('position',position)
+          flips=[]
+          for layer in range(48):
+              stem=f'L{layer:02d}_moe_router_'
+              ids={kind:set(map(int,values(data[position,stem+'ids'])))
+                   for kind,data in paths.items()}
+              if all(ids[kind]==ids['fp32'] for kind in ('cpu','v100')):
+                  continue
+              scores={kind:values(data[position,stem+'scores'])
+                      for kind,data in paths.items()}
+              record={'layer':layer}
+              for kind in ('cpu','v100'):
+                  missing=sorted(ids['fp32']-ids[kind])
+                  added=sorted(ids[kind]-ids['fp32'])
+                  rank=sorted(range(512),key=lambda i:(-scores[kind][i],i))
+                  record[kind+'_lost']=missing
+                  record[kind+'_gained']=added
+                  record[kind+'_cutoff_gap']=scores[kind][rank[9]]-scores[kind][rank[10]]
+              row=rows.get((position,f'L{layer:02d}_mlp_block_input'))
+              if row:
+                  record['v100_cpu_input_nrmse']=row['v100_vs_cpu_nrmse']
+              print(json.dumps(record,sort_keys=True))
+              flips.append(record)
+          assert flips
+          print('first_changed_layer',flips[0]['layer'])
+          print('flip_counts',json.dumps({
+              'cpu_oracle':sum(bool(x['cpu_lost']) for x in flips),
+              'v100_oracle':sum(bool(x['v100_lost']) for x in flips),
+              'v100_only':sum(bool(x['v100_lost']) and not x['cpu_lost'] for x in flips),
+              'shared':sum(x['v100_lost']==x['cpu_lost'] and bool(x['cpu_lost'])
+                           for x in flips)},sort_keys=True))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: position10-router-report
+          path: position10-router-report.txt
+          retention-days: 14
