@@ -132,6 +132,17 @@ def _stage_hooks(model, captured, trace_gdn_internals=False,
         if trace_gdn_internals and hasattr(layer, "linear_attn"):
             gdn = layer.linear_attn
             handles.append(gdn.register_forward_hook(capture(prefix + "attn_block_output")))
+            if index == 0:
+                def capture_conv(_module, _args, output, stem=prefix):
+                    # Conv1d returns [batch, channels, time]; decode's SiLU
+                    # and split feed the GDN recurrence at this boundary.
+                    conv = F.silu(output).transpose(1, 2)
+                    if conv.shape[-1] != 10240 or conv.shape[1] != 1:
+                        raise ValueError(f"unexpected layer-zero GDN convolution shape {tuple(conv.shape)}")
+                    for name, chunk in zip(("gdn_query", "gdn_key", "gdn_value"),
+                                           conv.split((2048, 2048, 6144), dim=-1)):
+                        captured[stem + name] = chunk.detach().float().cpu().clone()
+                handles.append(gdn.conv1d.register_forward_hook(capture_conv))
             for module, name in ((gdn.in_proj_qkv, "qkv"),
                                  (gdn.in_proj_z, "z"),
                                  (gdn.in_proj_a, "a"),
