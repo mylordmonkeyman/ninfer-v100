@@ -816,6 +816,8 @@ int main() {
             second_inject_env != nullptr ? second_inject_env : "";
         const bool oracle_inject_all_positions =
             std::getenv("NINFER_PHASE11_ORACLE_INJECT_ALL_POSITIONS") != nullptr;
+        const bool replay_oracle_router_ids =
+            std::getenv("NINFER_PHASE11_REPLAY_ORACLE_ROUTER_IDS") != nullptr;
         if (!oracle_inject_stage.empty() && !stage_trace_enabled) {
             throw std::invalid_argument(
                 "NINFER_PHASE11_ORACLE_INJECT_STAGE requires a stage oracle root");
@@ -834,6 +836,12 @@ int main() {
             throw std::invalid_argument(
                 "Phase 11 second injection requires a distinct stage and stage oracle");
         }
+        if (replay_oracle_router_ids &&
+            (!stage_trace_all_positions || !oracle_inject_stage.empty() ||
+             !second_inject_stage.empty() || !inject_source_root.empty())) {
+            throw std::invalid_argument(
+                "Phase 11 oracle-membership replay requires all-position tracing and no other injection");
+        }
         std::uint32_t current_stage_trace_position = stage_trace_position;
         std::vector<std::string> first_bad_stage_by_position(records.size());
         std::vector<double> first_bad_cosine_by_position(records.size(), 1.0);
@@ -841,6 +849,9 @@ int main() {
         std::vector<double> first_bad_max_error_by_position(records.size(), 0.0);
         std::vector<float> last_router_scores;
         std::string last_router_score_prefix;
+        std::vector<float> pending_router_alpha;
+        std::string pending_router_prefix;
+        std::uint64_t replayed_router_layers = 0;
         constexpr std::size_t kRouterHidden = 2'560;
         constexpr std::size_t kRouterExperts = 512;
         std::array<std::vector<std::uint16_t>, 48> router_weight_words;
@@ -1598,6 +1609,73 @@ int main() {
                           << std::flush;
             }
 
+            // Diagnostic only: isolate the effect of expert membership on
+            // the actual V100 decode. The selected expert weights still come
+            // from this token's own V100 router scores, never oracle scores.
+            if (replay_oracle_router_ids && name.size() == 18 &&
+                name.substr(4) == "moe_router_ids") {
+                if (!integer_tensor || count != 10 ||
+                    last_router_score_prefix != name.substr(0, 4) ||
+                    last_router_scores.size() != 513 ||
+                    !pending_router_alpha.empty()) {
+                    throw std::runtime_error("Phase 11 oracle-membership router state is invalid");
+                }
+                std::vector<std::int32_t> ids = expected_i32;
+                std::vector<std::int32_t> unique = ids;
+                std::sort(unique.begin(), unique.end());
+                if (unique.front() < 0 || unique.back() >= 512 ||
+                    std::adjacent_find(unique.begin(), unique.end()) != unique.end()) {
+                    throw std::runtime_error("Phase 11 oracle expert IDs are invalid");
+                }
+                for (const auto id : ids) {
+                    if (!std::isfinite(last_router_scores[id])) {
+                        throw std::runtime_error("Phase 11 replay router score is nonfinite");
+                    }
+                }
+                std::sort(ids.begin(), ids.end(), [&](std::int32_t a, std::int32_t b) {
+                    const float score_a = last_router_scores[a];
+                    const float score_b = last_router_scores[b];
+                    return score_a != score_b ? score_a > score_b : a < b;
+                });
+                const float maximum = last_router_scores[ids.front()];
+                pending_router_alpha.resize(ids.size());
+                float denominator = 0.0F;
+                for (std::size_t i = 0; i < ids.size(); ++i) {
+                    pending_router_alpha[i] = std::exp(last_router_scores[ids[i]] - maximum);
+                    denominator += pending_router_alpha[i];
+                }
+                for (float& alpha : pending_router_alpha) { alpha /= denominator; }
+                pending_router_prefix = std::string(name.substr(0, 4));
+                CUDA_CHECK(cudaMemcpy(tensor.data, ids.data(),
+                                      ids.size() * sizeof(std::int32_t), cudaMemcpyHostToDevice));
+                std::vector<std::int32_t> verified(ids.size());
+                CUDA_CHECK(cudaMemcpy(verified.data(), tensor.data,
+                                      ids.size() * sizeof(std::int32_t), cudaMemcpyDeviceToHost));
+                if (verified != ids) {
+                    throw std::runtime_error("Phase 11 replay expert-ID readback mismatch");
+                }
+            } else if (replay_oracle_router_ids && name.size() == 20 &&
+                       name.substr(4) == "moe_router_alpha") {
+                if (tensor.dtype != ninfer::DType::FP32 ||
+                    pending_router_prefix != name.substr(0, 4) ||
+                    pending_router_alpha.size() != tensor.numel()) {
+                    throw std::runtime_error("Phase 11 replay alpha has no matching router IDs");
+                }
+                CUDA_CHECK(cudaMemcpy(tensor.data, pending_router_alpha.data(),
+                                      pending_router_alpha.size() * sizeof(float),
+                                      cudaMemcpyHostToDevice));
+                std::vector<float> verified(pending_router_alpha.size());
+                CUDA_CHECK(cudaMemcpy(verified.data(), tensor.data,
+                                      verified.size() * sizeof(float),
+                                      cudaMemcpyDeviceToHost));
+                if (verified != pending_router_alpha) {
+                    throw std::runtime_error("Phase 11 replay router-alpha readback mismatch");
+                }
+                pending_router_alpha.clear();
+                pending_router_prefix.clear();
+                ++replayed_router_layers;
+            }
+
             if (integer_tensor && !pass) {
                 auto expected_ids_sorted = expected_i32;
                 auto candidate_ids_sorted = candidate_i32;
@@ -2081,6 +2159,15 @@ int main() {
 
         executor.release_lane(lane);
         device.synchronize();
+
+        if (replay_oracle_router_ids) {
+            if (!pending_router_alpha.empty() ||
+                replayed_router_layers != records.size() * 48ULL) {
+                throw std::runtime_error("Phase 11 did not replay all oracle expert memberships");
+            }
+            std::cout << "phase11.oracle_membership_replay.layer_calls="
+                      << replayed_router_layers << '\n';
+        }
 
         const auto expert_stats =
             flash_next_host_expert_execution_stats();
