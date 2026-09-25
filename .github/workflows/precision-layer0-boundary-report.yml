@@ -85,6 +85,29 @@ jobs:
               out.append(f'{stage} {nrmse(cpu,gpu):.9g} '
                          f'{nrmse(oracle,cpu):.9g} '
                          f'{nrmse(oracle,gpu):.9g} {len(cpu)}')
+          # The layer-zero master state begins as four copies of the embedding.
+          # Fit one injection coefficient per stream from the frozen state/output
+          # tensors; residuals check whether the inferred coefficients explain
+          # the actual hyper update before attributing the gap to the gates.
+          for label, hyper_root, gdn_root in (
+                  ('cpu', hyper_roots[0], gdn_roots[0]),
+                  ('v100', hyper_roots[1], gdn_roots[1])):
+              embedding = read(hyper_root, 12, 'embedding')
+              if embedding is None:
+                  path = hyper_root / 'pos0012/embedding.bin'
+                  embedding = array('f'); embedding.frombytes(path.read_bytes())
+              hidden = read(hyper_root, 12, 'hyper_after_attn')
+              attn = read(gdn_root, 12, 'attn_block_output')
+              assert len(embedding) == len(attn) == 2560 and len(hidden) == 10240
+              for stream in range(4):
+                  delta = [float(hidden[stream*2560+i])-float(embedding[i])
+                           for i in range(2560)]
+                  denominator = math.fsum(float(y)**2 for y in attn)
+                  coefficient = math.fsum(float(x)*float(y) for x,y in zip(delta,attn))/denominator
+                  residual = math.sqrt(math.fsum((x-coefficient*float(y))**2
+                                         for x,y in zip(delta,attn))/denominator)
+                  out.append(f'inferred_gate {label} stream={stream} '
+                             f'coefficient={coefficient:.9g} normalized_residual={residual:.9g}')
           Path('layer0-boundary-report.txt').write_text('\n'.join(out)+'\n')
           print('\n'.join(out))
           PY
