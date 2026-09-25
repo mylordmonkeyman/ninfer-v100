@@ -1,0 +1,85 @@
+name: Phase 11 FP32 MLP Input Ablation Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-mlp-fp32-ablation-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Download frozen CPU ablation and calibrated baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36090985820 --repo "$GITHUB_REPOSITORY" \
+            --name cpu-router-replay-14 --dir frozen
+      - name: Check full-prefix KL and router-set effects
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee mlp-fp32-ablation-report.txt
+          import json
+          import struct
+          from pathlib import Path
+
+          root = Path('frozen')
+          report = json.loads((root / 'precision_report.json').read_text())
+          ablation = report['mlp_block_input_fp32_ablation']
+          assert report['positions'] == 14
+
+          def summary(label, rows):
+              ordered = sorted(row['kl'] for row in rows)
+              index = (len(ordered) - 1) * .99
+              lower = int(index)
+              p99 = ordered[lower] + (ordered[min(lower + 1, len(ordered)-1)]
+                                      - ordered[lower]) * (index - lower)
+              print(label, 'mean_kl', sum(ordered) / len(ordered),
+                    'p99_kl', p99, 'max_kl', ordered[-1],
+                    'top1', sum(row['top1_agree'] for row in rows), '/', len(rows))
+              print(label, 'kl_by_position', [row['kl'] for row in rows])
+              print(label, 'incorrect_top1_positions',
+                    [i for i, row in enumerate(rows) if not row['top1_agree']])
+
+          summary('baseline_cpu', report['per_position'])
+          summary('ablation_cpu', ablation['per_position_oracle'])
+          summary('actual_v100', report['three_way']['per_position_v100'])
+          print('ablation_router_counts', ablation['router_set_counts'])
+
+          def entries(name):
+              path = root / name
+              manifest = json.loads((path / 'manifest.json').read_text())
+              return {(row['position'], stage['name']): path / stage['file']
+                      for row in manifest['positions'] for stage in row['tensors']}
+
+          def ids(path):
+              payload = path.read_bytes()
+              assert len(payload) == 40
+              result = {int(x) for (x,) in struct.iter_unpack('<f', payload)}
+              assert len(result) == 10
+              return result
+
+          fp32 = entries('fp32')
+          baseline = entries('v100-phase11-storage')
+          upgrade = entries('mlp-block-input-fp32')
+          for pos, layer in ((2, 44), (12, 2)):
+              key = (pos, f'L{layer:02d}_moe_router_ids')
+              reference, old, new = (ids(source[key]) for source in
+                                     (fp32, baseline, upgrade))
+              print('router', pos, layer, 'oracle', sorted(reference),
+                    'baseline', sorted(old), 'ablation', sorted(new),
+                    'ablation_matches_oracle', new == reference)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mlp-fp32-ablation-report
+          path: mlp-fp32-ablation-report.txt
+          retention-days: 14
