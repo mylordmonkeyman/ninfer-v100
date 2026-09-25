@@ -707,6 +707,35 @@ it does not rule out additional recurrent-state, reduction-order, or later
 implementation differences over full prefixes. Next hold prior recurrent
 state and convolution history equal when assessing the remaining gap.
 
+The [CPU prior-state probe](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36183463774)
+found a finite FP32 layer-zero recurrent state of shape (1,48,128,128)
+just before position 12. Its raw flattening is transposed relative to the
+V100 source-state tensor: the [layout report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36184878400)
+measures raw NRMSE 1.41145, falling to 1.37176e-5 after transposing each
+128x128 matrix. The [hosted conversion](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36184956447)
+validates this orientation and exports a separate converted CPU artifact.
+An earlier untransposed [injection](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36184223882)
+read back the supplied bytes but destroyed the recurrent result; those
+numbers reflect an invalid state layout and are excluded from attribution.
+
+The [validated state and key replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36185004001)
+runs three complete 13-position V100 prefixes. The natural CPU-to-V100
+recurrent-output NRMSE is 1.32302e-5. Replacing only the prior FP32 state
+reduces it slightly to 1.22752e-5; replacing both prior state and key
+reduces it to 8.19e-8. The state, key, and recurrent stage files are captured
+before their diagnostic replacement; downstream differences measure the
+interventions. With both inputs matched, gated-output NRMSE remains
+4.20e-5, consistent with the separate z-input difference: supplying both
+CPU z and CPU recurrent output had reduced gated-output NRMSE to 9.21e-8
+in the earlier replay. This local agreement rules out a sizable recurrence
+arithmetic discrepancy at this boundary under the matched-input profile.
+The state and key interventions require offline CPU values and are not
+candidate implementation changes. Mean oracle KL over the short prefixes
+was 0.01485480 for the natural run, 0.01377233 with state injected, and
+0.01281531 with state plus key; all underlying CTests still failed the
+unchanged Phase 11 gate. The remaining complete-prefix KL and router-set
+errors need a deployable precision or implementation correction.
+
 ## 1. Environment Setup
 
 Run the setup script using Python 3.14 to create the isolated virtual environment:
