@@ -611,6 +611,27 @@ calibration should compare recurrence with matched input **and** matched
 prior state before attributing the difference to a kernel or precision
 profile; the output projection at this boundary needs no further replay.
 
+### Prepared-weight parity at early divergent layers
+
+The [prepared-artifact audit](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36172279707)
+compared the pinned source safetensors with the actual `.ninfer` artifact on
+the V100 host. All 16 selected planes matched byte for byte: at both layers
+0 and 2, the BF16 router and three MLP hyper-connection weights, plus the
+FP8 GDN fused projection and output codes and their FP32 row scales. The
+comparison validated each object's artifact shape, format, and layout before
+reading its payload. No weight bytes were published as Actions artifacts.
+
+This rules out a source-to-artifact mismatch for these early objects; it does
+not verify every expert or later-layer weight, the device copies, or the
+reduction and rounding rules used when the V100 consumes them. The
+[device-resident audit](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36170022463)
+compiled but did not run: the host failed to reach the existing 28 GiB free
+VRAM threshold during 30 checks. It can be started with the workflow's manual
+dispatch once the GPU has enough free memory. The next causal comparison
+should hold the position-12 layer-zero attention output and hyper master
+state equal between CPU and V100, then compare their FP32 MLP mixer before
+the BF16 storage cast. Retain the unchanged Phase 11 qualification gate.
+
 ## 1. Environment Setup
 
 Run the setup script using Python 3.14 to create the isolated virtual environment:
