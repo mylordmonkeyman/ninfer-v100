@@ -1,0 +1,46 @@
+name: Phase 11 Position Ten Three Way KL Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-position10-kl-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-precision-reference-14
+          run-id: 36179438602
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: reference
+      - name: Compare position-ten oracle KL for CPU and V100
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee position10-kl-report.txt
+          import json
+          from pathlib import Path
+          paths=list(Path('reference').rglob('precision_report.json'))
+          assert len(paths)==1,paths
+          r=json.loads(paths[0].read_text())
+          assert r['positions']==14
+          three=r['three_way']
+          print('mean_cpu',r['mean_kl'],'mean_v100',three['oracle_vs_v100_mean_kl'])
+          for p in (0,10,12,13):
+              print('position',p,'cpu',r['per_position'][p],
+                    'v100',three['per_position_v100'][p])
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: position10-three-way-kl
+          path: position10-kl-report.txt
+          retention-days: 14
