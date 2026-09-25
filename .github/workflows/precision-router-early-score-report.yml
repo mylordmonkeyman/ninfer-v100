@@ -1,0 +1,103 @@
+name: Phase 11 Early Router Score Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-router-early-score-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Download the frozen independent CPU and V100 traces
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36087743583 --repo "$GITHUB_REPOSITORY" \
+            --name cpu-router-replay-14 --dir cpu
+          gh run download 36078905618 --repo "$GITHUB_REPOSITORY" \
+            --name v100-mlp-raw-layer1-14 --dir v100
+      - name: Examine the position-12 layer-two expert swap and upstream stages
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee early-router-scores.txt
+          import csv
+          import json
+          import struct
+          from pathlib import Path
+
+          root = Path('cpu')
+          position = 12
+          stem = 'L02_moe_router_'
+          def entries(path, candidate=False):
+              if candidate:
+                  lines = (path / 'stages.jsonl').read_text().splitlines()
+                  return {(r['position'], r['name']): path / r['file']
+                          for r in map(json.loads, lines)}
+              manifest = json.loads((path / 'manifest.json').read_text())
+              return {(r['position'], stage['name']): path / stage['file']
+                      for r in manifest['positions'] for stage in r['tensors']}
+
+          def floats(path):
+              raw = path.read_bytes()
+              assert raw and len(raw) % 4 == 0, path
+              return [x for (x,) in struct.iter_unpack('<f', raw)]
+
+          paths = {'fp32': entries(root / 'fp32'),
+                   'cpu': entries(root / 'v100-phase11-storage'),
+                   'v100': entries(Path('v100/candidate-stage'), True)}
+          ids = {kind: set(map(int, floats(source[position, stem + 'ids'])))
+                 for kind, source in paths.items()}
+          assert len(ids['fp32']) == len(ids['cpu']) == len(ids['v100']) == 10
+          assert ids['fp32'] == ids['cpu']
+          print('oracle_minus_v100', sorted(ids['fp32'] - ids['v100']))
+          print('v100_minus_oracle', sorted(ids['v100'] - ids['fp32']))
+          assert ids['fp32'] - ids['v100'] == {173}
+          assert ids['v100'] - ids['fp32'] == {393}
+
+          score = {kind: floats(source[position, stem + 'scores'])
+                   for kind, source in paths.items()}
+          assert all(len(scores) == 512 for scores in score.values())
+          for kind, values in score.items():
+              rank = sorted(range(512), key=lambda i: (-values[i], i))
+              assert set(rank[:10]) == ids[kind], kind
+              print(kind, 'score_173', values[173], 'score_393', values[393],
+                    '173_minus_393', values[173] - values[393],
+                    'rank_173', rank.index(173) + 1,
+                    'rank_393', rank.index(393) + 1,
+                    'cutoff_gap', values[rank[9]] - values[rank[10]])
+          for expert in (173, 393):
+              print('expert', expert, 'cpu_minus_fp32',
+                    score['cpu'][expert] - score['fp32'][expert],
+                    'v100_minus_fp32',
+                    score['v100'][expert] - score['fp32'][expert],
+                    'v100_minus_cpu',
+                    score['v100'][expert] - score['cpu'][expert])
+
+          rows = {(int(r['position']), r['stage']): r for r in
+                  csv.DictReader((root / 'comparison/stage_comparison.csv').open())}
+          for layer in (0, 1, 2):
+              for suffix in ('attn_block_input', 'attn_block_output',
+                             'hyper_after_attn', 'mlp_block_input',
+                             'mlp_block_output', 'hyper_after_mlp'):
+                  stage = f'L{layer:02d}_{suffix}'
+                  row = rows.get((position, stage))
+                  if row is None:
+                      continue
+                  print('stage', stage, 'cpu_oracle', row['cpu_vs_oracle_nrmse'],
+                        'v100_oracle', row['v100_vs_oracle_nrmse'],
+                        'cpu_v100', row['v100_vs_cpu_nrmse'])
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: early-router-scores
+          path: early-router-scores.txt
+          retention-days: 14
