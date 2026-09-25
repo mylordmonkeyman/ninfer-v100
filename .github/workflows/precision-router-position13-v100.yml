@@ -1,0 +1,133 @@
+name: Phase 11 V100 Position 13 Router Input Replay
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-router-position13-v100.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  replay:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-router-replay-14
+          run-id: 36087743583
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: cpu-profile
+      - name: Validate the independent CPU stage and build the diagnostic
+        run: |
+          set -euo pipefail
+          test -r /models/qwen3-8b-flash-next
+          for source in cpu-profile/v100-phase11-storage /oracle/phase11-stage-trace14; do
+            test -s "$source/pos0013/L26_mlp_block_input.bin"
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+          a = Path('cpu-profile/v100-phase11-storage/pos0013/L26_mlp_block_input.bin')
+          b = Path('/oracle/phase11-stage-trace14/pos0013/L26_mlp_block_input.bin')
+          assert a.stat().st_size == b.stat().st_size == 2560 * 4
+          assert a.read_bytes() != b.read_bytes(), 'CPU intervention must differ from oracle'
+          print('Independent CPU and oracle stage files have matching shape and distinct contents')
+          PY
+          cmake -S . -B build-precision-v100 -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-precision-v100 -j --target \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test
+      - name: Wait for free V100 memory
+        timeout-minutes: 19
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free \
+              --format=csv,noheader,nounits | tr -d '[:space:]')
+            echo "V100 free memory: ${free_mib} MiB (attempt ${attempt}/30)"
+            if (( free_mib >= 28000 )); then exit 0; fi
+            if (( attempt < 30 )); then sleep 30; fi
+          done
+          echo '::error::V100 needs at least 28000 MiB free'
+          exit 1
+      - name: Inject CPU stage and oracle positive control at position 13
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "14"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace14
+          NINFER_PHASE11_STAGE_ORACLE_POSITION: "2"
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_PHASE11_ORACLE_INJECT_STAGE: L26_mlp_block_input
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
+        run: |
+          set -euo pipefail
+          mkdir -p router-position13
+          for source in cpu oracle; do
+            if [[ "$source" == cpu ]]; then
+              export NINFER_PHASE11_INJECT_SOURCE_ROOT="$GITHUB_WORKSPACE/cpu-profile/v100-phase11-storage"
+            else
+              unset NINFER_PHASE11_INJECT_SOURCE_ROOT
+            fi
+            set +e
+            ctest --test-dir build-precision-v100 -V \
+              -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+              > "router-position13/${source}.log" 2>&1
+            status=$?
+            set -e
+            echo "Replay $source: unchanged Phase 11 gate status $status"
+            python3 - "$source" <<'PY'
+          import sys
+          from pathlib import Path
+
+          source = sys.argv[1]
+          lines = Path(f'router-position13/{source}.log').read_text().splitlines()
+          markers = (f'phase11.oracle_injection.position=13 stage=L26_mlp_block_input source={"independent-cpu" if source == "cpu" else "oracle"} ',
+                     'phase11.error_decomposition.position=13 stage=L26_moe_router_ids ',
+                     'phase11.router_ids_mismatch.position=13 stage=L26_moe_router_ids ',
+                     'phase11.router_margin.position=13 stage=L26_moe_router_ids ',
+                     'phase11.top1_agreement=', 'phase11.mean_kl=')
+          for line in lines:
+              if any(marker in line for marker in markers):
+                  print(line[:1700])
+          if not any(markers[0] in line for line in lines):
+              raise SystemExit(f'{source} injection did not occur')
+          if not any('phase11.positions=14' in line for line in lines):
+              raise SystemExit(f'{source} 14-position replay incomplete')
+          PY
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: v100-router-cpu-input-position13-layer26
+          path: router-position13
+          if-no-files-found: ignore
+          retention-days: 14
