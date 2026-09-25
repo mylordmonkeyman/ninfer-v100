@@ -626,8 +626,10 @@ not verify every expert or later-layer weight, the device copies, or the
 reduction and rounding rules used when the V100 consumes them. The
 [device-resident audit](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36170022463)
 compiled but did not run: the host failed to reach the existing 28 GiB free
-VRAM threshold during 30 checks. It can be started with the workflow's manual
-dispatch once the GPU has enough free memory. The next causal comparison
+VRAM threshold during 30 checks. When the GPU is free, a push that changes
+the weight-audit workflow and whose commit message contains
+`[v100-weight-device]` starts the device audit on this work branch. The next
+causal comparison
 should hold the position-12 layer-zero attention output and hyper master
 state equal between CPU and V100, then compare their FP32 MLP mixer before
 the BF16 storage cast. Retain the unchanged Phase 11 qualification gate.

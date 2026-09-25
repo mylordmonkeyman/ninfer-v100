@@ -1,7 +1,6 @@
 name: Phase 11 V100 Weight Audit
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - work/precision-matched-reference
@@ -14,7 +13,7 @@ permissions:
 
 jobs:
   prepared-artifact-audit:
-    if: github.event_name == 'push'
+    if: '!contains(github.event.head_commit.message, ''[v100-weight-device]'')'
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     timeout-minutes: 25
     steps:
@@ -46,7 +45,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
   loaded-weight-audit:
-    if: github.event_name == 'workflow_dispatch'
+    if: contains(github.event.head_commit.message, '[v100-weight-device]')
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     timeout-minutes: 55
     steps:
