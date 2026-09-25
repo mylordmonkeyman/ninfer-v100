@@ -38,6 +38,22 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Download frozen V100 layer-zero trace
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-hyper-layer0-calibration-14
+          run-id: 36062874657
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: v100
+      - name: Download frozen V100 GDN trace
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-gdn-layer0-calibration-14
+          run-id: 36061122886
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: v100-gdn
       - name: Locate read-only input assets and CPU Python
         shell: bash
         run: |
@@ -156,7 +172,24 @@ jobs:
                                            for i in range(2560)))/max(math.sqrt(math.fsum(float(e)**2 for e in embedding)),1e-12)
                   print('stream',stream,'gate',float(gates[stream]),
                         'update_residual',resid,'prestate_vs_embedding',initial,flush=True)
-          PYREPORT
+          # Same-run CPU stages, frozen V100 tensor, and actual CPU gate values.
+          python3 - <<'PYCOMPARE' >> cpu-injection-report.txt
+          from array import array
+          from pathlib import Path
+          import math
+          cpu=Path('precision-reference-results/v100-phase11-storage/pos0012')
+          gpu=Path('v100/candidate-stage/pos0012')
+          for stage in ('L00_attn_block_input', 'L00_attn_block_output',
+                        'L00_hyper_after_attn', 'L00_mlp_block_input'):
+              a=array('f');b=array('f')
+              a.frombytes((cpu/(stage+'.bin')).read_bytes())
+              candidate = Path('v100-gdn/candidate-stage/pos0012') if stage == 'L00_attn_block_output' else gpu
+              b.frombytes((candidate/(stage+'.bin')).read_bytes())
+              assert len(a)==len(b)>0
+              rms=math.sqrt(math.fsum((float(x)-float(y))**2 for x,y in zip(a,b)) /
+                            max(math.fsum(float(x)**2 for x in a),1e-24))
+              print('same_profile_cpu_v100',stage,rms,flush=True)
+          PYCOMPARE
           cat cpu-injection-report.txt
 
       - name: Upload compact CPU comparison
