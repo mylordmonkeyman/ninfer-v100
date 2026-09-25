@@ -27,10 +27,23 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           path: cpu
+      - name: Find and wait for GDN V100 trace
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh api -X GET \
+            "repos/${{ github.repository }}/actions/workflows/precision-layer0-gdn-conv-v100.yml/runs" \
+            -f branch=work/precision-matched-reference \
+            --jq '.workflow_runs | map(select(.event == "push")) | .[0].id')
+          test -n "$run_id" && test "$run_id" != null
+          echo "V100_RUN_ID=$run_id" >> "$GITHUB_ENV"
+          echo "Waiting for V100 GDN trace run $run_id"
+          gh run watch "$run_id" --repo "${{ github.repository }}" --interval 30 --exit-status
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: v100-layer0-matched-attn-13
-          run-id: 36176940353
+          name: v100-layer0-gdn-conv-13
+          run-id: ${{ env.V100_RUN_ID }}
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           path: gpu
