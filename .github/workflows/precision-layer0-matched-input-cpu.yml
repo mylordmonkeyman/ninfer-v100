@@ -64,6 +64,7 @@ jobs:
             --fp32-oracle /oracle/phase11-stage-trace14 \
             --positions 14 \
             --trace-hyper-layer0 \
+            --trace-gdn-internals \
             --out-dir "$GITHUB_WORKSPACE/precision-reference-results" \
             > cpu-boundary.log 2>&1 || {
               tail -100 cpu-boundary.log
@@ -73,13 +74,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p cpu-boundary/pos0012
-          for stage in L00_hyper_after_attn L00_mlp_block_input_fp32 \
-              L00_mlp_block_input; do
+          for stage in L00_attn_block_input L00_attn_block_output \
+              L00_hyper_after_attn L00_mlp_block_input_fp32 L00_mlp_block_input; do
             source="precision-reference-results/v100-phase11-storage/pos0012/${stage}.bin"
             test -s "$source"
             cp "$source" "cpu-boundary/pos0012/${stage}.bin"
           done
           test "$(stat -c %s cpu-boundary/pos0012/L00_hyper_after_attn.bin)" -eq 40960
+          test "$(stat -c %s cpu-boundary/pos0012/L00_attn_block_output.bin)" -eq 10240
           test "$(stat -c %s cpu-boundary/pos0012/L00_mlp_block_input_fp32.bin)" -eq 10240
           python3 - <<'PY'
           import json
