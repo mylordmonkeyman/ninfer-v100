@@ -1,6 +1,7 @@
 name: Phase 11 V100 Loaded Weight Audit
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - work/precision-matched-reference
@@ -12,7 +13,40 @@ permissions:
   contents: read
 
 jobs:
+  prepared-artifact-audit:
+    if: github.event_name == 'push'
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Compare prepared artifact planes with pinned source tensors
+        run: |
+          set -euo pipefail
+          test -s /srv/ninfer/source/mixed/model.safetensors.index.json
+          test -r /models/qwen3-8b-flash-next
+          PYTHONPATH="$GITHUB_WORKSPACE" python3 \
+            tools/reference/qwen3_8_flash_next/oracle/verify_v100_weight_payload.py \
+            --source-root /srv/ninfer/source/mixed \
+            --candidate-artifact /models/qwen3-8b-flash-next \
+            --report prepared-artifact-summary.json \
+            > prepared-artifact.log 2>&1 || {
+              cat prepared-artifact.log
+              exit 1
+            }
+          cat prepared-artifact.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: v100-prepared-weight-audit
+          path: |
+            prepared-artifact.log
+            prepared-artifact-summary.json
+          if-no-files-found: ignore
+          retention-days: 14
   loaded-weight-audit:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     timeout-minutes: 55
     steps:
