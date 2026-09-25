@@ -241,6 +241,22 @@ NRMSE grows from 0.000693 at attention input to 0.001328 at MLP input and
 still fails; do not infer a precision-only explanation until further
 CPU/V100 calibration and controlled routing comparisons agree.
 
+The [layer-one GDN output trace](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36074950425)
+records all 3,472 selected stage rows. At position zero, CPU-to-V100 NRMSE
+is 0.000693 at GDN input and 0.000627 at GDN output, then 0.001328 at MLP
+input. The [post-attention hyper trace](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36075722015)
+adds the intermediate FP32 hyper state over 14 positions. At positions zero
+and two, respectively, its CPU-to-V100 NRMSE is 0.000476 and 0.000187;
+MLP input is 0.001328 and 0.001253. Thus the next local reference mismatch
+arises during **layer-one MLP hyper preparation**, after the GDN output and
+attention injection. At positions 12 and 13, the post-attention hyper gaps
+are 0.000721 and 0.000905, growing to 0.002636 and 0.002639 at MLP input.
+This comparison isolates the next CPU/V100 materialization or arithmetic
+boundary; it does not alone establish which result is mathematically closer
+or explain the remaining whole-prefix router divergence. The V100 diagnostic
+test still returns failure under the unchanged Phase 11 acceptance gate;
+the selected-stage capture and comparison completed successfully.
+
 ### Layer 15 QSA projection replay and input boundary
 
 The [upstream stage extraction](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36020859990)
