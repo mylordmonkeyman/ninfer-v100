@@ -1,0 +1,113 @@
+name: Phase 11 CPU Layer Zero GDN Convolution Inputs
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-layer0-gdn-conv-cpu.yml
+
+permissions:
+  contents: read
+
+jobs:
+  cpu-hyper-input:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 180
+    env:
+      CUDA_VISIBLE_DEVICES: ""
+      NINFER_ORACLE_DETERMINISTIC: "1"
+      NINFER_ORACLE_THREADS: "16"
+      OMP_NUM_THREADS: "16"
+      MKL_NUM_THREADS: "16"
+      OPENBLAS_NUM_THREADS: "16"
+      NUMEXPR_NUM_THREADS: "16"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Find pinned CPU inputs and Python
+        run: |
+          set -euo pipefail
+          test -s /srv/ninfer/source/mixed/model.safetensors.index.json
+          test -d /srv/ninfer/source/ple/ples_int4
+          test -s /oracle/phase11/token_ids.json
+          test -s /oracle/phase11-stage-trace14/manifest.json
+          for candidate in "$GITHUB_WORKSPACE/venv-oracle/bin/python" \
+              "$HOME/ninfer-v100/venv-oracle/bin/python" \
+              /srv/ninfer/venv-oracle/bin/python python3; do
+            if command -v "$candidate" >/dev/null 2>&1 && \
+                "$candidate" -c 'import numpy, torch, transformers, safetensors' \
+                  >/dev/null 2>&1; then
+              echo "CPU_PYTHON=$candidate" >> "$GITHUB_ENV"
+              exit 0
+            fi
+          done
+          echo 'CPU_PYTHON=' >> "$GITHUB_ENV"
+      - name: Prepare CPU Python if needed
+        run: |
+          set -euo pipefail
+          if [[ -n "$CPU_PYTHON" ]]; then exit 0; fi
+          python3 -m venv "$GITHUB_WORKSPACE/precision-venv"
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            torch --index-url https://download.pytorch.org/whl/cpu
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            numpy safetensors 'transformers>=5.16,<6'
+          echo "CPU_PYTHON=$GITHUB_WORKSPACE/precision-venv/bin/python" >> "$GITHUB_ENV"
+      - name: Recompute current 14-position CPU precision profile
+        run: |
+          set -euo pipefail
+          "$CPU_PYTHON" tools/reference/qwen3_8_flash_next/oracle/run_precision_reference.py \
+            --model-dir /srv/ninfer/source/mixed \
+            --ple-dir /srv/ninfer/source/ple/ples_int4 \
+            --ids-file /oracle/phase11/token_ids.json \
+            --fp32-oracle /oracle/phase11-stage-trace14 \
+            --positions 14 \
+            --trace-hyper-layer0 \
+            --trace-gdn-internals \
+            --out-dir "$GITHUB_WORKSPACE/precision-reference-results" \
+            > cpu-boundary.log 2>&1 || {
+              tail -100 cpu-boundary.log
+              exit 1
+            }
+      - name: Export only position-12 matched-input stages
+        run: |
+          set -euo pipefail
+          mkdir -p cpu-boundary/pos0012
+          for stage in L00_attn_block_input L00_attn_block_output \
+              L00_gdn_projected L00_gdn_query L00_gdn_key L00_gdn_value \
+              L00_gdn_z L00_gdn_g L00_gdn_beta \
+              L00_gdn_recurrent_output L00_gdn_gated_output \
+              L00_hyper_after_attn L00_mlp_block_input_fp32 L00_mlp_block_input; do
+            source="precision-reference-results/v100-phase11-storage/pos0012/${stage}.bin"
+            test -s "$source"
+            cp "$source" "cpu-boundary/pos0012/${stage}.bin"
+          done
+          test "$(stat -c %s cpu-boundary/pos0012/L00_hyper_after_attn.bin)" -eq 40960
+          test "$(stat -c %s cpu-boundary/pos0012/L00_attn_block_output.bin)" -eq 10240
+          test "$(stat -c %s cpu-boundary/pos0012/L00_gdn_projected.bin)" -eq 65536
+          test "$(stat -c %s cpu-boundary/pos0012/L00_gdn_query.bin)" -eq 8192
+          test "$(stat -c %s cpu-boundary/pos0012/L00_gdn_key.bin)" -eq 8192
+          test "$(stat -c %s cpu-boundary/pos0012/L00_gdn_value.bin)" -eq 24576
+          test "$(stat -c %s cpu-boundary/pos0012/L00_mlp_block_input_fp32.bin)" -eq 10240
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('precision-reference-results/precision_report.json')
+          r=json.loads(p.read_text())
+          assert r['positions']==14 and r['profile']=='v100-phase11-storage'
+          Path('cpu-boundary/report.json').write_text(json.dumps({
+              'positions': r['positions'], 'profile': r['profile'],
+              'mean_kl': r['mean_kl'], 'fp32_decode_worst_kl': r['fp32_decode_worst_kl']
+          }, indent=2)+'\n')
+          print(Path('cpu-boundary/report.json').read_text())
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: cpu-layer0-gdn-conv-14
+          path: |
+            cpu-boundary
+            cpu-boundary.log
+          if-no-files-found: ignore
+          retention-days: 14
