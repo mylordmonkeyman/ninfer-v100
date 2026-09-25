@@ -621,18 +621,24 @@ FP8 GDN fused projection and output codes and their FP32 row scales. The
 comparison validated each object's artifact shape, format, and layout before
 reading its payload. No weight bytes were published as Actions artifacts.
 
-This rules out a source-to-artifact mismatch for these early objects; it does
-not verify every expert or later-layer weight, the device copies, or the
-reduction and rounding rules used when the V100 consumes them. The
-[device-resident audit](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36170022463)
-compiled but did not run: the host failed to reach the existing 28 GiB free
-VRAM threshold during 30 checks. When the GPU is free, a push that changes
-the weight-audit workflow and whose commit message contains
-`[v100-weight-device]` starts the device audit on this work branch. The next
-causal comparison
-should hold the position-12 layer-zero attention output and hyper master
-state equal between CPU and V100, then compare their FP32 MLP mixer before
-the BF16 storage cast. Retain the unchanged Phase 11 qualification gate.
+The [device-resident audit](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36173240610)
+subsequently passed with 32,491 MiB free on the first check. All the same
+16 selected planes matched source bytes after loading onto the V100. The
+previous [attempt](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36170022463)
+timed out in its memory-wait step, but that workflow did not print its
+memory readings; its reason for seeing no passing reading is unknown. A
+[focused runner probe](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36173113607)
+also saw 32,491 MiB free on GPU 0, the V100. The probe itself exited early
+because it queried a GPU 1 that this runner cannot see. The device audit now
+logs each memory reading.
+
+This rules out source-to-artifact and artifact-to-device byte differences
+for these early objects. It does not verify every expert or later-layer
+weight, or the reduction and rounding rules used when the V100 consumes
+them. The next causal comparison should hold the position-12 layer-zero
+attention output and hyper master state equal between CPU and V100, then
+compare their FP32 MLP mixer before the BF16 storage cast. Retain the
+unchanged Phase 11 qualification gate.
 
 ## 1. Environment Setup
 
