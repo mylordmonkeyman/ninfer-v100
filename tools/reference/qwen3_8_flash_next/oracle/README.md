@@ -349,6 +349,20 @@ input and chooses its expert set. The next investigation should isolate
 upstream trajectory differences at the earliest shared input boundary
 and evaluate a controlled precision change across full prefixes.
 
+The [full-prefix FP32 MLP-input ablation](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36090985820)
+and [distribution report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36091445721)
+test a hypothetical precision upgrade: the independent CPU reference keeps
+each MLP block input in FP32 while retaining the other candidate-profile
+casts and recomputing all 14 tokens with persistent rounded state. This
+**worsens** mean oracle KL from 0.031902 to 0.080842 and P99 KL from
+0.287952 to 0.913398; oracle top-1 agreement falls from 14/14 to 13/14.
+Oracle-relative expert-set flips rise from 68 to 81 across 672 cells.
+Although the upgraded CPU reference differs from V100 in fewer expert sets
+(54 instead of 91), it also adopts V100's incorrect position-2, layer-44
+expert substitution. The blanket FP32 MLP-input change is therefore
+rejected as a corrective precision setting for this sample. No deployable
+V100 precision change has been qualified, and §7 thresholds are unchanged.
+
 ### Layer 15 QSA projection replay and input boundary
 
 The [upstream stage extraction](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36020859990)
