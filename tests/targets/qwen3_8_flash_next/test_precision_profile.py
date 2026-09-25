@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] /
 
 from precision_profile import PROFILES, materialize_persistent_states, round_to_bf16
 from precision_metrics import compare_logits
+from run_precision_reference import force_router_membership
 
 
 class PrecisionProfileTest(unittest.TestCase):
@@ -55,6 +56,35 @@ class PrecisionProfileTest(unittest.TestCase):
         comparison = compare_logits(oracle, shifted)
         self.assertLess(comparison["kl"], 1e-12)
         self.assertTrue(comparison["top1_agree"])
+
+    def test_forced_membership_recomputes_candidate_weights(self):
+        class Gate(torch.nn.Module):
+            top_k = 2
+            num_experts = 4
+            norm_topk_prob = True
+
+            def forward(self, hidden):
+                scores = hidden
+                probs = scores.softmax(dim=-1)
+                values, indices = probs.topk(2, dim=-1)
+                return scores, values / values.sum(dim=-1, keepdim=True), indices
+
+        gate = Gate()
+        model = SimpleNamespace(layers=[SimpleNamespace(mlp=SimpleNamespace(gate=gate))])
+        hidden = torch.tensor([[4.0, 3.0, 2.0, 1.0]])
+        original_ids = gate(hidden)[2].clone()
+        originals = force_router_membership(
+            model, {(0, 0): torch.tensor([1, 3])}, [0])
+        try:
+            scores, alpha, ids = gate(hidden)
+            self.assertEqual(ids.tolist(), [[1, 3]])
+            expected = scores.softmax(-1)[:, [1, 3]]
+            expected /= expected.sum(-1, keepdim=True)
+            torch.testing.assert_close(alpha, expected)
+        finally:
+            for module, forward in originals:
+                module.forward = forward
+        torch.testing.assert_close(gate(hidden)[2], original_ids)
 
 
 if __name__ == "__main__":

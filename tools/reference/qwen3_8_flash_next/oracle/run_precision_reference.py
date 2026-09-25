@@ -11,6 +11,7 @@ calibrated with stage traces on the V100.
 import argparse
 import json
 from pathlib import Path
+from types import MethodType
 
 import numpy as np
 import torch
@@ -55,6 +56,46 @@ def read_oracle(root, token_ids):
             raise ValueError(f"truncated oracle logits: {path}")
         result.append((logits, tensors))
     return result
+
+
+def read_router_ids(entries, positions, layers):
+    """Read represented top-k expert IDs for a complete prefix trace."""
+    expected = layers[0].mlp.gate.top_k
+    result = {}
+    for position in range(positions):
+        for layer in range(len(layers)):
+            key = (position, f"L{layer:02d}_moe_router_ids")
+            if key not in entries:
+                raise ValueError(f"router replay lacks stage {key}")
+            values = np.fromfile(entries[key], dtype="<f4")
+            if (values.size != expected or not np.isfinite(values).all() or
+                not np.array_equal(values, values.astype(np.int64).astype(np.float32)) or
+                (values < 0).any() or (values >= layers[layer].mlp.gate.num_experts).any() or
+                len(set(values.tolist())) != expected):
+                raise ValueError(f"invalid router replay expert IDs at {key}")
+            result[position, layer] = torch.from_numpy(values.astype(np.int64))
+    return result
+
+
+def force_router_membership(model, ids, position):
+    """Use saved expert sets, retaining the recomputed candidate router scores."""
+    originals = []
+    for layer, module in enumerate(model.layers):
+        gate = module.mlp.gate
+        original = gate.forward
+        originals.append((gate, original))
+
+        def replay(self, hidden, _original=original, _layer=layer):
+            scores, _alpha, _selected = _original(hidden)
+            chosen = ids[position[0], _layer].to(device=scores.device)
+            chosen = chosen.expand(scores.shape[0], -1)
+            alpha = torch.softmax(scores.float(), dim=-1).gather(-1, chosen)
+            if self.norm_topk_prob:
+                alpha = alpha / alpha.sum(dim=-1, keepdim=True)
+            return scores, alpha.to(scores.dtype), chosen
+
+        gate.forward = MethodType(replay, gate)
+    return originals
 
 
 def _stage_hooks(model, captured, trace_gdn_internals=False,
@@ -129,12 +170,15 @@ def run_decode(model, head, token_ids, profile, out_root,
                trace_gdn_internals=False, trace_hyper_layer0=False,
                trace_mlp_layer0=False, trace_moe_routing_layer0=False,
                trace_gdn_layer1=False, trace_hyper_layer1=False,
-               trace_mlp_raw_layer1=False):
+               trace_mlp_raw_layer1=False, forced_router_ids=None):
     # One token per forward, with one cache for the entire prefix.  Rounding a
     # cache tensor after the update changes all later positions, unlike
     # independently rounding tensors from the completed FP32 oracle.
     captured = {}
     handles = []
+    replay_position = [-1]
+    originals = (force_router_membership(model, forced_router_ids, replay_position)
+                 if forced_router_ids is not None else [])
     if trace_mlp_raw_layer1:
         # Register before the profile's BF16 output hook. This captures the
         # independently computed FP32 mixer result that the V100 diagnostic
@@ -157,6 +201,7 @@ def run_decode(model, head, token_ids, profile, out_root,
     try:
         with torch.inference_mode():
             for position, token_id in enumerate(token_ids):
+                replay_position[0] = position
                 captured.clear()
                 output = model(input_ids=torch.tensor([[token_id]], dtype=torch.long),
                                past_key_values=cache, use_cache=True)
@@ -207,6 +252,8 @@ def run_decode(model, head, token_ids, profile, out_root,
     finally:
         for handle in handles:
             handle.remove()
+        for gate, original in originals:
+            gate.forward = original
     if out_root is not None:
         (out_root / "manifest.json").write_text(json.dumps(manifest, indent=2))
     return logits
@@ -237,6 +284,8 @@ def main():
                         help="collect layer-one hyper state after attention injection")
     parser.add_argument("--trace-mlp-raw-layer1", action="store_true",
                         help="collect layer-one MLP mixer output before BF16 storage")
+    parser.add_argument("--replay-router-ids", action="store_true",
+                        help="recompute complete prefixes with frozen oracle and V100 expert IDs")
     args = parser.parse_args()
     if args.positions < 1:
         parser.error("--positions must be positive")
@@ -320,6 +369,34 @@ def main():
             "cpu_vs_v100_top1_agreement": sum(r["top1_agree"] for r in cpu_v100_rows) / len(cpu_v100_rows),
             "per_position_v100": v100_rows,
             "per_position_cpu_v100": cpu_v100_rows,
+        }
+    if args.replay_router_ids:
+        if args.v100_trace is None:
+            parser.error("--replay-router-ids requires --v100-trace")
+        oracle_entries = {(p, item["name"]): args.fp32_oracle / item["file"]
+                          for p, (_logits, tensors) in enumerate(oracle)
+                          for item in tensors.values()}
+        v100_entries = candidate_entries(args.v100_trace)
+        replays = {}
+        for source, entries in (("oracle", oracle_entries), ("v100", v100_entries)):
+            ids = read_router_ids(entries, args.positions, model.layers)
+            logits = run_decode(model, head, token_ids,
+                                PROFILES["v100-phase11-storage"], None,
+                                forced_router_ids=ids)
+            oracle_rows = [compare_logits(item[0], result)
+                           for item, result in zip(oracle, logits)]
+            v100_rows = [compare_logits(result, gpu)
+                         for result, gpu in zip(logits, candidate_logits)]
+            replays[source] = {
+                "oracle_mean_kl": sum(r["kl"] for r in oracle_rows) / len(oracle_rows),
+                "cpu_vs_v100_mean_kl": sum(r["kl"] for r in v100_rows) / len(v100_rows),
+                "oracle_top1_agreement": sum(r["top1_agree"] for r in oracle_rows) / len(oracle_rows),
+                "per_position_oracle": oracle_rows,
+                "per_position_cpu_vs_v100": v100_rows,
+            }
+        report["router_replay"] = {
+            "meaning": "forced expert membership; weights recomputed from each CPU trajectory's scores",
+            "source": replays,
         }
     (args.out_dir / "precision_report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps({key: report[key] for key in
