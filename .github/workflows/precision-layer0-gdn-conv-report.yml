@@ -32,11 +32,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          run_id=$(gh api -X GET \
-            "repos/${{ github.repository }}/actions/workflows/precision-layer0-gdn-conv-v100.yml/runs" \
-            -f branch=work/precision-matched-reference \
-            --jq '.workflow_runs | map(select(.event == "push")) | .[0].id')
-          test -n "$run_id" && test "$run_id" != null
+          run_id=36182343668
           echo "V100_RUN_ID=$run_id" >> "$GITHUB_ENV"
           echo "Waiting for V100 GDN trace run $run_id"
           gh run watch "$run_id" --repo "${{ github.repository }}" --interval 30 --exit-status
