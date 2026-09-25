@@ -335,6 +335,20 @@ at layer-two MLP input; it jumps to 0.016588 after the layer-two MLP and
 hyper output. This shows how a close expert cutoff amplifies the divergent
 trajectory, but does not identify a faulty earlier operation by itself.
 
+A [second matched-input V100 replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36090530965)
+tests the earlier token position 2 at deep layer 44, where natural V100
+substitutes expert 395 for the oracle/CPU expert 359. Injecting the CPU
+profile's own `L44_mlp_block_input` restores the oracle/CPU expert set;
+injecting the independent oracle input does the same. Both three-prefix
+diagnostics still return the unchanged Phase 11 CTest gate-failure code.
+Their short-prefix mean oracle KL values are 0.000086 and 0.000064,
+respectively, and do not represent the complete Phase 11 qualification.
+These two matched-input experiments bracket one early and one deep
+V100-only router flip: in both, the router accepts the independent CPU
+input and chooses its expert set. The next investigation should isolate
+upstream trajectory differences at the earliest shared input boundary
+and evaluate a controlled precision change across full prefixes.
+
 ### Layer 15 QSA projection replay and input boundary
 
 The [upstream stage extraction](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36020859990)
