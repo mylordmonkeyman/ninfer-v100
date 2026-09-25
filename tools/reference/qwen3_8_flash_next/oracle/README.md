@@ -480,6 +480,38 @@ precision match or an acceptance floor. Remaining calibration should compare
 the QSA input path and other internal materialization boundaries before
 changing the Phase 11 gate.
 
+### Complete V100 oracle-membership replay (14 positions)
+
+A [same-build V100 diagnostic](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36140377434)
+ran the natural path and then replayed all 672 expert sets from the frozen
+independent stage trace. At each router the replay retained the V100's own
+scores, ordered the ten oracle-selected IDs by those scores, and recomputed
+softmax weights from those scores; the shared expert and all other arithmetic
+remained on the actual V100 engine. Each replayed ID and weight was checked on
+the device before proceeding. Its CTest passed the original short-sample gate.
+
+| V100 measurement | Natural routing | Oracle-membership replay |
+| --- | ---: | ---: |
+| Mean oracle logits KL | 0.05775208 | 0.00047948 |
+| P99 oracle logits KL | 0.61541675 | 0.00462245 |
+| Top-1 agreement | 13 / 14 | 14 / 14 |
+| Relative mean NLL delta | 0.00714438 | 0.00121680 |
+| Position-13 oracle logits KL | 0.61541675 | 0.00462245 |
+
+This establishes that the real V100 engine's arithmetic reaches the §7
+logit thresholds for these 14 prefixes **when expert membership is supplied
+by the oracle**. No oracle IDs are available during serving. The uninjected
+candidate still fails and the required longer teacher-forced qualification
+has not run. This experiment isolates discrete membership selection as the
+dominant cause of the observed short-sample failure; it does not establish
+whether the upstream router-input differences arise exclusively from
+rounding/format conversion or include an engine implementation error.
+
+The next actionable check is the first CPU-to-V100 difference between
+position-12 layer-zero attention input and MLP input, including GDN output
+and hyper-connection boundaries. Any candidate correction must run across
+complete prefixes without oracle IDs before qualification can be claimed.
+
 ### Earliest V100-only routing change: position 12, layer 2
 
 The [14-position stage comparison](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36055511685)
