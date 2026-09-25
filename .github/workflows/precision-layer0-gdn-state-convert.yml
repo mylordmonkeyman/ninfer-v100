@@ -1,0 +1,69 @@
+name: Phase 11 Convert CPU GDN State to V100 Layout
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-layer0-gdn-state-convert.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  convert:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-layer0-gdn-prior-state-shape
+          run-id: 36183922098
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-layer0-matched-state-13
+          run-id: 36184223882
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: gpu
+      - name: Transpose independent CPU prior state and verify natural baseline
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee state-layout-validation.txt
+          from array import array
+          from pathlib import Path
+          from math import fsum,sqrt
+          name='L00_gdn_ssm_source_state.bin'
+          cpu_path=next(Path('cpu').rglob(name))
+          gpu_path=next(p for p in Path('gpu').rglob(name)
+                        if p.parent.parent.name=='baseline')
+          def read(path):
+              data=array('f');data.frombytes(path.read_bytes());return data
+          cpu=read(cpu_path);gpu=read(gpu_path)
+          assert len(cpu)==len(gpu)==48*128*128
+          transformed=array('f',(cpu[h*16384+j*128+i]
+                                 for h in range(48)
+                                 for i in range(128)
+                                 for j in range(128)))
+          nrmse=sqrt(fsum((float(a)-float(b))**2
+                          for a,b in zip(transformed,gpu))/
+                     fsum(float(a)**2 for a in transformed))
+          assert nrmse<2e-5, nrmse
+          target=Path('cpu-state-v100-layout/pos0012')/name
+          target.parent.mkdir(parents=True,exist_ok=True)
+          target.write_bytes(transformed.tobytes())
+          assert target.stat().st_size==3145728
+          print('natural_state_nrmse_after_transpose',nrmse)
+          print('converted_state_bytes',target.stat().st_size)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cpu-layer0-gdn-state-v100-layout-13
+          path: |
+            cpu-state-v100-layout
+            state-layout-validation.txt
+          retention-days: 14
