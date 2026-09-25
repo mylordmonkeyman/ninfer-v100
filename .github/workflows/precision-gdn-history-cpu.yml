@@ -1,0 +1,167 @@
+name: Phase 11 Layer Zero GDN History Diagnostic
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-gdn-history-cpu.yml
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: phase11-cpu-gdn-history-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  cpu-reference-14:
+    name: CPU-only 14-position reference
+    runs-on:
+      - self-hosted
+      - v100
+      - sm70
+      - cuda-12-8
+      - ninfer-phase11
+    timeout-minutes: 360
+    env:
+      CUDA_VISIBLE_DEVICES: ""
+      NINFER_ORACLE_DETERMINISTIC: "1"
+      NINFER_ORACLE_THREADS: "16"
+      OMP_NUM_THREADS: "16"
+      MKL_NUM_THREADS: "16"
+      OPENBLAS_NUM_THREADS: "16"
+      NUMEXPR_NUM_THREADS: "16"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Download completed V100 prefix trace
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-gdn-layer0-calibration-14
+          run-id: 36061122886
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: v100-input
+
+      - name: Locate read-only input assets and CPU Python
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Mounted data path availability:'
+          for root in /models /oracle /srv/ninfer/source /srv/ninfer/oracle \
+              /home/runner/ninfer-v100; do
+            if [[ -d "$root" ]]; then
+              echo "Directory: $root"
+              find "$root" -maxdepth 3 -type f \( -name model.safetensors.index.json \
+                  -o -name 'shard_*.safetensors' -o -name token_ids.json \) \
+                  -print -quit 2>/dev/null || true
+            else
+              echo "Absent: $root"
+            fi
+          done
+          model_dir="${NINFER_PHASE11_MODEL_DIR:-/srv/ninfer/source/mixed}"
+          ple_dir="${NINFER_PHASE11_PLE_DIR:-/srv/ninfer/source/ple/ples_int4}"
+          oracle_dir="${NINFER_PHASE11_STAGE_ORACLE_ROOT:-/oracle/phase11-stage-trace14}"
+          ids_file="${NINFER_PHASE11_IDS_FILE:-/oracle/phase11/token_ids.json}"
+          missing=0
+          for path in "$model_dir/model.safetensors.index.json" "$ple_dir" \
+              "$oracle_dir/manifest.json" "$ids_file"; do
+            if [[ ! -r "$path" ]]; then
+              echo "::error::Missing readable CPU reference input: $path"
+              missing=1
+              continue
+            fi
+            echo "Readable: $path"
+          done
+          python_bin="${NINFER_PHASE11_PYTHON:-}"
+          if [[ -z "$python_bin" ]]; then
+            for candidate in "$GITHUB_WORKSPACE/venv-oracle/bin/python" \
+                "$HOME/ninfer-v100/venv-oracle/bin/python" \
+                /srv/ninfer/venv-oracle/bin/python python3; do
+              if command -v "$candidate" >/dev/null 2>&1 && \
+                  "$candidate" -c 'import numpy, torch, transformers, safetensors' >/dev/null 2>&1; then
+                python_bin="$candidate"
+                break
+              fi
+            done
+          fi
+          if (( missing )); then exit 1; fi
+          test -s "$GITHUB_WORKSPACE/v100-input/candidate-stage/stages.jsonl"
+          {
+            echo "PRECISION_PYTHON=$python_bin"
+            echo "PRECISION_MODEL_DIR=$model_dir"
+            echo "PRECISION_PLE_DIR=$ple_dir"
+            echo "PRECISION_ORACLE_DIR=$oracle_dir"
+            echo "PRECISION_IDS_FILE=$ids_file"
+          } >> "$GITHUB_ENV"
+
+      - name: Prepare CPU Python if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$PRECISION_PYTHON" ]]; then
+            echo "CPU Python: $PRECISION_PYTHON"
+            exit 0
+          fi
+          python3 -m venv "$GITHUB_WORKSPACE/precision-venv"
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            torch --index-url https://download.pytorch.org/whl/cpu
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            numpy safetensors 'transformers>=5.16,<6'
+          echo "PRECISION_PYTHON=$GITHUB_WORKSPACE/precision-venv/bin/python" >> "$GITHUB_ENV"
+
+      - name: Recompute three 14-position prefixes and compare stages
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PRECISION_PYTHON" tests/targets/qwen3_8_flash_next/test_precision_profile.py
+          "$PRECISION_PYTHON" tests/targets/qwen3_8_flash_next/test_precision_trace_compare.py
+          "$PRECISION_PYTHON" tools/reference/qwen3_8_flash_next/oracle/run_precision_reference.py \
+            --model-dir "$PRECISION_MODEL_DIR" \
+            --ple-dir "$PRECISION_PLE_DIR" \
+            --ids-file "$PRECISION_IDS_FILE" \
+            --fp32-oracle "$PRECISION_ORACLE_DIR" \
+            --positions 14 \
+            --trace-gdn-internals \
+            --out-dir "$GITHUB_WORKSPACE/precision-reference-results"
+
+      - name: Compare early GDN history boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PRECISION_PYTHON" - <<'PYREPORT'
+          import numpy as np
+          from pathlib import Path
+          root = Path('precision-reference-results')
+          gpu = Path('v100-input/candidate-stage')
+          stages = ('attn_block_input', 'gdn_z', 'gdn_g', 'gdn_beta',
+                    'gdn_recurrent_output', 'gdn_gated_output',
+                    'attn_block_output', 'mlp_block_input')
+          def nrmse(a, b):
+              assert a.size == b.size and a.size > 0
+              return np.sqrt(np.mean((a-b)**2)) / max(np.sqrt(np.mean(a*a)), 1e-12)
+          for pos in (0, 2, 12, 13):
+              for suffix in stages:
+                  name = 'L00_' + suffix
+                  relative = f'pos{pos:04d}/{name}.bin'
+                  cpu = np.fromfile(root/'v100-phase11-storage'/relative, dtype='<f4').astype('f8')
+                  v100 = np.fromfile(gpu/relative, dtype='<f4').astype('f8')
+                  oracle = np.fromfile(root/'fp32'/relative, dtype='<f4').astype('f8')
+                  assert np.isfinite(cpu).all() and np.isfinite(v100).all()
+                  print(f'GDN position={pos} stage={name} cpu-v100={nrmse(cpu,v100):.9g} '
+                        f'cpu-fp32={nrmse(oracle,cpu):.9g} '
+                        f'v100-fp32={nrmse(oracle,v100):.9g}', flush=True)
+          PYREPORT
+
+      - name: Upload CPU results and mismatch diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cpu-gdn-history-reference-14
+          path: precision-reference-results
+          if-no-files-found: ignore
+          retention-days: 14
