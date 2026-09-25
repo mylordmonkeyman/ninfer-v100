@@ -1,0 +1,90 @@
+name: Phase 11 Current Router Divergence Map
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-router-boundary-current.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Download frozen CPU and V100 prefixes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36087743583 --repo "$GITHUB_REPOSITORY" \
+            --name cpu-router-replay-14 --dir cpu
+          gh run download 36078905618 --repo "$GITHUB_REPOSITORY" \
+            --name v100-mlp-raw-layer1-14 --dir gpu
+      - name: Locate the first divergent router decisions and cutoff gaps
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee current-router-boundaries.txt
+          import json
+          import struct
+          from collections import Counter
+          from pathlib import Path
+
+          def entries(root):
+              manifest = json.loads((root / 'manifest.json').read_text())
+              return {(row['position'], stage['name']): root / stage['file']
+                      for row in manifest['positions'] for stage in row['tensors']}
+
+          def candidate(root):
+              return {(row['position'], row['name']): root / row['file']
+                      for row in map(json.loads, (root / 'stages.jsonl').read_text().splitlines())}
+
+          def floats(path):
+              data = path.read_bytes()
+              assert data and len(data) % 4 == 0
+              return [v for (v,) in struct.iter_unpack('<f', data)]
+
+          fp32 = entries(Path('cpu/fp32'))
+          cpu = entries(Path('cpu/v100-phase11-storage'))
+          gpu = candidate(Path('gpu/candidate-stage'))
+          counts = Counter()
+          first = {}
+          for pos in range(14):
+              for layer in range(48):
+                  stem = f'L{layer:02d}_moe_router_'
+                  key_ids = (pos, stem + 'ids')
+                  sets = [set(map(int, floats(source[key_ids]))) for source in (fp32, cpu, gpu)]
+                  oracle, reference, candidate_set = sets
+                  if len(oracle) != len(reference) or len(oracle) != len(candidate_set):
+                      raise ValueError(f'duplicate router ID at {pos}, {layer}')
+                  if reference != candidate_set:
+                      counts['cpu_v100'] += 1
+                      if pos not in first:
+                          def margin(source):
+                              scores = sorted(floats(source[pos, stem + 'scores']), reverse=True)
+                              k = len(oracle)
+                              return scores[k-1] - scores[k]
+                          first[pos] = (layer, sorted(oracle), sorted(reference),
+                                        sorted(candidate_set), margin(cpu), margin(gpu))
+                  counts['shared_oracle_flip'] += reference != oracle and candidate_set != oracle
+                  counts['cpu_only_oracle_flip'] += reference != oracle and candidate_set == oracle
+                  counts['v100_only_oracle_flip'] += reference == oracle and candidate_set != oracle
+          print('COUNTS', dict(counts))
+          for pos in range(14):
+              if pos in first:
+                  layer, oracle, reference, candidate_set, cpu_gap, gpu_gap = first[pos]
+                  print('FIRST', pos, 'layer', layer, 'oracle', oracle,
+                        'cpu', reference, 'v100', candidate_set,
+                        'cpu_cutoff_gap', cpu_gap, 'v100_cutoff_gap', gpu_gap)
+              else:
+                  print('FIRST', pos, 'none')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: current-router-boundaries
+          path: current-router-boundaries.txt
+          retention-days: 14
