@@ -758,6 +758,16 @@ V100 implementation. These measurements prioritize calibrating early
 CPU-only router decisions and testing whether a deployable precision change
 improves the full prefixes; they do not relax the §7 gate.
 
+The [single-layer FP32 MLP-input ablation](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36186371670)
+recomputes all 14 CPU prefixes with only layer one's MLP input kept in
+FP32. It restores the oracle layer-five expert set at position 10 and lowers
+that position's oracle KL from 0.115576 to 0.104652. Nevertheless, mean
+oracle KL worsens from 0.031902 to 0.089724, top-1 agreement falls from
+14/14 to 12/14, and position-13 KL rises from 0.313710 to 1.101900.
+This narrow materialization change is rejected as a corrective precision
+policy for the sample, just as the earlier all-layer FP32 input ablation was.
+A locally restored expert set does not establish a full-prefix pass.
+
 ## 1. Environment Setup
 
 Run the setup script using Python 3.14 to create the isolated virtual environment:
