@@ -172,6 +172,7 @@ jobs:
                                            for i in range(2560)))/max(math.sqrt(math.fsum(float(e)**2 for e in embedding)),1e-12)
                   print('stream',stream,'gate',float(gates[stream]),
                         'update_residual',resid,'prestate_vs_embedding',initial,flush=True)
+          PYREPORT
           # Same-run CPU stages, frozen V100 tensor, and actual CPU gate values.
           python3 - <<'PYCOMPARE' >> cpu-injection-report.txt
           from array import array
