@@ -1,5 +1,8 @@
 name: Phase 11 V100 Early GDN Replay
 
+# Current 14-prefix comparison: position 12's first V100-only expert-set
+# divergence is L02. The three injection points bracket this boundary.
+
 on:
   push:
     branches:
