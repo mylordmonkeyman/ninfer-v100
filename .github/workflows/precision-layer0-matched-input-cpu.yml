@@ -33,7 +33,8 @@ jobs:
           test -d /srv/ninfer/source/ple/ples_int4
           test -s /oracle/phase11/token_ids.json
           test -s /oracle/phase11-stage-trace14/manifest.json
-          for candidate in "$HOME/ninfer-v100/venv-oracle/bin/python" \
+          for candidate in "$GITHUB_WORKSPACE/venv-oracle/bin/python" \
+              "$HOME/ninfer-v100/venv-oracle/bin/python" \
               /srv/ninfer/venv-oracle/bin/python python3; do
             if command -v "$candidate" >/dev/null 2>&1 && \
                 "$candidate" -c 'import numpy, torch, transformers, safetensors' \
@@ -42,8 +43,17 @@ jobs:
               exit 0
             fi
           done
-          echo '::error::Pinned CPU oracle Python is unavailable'
-          exit 1
+          echo 'CPU_PYTHON=' >> "$GITHUB_ENV"
+      - name: Prepare CPU Python if needed
+        run: |
+          set -euo pipefail
+          if [[ -n "$CPU_PYTHON" ]]; then exit 0; fi
+          python3 -m venv "$GITHUB_WORKSPACE/precision-venv"
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            torch --index-url https://download.pytorch.org/whl/cpu
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            numpy safetensors 'transformers>=5.16,<6'
+          echo "CPU_PYTHON=$GITHUB_WORKSPACE/precision-venv/bin/python" >> "$GITHUB_ENV"
       - name: Recompute current 14-position CPU precision profile
         run: |
           set -euo pipefail
