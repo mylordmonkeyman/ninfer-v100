@@ -805,6 +805,11 @@ int main() {
             std::getenv("NINFER_PHASE11_ORACLE_INJECT_STAGE");
         const std::string oracle_inject_stage =
             oracle_inject_stage_env != nullptr ? oracle_inject_stage_env : "";
+        const char* inject_source_env =
+            std::getenv("NINFER_PHASE11_INJECT_SOURCE_ROOT");
+        const fs::path inject_source_root =
+            inject_source_env != nullptr && inject_source_env[0] != '\0'
+                ? fs::path(inject_source_env) : fs::path{};
         const char* second_inject_env =
             std::getenv("NINFER_PHASE11_ORACLE_INJECT_SECOND_STAGE");
         const std::string second_inject_stage =
@@ -814,6 +819,10 @@ int main() {
         if (!oracle_inject_stage.empty() && !stage_trace_enabled) {
             throw std::invalid_argument(
                 "NINFER_PHASE11_ORACLE_INJECT_STAGE requires a stage oracle root");
+        }
+        if (!inject_source_root.empty() && oracle_inject_stage.empty()) {
+            throw std::invalid_argument(
+                "NINFER_PHASE11_INJECT_SOURCE_ROOT requires an injection stage");
         }
         if (oracle_inject_all_positions &&
             (!stage_trace_all_positions || oracle_inject_stage.empty())) {
@@ -1524,10 +1533,30 @@ int main() {
                     throw std::invalid_argument(
                         "Phase 11 oracle injection does not support integer stages");
                 }
+                std::vector<float> injected = expected;
+                if (inject_first && !inject_source_root.empty()) {
+                    const fs::path source_path = inject_source_root / pos_dir /
+                        (oracle_stage_name + ".bin");
+                    if (!fs::is_regular_file(source_path) ||
+                        fs::file_size(source_path) != expected_bytes) {
+                        throw std::runtime_error(
+                            "Phase 11 injection source missing or shape mismatch: " +
+                            source_path.string());
+                    }
+                    std::ifstream source(source_path, std::ios::binary);
+                    source.read(reinterpret_cast<char*>(injected.data()),
+                                static_cast<std::streamsize>(expected_bytes));
+                    if (!source || !std::all_of(injected.begin(), injected.end(),
+                                                [](float value) { return std::isfinite(value); })) {
+                        throw std::runtime_error(
+                            "Phase 11 injection source unreadable or nonfinite: " +
+                            source_path.string());
+                    }
+                }
                 if (tensor.dtype == ninfer::DType::BF16) {
                     std::vector<std::uint16_t> words(count);
                     for (std::size_t i = 0; i < count; ++i) {
-                        words[i] = round_fp32_to_bf16(expected[i]);
+                        words[i] = round_fp32_to_bf16(injected[i]);
                     }
                     CUDA_CHECK(cudaMemcpy(
                         tensor.data, words.data(),
@@ -1542,14 +1571,14 @@ int main() {
                     }
                 } else if (tensor.dtype == ninfer::DType::FP32) {
                     CUDA_CHECK(cudaMemcpy(
-                        tensor.data, expected.data(),
+                        tensor.data, injected.data(),
                         count * sizeof(float),
                         cudaMemcpyHostToDevice));
                     std::vector<float> verified(count);
                     CUDA_CHECK(cudaMemcpy(verified.data(), tensor.data,
                                           count * sizeof(float),
                                           cudaMemcpyDeviceToHost));
-                    if (!std::equal(verified.begin(), verified.end(), expected.begin(),
+                    if (!std::equal(verified.begin(), verified.end(), injected.begin(),
                                     [](float a, float b) {
                                         return std::bit_cast<std::uint32_t>(a) ==
                                                std::bit_cast<std::uint32_t>(b);
@@ -1563,6 +1592,8 @@ int main() {
                 std::cout << "phase11.oracle_injection.position="
                           << current_stage_trace_position
                           << " stage=" << name
+                          << " source=" << (inject_first && !inject_source_root.empty()
+                                              ? "independent-cpu" : "oracle")
                           << " count=" << count << '\n'
                           << std::flush;
             }
