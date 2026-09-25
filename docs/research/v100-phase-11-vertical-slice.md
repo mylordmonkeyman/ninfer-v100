@@ -351,6 +351,35 @@ margin (`analyze_flip_margins.py`, run 35981902518):
 - **Wide-margin tier.** Zero flips with margin ≥ 20; all 35 tier
   positions agree on top-1.
 
+### Component code review (static, contract vs. implementation)
+
+In parallel with the exact-input audits, a line-level static review of the
+Phase 11 decode-path kernels checked each formula against
+`docs/maintainer/qwen3.8-flash-next-model.md` and the pinned HF source
+(transformers @ 281dd533, `Qwen4ExpTextGatedResidual`,
+`Qwen4ExpTextQSAIndexer`, `apply_interleaved_mrope`). No production-path
+deviation was found:
+
+| family | file | verdict | key evidence |
+|---|---|---|---|
+| CPU expert reference | `cpu_expert_reference.cpp` | correct | NVFP4 scale swizzle is the standard 128×4 block layout and matches producer/consumer; E2M1/E4M3 decode tables are IEEE/NVIDIA-exact; RNE with the add-half-ULP tie idiom; W4A16 (activations unquantized, the documented "reference" profile); gate/up/down layout 1280×2560 / 2560×640; deterministic fixed-order FMA accumulation |
+| QSA indexer | `qsa_indexer_kernels.cu` | correct | 640-row projection (4×128 queries + 1×128 raw key); RMSNorm (1+w, eps 1e-6); rotate-half on the first 64 dims, θ = 1e7; interleaved MRoPE axis = pair%3, which exactly equals HF's `apply_interleaved_mrope` with sections [11,11,10] on the 32-pair grid; block key = FP32 mean of the 4 BF16 raw keys → BF16 → normalized → rotated at the block's first position, stored once in the paged plane at completion; score = Σ_heads relu(q·k)/√128 with -inf padding for incomplete blocks; identity selection at ≤ 512 complete blocks; top-512 via packed (score-bits, ~id) keys is deterministic with lower-block-id tie wins; the attention consumer expands the selection and appends the causal tail after it, matching HF's `cat([selected, tail])` |
+| hyper connections | `hyper_connection_kernels.cu` | correct | line-by-line match with HF: 4×2560 group RMSNorm (1+w, eps 1e-6), `low_rank = silu(W_down(N)/4)` → BF16 (320 rows), `M = sigmoid(W_up(low_rank))` (sigmoid after W_up, no /4 there), `block_input = mean_stream(M ⊙ N)` (×0.25), `injection = 2·sigmoid(W_inject(N)/4)` as 4 scalars per token (W_inject: 10240 → 4, binding-verified), `H' = H + block_output ⊙ injection` as a fused FMA with a single BF16 store; the final/MTP mixer omits W_inject; 4× embedding repeat initializes the hyper state; legacy/fused decode routes are bit-exact to each other and to production in `test_hyper_connection.cpp`, including CUDA-graph replay |
+| MoE host orchestration | `moe.cpp` | correct | GPU router + shared expert, D2H rendezvous of input/ids/alpha, per-token private CPU expert outputs from a semaphore-bounded 32-worker pool, then a serial routed accumulation in fixed `token*640 + i` FMA order (deterministic merge) |
+| GDN, QSA attention, LM head, PLE | `gdn_kernels.cu`, `qsa_attention_kernels.cu`, … | behavioral evidence stands | the static-review agent results for these families expired unconsumed; the exact-input audits above are the evidence: GDN full replay 0.00065, conv history isolated, QSA sparse kernel FP64-oracle-validated, o_proj host-FP64 exonerated, LM head 1.27× floor, PLE 14/14 injections |
+
+Two recorded non-findings:
+
+- The non-Volta prefill indexer sort (`sort_pairs_descending` on raw FP32
+  score keys) does not guarantee the documented lower-block-id tie contract;
+  it affects only the sm_120a prefill path (not this branch's build) and
+  requires an exact FP32 score tie.
+- The kernels compute RoPE cos/sin in FP32 and round only at the store; HF
+  casts cos/sin to BF16 before the multiply. The kernel is a
+  strictly-higher-precision implementation profile of the same formula (the
+  oracle's `apply_text_qsa_rope` also computes in FP32).
+
+
 
 ### Proposed relaxed gate (v2, after the 4,096-position measurement)
 
