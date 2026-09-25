@@ -1,0 +1,258 @@
+name: Phase 11 Layer One Unrounded MLP Calibration
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-mlp-raw-layer1.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  trace-14:
+    name: Compare one V100 14-position trace
+    runs-on:
+      - self-hosted
+      - v100
+      - sm70
+      - cuda-12-8
+      - ninfer-phase11
+    timeout-minutes: 180
+    env:
+      NINFER_ORACLE_DETERMINISTIC: "1"
+      NINFER_ORACLE_THREADS: "16"
+      OMP_NUM_THREADS: "16"
+      MKL_NUM_THREADS: "16"
+      OPENBLAS_NUM_THREADS: "16"
+      NUMEXPR_NUM_THREADS: "16"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Locate read-only input assets and CPU Python
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Mounted data path availability:'
+          for root in /models /oracle /srv/ninfer/source /srv/ninfer/oracle \
+              /home/runner/ninfer-v100; do
+            if [[ -d "$root" ]]; then
+              echo "Directory: $root"
+              find "$root" -maxdepth 3 -type f \( -name model.safetensors.index.json \
+                  -o -name 'shard_*.safetensors' -o -name token_ids.json \) \
+                  -print -quit 2>/dev/null || true
+            else
+              echo "Absent: $root"
+            fi
+          done
+          model_dir="${NINFER_PHASE11_MODEL_DIR:-/srv/ninfer/source/mixed}"
+          ple_dir="${NINFER_PHASE11_PLE_DIR:-/srv/ninfer/source/ple/ples_int4}"
+          oracle_dir="${NINFER_PHASE11_STAGE_ORACLE_ROOT:-/oracle/phase11-stage-trace14}"
+          ids_file="${NINFER_PHASE11_IDS_FILE:-/oracle/phase11/token_ids.json}"
+          missing=0
+          for path in "$model_dir/model.safetensors.index.json" "$ple_dir" \
+              "$oracle_dir/manifest.json" "$ids_file"; do
+            if [[ ! -r "$path" ]]; then
+              echo "::error::Missing readable CPU reference input: $path"
+              missing=1
+              continue
+            fi
+            echo "Readable: $path"
+          done
+          python_bin="${NINFER_PHASE11_PYTHON:-}"
+          if [[ -z "$python_bin" ]]; then
+            for candidate in "$GITHUB_WORKSPACE/venv-oracle/bin/python" \
+                "$HOME/ninfer-v100/venv-oracle/bin/python" \
+                /srv/ninfer/venv-oracle/bin/python python3; do
+              if command -v "$candidate" >/dev/null 2>&1 && \
+                  "$candidate" -c 'import numpy, torch, transformers, safetensors' >/dev/null 2>&1; then
+                python_bin="$candidate"
+                break
+              fi
+            done
+          fi
+          if (( missing )); then exit 1; fi
+          {
+            echo "PRECISION_PYTHON=$python_bin"
+            echo "PRECISION_MODEL_DIR=$model_dir"
+            echo "PRECISION_PLE_DIR=$ple_dir"
+            echo "PRECISION_ORACLE_DIR=$oracle_dir"
+            echo "PRECISION_IDS_FILE=$ids_file"
+          } >> "$GITHUB_ENV"
+
+      - name: Prepare CPU Python if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$PRECISION_PYTHON" ]]; then
+            echo "CPU Python: $PRECISION_PYTHON"
+            exit 0
+          fi
+          python3 -m venv "$GITHUB_WORKSPACE/precision-venv"
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            torch --index-url https://download.pytorch.org/whl/cpu
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            numpy safetensors 'transformers>=5.16,<6'
+          echo "PRECISION_PYTHON=$GITHUB_WORKSPACE/precision-venv/bin/python" >> "$GITHUB_ENV"
+
+      - name: Recompute sequential CPU reference and layer-one GDN output
+        shell: bash
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+        run: |
+          set -euo pipefail
+          "$PRECISION_PYTHON" tests/targets/qwen3_8_flash_next/test_precision_profile.py
+          "$PRECISION_PYTHON" tests/targets/qwen3_8_flash_next/test_precision_trace_compare.py
+          "$PRECISION_PYTHON" tools/reference/qwen3_8_flash_next/oracle/run_precision_reference.py \
+            --model-dir "$PRECISION_MODEL_DIR" \
+            --ple-dir "$PRECISION_PLE_DIR" \
+            --ids-file "$PRECISION_IDS_FILE" \
+            --fp32-oracle "$PRECISION_ORACLE_DIR" \
+            --positions 14 \
+            --trace-mlp-layer0 \
+            --trace-moe-routing-layer0 \
+            --trace-gdn-layer1 \
+            --trace-hyper-layer1 \
+            --trace-mlp-raw-layer1 \
+            --out-dir "$GITHUB_WORKSPACE/cpu-reference"
+
+      - name: Compile only the V100 real-model trace target
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-precision-v100 -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF \
+            -DBUILD_TESTING=ON
+          cmake --build build-precision-v100 -j --target \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test
+
+      - name: Wait for model residency without evicting other GPU work
+        shell: bash
+        timeout-minutes: 19
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free \
+              --format=csv,noheader,nounits | tr -d '[:space:]')
+            echo "V100 free memory: ${free_mib} MiB (attempt ${attempt}/30)"
+            if (( free_mib >= 28000 )); then exit 0; fi
+            if (( attempt < 30 )); then sleep 30; fi
+          done
+          echo '::error::V100 needs at least 28000 MiB free for this model test'
+          exit 1
+
+      - name: Dump pre-injection candidate stages for all 14 positions
+        shell: bash
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "14"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace14
+          NINFER_PHASE11_STAGE_ORACLE_POSITION: "13"
+          NINFER_PHASE11_STAGE_ORACLE_ALL_POSITIONS: "1"
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_PHASE11_TRACE_MLP_LAYER0: "1"
+          NINFER_PHASE11_TRACE_MOE_ROUTING_LAYER0: "1"
+          NINFER_PHASE11_TRACE_GDN_LAYER1: "1"
+          NINFER_PHASE11_TRACE_HYPER_LAYER1: "1"
+          NINFER_PHASE11_TRACE_MLP_RAW_LAYER1: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
+        run: |
+          set -euo pipefail
+          export NINFER_PHASE11_CANDIDATE_TRACE_ROOT="$GITHUB_WORKSPACE/candidate-stage"
+          set +e
+          ctest --test-dir build-precision-v100 -V \
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+            > v100-trace.log 2>&1
+          test_status=$?
+          set -e
+          echo "V100 diagnostic test exit status: $test_status"
+          rg 'phase11.(top1_agreement|mean_kl|error_decomposition.position=13)' \
+            v100-trace.log | tail -12 || true
+          test -s candidate-stage/stages.jsonl
+          stage_rows=$(wc -l < candidate-stage/stages.jsonl)
+          echo "Recorded $stage_rows selected stages"
+          test "$stage_rows" -eq 3500
+
+      - name: Compare layer-one GDN with CPU and FP32 oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          records = [json.loads(line) for line in Path('candidate-stage/stages.jsonl').read_text().splitlines()]
+          selected = {(r['position'], r['name']) for r in records}
+          for folder in ('cpu-reference/fp32', 'cpu-reference/v100-phase11-storage'):
+              path = Path(folder) / 'manifest.json'
+              manifest = json.loads(path.read_text())
+              for position in manifest['positions']:
+                  position['tensors'] = [t for t in position['tensors']
+                                         if (position['position'], t['name']) in selected]
+              path.write_text(json.dumps(manifest))
+          PY
+          python3 -m venv compare-venv
+          compare-venv/bin/pip install numpy
+          mkdir -p v100-comparison
+          compare-venv/bin/python \
+            tools/reference/qwen3_8_flash_next/oracle/compare_precision_traces.py \
+            --oracle /oracle/phase11-stage-trace14 \
+            --cpu cpu-reference/v100-phase11-storage \
+            --v100 candidate-stage \
+            --incremental-fp32 cpu-reference/fp32 \
+            --out-dir v100-comparison \
+            | tee v100-comparison/summary.log
+          python3 - <<'PY'
+          import csv
+          from pathlib import Path
+          rows = {(int(r['position']), r['stage']): r for r in
+                  csv.DictReader(Path('v100-comparison/stage_comparison.csv').open())}
+          names = ('attn_block_input', 'attn_block_output', 'hyper_after_attn', 'mlp_block_input_fp32', 'mlp_block_input',
+                   'hyper_after_mlp')
+          for pos in (0, 2, 12, 13):
+              print('Unrounded MLP layer-one calibration position', pos)
+              for suffix in names:
+                  r = rows[pos, 'L01_' + suffix]
+                  print(suffix, 'cpu-oracle', r['cpu_vs_oracle_nrmse'],
+                        'gpu-oracle', r['v100_vs_oracle_nrmse'],
+                        'cpu-gpu', r['v100_vs_cpu_nrmse'])
+          PY
+
+      - name: Upload trace and comparison
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: v100-mlp-raw-layer1-14
+          path: |
+            candidate-stage
+            v100-comparison
+            cpu-reference/precision_report.json
+            v100-trace.log
+          if-no-files-found: ignore
+          retention-days: 14

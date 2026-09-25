@@ -128,12 +128,25 @@ def _stage_hooks(model, captured, trace_gdn_internals=False,
 def run_decode(model, head, token_ids, profile, out_root,
                trace_gdn_internals=False, trace_hyper_layer0=False,
                trace_mlp_layer0=False, trace_moe_routing_layer0=False,
-               trace_gdn_layer1=False, trace_hyper_layer1=False):
+               trace_gdn_layer1=False, trace_hyper_layer1=False,
+               trace_mlp_raw_layer1=False):
     # One token per forward, with one cache for the entire prefix.  Rounding a
     # cache tensor after the update changes all later positions, unlike
     # independently rounding tensors from the completed FP32 oracle.
     captured = {}
-    handles = install_projection_boundaries(model, profile)
+    handles = []
+    if trace_mlp_raw_layer1:
+        # Register before the profile's BF16 output hook. This captures the
+        # independently computed FP32 mixer result that the V100 diagnostic
+        # emits as L01_mlp_block_input_fp32 before storing block_input.
+        def capture_unrounded_mlp(_module, _args, output):
+            captured["L01_mlp_block_input_fp32"] = (
+                output[0].detach().to(torch.float32).cpu().clone()
+            )
+
+        handles.append(model.layers[1].mlp_hyper_connection.register_forward_hook(
+            capture_unrounded_mlp))
+    handles.extend(install_projection_boundaries(model, profile))
     handles.extend(_stage_hooks(model, captured, trace_gdn_internals,
                                 trace_hyper_layer0, trace_mlp_layer0,
                                 trace_moe_routing_layer0, trace_gdn_layer1,
@@ -222,6 +235,8 @@ def main():
                         help="collect layer-one GDN output before hyper injection")
     parser.add_argument("--trace-hyper-layer1", action="store_true",
                         help="collect layer-one hyper state after attention injection")
+    parser.add_argument("--trace-mlp-raw-layer1", action="store_true",
+                        help="collect layer-one MLP mixer output before BF16 storage")
     args = parser.parse_args()
     if args.positions < 1:
         parser.error("--positions must be positive")
@@ -237,7 +252,8 @@ def main():
                       trace_mlp_layer0=args.trace_mlp_layer0,
                       trace_moe_routing_layer0=args.trace_moe_routing_layer0,
                       trace_gdn_layer1=args.trace_gdn_layer1,
-                      trace_hyper_layer1=args.trace_hyper_layer1)
+                      trace_hyper_layer1=args.trace_hyper_layer1,
+                      trace_mlp_raw_layer1=args.trace_mlp_raw_layer1)
     baseline = [compare_logits(item[0], logits)
                 for item, logits in zip(oracle, fp32)]
     worst = max(row["kl"] for row in baseline)
@@ -258,7 +274,8 @@ def main():
                          trace_mlp_layer0=args.trace_mlp_layer0,
                          trace_moe_routing_layer0=args.trace_moe_routing_layer0,
                          trace_gdn_layer1=args.trace_gdn_layer1,
-                         trace_hyper_layer1=args.trace_hyper_layer1)
+                         trace_hyper_layer1=args.trace_hyper_layer1,
+                         trace_mlp_raw_layer1=args.trace_mlp_raw_layer1)
     comparison = [compare_logits(item[0], logits)
                   for item, logits in zip(oracle, matched)]
     report = {

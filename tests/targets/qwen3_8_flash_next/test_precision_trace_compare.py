@@ -67,6 +67,35 @@ class TraceComparisonTest(unittest.TestCase):
                 row = next(csv.DictReader(handle))
             self.assertEqual(row["reference_source"], "incremental-fp32-scores")
 
+    def test_unrounded_mlp_stage_uses_same_oracle_operation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            oracle_stage = "L01_mlp_block_input"
+            raw_stage = "L01_mlp_block_input_fp32"
+            for folder, stage, value in (("oracle", oracle_stage, 1.0),
+                                         ("cpu", raw_stage, 1.25),
+                                         ("v100", raw_stage, 1.5)):
+                pos = root / folder / "pos0000"
+                pos.mkdir(parents=True)
+                np.asarray([value], dtype="<f4").tofile(pos / f"{stage}.bin")
+                record = {"position": 0, "token_id": 42, "tensors": [
+                    {"name": stage, "file": f"pos0000/{stage}.bin"}]}
+                if folder == "v100":
+                    (root / folder / "stages.jsonl").write_text(json.dumps({
+                        "position": 0, "name": stage,
+                        "file": f"pos0000/{stage}.bin"}))
+                else:
+                    (root / folder / "manifest.json").write_text(json.dumps(
+                        {"positions": [record]}))
+            compare(root / "oracle", root / "cpu", root / "report", root / "v100")
+            import csv
+            with (root / "report" / "stage_comparison.csv").open() as handle:
+                row = next(csv.DictReader(handle))
+            self.assertEqual(row["reference_source"],
+                             "independent-fp32-unrounded-mixer")
+            self.assertAlmostEqual(float(row["cpu_vs_oracle_nrmse"]), 0.25)
+            self.assertAlmostEqual(float(row["v100_vs_oracle_nrmse"]), 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

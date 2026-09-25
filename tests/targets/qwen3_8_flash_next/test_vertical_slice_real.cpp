@@ -1316,6 +1316,11 @@ int main() {
                             name == "L00_moe_shared_scale");
                 }()) ||
                 ([&] {
+                    const char* extra = std::getenv("NINFER_PHASE11_TRACE_MLP_RAW_LAYER1");
+                    return extra != nullptr && extra[0] == '1' && extra[1] == '\0' &&
+                           name == "L01_mlp_block_input_fp32";
+                }()) ||
+                ([&] {
                     const char* extra = std::getenv("NINFER_PHASE11_TRACE_HYPER_LAYER1");
                     return extra != nullptr && extra[0] == '1' && extra[1] == '\0' &&
                            name == "L01_hyper_after_attn";
