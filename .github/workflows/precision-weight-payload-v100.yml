@@ -12,8 +12,32 @@ permissions:
   contents: read
 
 jobs:
+  gpu-memory-probe:
+    if: contains(github.event.head_commit.message, '[v100-weight-probe]')
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 5
+    steps:
+      - name: Inspect device enumeration and memory check
+        run: |
+          set -euo pipefail
+          nvidia-smi --query-gpu=index,name,uuid,pci.bus_id,memory.total,memory.used,memory.free \
+            --format=csv,noheader,nounits
+          for device_id in 0 1; do
+            echo "device_id=$device_id"
+            nvidia-smi --id="$device_id" \
+              --query-gpu=index,name,memory.total,memory.used,memory.free \
+              --format=csv,noheader,nounits
+          done
+          free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free \
+            --format=csv,noheader,nounits | tr -d '[:space:]')
+          printf 'original_check_free_mib=%q threshold=28000\n' "$free_mib"
+          if (( free_mib >= 28000 )); then
+            echo 'Original memory check: pass'
+          else
+            echo 'Original memory check: fail'
+          fi
   prepared-artifact-audit:
-    if: '!contains(github.event.head_commit.message, ''[v100-weight-device]'')'
+    if: '!contains(github.event.head_commit.message, ''[v100-weight-device]'') && !contains(github.event.head_commit.message, ''[v100-weight-probe]'')'
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     timeout-minutes: 25
     steps:
