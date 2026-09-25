@@ -544,8 +544,9 @@ recalculation exactly reproduces **all 2,560 V100 BF16 stored values**;
 1,290 values round upward, 1,270 downward, and four FP32 values are within
 32 low mantissa bits of a BF16 midpoint. The first GPU workflow failed only
 because its post-run log printer invoked unavailable `rg`; both tensors and
-the 14-position natural-path failure were captured. A corrected workflow
-repeats this check without depending on `rg`.
+the 14-position natural-path failure were captured. The
+[corrected GPU workflow](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36148874618)
+completed successfully while reporting the unchanged natural CTest failure.
 
 At this boundary, the extra apparent BF16 input error is an expected
 format-conversion amplification of a smaller upstream FP32 difference, not
