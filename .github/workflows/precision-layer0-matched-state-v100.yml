@@ -28,8 +28,8 @@ jobs:
           path: cpu
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: cpu-layer0-gdn-prior-state-shape
-          run-id: 36183922098
+          name: cpu-layer0-gdn-state-v100-layout-13
+          run-id: 36184956447
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           path: state
@@ -67,7 +67,7 @@ jobs:
             if (( attempt < 30 )); then sleep 30; fi
           done
           exit 1
-      - name: Replay CPU source state and key with corrected diagnostic flags
+      - name: Replay layout-matched CPU state and key before recurrence
         env:
           NINFER_WEIGHTS: /models/qwen3-8b-flash-next
           NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
@@ -96,7 +96,7 @@ jobs:
           NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
         run: |
           set -euo pipefail
-          export NINFER_PHASE11_STATE_COMPARE_ROOT="$GITHUB_WORKSPACE/state/cpu-state"
+          export NINFER_PHASE11_STATE_COMPARE_ROOT="$GITHUB_WORKSPACE/state/cpu-state-v100-layout"
           export NINFER_PHASE11_TRACE_GDN_STATE=1
           test "$(stat -c %s "$NINFER_PHASE11_STATE_COMPARE_ROOT/pos0012/L00_gdn_ssm_source_state.bin")" -eq 3145728
           test "$(stat -c %s cpu/cpu-boundary/pos0012/L00_gdn_key.bin)" -eq 8192
@@ -149,7 +149,7 @@ jobs:
           from pathlib import Path
           from math import fsum,sqrt
           cpu=Path('cpu/cpu-boundary/pos0012')
-          state_cpu=Path('state/cpu-state/pos0012')
+          state_cpu=Path('state/cpu-state-v100-layout/pos0012')
           roots={mode:Path('matched-input')/mode/'pos0012'
                  for mode in ('baseline','state','both')}
           def values(root,stage):
