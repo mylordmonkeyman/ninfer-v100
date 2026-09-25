@@ -75,6 +75,8 @@ jobs:
           set -euo pipefail
           mkdir -p cpu-boundary/pos0012
           for stage in L00_attn_block_input L00_attn_block_output \
+              L00_gdn_projected L00_gdn_z L00_gdn_g L00_gdn_beta \
+              L00_gdn_recurrent_output L00_gdn_gated_output \
               L00_hyper_after_attn L00_mlp_block_input_fp32 L00_mlp_block_input; do
             source="precision-reference-results/v100-phase11-storage/pos0012/${stage}.bin"
             test -s "$source"
@@ -82,6 +84,7 @@ jobs:
           done
           test "$(stat -c %s cpu-boundary/pos0012/L00_hyper_after_attn.bin)" -eq 40960
           test "$(stat -c %s cpu-boundary/pos0012/L00_attn_block_output.bin)" -eq 10240
+          test "$(stat -c %s cpu-boundary/pos0012/L00_gdn_projected.bin)" -eq 65536
           test "$(stat -c %s cpu-boundary/pos0012/L00_mlp_block_input_fp32.bin)" -eq 10240
           python3 - <<'PY'
           import json
