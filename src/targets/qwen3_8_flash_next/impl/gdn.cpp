@@ -214,7 +214,7 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
         // No state copy or synchronization is added to normal decode.
         if (emit && batch == 1) {
             const char* trace_state = std::getenv("NINFER_PHASE11_TRACE_GDN_STATE");
-            if (trace_state != nullptr && trace_state[0] == '1' && trace_state[1] == '\\0') {
+            if (trace_state != nullptr && trace_state[0] == '1' && trace_state[1] == '\0') {
                 std::int32_t source_slot = -1;
                 if (cudaMemcpyAsync(&source_slot, source_slots.data, sizeof(source_slot),
                                     cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
