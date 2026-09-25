@@ -768,6 +768,23 @@ This narrow materialization change is rejected as a corrective precision
 policy for the sample, just as the earlier all-layer FP32 input ablation was.
 A locally restored expert set does not establish a full-prefix pass.
 
+The [14-position V100 state-and-key continuation](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36186612932)
+repeats the position-12 diagnostic and includes position 13. Mean oracle KL
+improves from 0.057752 to 0.050645, but top-1 remains 13/14 and both
+underlying CTests fail the unchanged Phase 11 gate. The intervention uses
+offline independent CPU state and key values, so even its KL improvement is
+not a deployable correction. It also does not explain the final position's
+incorrect top token by itself.
+
+The [frozen position-13 router report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36188655073)
+finds the first V100-only expert-set swap at layer 26: V100 selects 488
+where the FP32 oracle and CPU profile select 252. Their 252-minus-488
+score margins are +0.025909, +0.020459, and -0.029846, respectively;
+CPU-to-V100 MLP-input NRMSE there is 0.067561. CPU-only changes already
+occur by layer 14 at that position, and 6 of V100's 13 oracle-relative
+router-set changes are V100-only. A matched CPU-input replay at layer 26
+is the next causal check, while the complete-prefix gate remains unchanged.
+
 ## 1. Environment Setup
 
 Run the setup script using Python 3.14 to create the isolated virtual environment:
