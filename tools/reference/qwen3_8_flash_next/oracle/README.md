@@ -325,6 +325,16 @@ the CPU and GPU trajectories agree globally, or determine whether an
 upstream V100 kernel or the candidate precision profile causes the
 natural-input difference.
 
+The [frozen position-12 score report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36090386983)
+quantifies that expert swap. The independently checked FP32 score for expert
+173 exceeds expert 393 by 0.001560, and the CPU profile still ranks 173
+tenth over 393 eleventh by 0.001398. Natural V100 reverses their order by
+0.000284. CPU-to-V100 NRMSE is zero at the layer-zero attention input,
+0.001124 at its MLP input, 0.002636 at layer-one MLP input, and 0.003183
+at layer-two MLP input; it jumps to 0.016588 after the layer-two MLP and
+hyper output. This shows how a close expert cutoff amplifies the divergent
+trajectory, but does not identify a faulty earlier operation by itself.
+
 ### Layer 15 QSA projection replay and input boundary
 
 The [upstream stage extraction](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36020859990)
