@@ -1,0 +1,71 @@
+name: Phase 11 Layer Zero GDN Boundary Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-layer0-gdn-boundary-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-layer0-matched-input-14
+          run-id: 36177462927
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-layer0-matched-attn-13
+          run-id: 36176940353
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: gpu
+      - name: Compare natural position-12 GDN stages with matched input
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee boundary-report.txt
+          from array import array
+          from pathlib import Path
+          import math
+
+          cpu=next(Path('cpu').rglob('L00_gdn_projected.bin')).parent
+          gpu_roots=[p.parent for p in Path('gpu').rglob('L00_gdn_projected.bin')
+                     if p.parent.parent.name == 'baseline']
+          assert len(gpu_roots)==1, gpu_roots
+          gpu=gpu_roots[0]
+          assert cpu.name==gpu.name=='pos0012'
+
+          def values(root,stage):
+              a=array('f');a.frombytes((root/f'L00_{stage}.bin').read_bytes());return a
+          def nrmse(reference,actual):
+              return math.sqrt(math.fsum((float(x)-float(y))**2
+                                        for x,y in zip(reference,actual)) /
+                               max(math.fsum(float(x)**2 for x in reference),1e-24))
+          print('position=12 layer=0 profile=v100-phase11-storage')
+          for stage in ('attn_block_input','gdn_projected','gdn_z','gdn_g',
+                        'gdn_beta','gdn_recurrent_output','gdn_gated_output',
+                        'attn_block_output','hyper_after_attn',
+                        'mlp_block_input_fp32','mlp_block_input'):
+              c=values(cpu,stage);g=values(gpu,stage)
+              assert len(c)==len(g)>0 and all(math.isfinite(x) for x in c+g)
+              max_diff=max(abs(float(x)-float(y)) for x,y in zip(c,g))
+              print(f'{stage} count={len(c)} nrmse={nrmse(c,g):.12g} '
+                    f'max_abs={max_diff:.12g} bitwise_equal={c.tobytes()==g.tobytes()}')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: layer0-gdn-boundary-report
+          path: boundary-report.txt
+          if-no-files-found: ignore
+          retention-days: 14
