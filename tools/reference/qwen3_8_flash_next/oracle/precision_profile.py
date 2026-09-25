@@ -104,7 +104,8 @@ def _ple_from_bf16_shadow(self, hidden_states, input_ids, past_key_values,
     return gated + self._short_conv(normalized, past_key_values)
 
 
-def install_projection_boundaries(model, profile, *, mlp_block_input_fp32=False):
+def install_projection_boundaries(model, profile, *, mlp_block_input_fp32=False,
+                                  mlp_block_input_fp32_layers=()):
     """Materialize selected projection outputs; return removable hook handles.
 
     This only models projected activation storage.  In particular it does not
@@ -121,7 +122,7 @@ def install_projection_boundaries(model, profile, *, mlp_block_input_fp32=False)
     handles.append(model.hyper_connection_mixer.register_forward_hook(
         lambda _module, _args, output: round_to_bf16(output)
     ))
-    for layer in model.layers:
+    for layer_index, layer in enumerate(model.layers):
         projections = []
         hyper = layer.attn_hyper_connection
         handles.append(_RestoreForward(hyper, hyper.forward))
@@ -169,7 +170,7 @@ def install_projection_boundaries(model, profile, *, mlp_block_input_fp32=False)
             lambda _module, _args, output:
                 (round_to_bf16(output[0]), output[1], output[2])
         ))
-        if not mlp_block_input_fp32:
+        if not mlp_block_input_fp32 and layer_index not in mlp_block_input_fp32_layers:
             handles.append(layer.mlp_hyper_connection.register_forward_hook(
                 lambda _module, _args, output:
                     (round_to_bf16(output[0]), output[1], output[2])
