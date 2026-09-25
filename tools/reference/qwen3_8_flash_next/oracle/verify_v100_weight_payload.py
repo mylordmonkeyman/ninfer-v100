@@ -106,8 +106,8 @@ def verify_layer(layer: int, recipe_module, source_bytes, candidate_root,
             planes = {
                 "codes": b"".join(source_bytes(m.name, m.dtype, m.shape)
                                   for m in selected.matrices),
-                "scales": b"".join(source_bytes(m.name + "_scale", "F32",
-                                               (m.shape[0],))
+                    "scales": b"".join(source_bytes(m.name + "_scale", "F32",
+                                               (m.shape[0], 1))
                                    for m in selected.matrices),
             }
         else:

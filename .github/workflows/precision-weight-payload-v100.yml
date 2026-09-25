@@ -1,4 +1,4 @@
-name: Phase 11 V100 Loaded Weight Audit
+name: Phase 11 V100 Weight Audit
 
 on:
   workflow_dispatch:
