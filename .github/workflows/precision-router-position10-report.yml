@@ -77,6 +77,23 @@ jobs:
               'v100_only':sum(bool(x['v100_lost']) and not x['cpu_lost'] for x in flips),
               'shared':sum(x['v100_lost']==x['cpu_lost'] and bool(x['cpu_lost'])
                            for x in flips)},sort_keys=True))
+          print('layer5_score_competition')
+          for kind,data in paths.items():
+              scores=values(data[position,'L05_moe_router_scores'])
+              rank=sorted(range(512),key=lambda i:(-scores[i],i))
+              print(kind,'120_minus_136',scores[120]-scores[136],
+                    'rank120',rank.index(120)+1,'rank136',rank.index(136)+1)
+          print('early_stage_differences')
+          for layer in range(6):
+              for suffix in ('attn_block_input','attn_block_output',
+                             'hyper_after_attn','mlp_block_input',
+                             'mlp_block_output','hyper_after_mlp'):
+                  stage=f'L{layer:02d}_{suffix}'
+                  row=rows.get((position,stage))
+                  if row:
+                      print(stage,'cpu_oracle',row['cpu_vs_oracle_nrmse'],
+                            'v100_oracle',row['v100_vs_oracle_nrmse'],
+                            'cpu_v100',row['v100_vs_cpu_nrmse'])
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
