@@ -290,7 +290,25 @@ logits separately reproduce the frozen FP32 oracle). Across 672 cells,
 49 oracle-relative expert-set flips are shared, 19 CPU-only and 48 V100-only;
 CPU and V100 differ in 91 cells. At position 12 the first V100-only flip is
 at layer 2, where the CPU still selects the FP32 set. A targeted V100
-position-12 boundary injection is the next check on that early mismatch.
+position-12 boundary injection checks that early mismatch.
+
+The [position-12 V100 stage-injection replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36088333449)
+recomputes 13 sequential prefixes for each of three separate oracle inputs:
+`L01_attn_block_input`, `L02_attn_block_input`, and
+`L02_mlp_block_input`. Each injection restores the layer-two oracle expert
+set, including the final injection immediately before routing. Without
+injection, layer-two V100 replaces oracle expert 173 with 393; the CPU
+profile selects the oracle set. In the ordinary position-12 trace the
+layer-two MLP input NRMSE against oracle is 0.004211 on V100 and 0.004478
+on CPU; CPU-to-V100 NRMSE is 0.003183. Therefore overall tensor NRMSE alone
+does not predict this close top-10 decision. The latest-stage intervention
+shows that this **specific V100-only expert-set flip depends on its upstream
+MLP input** rather than incorrect router selection given oracle input. It
+does not identify which earlier storage or arithmetic boundary is
+responsible. The three 13-prefix replays have mean oracle KL 0.011139,
+0.012815, and 0.014112, respectively; each still fails the unchanged
+Phase 11 gate (the diagnostic workflow succeeds because the three injections
+and measurements completed, while each CTest returns its gate-failure code).
 
 ### Layer 15 QSA projection replay and input boundary
 
