@@ -70,6 +70,12 @@ def compare(oracle_root, cpu_root, out_dir, v100_root=None, incremental_fp32_roo
             # independent-oracle logits gate; label this auxiliary reference.
             reference_path = incremental[key]
             reference_source = "incremental-fp32-scores"
+        elif name in ("L00_hyper_before_attn", "L00_attn_injection") and key in incremental:
+            # These optional internal boundaries have no frozen full-sequence
+            # oracle tensors. Their incremental FP32 reference has passed the
+            # independent oracle logits parity check; label the provenance.
+            reference_path = incremental[key]
+            reference_source = "incremental-fp32-hyper-boundary"
         else:
             raise ValueError(f"FP32 oracle is missing CPU stage {key}")
         expected = load(reference_path)
