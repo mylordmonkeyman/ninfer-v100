@@ -120,6 +120,7 @@ jobs:
             --trace-gdn-internals \
             --out-dir "$GITHUB_WORKSPACE/precision-reference-results"
 
+      # Internal reference stages are labeled incremental FP32; frozen logits still gate parity.
       - name: Reconstruct CPU layer-zero attention injection at position 12
         shell: bash
         run: |
