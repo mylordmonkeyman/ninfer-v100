@@ -22,7 +22,7 @@ jobs:
           set -euo pipefail
           nvidia-smi --query-gpu=index,name,uuid,pci.bus_id,memory.total,memory.used,memory.free \
             --format=csv,noheader,nounits
-          for device_id in 0 1; do
+          for device_id in 0; do
             echo "device_id=$device_id"
             nvidia-smi --id="$device_id" \
               --query-gpu=index,name,memory.total,memory.used,memory.free \
@@ -94,6 +94,9 @@ jobs:
           for attempt in $(seq 1 30); do
             free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free \
               --format=csv,noheader,nounits | tr -d '[:space:]')
+            printf 'V100 memory check %s/30: free=%q MiB, threshold=28000 MiB\n' \
+              "$attempt" "$free_mib"
+            [[ "$free_mib" =~ ^[0-9]+$ ]] || exit 1
             if (( free_mib >= 28000 )); then exit 0; fi
             if (( attempt < 30 )); then sleep 30; fi
           done
