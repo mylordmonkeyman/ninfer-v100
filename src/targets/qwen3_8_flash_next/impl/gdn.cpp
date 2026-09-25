@@ -209,15 +209,24 @@ void flash_next_gdn_decode(const Tensor& input, const GdnWeights& weights,
         Tensor recurrent_output = scratch.recurrent_output.view({128, 48, 1, batch});
         Tensor g                = scratch.g.view({48, 1, batch});
         Tensor beta             = scratch.beta.view({48, 1, batch});
+        // Capture and optionally inject the one-token convolution outputs
+        // before the recurrence consumes them. The callback is diagnostic.
+        if (emit && batch == 1) {
+            emit("gdn_query", scratch.query);
+            emit("gdn_key", scratch.key);
+            emit("gdn_value", scratch.value);
+        }
         ops::gated_delta_net_batch_update(query, key, value, g, beta, 1.0F / std::sqrt(128.0F), true,
                                           ssm_states, source_slots, destination_slots, recurrent_output,
                                           stream);
     }
 
     if (emit) {
-        emit("gdn_query", scratch.query);
-        emit("gdn_key", scratch.key);
-        emit("gdn_value", scratch.value);
+        if (batch != 1) {
+            emit("gdn_query", scratch.query);
+            emit("gdn_key", scratch.key);
+            emit("gdn_value", scratch.value);
+        }
         emit("gdn_z", scratch.z);
         emit("gdn_recurrent_output", scratch.recurrent_output);
     }
