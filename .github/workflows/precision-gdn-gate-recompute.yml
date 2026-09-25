@@ -1,0 +1,82 @@
+name: Phase 11 GDN Gate Recompute
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-gdn-gate-recompute.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  gate-14:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-gdn-layer0-calibration-14
+          run-id: 36061122886
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: v100-input
+      - name: Recompute FP32 gate from captured recurrent output
+        shell: bash
+        run: |
+          set -euo pipefail
+          python_bin="${NINFER_PHASE11_PYTHON:-}"
+          if [[ -z "$python_bin" ]]; then
+            for candidate in "$HOME/ninfer-v100/venv-oracle/bin/python" \
+                /srv/ninfer/venv-oracle/bin/python python3; do
+              if "$candidate" -c 'import numpy, torch, safetensors' 2>/dev/null; then
+                python_bin="$candidate"
+                break
+              fi
+            done
+          fi
+          test -n "$python_bin"
+          "$python_bin" - <<'PY'
+          import json
+          from pathlib import Path
+          import numpy as np
+          import torch
+          from safetensors import safe_open
+
+          model = Path('/srv/ninfer/source/mixed')
+          index = json.loads((model/'model.safetensors.index.json').read_text())['weight_map']
+          keys = [key for key in index if key.endswith('layers.0.linear_attn.norm.weight')]
+          if len(keys) != 1:
+              raise RuntimeError(f'Expected one layer-zero GDN norm weight; got {keys}')
+          key = keys[0]
+          with safe_open(model/index[key], framework='pt') as shard:
+              norm = shard.get_tensor(key).float().numpy()
+          if norm.shape != (128,):
+              raise RuntimeError(f'Unexpected GDN norm shape {norm.shape}')
+          root = Path('v100-input/candidate-stage')
+          for pos in (0, 2, 12, 13):
+              directory = root/f'pos{pos:04d}'
+              def stage(name):
+                  return np.fromfile(directory/f'L00_{name}.bin', dtype='<f4').reshape(48, 128)
+              x = stage('gdn_recurrent_output')
+              z = stage('gdn_z')
+              actual = stage('gdn_gated_output')
+              # Mirrors the FP32 diagnostic kernel: per-head RMSNorm then
+              # sigmoid(BF16 z), retaining the unrounded gate product.
+              mean_squares = np.mean(x.astype('f8')**2, axis=1, keepdims=True)
+              expected = (x.astype('f8') / np.sqrt(mean_squares + 1e-6)
+                          * norm.astype('f8')[None, :]
+                          / (1 + np.exp(-z.astype('f8'))))
+              error = expected - actual
+              nrmse = np.sqrt(np.mean(error**2)) / np.sqrt(np.mean(expected**2))
+              print(f'gate position={pos} nrmse={nrmse:.9g} '
+                    f'max_abs={np.max(np.abs(error)):.9g} '
+                    f'count={error.size}', flush=True)
+              if not np.isfinite(nrmse):
+                  raise RuntimeError('Nonfinite gate recomputation')
+          PY
