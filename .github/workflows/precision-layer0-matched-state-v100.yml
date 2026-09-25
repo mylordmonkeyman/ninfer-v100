@@ -67,7 +67,7 @@ jobs:
             if (( attempt < 30 )); then sleep 30; fi
           done
           exit 1
-      - name: Replay independent CPU state and key before position-12 GDN recurrence
+      - name: Replay CPU source state and key with corrected diagnostic flags
         env:
           NINFER_WEIGHTS: /models/qwen3-8b-flash-next
           NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
