@@ -66,7 +66,7 @@ jobs:
           else:
               raise RuntimeError(f'Unexpected norm dtype {entry["dtype"]}')
           root = Path('v100-input/candidate-stage')
-          cpu_root = Path('cpu-input/precision-reference-results/v100-phase11-storage')
+          cpu_root = Path('cpu-input/v100-phase11-storage')
           def gate(x, z):
               expected = []
               for head in range(48):
