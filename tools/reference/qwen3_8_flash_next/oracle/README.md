@@ -310,6 +310,21 @@ responsible. The three 13-prefix replays have mean oracle KL 0.011139,
 Phase 11 gate (the diagnostic workflow succeeds because the three injections
 and measurements completed, while each CTest returns its gate-failure code).
 
+The [independent CPU-input V100 replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36089911902)
+then supplies the **CPU precision reference's own** position-12
+`L02_mlp_block_input` to the real V100 router, while comparing subsequent
+stages to the unchanged independent FP32 oracle. The V100 router now selects
+the oracle/CPU expert set (zero layer-two ID mismatch); a separate oracle
+input positive control also selects that set. Both runs recompute all 13
+prefixes and retain the unchanged Phase 11 gate: mean oracle KL is 0.014877
+for CPU input and 0.014112 for oracle input, and CTest fails the gate in
+both cases. Together with the ordinary V100 position-12 flip, these
+controlled interventions exclude a standalone router-selection defect at
+this early cell for these two matched input tensors. They do not prove
+the CPU and GPU trajectories agree globally, or determine whether an
+upstream V100 kernel or the candidate precision profile causes the
+natural-input difference.
+
 ### Layer 15 QSA projection replay and input boundary
 
 The [upstream stage extraction](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36020859990)
