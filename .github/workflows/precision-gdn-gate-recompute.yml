@@ -154,4 +154,13 @@ jobs:
                     f'gpu-round-mismatches={len(raw_mismatch)} '
                     f'critical-head-mismatches={sum(24*128 <= i < 27*128 for i in mismatches)}',
                     flush=True)
+              cpu_projected = load(cpu_root,'gdn_projected')
+              gpu_projected = projected
+              projected_flips = [i for i,(a,b) in enumerate(zip(gpu_projected,cpu_projected))
+                                 if a != bf16_round(b)]
+              for label,lo,hi in (('query',0,2048),('key',2048,4096),
+                                  ('value',4096,10240),('value_heads24_26',7168,7552)):
+                  print(f'projection-round position={pos} part={label} '
+                        f'cpu-round-v100-mismatches={sum(lo <= i < hi for i in projected_flips)} '
+                        f'count={hi-lo}',flush=True)
           PY
