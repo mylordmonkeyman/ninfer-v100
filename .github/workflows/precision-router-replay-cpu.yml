@@ -132,6 +132,7 @@ jobs:
             --trace-mlp-layer0 \
             --trace-moe-routing-layer0 \
             --replay-router-ids \
+            --ablate-mlp-block-input-bf16 \
             --v100-trace "$GITHUB_WORKSPACE/v100-input/candidate-stage" \
             --out-dir "$GITHUB_WORKSPACE/precision-reference-results"
 
@@ -145,6 +146,11 @@ jobs:
           print('Normal CPU oracle KL', report['mean_kl'])
           print('Normal CPU/V100 KL', report['three_way']['cpu_vs_v100_mean_kl'])
           print('V100 oracle KL', report['three_way']['oracle_vs_v100_mean_kl'])
+          upgrade = report['mlp_block_input_fp32_ablation']
+          print('Hypothetical FP32 MLP input CPU oracle KL',
+                upgrade['oracle_mean_kl'], 'top1',
+                upgrade['oracle_top1_agreement'], '/', report['positions'],
+                'router sets', upgrade['router_set_counts'])
           for source, rows in report['router_replay']['source'].items():
               print(source, 'forced CPU oracle KL', rows['oracle_mean_kl'],
                     'forced CPU/V100 KL', rows['cpu_vs_v100_mean_kl'],
