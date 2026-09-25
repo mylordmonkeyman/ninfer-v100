@@ -683,6 +683,30 @@ hold the previous GDN state equal to distinguish accumulated storage/reduction
 differences from a recurrence implementation error. No precision floor or
 general kernel correctness conclusion follows from this one position.
 
+The [matched GDN convolution-stage report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36182369693)
+compares the CPU profile with the unmodified V100 13-position prefix at the
+same position. The CPU query/key/value tensors are reconstructed from the
+captured FP32 QKV projections and BF16-rounded prior convolution history;
+the CPU decode uses an optimized state update that bypasses Conv1d hooks.
+The V100 stage trace is captured directly from its FP32 convolution output.
+Query NRMSE is 1.20e-7, key is 0.000676006, and value is 7.12e-8. Thus
+the earliest large convolution-output difference on this path is localized
+to key; this reconstruction alone cannot prove that the CPU implementation
+uses the identical accumulation order at every element.
+
+The [matched key replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36182817150)
+captures and replaces the V100 key **before** its recurrent update, using
+the independent CPU value at position 12. The CPU-to-V100 recurrent-output
+NRMSE falls from 1.32302e-5 to 4.65489e-6, gated-output NRMSE from
+0.000266225 to 0.0000465767, and attention-output NRMSE from 0.000219575
+to 0.0000452091. The diagnostic CTests both exit 8 against the unchanged
+Phase 11 gate. This intervention connects the local key mismatch to most of
+the position-12 recurrent and gate mismatch. It is consistent with the
+previously observed position-10 BF16 midpoint tie in a key-history channel;
+it does not rule out additional recurrent-state, reduction-order, or later
+implementation differences over full prefixes. Next hold prior recurrent
+state and convolution history equal when assessing the remaining gap.
+
 ## 1. Environment Setup
 
 Run the setup script using Python 3.14 to create the isolated virtual environment:
