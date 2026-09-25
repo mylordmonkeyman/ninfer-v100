@@ -131,5 +131,6 @@ jobs:
             --model-dir "$PRECISION_MODEL_DIR" \
             --ple-dir "$PRECISION_PLE_DIR" \
             --ids-file "$PRECISION_IDS_FILE" \
+            --fp32-oracle "$PRECISION_ORACLE_DIR" \
             --cpu-trace "$GITHUB_WORKSPACE/cpu-input/v100-phase11-storage" \
             --v100-trace "$GITHUB_WORKSPACE/v100-input/candidate-stage"
