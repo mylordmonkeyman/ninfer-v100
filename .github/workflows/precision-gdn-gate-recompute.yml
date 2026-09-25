@@ -127,4 +127,13 @@ jobs:
                   rmse = math.sqrt(sum((u-v)**2 for u,v in zip(a,b))/128)
                   print(f'history position={pos} head={head} recurrent_rms={rms:.9g} '
                         f'recurrent_rmse={rmse:.9g}', flush=True)
+          for pos in (10, 11, 12):
+              for name in ('attn_block_input', 'gdn_projected', 'gdn_z',
+                           'gdn_g', 'gdn_beta', 'gdn_recurrent_output'):
+                  def load(base):
+                      raw = (base/f'pos{pos:04d}'/f'L00_{name}.bin').read_bytes()
+                      return struct.unpack(f'<{len(raw)//4}f',raw)
+                  a,b = load(root),load(cpu_root)
+                  print(f'boundary position={pos} stage={name} nrmse={nrmse(a,b):.9g} '
+                        f'count={len(a)}', flush=True)
           PY
