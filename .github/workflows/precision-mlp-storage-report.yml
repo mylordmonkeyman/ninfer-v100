@@ -1,0 +1,73 @@
+name: Phase 11 Layer One MLP Storage Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-mlp-storage-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Download frozen V100 raw and stored stages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36078905618 --repo "$GITHUB_REPOSITORY" \
+            --name v100-mlp-raw-layer1-14 --dir frozen
+      - name: Check BF16 round to nearest even and boundary amplification
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee mlp-storage-report.txt
+          import csv
+          import json
+          import math
+          import struct
+          from pathlib import Path
+
+          root = Path('frozen')
+          entries = {(row['position'], row['name']): root / 'candidate-stage' / row['file']
+                     for row in map(json.loads, (root / 'candidate-stage/stages.jsonl').read_text().splitlines())}
+          comparison = {(int(row['position']), row['stage']): row for row in
+                        csv.DictReader((root / 'v100-comparison/stage_comparison.csv').open())}
+          total_mismatches = 0
+          total_elements = 0
+          for pos in range(14):
+              raw = entries[pos, 'L01_mlp_block_input_fp32'].read_bytes()
+              stored = entries[pos, 'L01_mlp_block_input'].read_bytes()
+              assert len(raw) == len(stored) == 2560 * 4
+              raw_bits = [bits for (bits,) in struct.iter_unpack('<I', raw)]
+              stored_bits = [bits for (bits,) in struct.iter_unpack('<I', stored)]
+              expected = [(((bits + 0x7fff + ((bits >> 16) & 1)) >> 16) & 0xffff) << 16
+                          for bits in raw_bits]
+              mismatches = sum(a != b for a, b in zip(expected, stored_bits))
+              total_mismatches += mismatches
+              total_elements += len(expected)
+              raw_float = [value for (value,) in struct.iter_unpack('<f', raw)]
+              stored_float = [value for (value,) in struct.iter_unpack('<f', stored)]
+              scale = math.sqrt(sum(x*x for x in raw_float) / len(raw_float))
+              storage_nrmse = math.sqrt(sum((a-b)**2 for a, b in zip(raw_float, stored_float))
+                                        / len(raw_float)) / scale
+              before = comparison[pos, 'L01_mlp_block_input_fp32']
+              after = comparison[pos, 'L01_mlp_block_input']
+              print('POSITION', pos, 'BF16 mismatches', mismatches, 'of', len(expected),
+                    'GPU storage NRMSE', storage_nrmse,
+                    'CPU/V100 FP32 NRMSE', before['v100_vs_cpu_nrmse'],
+                    'CPU/V100 BF16 NRMSE', after['v100_vs_cpu_nrmse'],
+                    'CPU/oracle FP32 NRMSE', before['cpu_vs_oracle_nrmse'],
+                    'V100/oracle FP32 NRMSE', before['v100_vs_oracle_nrmse'])
+          print('TOTAL BF16 mismatches', total_mismatches, 'of', total_elements)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mlp-storage-report
+          path: mlp-storage-report.txt
+          retention-days: 14
