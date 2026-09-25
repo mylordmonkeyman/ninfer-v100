@@ -533,6 +533,26 @@ order. Compare the intermediate normalized state, low-rank result, and
 final BF16 materialization with matched inputs before changing production
 arithmetic.
 
+A [same-prefix raw-mixer comparison](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36148885273)
+adds the intermediate layer-zero FP32 MLP mixer output at position 12.
+CPU-to-V100 NRMSE is 0.00048936 at that FP32 output, increasing to
+0.00112440 after the BF16 materialization. Each implementation's own
+raw-to-stored NRMSE is about 0.00159 (CPU 0.00158538, V100 0.00159533).
+The [V100 raw/stored artifact](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36147753593)
+contains 2,560 finite FP32 pairs. Independent bitwise round-to-nearest-even
+recalculation exactly reproduces **all 2,560 V100 BF16 stored values**;
+1,290 values round upward, 1,270 downward, and four FP32 values are within
+32 low mantissa bits of a BF16 midpoint. The first GPU workflow failed only
+because its post-run log printer invoked unavailable `rg`; both tensors and
+the 14-position natural-path failure were captured. A corrected workflow
+repeats this check without depending on `rg`.
+
+At this boundary, the extra apparent BF16 input error is an expected
+format-conversion amplification of a smaller upstream FP32 difference, not
+an incorrect V100 BF16 conversion. This supports the rounding-driven routing
+hypothesis but does not establish that *every* V100-only expert flip has the
+same cause or that no upstream engine bug exists elsewhere.
+
 Any candidate correction must run across complete prefixes without oracle
 IDs before qualification can be claimed. The unchanged §7 gate remains
 failed on natural routing, and the present evidence does not prove that
