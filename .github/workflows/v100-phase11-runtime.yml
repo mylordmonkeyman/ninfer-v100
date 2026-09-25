@@ -280,11 +280,18 @@ jobs:
             echo "ERROR: agent model qwen3.8-27b-omp was reloaded during this run; the GPU is contended." >&2
             echo "Re-run the workflow when the agent is idle." >&2
             cat "$preflight_log" >&2
+            loaded=$(curl -s -m 10 http://127.0.0.1:9292/v1/models \
+              | python3 -c 'import json,sys; d=json.load(sys.stdin); print(",".join(m["id"] for m in d["data"] if m.get("status",{}).get("value")=="loaded") or "none")' \
+              2>/dev/null || echo "llama-swap unreachable")
+            gpu=$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader 2>/dev/null | head -1)
+            echo "::error file=.github/workflows/v100-phase11-runtime.yml::GPU contended at decomposition preflight; loaded models: ${loaded}; gpu: ${gpu:-n/a}"
             exit 1
           fi
           if ! test -r "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0013/L00_mlp_block_input.bin"; then
             echo "ERROR: stage oracle file is unreadable: $NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0013/L00_mlp_block_input.bin" >&2
             ls -la "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0013/" >&2 | head -20
+            listing=$(ls -la "$NINFER_PHASE11_STAGE_ORACLE_ROOT/pos0013/" 2>/dev/null | head -20 | tr '\n' ';' | tr -s ' ')
+            echo "::error file=.github/workflows/v100-phase11-runtime.yml::stage oracle unreadable: ${NINFER_PHASE11_STAGE_ORACLE_ROOT}/pos0013; listing: ${listing}"
             exit 1
           fi
           result_log="$result_dir/error-decomposition.log"
@@ -294,20 +301,31 @@ jobs:
           python3 - "$result_log" <<'PY'
           from pathlib import Path
           import sys
-          data = Path(sys.argv[1]).read_text()
+          log_path = Path(sys.argv[1])
+          if not log_path.exists():
+              print("::error file=.github/workflows/v100-phase11-runtime.yml::decomposition log missing; ctest produced no file at " + sys.argv[1])
+              raise SystemExit("error-decomposition.log missing")
+          data = log_path.read_text()
           lines = [line.strip() for line in data.splitlines()]
+          tail = " | ".join(line for line in lines if line)[-2500:]
           decomposition = [line for line in lines
                            if "phase11.error_decomposition.position=" in line]
           position_13 = [line for line in decomposition
                          if "phase11.error_decomposition.position=13 " in line]
           if len(decomposition) < 9000:
+              print("::error file=.github/workflows/v100-phase11-runtime.yml::decomposition coverage "
+                    f"{len(decomposition)}/9000 (log {len(data)} bytes); tail: {tail}")
               raise SystemExit(
                   f"Expected full-layer decomposition coverage, got {len(decomposition)} stage lines")
           if len(position_13) < 700:
+              print("::error file=.github/workflows/v100-phase11-runtime.yml::position-13 coverage "
+                    f"{len(position_13)}/700 (decomposition {len(decomposition)}); tail: {tail}")
               raise SystemExit(
                   f"Position-13 decomposition coverage is unexpectedly sparse: {len(position_13)} stages")
           if "phase11.stage_trace.position=13 stage=L24_attn_block_input" not in data or \
              "phase11.top1_agreement=" not in data:
+              print("::error file=.github/workflows/v100-phase11-runtime.yml::decomposition run did not reach position 13 (log "
+                    f"{len(data)} bytes); tail: {tail}")
               raise SystemExit("Error decomposition run did not reach position 13")
           PY
           python3 tools/reference/qwen3_8_flash_next/oracle/analyze_error_decomposition.py \
