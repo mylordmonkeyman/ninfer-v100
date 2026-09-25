@@ -80,7 +80,14 @@ jobs:
           test -s candidate-stage/pos0012/L00_mlp_block_input_fp32.bin
           test -s candidate-stage/pos0012/L00_mlp_block_input.bin
           test "$(stat -c %s candidate-stage/pos0012/L00_mlp_block_input_fp32.bin)" -eq 10240
-          rg 'phase11.positions=14|phase11.mean_kl=' raw-mixer.log
+          python3 - <<'PYREPORT'
+          from pathlib import Path
+          text=Path('raw-mixer.log').read_text()
+          for key in ('phase11.positions=14','phase11.mean_kl='):
+              lines=[line for line in text.splitlines() if key in line]
+              if len(lines)!=1: raise SystemExit(f'expected one {key}, got {len(lines)}')
+              print(lines[0])
+          PYREPORT
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
