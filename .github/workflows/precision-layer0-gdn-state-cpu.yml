@@ -1,0 +1,107 @@
+name: Phase 11 CPU Layer Zero Prior GDN State Probe
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-layer0-gdn-state-cpu.yml
+
+permissions:
+  contents: read
+
+jobs:
+  prior-state-shape:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 180
+    env:
+      CUDA_VISIBLE_DEVICES: ""
+      NINFER_ORACLE_DETERMINISTIC: "1"
+      NINFER_ORACLE_THREADS: "16"
+      OMP_NUM_THREADS: "16"
+      MKL_NUM_THREADS: "16"
+      OPENBLAS_NUM_THREADS: "16"
+      NUMEXPR_NUM_THREADS: "16"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Find pinned CPU inputs and Python
+        run: |
+          set -euo pipefail
+          test -s /srv/ninfer/source/mixed/model.safetensors.index.json
+          test -d /srv/ninfer/source/ple/ples_int4
+          test -s /oracle/phase11/token_ids.json
+          test -s /oracle/phase11-stage-trace14/manifest.json
+          for candidate in "$GITHUB_WORKSPACE/venv-oracle/bin/python" \
+              "$HOME/ninfer-v100/venv-oracle/bin/python" \
+              /srv/ninfer/venv-oracle/bin/python python3; do
+            if command -v "$candidate" >/dev/null 2>&1 && \
+                "$candidate" -c 'import numpy, torch, transformers, safetensors' \
+                  >/dev/null 2>&1; then
+              echo "CPU_PYTHON=$candidate" >> "$GITHUB_ENV"
+              exit 0
+            fi
+          done
+          echo 'CPU_PYTHON=' >> "$GITHUB_ENV"
+      - name: Prepare CPU Python if needed
+        run: |
+          set -euo pipefail
+          if [[ -n "$CPU_PYTHON" ]]; then exit 0; fi
+          python3 -m venv "$GITHUB_WORKSPACE/precision-venv"
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            torch --index-url https://download.pytorch.org/whl/cpu
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            numpy safetensors 'transformers>=5.16,<6'
+          echo "CPU_PYTHON=$GITHUB_WORKSPACE/precision-venv/bin/python" >> "$GITHUB_ENV"
+      - name: Inspect independent CPU recurrent state before position 12
+        run: |
+          set -euo pipefail
+          "$CPU_PYTHON" - <<'PY' | tee prior-state-shape.txt
+          import sys
+          from pathlib import Path
+          import torch
+          sys.path.insert(0, 'tools/reference/qwen3_8_flash_next/oracle')
+          from run_oracle import build_oracle
+          from run_precision_reference import read_ids
+          from precision_profile import (PROFILES, install_projection_boundaries,
+                                         materialize_persistent_states)
+          ids=read_ids(Path('/oracle/phase11/token_ids.json'),13)
+          model,head=build_oracle('/srv/ninfer/source/mixed',
+                                  '/srv/ninfer/source/ple/ples_int4')
+          model.eval()
+          for layer in model.layers:
+              layer.mlp.experts.round_activations_to_bf16=True
+          profile=PROFILES['v100-phase11-storage']
+          hooks=install_projection_boundaries(model,profile)
+          cache=None
+          try:
+              with torch.inference_mode():
+                  for position,token in enumerate(ids):
+                      if position==12:
+                          assert cache is not None
+                          states=cache.layers[0].recurrent_states
+                          print('position=12 state_keys=',list(states),flush=True)
+                          for key,state in states.items():
+                              if state is None: continue
+                              x=state.detach().float()
+                              print('state',key,'shape',tuple(x.shape),'dtype',state.dtype,
+                                    'count',x.numel(),'l2',float(torch.linalg.vector_norm(x)),
+                                    'finite',bool(torch.isfinite(x).all()),flush=True)
+                          assert any(state is not None and state.numel()==48*128*128
+                                     for state in states.values())
+                      out=model(input_ids=torch.tensor([[token]],dtype=torch.long),
+                                past_key_values=cache,use_cache=True)
+                      cache=out.past_key_values
+                      materialize_persistent_states(cache,model,profile)
+              print('completed_prefix_positions=13',flush=True)
+          finally:
+              for hook in hooks: hook.remove()
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: cpu-layer0-gdn-prior-state-shape
+          path: prior-state-shape.txt
+          if-no-files-found: ignore
+          retention-days: 14
