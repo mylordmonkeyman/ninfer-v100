@@ -1,0 +1,80 @@
+name: Phase 11 Layer Zero Boundary Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-layer0-boundary-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-hyper-layer0-reference-14
+          run-id: 36062184692
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-hyper-layer0-calibration-14
+          run-id: 36062874657
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: v100
+      - name: Quantify position-12 layer-zero boundary error
+        run: |
+          python3 - <<'PY'
+          from array import array
+          import math
+          from pathlib import Path
+          import sys
+          assert sys.byteorder == 'little'
+          stages = ('attn_block_input', 'gdn_recurrent_output',
+                    'gdn_gated_output', 'attn_block_output',
+                    'hyper_after_attn', 'mlp_block_input_fp32',
+                    'mlp_block_input')
+          roots = (Path('cpu/v100-phase11-storage'),
+                   Path('v100/candidate-stage'), Path('cpu/fp32'))
+          def read(root, position, stage):
+              path = root / f'pos{position:04d}/L00_{stage}.bin'
+              if not path.is_file():
+                  return None
+              data = array('f')
+              data.frombytes(path.read_bytes())
+              return data
+          def nrmse(reference, actual):
+              assert len(reference) == len(actual) and len(reference) > 0
+              squared = math.fsum((float(x) - float(y))**2
+                                  for x,y in zip(reference, actual))
+              scale = math.fsum(float(x)**2 for x in reference)
+              return math.sqrt(squared / max(scale, 1e-24))
+          out = ['Position 12, layer 0: CPU reference and V100 boundaries',
+                 'stage cpu_v100 cpu_oracle v100_oracle count']
+          for stage in stages:
+              cpu, gpu, oracle = (read(root, 12, stage) for root in roots)
+              if cpu is None or gpu is None or oracle is None:
+                  out.append(f'{stage} missing cpu={cpu is not None} '
+                             f'v100={gpu is not None} oracle={oracle is not None}')
+                  continue
+              out.append(f'{stage} {nrmse(cpu,gpu):.9g} '
+                         f'{nrmse(oracle,cpu):.9g} '
+                         f'{nrmse(oracle,gpu):.9g} {len(cpu)}')
+          Path('layer0-boundary-report.txt').write_text('\n'.join(out)+'\n')
+          print('\n'.join(out))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: layer0-boundary-report
+          path: layer0-boundary-report.txt
+          if-no-files-found: ignore
+          retention-days: 14
