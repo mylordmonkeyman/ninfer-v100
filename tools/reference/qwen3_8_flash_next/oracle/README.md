@@ -736,6 +736,28 @@ was 0.01485480 for the natural run, 0.01377233 with state injected, and
 unchanged Phase 11 gate. The remaining complete-prefix KL and router-set
 errors need a deployable precision or implementation correction.
 
+### Position-ten CPU calibration is not a V100 precision floor
+
+The [frozen position-ten router report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36186062340)
+finds the first CPU-only expert-set change at layer 5: FP32 ranks expert
+120 over 136 by 0.001184, the CPU storage profile reverses them by
+0.000965, and V100 still ranks 120 above 136 by 0.000445. The CPU and V100
+layer-zero attention and MLP inputs are bitwise identical at position 10;
+their layer-zero MLP outputs differ by only 6.32e-8 NRMSE. At the layer-five
+MLP input, CPU-to-V100 NRMSE is 0.003046, and the CPU layer-five post-MLP
+hyper output differs from the oracle by 0.020302 versus V100's 0.003207.
+Among 48 position-ten router cells, CPU differs from the FP32 set in 18
+and V100 in 7; the first V100-only expert change occurs at layer 27.
+
+The [three-way per-position KL report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36186513521)
+shows position-ten oracle KL 0.115576 for CPU but 0.074579 for V100.
+At position 13 CPU has KL 0.313710 and retains the oracle top token, while
+V100 has KL 0.615420 and changes the top token. Consequently the CPU
+profile's position-ten outlier is not a demonstrated lower bound for the
+V100 implementation. These measurements prioritize calibrating early
+CPU-only router decisions and testing whether a deployable precision change
+improves the full prefixes; they do not relax the §7 gate.
+
 ## 1. Environment Setup
 
 Run the setup script using Python 3.14 to create the isolated virtual environment:
