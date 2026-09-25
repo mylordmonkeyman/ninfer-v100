@@ -1339,7 +1339,7 @@ int main() {
                 stage_root / pos_dir / (oracle_stage_name + ".bin");
             if (name == "L00_gdn_ssm_source_state") {
                 const char* state_root = std::getenv("NINFER_PHASE11_STATE_COMPARE_ROOT");
-                if (state_root != nullptr && state_root[0] != '\\0') {
+                if (state_root != nullptr && state_root[0] != '\0') {
                     expected_path = fs::path(state_root) / pos_dir /
                         (oracle_stage_name + ".bin");
                 }
