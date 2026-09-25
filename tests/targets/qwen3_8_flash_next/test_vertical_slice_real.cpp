@@ -631,6 +631,85 @@ int main() {
         device.synchronize();
         vram.after_model_load = phase11_cuda_memory_snapshot();
 
+        if (const char* audit_root = std::getenv("NINFER_PHASE11_WEIGHT_AUDIT_ROOT");
+            audit_root != nullptr && audit_root[0] != '\0') {
+            const fs::path root(audit_root);
+            const auto write_plane = [&](std::string_view object,
+                                         std::string_view plane, const void* data,
+                                         std::size_t bytes) {
+                if (data == nullptr || bytes == 0) {
+                    throw std::runtime_error("Phase 11 weight audit has an empty plane");
+                }
+                const fs::path path = root / (std::string(object) + "." +
+                                              std::string(plane) + ".bin");
+                fs::create_directories(path.parent_path());
+                std::vector<std::byte> host(bytes);
+                CUDA_CHECK(cudaMemcpy(host.data(), data, bytes, cudaMemcpyDeviceToHost));
+                std::ofstream output(path, std::ios::binary | std::ios::trunc);
+                output.write(reinterpret_cast<const char*>(host.data()),
+                             static_cast<std::streamsize>(host.size()));
+                if (!output) {
+                    throw std::runtime_error("Phase 11 weight audit cannot write " +
+                                             path.string());
+                }
+                std::cout << "phase11.weight_audit.object=" << object
+                          << " plane=" << plane << " bytes=" << bytes << '\n';
+            };
+            const auto audit = [&](const Weight& weight, std::string_view object,
+                                   QType format, std::int32_t rows,
+                                   std::int32_t columns) {
+                if (weight.qtype != format || weight.n != rows ||
+                    weight.k != columns || weight.qdata == nullptr) {
+                    throw std::runtime_error("Phase 11 weight audit shape/format mismatch: " +
+                                             std::string(object));
+                }
+                const auto cells = static_cast<std::size_t>(rows) * columns;
+                if (format == QType::BF16_CTRL) {
+                    if (weight.layout != QuantLayout::Contiguous) {
+                        throw std::runtime_error("Phase 11 BF16 weight layout mismatch");
+                    }
+                    write_plane(object, "bf16", weight.qdata,
+                                cells * sizeof(std::uint16_t));
+                } else if (format == QType::FP8_E4M3FN_ROW_F32S) {
+                    if (weight.layout != QuantLayout::RowScale ||
+                        weight.scale_dtype != DType::FP32) {
+                        throw std::runtime_error("Phase 11 FP8 weight layout mismatch");
+                    }
+                    write_plane(object, "codes", weight.qdata, cells);
+                    write_plane(object, "scales", weight.scales,
+                                static_cast<std::size_t>(rows) * sizeof(float));
+                } else {
+                    throw std::runtime_error("Phase 11 weight audit format unsupported");
+                }
+            };
+            const auto& text = model.text_view();
+            for (const int layer : {0, 2}) {
+                const std::string prefix = "text/layers/" + std::to_string(layer) + "/";
+                const auto& weights = text.layers[layer];
+                audit(weights.moe.router, prefix + "mlp/router",
+                      QType::BF16_CTRL, 512, 2'560);
+                const auto& norm = weights.mlp_hyper.norm;
+                if (norm.data == nullptr || norm.dtype != DType::BF16 ||
+                    norm.numel() != 10'240 || !norm.is_contiguous()) {
+                    throw std::runtime_error("Phase 11 weight audit norm mismatch");
+                }
+                write_plane(prefix + "mlp/hyper_connection/norm", "bf16",
+                            norm.data, 10'240ULL * sizeof(std::uint16_t));
+                audit(weights.mlp_hyper.input_mix_down,
+                      prefix + "mlp/hyper_connection/input_mix/down",
+                      QType::BF16_CTRL, 320, 10'240);
+                audit(weights.mlp_hyper.input_mix_up,
+                      prefix + "mlp/hyper_connection/input_mix/up",
+                      QType::BF16_CTRL, 10'240, 320);
+                audit(text.gdn[layer].query_key_value_z,
+                      prefix + "gdn/query_key_value_z",
+                      QType::FP8_E4M3FN_ROW_F32S, 16'384, 2'560);
+                audit(text.gdn[layer].output, prefix + "gdn/output",
+                      QType::FP8_E4M3FN_ROW_F32S, 2'560, 6'144);
+            }
+            return 0;
+        }
+
         if (const char* isolation_root =
                 std::getenv("NINFER_PHASE11_GDN_CONV_ISOLATION_ROOT");
             isolation_root != nullptr && isolation_root[0] != '\0') {
