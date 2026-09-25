@@ -1,0 +1,57 @@
+name: Phase 11 Router Replay Qualification Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-router-replay-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Download frozen complete-prefix router replay
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36087743583 --repo "$GITHUB_REPOSITORY" \
+            --name cpu-router-replay-14 --dir frozen
+      - name: Compare KL distributions and top-one behavior
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee router-replay-report.txt
+          import json
+          from pathlib import Path
+
+          r = json.loads(Path('frozen/precision_report.json').read_text())
+          def show(label, rows):
+              values = sorted(row['kl'] for row in rows)
+              n = len(values)
+              p99_index = (n - 1) * .99
+              lower = int(p99_index)
+              p99 = values[lower] + (values[min(lower + 1, n - 1)] - values[lower]) * (p99_index - lower)
+              top1 = sum(row['top1_agree'] for row in rows)
+              print(label, 'mean_kl', sum(values) / n, 'max_kl', values[-1],
+                    'p99_kl', p99, 'oracle_top1_agree', top1, '/', n)
+              print(label, 'per_position_kl', [row['kl'] for row in rows])
+
+          show('normal_cpu_vs_oracle', r['per_position'])
+          show('v100_vs_oracle', r['three_way']['per_position_v100'])
+          for source, result in r['router_replay']['source'].items():
+              show('cpu_forced_' + source + '_vs_oracle', result['per_position_oracle'])
+              print('cpu_forced_' + source + '_vs_v100_mean_kl',
+                    result['cpu_vs_v100_mean_kl'])
+          print('normal_cpu_vs_v100_mean_kl', r['three_way']['cpu_vs_v100_mean_kl'])
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: router-replay-report
+          path: router-replay-report.txt
+          retention-days: 14
