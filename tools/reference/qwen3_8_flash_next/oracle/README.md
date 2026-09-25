@@ -640,6 +640,49 @@ attention output and hyper master state equal between CPU and V100, then
 compare their FP32 MLP mixer before the BF16 storage cast. Retain the
 unchanged Phase 11 qualification gate.
 
+### Layer-zero position-12 matched-input GDN localization
+
+The [fresh CPU precision trace](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36177462927)
+completed all 14 positions. Its mean FP32-oracle KL was 0.031902. The
+[matched hyper-state replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36176024960)
+and [matched attention-output replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36176940353)
+each ran the real V100 model through a 13-position prefix. CPU and V100
+position-12 layer-zero attention inputs match exactly. Replacing the V100
+attention output with the CPU reference's value reduces the next FP32 hyper
+state NRMSE from 0.000230481 to 0.000000299 and the unrounded MLP mixer
+NRMSE from 0.000489360 to 0.000000340. Replacing the hyper master directly
+reduces the mixer NRMSE to 0.000000281. The natural difference at that point
+arrives from GDN attention; these replays do not establish its cause.
+
+The [GDN boundary report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36177837422)
+records position-12 CPU-to-V100 NRMSE of 0.001305950 for the fused projection,
+0.000021222 for z, 0.000013230 for the recurrent output, 0.000266225 for
+the gated output, and 0.000219575 for the attention output. Exact equality
+of the attention input does not guarantee bitwise equality of FP8 projection
+accumulators, since CPU and CUDA reductions can have different arithmetic
+orders. The earlier byte audit covers the relevant device-resident weights.
+
+The [recurrent/gated replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36178050742)
+supplied independent CPU position-12 recurrent output to V100 and reduced
+gated-output NRMSE to 0.000041995. Supplying the CPU gated output instead
+reduced attention-output NRMSE to 0.000000415. The
+[z/recurrent replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36178778784)
+then supplied CPU z alone, reducing gated-output NRMSE only to 0.000262892;
+supplying both CPU z and CPU recurrent output reduced it to 0.000000092.
+These stage files are captured *before* replacement, so the injected stage's
+own recorded row still shows the baseline difference. The downstream values
+show that, for these matched inputs, the V100 output gate closely reproduces
+the CPU result. The remaining natural gate difference originates mainly
+upstream of that gate, in the recurrence input/history or its arithmetic.
+
+Every diagnostic V100 CTest above still exits 8 against the **unchanged**
+Phase 11 qualification gate. Workflow success means its prefix completed and
+the specified injection occurred, not that the model qualified. Next compare
+the CPU and V100 layer-zero convolution query/key/value at position 12, then
+hold the previous GDN state equal to distinguish accumulated storage/reduction
+differences from a recurrence implementation error. No precision floor or
+general kernel correctness conclusion follows from this one position.
+
 ## 1. Environment Setup
 
 Run the setup script using Python 3.14 to create the isolated virtual environment:
