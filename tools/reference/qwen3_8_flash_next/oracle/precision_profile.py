@@ -75,6 +75,10 @@ def _attention_hyper_from_bf16_shadow(self, hyper_input):
     mix_gate = mix_gate.unflatten(-1, (self.hc_count, self.hidden_size))
     mixed = (mix_gate * normalized.unflatten(
         -1, (self.hc_count, self.hidden_size))).mean(dim=-2)
+    if getattr(self, "_phase11_capture_attention_raw", False):
+        # Diagnostic only: expose the same mathematical mixer boundary before
+        # the profile's BF16 output materialization.
+        self._phase11_attention_raw = mixed.detach().to(torch.float32).cpu().clone()
     if self.block_inject_weight is None:
         return round_to_bf16(mixed)
     injection = 2 * torch.sigmoid(
