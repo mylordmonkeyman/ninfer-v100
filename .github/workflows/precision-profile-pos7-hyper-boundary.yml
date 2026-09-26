@@ -1,0 +1,67 @@
+name: Phase 11 Position Seven Hyper Precision Boundary
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-profile-pos7-hyper-boundary.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Download frozen complete-prefix traces
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36087743583 --repo "$GITHUB_REPOSITORY" --name cpu-router-replay-14 --dir cpu
+          gh run download 36078905618 --repo "$GITHUB_REPOSITORY" --name v100-mlp-raw-layer1-14 --dir gpu
+      - name: Examine layer-one precision amplification
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee pos7-hyper-boundary.txt
+          from array import array
+          from math import fsum,sqrt
+          from pathlib import Path
+          roots={'oracle':Path('cpu/fp32/pos0007'),
+                 'profile':Path('cpu/v100-phase11-storage/pos0007'),
+                 'v100':Path('gpu/candidate-stage/pos0007')}
+          def read(root,name):
+              a=array('f');a.frombytes((root/(name+'.bin')).read_bytes());return a
+          def nrmse(a,b):
+              assert len(a)==len(b)>0
+              return sqrt(fsum((float(x)-float(y))**2 for x,y in zip(a,b))/
+                          max(fsum(float(x)**2 for x in a),1e-24))
+          for name in ('L00_hyper_after_mlp','ple_injection','L01_attn_block_input',
+                       'L01_mlp_block_input'):
+              values={kind:read(root,name) for kind,root in roots.items()}
+              print(name,'count',len(values['profile']),
+                    'profile_gpu_nrmse',format(nrmse(values['profile'],values['v100']),'.12g'),
+                    'profile_oracle',format(nrmse(values['oracle'],values['profile']),'.12g'),
+                    'gpu_oracle',format(nrmse(values['oracle'],values['v100']),'.12g'),
+                    'exact_profile_gpu',sum(x==y for x,y in zip(values['profile'],values['v100'])))
+          states={}
+          for kind,root in roots.items():
+              before=read(root,'L00_hyper_after_mlp')
+              ple=read(root,'ple_injection')
+              print(kind,'state_length',len(before),'ple_length',len(ple))
+              if len(before)==len(ple):
+                  states[kind]=[float(x)+float(y) for x,y in zip(before,ple)]
+          if len(states)==3:
+              print('sum_after_ple_profile_gpu_nrmse',
+                    format(nrmse(states['profile'],states['v100']),'.12g'))
+              print('sum_after_ple_profile_oracle',
+                    format(nrmse(states['oracle'],states['profile']),'.12g'))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pos7-hyper-precision-boundary
+          path: pos7-hyper-boundary.txt
+          retention-days: 14
