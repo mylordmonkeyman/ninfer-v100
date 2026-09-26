@@ -1,0 +1,73 @@
+name: Phase 11 Matched Layer Zero MLP Gate Arithmetic Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-layer0-mlp-gate-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-layer0-mlp-gate-reference-14
+          run-id: 36247796256
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-position7-matched-layer0-mlp-gate-14
+          run-id: 36247843768
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: gpu
+      - name: Compare four injection scales and index 5609 update arithmetic
+        run: |
+          python3 - <<'PY' | tee mlp-gate-report.txt
+          import ctypes,math,struct
+          from pathlib import Path
+          def read(path,count):
+              raw=path.read_bytes();assert len(raw)==count*4,(path,len(raw))
+              return struct.unpack('<'+str(count)+'f',raw)
+          def f32(x):
+              return struct.unpack('<f',struct.pack('<f',x))[0]
+          libm=ctypes.CDLL('libm.so.6')
+          libm.fmaf.argtypes=(ctypes.c_float,ctypes.c_float,ctypes.c_float)
+          libm.fmaf.restype=ctypes.c_float
+          cpu=Path('cpu/v100-phase11-storage/pos0007')
+          gpu=Path('gpu/replay/matched/pos0007')
+          if not gpu.exists():
+              gpu=Path('gpu/matched/pos0007')
+          cpu_gate=read(cpu/'L00_mlp_injection.bin',4)
+          gpu_gate=read(gpu/'L00_mlp_injection.bin',4)
+          print('CPU_gate',cpu_gate,'V100_gate',gpu_gate)
+          print('gate_abs_diffs',[abs(x-y) for x,y in zip(cpu_gate,gpu_gate)])
+          idx=5609;stream=idx//2560;channel=idx%2560
+          before=read(cpu/'L00_hyper_after_attn.bin',10240)[idx]
+          block=read(cpu/'L00_mlp_block_output.bin',2560)[channel]
+          cpu_after=read(cpu/'L00_hyper_after_mlp.bin',10240)[idx]
+          gpu_after=read(gpu/'L00_hyper_after_mlp.bin',10240)[idx]
+          for name,scale in (('cpu',cpu_gate[stream]),('v100',gpu_gate[stream])):
+              fused=libm.fmaf(block,scale,before)
+              separated=f32(f32(block*scale)+before)
+              print(name,'gate',format(scale,'.12g'),
+                    'predicted_fma',format(fused,'.12g'),
+                    'predicted_separate',format(separated,'.12g'))
+          print('index',idx,'stream',stream,'channel',channel,
+                'before',format(before,'.12g'),'block',format(block,'.12g'),
+                'cpu_after',format(cpu_after,'.12g'),
+                'gpu_after',format(gpu_after,'.12g'))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phase11-layer0-mlp-gate-arithmetic-report
+          path: mlp-gate-report.txt
+          retention-days: 14
