@@ -51,6 +51,7 @@ jobs:
             if (( attempt < 30 )); then sleep 30; fi
           done
           exit 1
+      # The MLP gate has no frozen independent stage oracle; its trace is optional.
       - name: Capture matched-input MLP injection gates at layer zero
         env:
           NINFER_WEIGHTS: /models/qwen3-8b-flash-next
