@@ -1410,6 +1410,34 @@ int main() {
                         (oracle_stage_name + ".bin");
                 }
             }
+            if (name == "L00_mlp_injection" && dump_candidate_trace &&
+                !fs::is_regular_file(expected_path) &&
+                std::getenv("NINFER_PHASE11_TRACE_HYPER_LAYER0") != nullptr) {
+                if (tensor.dtype != ninfer::DType::FP32 || tensor.numel() != 4) {
+                    throw std::runtime_error("Phase 11 MLP gate trace shape mismatch");
+                }
+                std::array<float, 4> values{};
+                CUDA_CHECK(cudaMemcpy(values.data(), tensor.data,
+                                      values.size() * sizeof(float),
+                                      cudaMemcpyDeviceToHost));
+                const fs::path folder = candidate_root / pos_dir;
+                fs::create_directories(folder);
+                const fs::path path = folder / "L00_mlp_injection.bin";
+                std::ofstream output_file(path, std::ios::binary | std::ios::trunc);
+                output_file.write(reinterpret_cast<const char*>(values.data()),
+                                  values.size() * sizeof(float));
+                if (!output_file) {
+                    throw std::runtime_error("failed to write MLP gate trace");
+                }
+                candidate_index << json{{"position", current_stage_trace_position},
+                                        {"name", "L00_mlp_injection"},
+                                        {"dtype", "FP32"},
+                                        {"count", 4},
+                                        {"file", (fs::path(pos_dir) /
+                                                  "L00_mlp_injection.bin").string()}}
+                                << '\n' << std::flush;
+                return;
+            }
             if (!fs::is_regular_file(expected_path)) {
                 return;
             }
