@@ -65,6 +65,27 @@ jobs:
                     'CPU_V100_NRMSE',format(math.sqrt(err/norm),'.12g'),
                     'exact_values',sum(x==y for x,y in zip(a,b)),
                     'max_abs',format(max(abs(x-y) for x,y in zip(a,b)),'.12g'))
+          left,right=read(cpu,'L00_gdn_projected'),read(gpu,'L00_gdn_projected')
+          def bf16(value):
+              bits=struct.unpack('<I',struct.pack('<f',value))[0]
+              assert bits&0x7f800000!=0x7f800000
+              bits=(bits+0x7fff+((bits>>16)&1))&0xffffffff
+              return struct.unpack('<f',struct.pack('<I',bits&0xffff0000))[0]
+          for title,lo,hi in (('conv_qkv',0,10240),('z',10240,16384)):
+              a,b=left[lo:hi],right[lo:hi]
+              mismatch=[i+lo for i,(x,y) in enumerate(zip(a,b)) if bf16(x)!=y]
+              norm=math.fsum(x*x for x in a)
+              err=math.fsum((x-y)**2 for x,y in zip(a,b))
+              print('projection_segment',title,'NRMSE',
+                    format(math.sqrt(err/norm),'.12g'),
+                    'CPU_bf16_vs_gpu_mismatches',len(mismatch),
+                    'first_mismatches',mismatch[:12])
+              largest=sorted(range(len(a)),key=lambda i:abs(a[i]-b[i]),reverse=True)[:4]
+              for i in largest:
+                  print('projection_large_delta',title,lo+i,
+                        'cpu_raw',format(a[i],'.10g'),
+                        'cpu_rounded',format(bf16(a[i]),'.10g'),
+                        'gpu',format(b[i],'.10g'))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
