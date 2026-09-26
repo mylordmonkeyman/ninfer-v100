@@ -1496,7 +1496,8 @@ int main() {
                     const char* extra = std::getenv("NINFER_PHASE11_TRACE_HYPER_LAYER0");
                     return extra != nullptr && extra[0] == '1' && extra[1] == '\0' &&
                            (name == "L00_hyper_after_attn" ||
-                            name == "L00_mlp_block_input_fp32");
+                            name == "L00_mlp_block_input_fp32" ||
+                            name == "L00_mlp_injection");
                 }()) ||
                 ([&] {
                     const char* extra = std::getenv("NINFER_PHASE11_TRACE_MLP_LAYER0");
