@@ -1,0 +1,82 @@
+name: Phase 11 Position Seven Split State Precision Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-pos7-split-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-raw-attention-reference-14
+          run-id: 36211013815
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-position7-matched-post-ple-14
+          run-id: 36213259787
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: gpu
+      - name: Compare four frozen complete-prefix traces
+        run: |
+          python3 - <<'PY' | tee precision-pos7-report.txt
+          import math,struct
+          from pathlib import Path
+          def read(path,count):
+              raw=path.read_bytes()
+              assert len(raw)==count*4,(path,len(raw))
+              return struct.unpack('<'+str(count)+'f',raw)
+          def nrmse(a,b):
+              return math.sqrt(math.fsum((x-y)**2 for x,y in zip(a,b))/
+                               math.fsum(x*x for x in a))
+          def bf16(value):
+              bits=struct.unpack('<I',struct.pack('<f',value))[0]
+              bits=(bits+0x7fff+((bits>>16)&1))&0xffffffff
+              return bits>>16
+          cpu=Path('cpu/v100-phase11-storage/pos0007')
+          gpu=Path('gpu')
+          ref_raw=read(cpu/'L01_attn_block_input_fp32.bin',2560)
+          ref_stored=read(cpu/'L01_attn_block_input.bin',2560)
+          master=read(cpu/'L00_hyper_after_mlp.bin',10240)
+          ple=read(cpu/'ple_injection.bin',10240)
+          cpu_state=[struct.unpack('<f',struct.pack('<f',x+y))[0] for x,y in zip(master,ple)]
+          expected_shadow=[bf16(x) for x in cpu_state]
+          for mode in ('baseline','cpu_master','cpu_ple','matched'):
+              base=gpu/mode/'pos0007'
+              raw=read(base/'L01_attn_block_input_fp32.bin',2560)
+              stored=read(base/'L01_attn_block_input.bin',2560)
+              observed=read(base/'hyper_after_ple.bin',10240)
+              if mode=='baseline':
+                  injected=observed
+              elif mode=='cpu_master':
+                  v100_ple=read(gpu/'baseline/pos0007/ple_injection.bin',10240)
+                  injected=[struct.unpack('<f',struct.pack('<f',x+y))[0] for x,y in zip(master,v100_ple)]
+              elif mode=='cpu_ple':
+                  v100_master=read(gpu/'baseline/pos0007/L00_hyper_after_mlp.bin',10240)
+                  injected=[struct.unpack('<f',struct.pack('<f',x+y))[0] for x,y in zip(v100_master,ple)]
+              else:
+                  injected=cpu_state
+              mismatch=[i for i,(x,y) in enumerate(zip(expected_shadow,map(bf16,injected))) if x!=y]
+              print(mode,'raw_NRMSE',format(nrmse(ref_raw,raw),'.12g'),
+                    'stored_NRMSE',format(nrmse(ref_stored,stored),'.12g'),
+                    'injected_state_NRMSE',format(nrmse(cpu_state,injected),'.12g'),
+                    'BF16_shadow_mismatches',len(mismatch),
+                    'shadow_indices',mismatch)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phase11-position7-split-state-precision-report
+          path: precision-pos7-report.txt
+          retention-days: 14
