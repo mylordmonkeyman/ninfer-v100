@@ -1398,6 +1398,9 @@ int main() {
                 oracle_stage_name =
                     std::string(name.substr(0, 4)) + "mlp_block_input";
             }
+            if (name == "L01_attn_block_input_fp32") {
+                oracle_stage_name = "L01_attn_block_input";
+            }
             fs::path expected_path =
                 stage_root / pos_dir / (oracle_stage_name + ".bin");
             if (name == "L00_gdn_ssm_source_state") {
