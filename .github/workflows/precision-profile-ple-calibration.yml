@@ -1,0 +1,54 @@
+name: Phase 11 Precision Profile PLE Boundary Calibration
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-profile-ple-calibration.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Download matched complete-prefix comparisons
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36087743583 --repo "$GITHUB_REPOSITORY" --name cpu-router-replay-14 --dir cpu
+      - name: Locate earliest history and PLE amplification
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee ple-calibration.txt
+          import csv
+          from pathlib import Path
+          rows={(int(r['position']),r['stage']):r for r in
+                csv.DictReader(Path('cpu/comparison/stage_comparison.csv').open())}
+          for pos in (0,1,2,6,7,8,9,10,11,12,13):
+              print('position',pos)
+              for stage in ('embedding','L00_attn_block_input','L00_mlp_block_input',
+                            'L00_moe_router_scores','L00_mlp_block_output',
+                            'L00_hyper_after_mlp','ple_gathered','ple_injection',
+                            'hyper_after_ple','L01_attn_block_input',
+                            'L01_mlp_block_input','L01_hyper_after_mlp',
+                            'L02_attn_block_input'):
+                  r=rows.get((pos,stage))
+                  if r is None: continue
+                  print(stage,'cpu_gpu',r['v100_vs_cpu_nrmse'],
+                        'cpu_oracle',r['cpu_vs_oracle_nrmse'],
+                        'gpu_oracle',r['v100_vs_oracle_nrmse'])
+          for key in ('L00_mlp_block_input','L00_mlp_block_output',
+                      'ple_injection','L01_attn_block_input','L01_mlp_block_input'):
+              assert (7,key) in rows
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: precision-profile-ple-calibration
+          path: ple-calibration.txt
+          retention-days: 14
