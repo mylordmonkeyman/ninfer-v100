@@ -906,6 +906,17 @@ int main() {
             std::getenv("NINFER_PHASE11_ORACLE_INJECT_ALL_POSITIONS") != nullptr;
         const bool replay_oracle_router_ids =
             std::getenv("NINFER_PHASE11_REPLAY_ORACLE_ROUTER_IDS") != nullptr;
+        const char* replay_scope_env =
+            std::getenv("NINFER_PHASE11_REPLAY_ORACLE_ROUTER_SCOPE");
+        const std::string replay_scope =
+            replay_scope_env != nullptr ? replay_scope_env : "all";
+        if (replay_scope != "all" && replay_scope != "position13" &&
+            replay_scope != "position13-layer26plus") {
+            throw std::invalid_argument("Phase 11 oracle-membership replay scope is invalid");
+        }
+        if (!replay_oracle_router_ids && replay_scope != "all") {
+            throw std::invalid_argument("Phase 11 scoped membership replay requires replay enabled");
+        }
         if (!oracle_inject_stage.empty() && !stage_trace_enabled) {
             throw std::invalid_argument(
                 "NINFER_PHASE11_ORACLE_INJECT_STAGE requires a stage oracle root");
@@ -945,6 +956,18 @@ int main() {
         std::vector<float> pending_router_alpha;
         std::string pending_router_prefix;
         std::uint64_t replayed_router_layers = 0;
+        const auto replay_selected = [&](std::string_view name) {
+            if (!replay_oracle_router_ids || replay_scope == "all") {
+                return replay_oracle_router_ids;
+            }
+            if (current_stage_trace_position != 13 || name.size() < 3 ||
+                name[0] != 'L' || name[1] < '0' || name[1] > '9' ||
+                name[2] < '0' || name[2] > '9') {
+                return false;
+            }
+            const int layer = (name[1] - '0') * 10 + (name[2] - '0');
+            return replay_scope == "position13" || layer >= 26;
+        };
         constexpr std::size_t kRouterHidden = 2'560;
         constexpr std::size_t kRouterExperts = 512;
         std::array<std::vector<std::uint16_t>, 48> router_weight_words;
@@ -1718,7 +1741,7 @@ int main() {
             // Diagnostic only: isolate the effect of expert membership on
             // the actual V100 decode. The selected expert weights still come
             // from this token's own V100 router scores, never oracle scores.
-            if (replay_oracle_router_ids && name.size() == 18 &&
+            if (replay_selected(name) && name.size() == 18 &&
                 name.substr(4) == "moe_router_ids") {
                 if (!integer_tensor || count != 10 ||
                     last_router_score_prefix != name.substr(0, 4) ||
@@ -1760,7 +1783,7 @@ int main() {
                 if (verified != ids) {
                     throw std::runtime_error("Phase 11 replay expert-ID readback mismatch");
                 }
-            } else if (replay_oracle_router_ids && name.size() == 20 &&
+            } else if (replay_selected(name) && name.size() == 20 &&
                        name.substr(4) == "moe_router_alpha") {
                 if (tensor.dtype != ninfer::DType::FP32 ||
                     pending_router_prefix != name.substr(0, 4) ||
@@ -2268,7 +2291,9 @@ int main() {
 
         if (replay_oracle_router_ids) {
             if (!pending_router_alpha.empty() ||
-                replayed_router_layers != records.size() * 48ULL) {
+                replayed_router_layers !=
+                    (replay_scope == "all" ? records.size() * 48ULL :
+                     replay_scope == "position13" ? 48ULL : 22ULL)) {
                 throw std::runtime_error("Phase 11 did not replay all oracle expert memberships");
             }
             std::cout << "phase11.oracle_membership_replay.layer_calls="
