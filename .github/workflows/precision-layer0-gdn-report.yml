@@ -53,6 +53,18 @@ jobs:
                     'CPU_V100_NRMSE',format(math.sqrt(err/norm),'.12g'),
                     'exact_values',sum(x==y for x,y in zip(a,b)),
                     'max_abs',format(max(abs(x-y) for x,y in zip(a,b)),'.12g'))
+          shared=sorted(set(p.stem for p in cpu.glob('L00_gdn*.bin')) &
+                        set(p.stem for p in gpu.glob('L00_gdn*.bin')))
+          print('shared_GDN_stages',shared)
+          for stage in shared:
+              a,b=read(cpu,stage),read(gpu,stage)
+              assert len(a)==len(b),(stage,len(a),len(b))
+              norm=math.fsum(x*x for x in a)
+              err=math.fsum((x-y)**2 for x,y in zip(a,b))
+              print(stage,'count',len(a),
+                    'CPU_V100_NRMSE',format(math.sqrt(err/norm),'.12g'),
+                    'exact_values',sum(x==y for x,y in zip(a,b)),
+                    'max_abs',format(max(abs(x-y) for x,y in zip(a,b)),'.12g'))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
