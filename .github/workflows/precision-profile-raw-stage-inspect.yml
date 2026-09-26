@@ -1,0 +1,41 @@
+name: Phase 11 Inspect Missing Raw Stage Capture
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-profile-raw-stage-inspect.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Download failed diagnostic artifact and inspect stage filenames
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36211500054 --repo "$GITHUB_REPOSITORY" \
+            --name v100-raw-attention-pos7-14 --dir diagnostic
+          python3 - <<'PY' | tee raw-stage-inspection.txt
+          from pathlib import Path
+          files=sorted(p.relative_to('diagnostic').as_posix()
+                       for p in Path('diagnostic').rglob('*') if p.is_file())
+          print('file_count',len(files))
+          print('attention_files',*[f for f in files if 'attn_block_input' in f],sep='\n')
+          log=Path('diagnostic/ctest.log').read_text()
+          for text in ('phase11.positions=14','attn_block_input_fp32','phase11.stage_trace.position=7',
+                       'phase11.mean_kl='):
+              print('log_marker',text,log.count(text))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: raw-stage-inspection
+          path: raw-stage-inspection.txt
+          retention-days: 14
