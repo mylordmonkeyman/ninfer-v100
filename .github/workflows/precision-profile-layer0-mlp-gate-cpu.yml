@@ -104,6 +104,7 @@ jobs:
             numpy safetensors 'transformers>=5.16,<6'
           echo "PRECISION_PYTHON=$GITHUB_WORKSPACE/precision-venv/bin/python" >> "$GITHUB_ENV"
 
+      # The optional MLP gate uses the incremental FP32 stage as its reference.
       - name: Recompute three 14-position prefixes and compare stages
         shell: bash
         run: |
