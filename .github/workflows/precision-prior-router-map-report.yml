@@ -1,0 +1,72 @@
+name: Phase 11 Prior Positions V100 Only Router Map
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-prior-router-map-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Download matched frozen oracle CPU and V100 traces
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36087743583 --repo "$GITHUB_REPOSITORY" --name cpu-router-replay-14 --dir cpu
+          gh run download 36078905618 --repo "$GITHUB_REPOSITORY" --name v100-mlp-raw-layer1-14 --dir v100
+      - name: Map prior-position oracle-relative expert changes
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee prior-router-map.txt
+          import json, struct, csv
+          from pathlib import Path
+          roots={'fp32':Path('cpu/fp32'),
+                 'cpu':Path('cpu/v100-phase11-storage'),
+                 'v100':Path('v100/candidate-stage')}
+          rows={(int(r['position']),r['stage']):r for r in
+                csv.DictReader(Path('cpu/comparison/stage_comparison.csv').open())}
+          def data(kind,pos,layer,suffix):
+              p=roots[kind]/f'pos{pos:04d}/L{layer:02d}_moe_router_{suffix}.bin'
+              return [v[0] for v in struct.iter_unpack('<f',p.read_bytes())]
+          total={'v100_only':0,'cpu_only':0,'both':0}
+          for position in range(7,13):
+              cells=[]
+              for layer in range(48):
+                  sets={k:set(map(int,data(k,position,layer,'ids'))) for k in roots}
+                  changed={k:sets[k]!=sets['fp32'] for k in ('cpu','v100')}
+                  if not changed['cpu'] and not changed['v100']: continue
+                  label=('both' if all(changed.values()) else
+                         'v100_only' if changed['v100'] else 'cpu_only')
+                  total[label]+=1
+                  scores=data('v100',position,layer,'scores')
+                  rank=sorted(range(512),key=lambda i:(-scores[i],i))
+                  row=rows.get((position,f'L{layer:02d}_mlp_block_input'))
+                  cells.append({'layer':layer,'kind':label,
+                                'v100_lost':sorted(sets['fp32']-sets['v100']),
+                                'v100_gained':sorted(sets['v100']-sets['fp32']),
+                                'cpu_lost':sorted(sets['fp32']-sets['cpu']),
+                                'cpu_gained':sorted(sets['cpu']-sets['fp32']),
+                                'v100_cutoff':round(scores[rank[9]]-scores[rank[10]],8),
+                                'v100_oracle_input_nrmse':
+                                    float(row['v100_vs_oracle_nrmse']) if row else None})
+              print('position',position,'changes',len(cells),'v100_only',
+                    sum(x['kind']=='v100_only' for x in cells))
+              for cell in cells:
+                  print(json.dumps(cell,sort_keys=True))
+          print('total',json.dumps(total,sort_keys=True))
+          assert total['v100_only']>0
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: prior-router-map-report
+          path: prior-router-map.txt
+          retention-days: 14
