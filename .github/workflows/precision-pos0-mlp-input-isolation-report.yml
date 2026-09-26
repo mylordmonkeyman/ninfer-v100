@@ -76,6 +76,18 @@ jobs:
                            'phase11.oracle_injection.position=0 stage=L00_mlp_block_input'):
                   print(label,term,
                         [line.strip() for line in log.splitlines() if term in line][-1:])
+          for label,base in (('cpu',cpu),('once',once),('twice',twice)):
+              moe=[p.name for p in base.glob('L00_moe_*.bin')]
+              print(label,'moe_trace_files',sorted(moe)[:80])
+          common={p.name for p in cpu.glob('L00_moe_*.bin')}
+          common &= {p.name for p in once.glob('L00_moe_*.bin')}
+          for name in sorted(common):
+              if 'router_ids' in name:
+                  aa=(cpu/name).read_bytes();bb=(once/name).read_bytes()
+                  assert len(aa)==len(bb) and len(aa)%4==0
+                  a=struct.unpack('<'+str(len(aa)//4)+'i',aa)
+                  b=struct.unpack('<'+str(len(bb)//4)+'i',bb)
+                  print('router_ids',name,'cpu',a,'gpu',b,'same',a==b)
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
