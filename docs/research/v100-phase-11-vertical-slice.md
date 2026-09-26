@@ -311,9 +311,14 @@ storage dtype) at all 14 positions. Two structural findings:
    rounding.
 4. **Tail.** Final-hidden error ≈ 10–18% at positions 9–13 → max logit
    error 2.9–3.1 → a top-1 flip occurs only where the oracle's top-1 margin
-   is below the drift (position 13). The end-to-end error is a superposition
-   across all 48 layers; making any single mid-depth layer exact does not
-   restore the tail (the L24 exact-injection proof above).
+   is below the drift (position 13). The end-to-end error is a
+   superposition across all 48 layers; making any single mid-depth layer
+   exact does not restore the tail (the L24 exact-injection proof above;
+   likewise the 14-position PLE replay, which makes the PLE injection
+   exact at every position: pos-13 KL falls 0.615 → 0.187 but a new flip
+   appears at pos 10 (candidate 1156 vs oracle 279, KL 0.252) and top-1
+   is 12/14 — a mid-depth precision improvement that moves the failure
+   without removing it).
 
 Consequence: even a hypothetical all-components-at-floor implementation
 cannot push the mean KL below the floor-compounding bound (per-position KL
