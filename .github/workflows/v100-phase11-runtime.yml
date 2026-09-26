@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: read
+  workflows: write
 
 concurrency:
   group: v100-phase11-runtime-${{ github.ref }}
@@ -653,11 +654,8 @@ jobs:
   retry-v100-on-contention:
     name: Retry V100 Phase 11 Runtime (auto)
     needs: v100-phase11
-    if: needs.v100-phase11.result == 'failure'
+    if: needs['v100-phase11'].result == 'failure'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      workflows: write
     steps:
       - name: Re-dispatch after cooldown (capped at 2 consecutive failures)
         env:
