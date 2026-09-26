@@ -912,7 +912,9 @@ int main() {
             replay_scope_env != nullptr ? replay_scope_env : "all";
         if (replay_scope != "all" && replay_scope != "position13" &&
             replay_scope != "position13-layer26plus" &&
-            replay_scope != "prior13" && replay_scope != "prior13-layer26plus") {
+            replay_scope != "prior13" && replay_scope != "prior13-layer26plus" &&
+            replay_scope != "early7-layer26plus" &&
+            replay_scope != "late6-layer26plus") {
             throw std::invalid_argument("Phase 11 oracle-membership replay scope is invalid");
         }
         if (!replay_oracle_router_ids && replay_scope != "all") {
@@ -961,8 +963,16 @@ int main() {
             if (!replay_oracle_router_ids || replay_scope == "all") {
                 return replay_oracle_router_ids;
             }
-            if (replay_scope == "prior13" || replay_scope == "prior13-layer26plus") {
+            if (replay_scope == "prior13" || replay_scope == "prior13-layer26plus" ||
+                replay_scope == "early7-layer26plus" ||
+                replay_scope == "late6-layer26plus") {
                 if (current_stage_trace_position < 13) {
+                    if (replay_scope == "early7-layer26plus") {
+                        return current_stage_trace_position < 7;
+                    }
+                    if (replay_scope == "late6-layer26plus") {
+                        return current_stage_trace_position >= 7;
+                    }
                     return true;
                 }
                 if (replay_scope == "prior13" || current_stage_trace_position != 13) {
@@ -2306,7 +2316,9 @@ int main() {
                     (replay_scope == "all" ? records.size() * 48ULL :
                      replay_scope == "position13" ? 48ULL :
                      replay_scope == "position13-layer26plus" ? 22ULL :
-                     replay_scope == "prior13" ? 624ULL : 646ULL)) {
+                     replay_scope == "prior13" ? 624ULL :
+                     replay_scope == "prior13-layer26plus" ? 646ULL :
+                     replay_scope == "early7-layer26plus" ? 358ULL : 310ULL)) {
                 throw std::runtime_error("Phase 11 did not replay all oracle expert memberships");
             }
             std::cout << "phase11.oracle_membership_replay.layer_calls="
