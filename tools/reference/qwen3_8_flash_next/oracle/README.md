@@ -1076,9 +1076,35 @@ shows identical CPU FMA and V100 layer-zero attention inputs, but
 0.00004283 MLP-input NRMSE and 0.00019583 post-MLP master NRMSE
 before the layer-10 expert change. Their individual distances from
 the independent FP32 oracle at this early boundary are similar.
-A dedicated position-zero GDN/hyper trace tests where the CPU FMA
-profile still diverges before routing. Natural V100 Phase 11
-remains unqualified.
+The [position-zero GDN trace](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36251205720)
+and [stage comparison](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36251446844)
+locate the remaining first-token difference: CPU FMA and V100
+GDN Q/K/V, recurrence, gate, and attention output agree to roughly
+1e-7--4e-7 NRMSE, while post-attention FP32 hyper master differs by
+4.8146e-7. The raw MLP mixer differs by
+[7.05024e-7 NRMSE](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36251537039);
+both CPU and V100 round each raw mixer result to BF16
+round-to-nearest-even correctly, but four of the 2,560 stored MLP
+values differ, giving 4.283e-5 NRMSE at the stored boundary.
+Thus small upstream arithmetic differences are magnified by BF16
+storage even on the first token.
+
+The [position-zero matched-state replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36251681105)
+supplies the CPU FMA post-attention hyper master to the V100 at that
+single boundary. The V100 raw MLP mixer difference drops to
+3.75570e-7 NRMSE and the stored MLP input to 9.35308e-9,
+supporting an upstream-state contribution to the first stored
+divergence. The trace of post-attention hyper master is taken before
+injection and still reports its natural 4.8146e-7 difference.
+Downstream post-MLP master and layer-one raw attention still differ by
+7.62926e-5 and 2.76656e-4 NRMSE, respectively. Over all 14
+positions the injected V100 mean oracle KL worsens from natural
+0.057752 to 0.092523 and top-1 falls from 13/14 to 12/14;
+the unchanged CTest acceptance gate fails. The diagnostic workflow
+itself succeeds because it collects these results, not because the
+engine qualifies. Neither this local injection nor the matched
+precision profile establishes that all residual routing differences
+are due to rounding. Natural V100 Phase 11 remains unqualified.
 
 ## 1. Environment Setup
 
