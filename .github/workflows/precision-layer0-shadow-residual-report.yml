@@ -1,0 +1,82 @@
+name: Phase 11 Layer Zero Shadow Residual Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-layer0-shadow-residual-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-layer0-gdn-reference-14
+          run-id: 36214521162
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-layer0-gdn-pos7-14
+          run-id: 36214528016
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: natural
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-position7-matched-layer0-hyper-14
+          run-id: 36246000944
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: hyper
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-position7-matched-layer0-hyper-mlp-14
+          run-id: 36246240789
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: both
+      - name: Compare reconstructed BF16 shadow and raw attention across frozen traces
+        run: |
+          python3 - <<'PY' | tee residual-report.txt
+          import math,struct
+          from pathlib import Path
+          def read(path,count):
+              raw=path.read_bytes();assert len(raw)==count*4,(path,len(raw))
+              return struct.unpack('<'+str(count)+'f',raw)
+          def bf16(x):
+              bits=struct.unpack('<I',struct.pack('<f',x))[0]
+              bits=(bits+0x7fff+((bits>>16)&1))&0xffffffff
+              return bits>>16
+          def nrmse(a,b):
+              return math.sqrt(math.fsum((x-y)**2 for x,y in zip(a,b))/
+                               math.fsum(x*x for x in a))
+          cpu=Path('cpu/v100-phase11-storage/pos0007')
+          master=read(cpu/'L00_hyper_after_mlp.bin',10240)
+          ple=read(cpu/'ple_injection.bin',10240)
+          raw=read(cpu/'L01_attn_block_input_fp32.bin',2560)
+          expected=[bf16(x+y) for x,y in zip(master,ple)]
+          for name,base in [('natural',Path('natural/pos0007')),
+                            ('matched_hyper',Path('hyper/matched/pos0007')),
+                            ('matched_hyper_and_mlp',Path('both/matched/pos0007'))]:
+              m=read(base/'L00_hyper_after_mlp.bin',10240)
+              p=read(base/'ple_injection.bin',10240)
+              a=read(base/'L01_attn_block_input_fp32.bin',2560)
+              mismatched=[i for i,(x,y) in enumerate(zip(expected,(bf16(x+y) for x,y in zip(m,p)))) if x!=y]
+              print(name,'master_NRMSE',format(nrmse(master,m),'.12g'),
+                    'raw_attention_NRMSE',format(nrmse(raw,a),'.12g'),
+                    'BF16_shadow_mismatches',len(mismatched),
+                    'indices',mismatched)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phase11-layer0-shadow-residual-report
+          path: residual-report.txt
+          retention-days: 14
