@@ -823,6 +823,21 @@ all 672 routers reached 14/14 and passed the short gate, so the next
 diagnostic isolates the earlier-token routing history carried into
 position 13. All offline replays are unavailable at serving time.
 
+The [prior-prefix V100 replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36208937548)
+narrows the causal history. Oracle expert IDs only at positions 0–12
+(624 routers), with completely natural position-13 routing, restore
+14/14 top-1 and reduce mean KL to 0.015182 and P99 to 0.210462;
+the unchanged CTest still fails on KL. Replaying those prior 624
+routers plus position-13 layers 26–47 (646 in total) reduces mean KL
+to 0.00022874 and P99 to 0.00111214; its CTest **passes the unchanged
+14-position short-sample gate**. Neither result qualifies the natural
+engine, and neither proves whether the upstream differences were
+caused exclusively by rounding. In contrast, replays restricted to
+position 13 retained the wrong top token. Routing decisions in earlier
+tokens therefore affect the state reaching the last token materially.
+The next diagnostic splits the prior history to find which positions
+carry the strongest effect.
+
 ## 1. Environment Setup
 
 Run the setup script using Python 3.14 to create the isolated virtual environment:
