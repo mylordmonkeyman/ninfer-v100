@@ -1158,6 +1158,25 @@ facts do not establish complete path parity.
 The V100 update from measured MoE output and gate still exactly
 matches FP32 fused multiply-add.
 
+The reference's routed expert sum has a further arithmetic mismatch:
+its original lazy-expert path aggregates selected experts in
+expert-ID order with a separate FP32 multiply and add, whereas V100
+aggregates in selected-path order with FP32 fused multiply-add.
+An **optional layer-zero CPU variant** explicitly models the latter
+rule. Its [14-position CPU run](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36263573484)
+has mean oracle KL 0.0712894, versus 0.0623346 for the earlier
+fused-hyper CPU profile. The
+[frozen V100 comparison](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36264416981)
+shows CPU-to-V100 mean KL worsens from 0.0132244 to 0.0228202
+and router-set agreement falls from 623/672 to 593/672. The
+[layer-zero diagnostic](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36264482793)
+shows no BF16 output change at position zero; the first changed
+layer-zero BF16 output is one value at position two, where logits
+first change too. This optional CPU refinement does not explain the
+six position-zero BF16 MoE-output differences and does not improve
+complete-prefix calibration. It remains supplementary and has not
+been applied to the engine or independent FP32 oracle.
+
 Neither this local injection nor the matched precision profile
 establishes that all residual routing differences are due to
 rounding. Natural V100 Phase 11 remains unqualified.
