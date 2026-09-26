@@ -353,6 +353,8 @@ def main():
                         help="collect layer-one hyper state after attention injection")
     parser.add_argument("--trace-mlp-raw-layer1", action="store_true",
                         help="collect layer-one MLP mixer output before BF16 storage")
+    parser.add_argument("--fused-routed-layer0", action="store_true",
+                        help="use selected-path FP32 FMA for layer-zero routed expert accumulation")
     parser.add_argument("--fused-hyper-updates", action="store_true",
                         help="model CUDA fmaf in attention and MLP hyper updates for CPU storage profile")
     parser.add_argument("--replay-router-ids", action="store_true",
@@ -391,6 +393,8 @@ def main():
 
     for layer in model.layers:
         layer.mlp.experts.round_activations_to_bf16 = True
+    if args.fused_routed_layer0:
+        model.layers[0].mlp.experts.route_order_fma = True
     matched = run_decode(model, head, token_ids, PROFILES["v100-phase11-storage"],
                          args.out_dir / "v100-phase11-storage",
                          trace_gdn_internals=args.trace_gdn_internals,
