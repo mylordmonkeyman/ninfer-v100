@@ -1,0 +1,149 @@
+name: Phase 11 V100 Position Zero Matched Router Calibration
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-pos0-fused-router-v100.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  matched-router-input:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-fused-hyper-profile-reference-14
+          run-id: 36250285355
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: cpu
+      - name: Validate input and build raw-attention diagnostic
+        run: |
+          set -euo pipefail
+          test -r /models/qwen3-8b-flash-next
+          test -s /oracle/phase11-stage-trace14/pos0000/L00_hyper_after_attn.bin
+          cmake -S . -B build-precision-v100 -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-precision-v100 -j --target \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test
+      - name: Check V100 memory before model loading
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free \
+              --format=csv,noheader,nounits | tr -d '[:space:]')
+            echo "V100 free memory: ${free_mib} MiB (attempt ${attempt}/30)"
+            [[ "$free_mib" =~ ^[0-9]+$ ]] || exit 1
+            if (( free_mib >= 28000 )); then exit 0; fi
+            if (( attempt < 30 )); then sleep 30; fi
+          done
+          exit 1
+      - name: Match CPU post-attention hyper state at layer zero
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "14"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace14
+          NINFER_PHASE11_STAGE_ORACLE_POSITION: "0"
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_PHASE11_TRACE_HYPER_LAYER0: "1"
+          NINFER_PHASE11_TRACE_MLP_LAYER0: "1"
+          NINFER_PHASE11_TRACE_MOE_ROUTING_LAYER0: "1"
+          NINFER_PHASE11_TRACE_GDN_LAYER0: "1"
+          NINFER_PHASE11_TRACE_ATTENTION_PREPARE_RAW: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
+        run: |
+          set -euo pipefail
+          test -s cpu/v100-phase11-storage/pos0000/L00_hyper_after_attn.bin
+          mkdir -p replay
+          for mode in matched; do
+            export NINFER_PHASE11_CANDIDATE_TRACE_ROOT="$GITHUB_WORKSPACE/replay/$mode"
+            if [[ "$mode" == matched ]]; then
+              export NINFER_PHASE11_ORACLE_INJECT_STAGE=L00_hyper_after_attn
+              export NINFER_PHASE11_INJECT_SOURCE_ROOT="$GITHUB_WORKSPACE/cpu/v100-phase11-storage"
+            else
+              unset NINFER_PHASE11_ORACLE_INJECT_STAGE NINFER_PHASE11_INJECT_SOURCE_ROOT
+            fi
+            set +e
+            ctest --test-dir build-precision-v100 -V \
+              -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+              > "replay/$mode.log" 2>&1
+            status=$?
+            set -e
+            echo "$mode unchanged Phase 11 CTest status $status"
+            python3 - "$mode" <<'PY'
+          import sys
+          from pathlib import Path
+          mode=sys.argv[1]
+          log=Path(f'replay/{mode}.log').read_text()
+          assert 'phase11.positions=14' in log
+          if mode=='matched':
+              assert 'phase11.oracle_injection.position=0 stage=L00_hyper_after_attn source=independent-cpu count=10240' in log
+          base=Path('replay')/mode/'pos0000'
+          for stage,count in (('L00_hyper_after_attn',10240),
+                              ('L00_mlp_block_input_fp32',2560),
+                              ('L00_mlp_block_input',2560),
+                              ('L00_mlp_block_output',2560),
+                              ('L00_moe_router_alpha',10),
+                              ('L00_moe_shared_scale',1),
+                              ('L00_hyper_after_mlp',10240),
+                              ('L01_attn_block_input_fp32',2560)):
+              assert (base/(stage+'.bin')).stat().st_size==count*4
+          for line in log.splitlines():
+              if 'phase11.mean_kl=' in line or 'phase11.top1_agreement=' in line:
+                  print(line[:350])
+          PY
+          done
+          python3 - <<'PY' | tee replay/report.txt
+          import math,struct
+          from pathlib import Path
+          cpu=Path('cpu/v100-phase11-storage/pos0000')
+          def read(path):
+              raw=path.read_bytes()
+              assert len(raw)%4==0
+              return struct.unpack('<'+str(len(raw)//4)+'f',raw)
+          def nrmse(a,b):
+              assert len(a)==len(b)
+              return math.sqrt(math.fsum((x-y)**2 for x,y in zip(a,b))/math.fsum(x*x for x in a))
+          for mode in ('matched',):
+              base=Path('replay')/mode/'pos0000'
+              for stage in ('L00_hyper_after_attn','L00_mlp_block_input_fp32','L00_mlp_block_input','L00_hyper_after_mlp','L01_attn_block_input_fp32'):
+                  print(mode,stage,'CPU_V100_NRMSE',
+                        format(nrmse(read(cpu/(stage+'.bin')),read(base/(stage+'.bin'))),'.12g'))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: v100-position0-matched-layer0-router-14
+          path: replay
+          if-no-files-found: ignore
+          retention-days: 14
