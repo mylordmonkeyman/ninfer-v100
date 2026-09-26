@@ -981,10 +981,19 @@ complete-prefix CTests fail the unchanged gate: mean KL becomes
 0.057752. A first split workflow had a wrong path for its final
 matched-mode diagnostic and failed after the individual swaps;
 the corrected run and hosted report provide the comparable results.
-The master-state arithmetic before PLE is the next precision-profile
-calibration boundary. The independent CPU storage profile is not yet
-quantitatively matched to natural V100 over complete prefixes, and
-natural V100 Phase 11 remains unqualified.
+The [layer-zero master report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36214461947)
+compares newly captured CPU-profile and V100 stages at the first
+position-7 divergence. Both attention and MLP input vectors match
+exactly (2,560/2,560 values each). The post-attention FP32 hyper
+master already differs by 6.24941e-7 NRMSE (largest absolute
+difference 1.00583e-7). The MLP output differs in only 2 of 2,560
+values, with NRMSE 1.23360e-7; the subsequent post-MLP FP32 master
+differs by 3.66576e-7. The next trace compares attention block output
+before the hyper update to see whether the first difference comes
+from GDN output arithmetic or from the hyper-connection operation.
+The independent CPU storage profile is not yet quantitatively matched
+to natural V100 over complete prefixes, and natural V100 Phase 11
+remains unqualified.
 
 ## 1. Environment Setup
 
