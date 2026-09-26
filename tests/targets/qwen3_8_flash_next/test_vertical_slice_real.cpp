@@ -1438,6 +1438,53 @@ int main() {
                                 << '\n' << std::flush;
                 return;
             }
+            // These supplementary MoE component stages have no frozen FP32
+            // stage oracle. Export their live values solely for CPU-profile
+            // calibration when the explicit diagnostic switch is enabled.
+            if (dump_candidate_trace &&
+                std::getenv("NINFER_PHASE11_TRACE_MOE_COMPONENTS") != nullptr &&
+                (name == "L00_moe_shared_activation" ||
+                 name == "L00_moe_routed_sum")) {
+                const std::size_t count = tensor.numel();
+                const bool shared = name == "L00_moe_shared_activation";
+                if ((shared && (tensor.dtype != ninfer::DType::BF16 ||
+                                count != 640)) ||
+                    (!shared && (tensor.dtype != ninfer::DType::FP32 ||
+                                 count != 2'560))) {
+                    throw std::runtime_error("Phase 11 MoE component trace shape mismatch");
+                }
+                std::vector<float> values(count);
+                if (shared) {
+                    std::vector<std::uint16_t> words(count);
+                    CUDA_CHECK(cudaMemcpy(words.data(), tensor.data,
+                                          count * sizeof(std::uint16_t),
+                                          cudaMemcpyDeviceToHost));
+                    for (std::size_t i = 0; i < count; ++i) {
+                        values[i] = bf16_to_float(words[i]);
+                    }
+                } else {
+                    CUDA_CHECK(cudaMemcpy(values.data(), tensor.data,
+                                          count * sizeof(float),
+                                          cudaMemcpyDeviceToHost));
+                }
+                const fs::path folder = candidate_root / pos_dir;
+                fs::create_directories(folder);
+                const fs::path path = folder / (std::string(name) + ".bin");
+                std::ofstream output_file(path, std::ios::binary | std::ios::trunc);
+                output_file.write(reinterpret_cast<const char*>(values.data()),
+                                  static_cast<std::streamsize>(count * sizeof(float)));
+                if (!output_file) {
+                    throw std::runtime_error("failed to write MoE component trace");
+                }
+                candidate_index << json{{"position", current_stage_trace_position},
+                                        {"name", name},
+                                        {"dtype", "FP32"},
+                                        {"count", count},
+                                        {"file", (fs::path(pos_dir) /
+                                                  (std::string(name) + ".bin")).string()}}
+                                << '\n' << std::flush;
+                return;
+            }
             if (!fs::is_regular_file(expected_path)) {
                 return;
             }
