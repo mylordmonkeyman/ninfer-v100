@@ -74,6 +74,19 @@ jobs:
                     'raw_attention_NRMSE',format(nrmse(raw,a),'.12g'),
                     'BF16_shadow_mismatches',len(mismatched),
                     'indices',mismatched)
+              idx=5609
+              before=read(cpu/'L00_hyper_after_attn.bin',10240)[idx]
+              block=read(cpu/'L00_mlp_block_output.bin',2560)[idx%2560]
+              actual=m[idx]+p[idx]
+              target=master[idx]+ple[idx]
+              print(name,'index5609_cpu_before',format(before,'.12g'),
+                    'cpu_block_output',format(block,'.12g'),
+                    'cpu_master',format(master[idx],'.12g'),
+                    'candidate_master',format(m[idx],'.12g'),
+                    'cpu_plus_ple',format(target,'.12g'),
+                    'candidate_plus_ple',format(actual,'.12g'),
+                    'cpu_shadow_word',bf16(target),
+                    'candidate_shadow_word',bf16(actual))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
