@@ -1,0 +1,101 @@
+name: Phase 11 Position Zero Matched Boundary Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-pos0-matched-boundary-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-fused-hyper-profile-reference-14
+          run-id: 36250285355
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-layer0-gdn-pos0-14
+          run-id: 36251205720
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: natural
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-position0-matched-layer0-hyper-14
+          run-id: 36251681105
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: matched
+      - name: Compare earliest position-zero precision boundaries
+        run: |
+          python3 - <<'PY' | tee position-zero-matched-report.txt
+          import ctypes,math,struct
+          from pathlib import Path
+          cpu=Path('cpu/v100-phase11-storage/pos0000')
+          natural=Path('natural/pos0000')
+          matched=Path('matched/matched/pos0000')
+          libc=ctypes.CDLL(None)
+          libc.fmaf.argtypes=(ctypes.c_float,ctypes.c_float,ctypes.c_float)
+          libc.fmaf.restype=ctypes.c_float
+          def read(base,stage):
+              path=base/(stage+'.bin')
+              data=path.read_bytes()
+              assert len(data)%4==0,(path,len(data))
+              return struct.unpack('<'+str(len(data)//4)+'f',data)
+          def bf16(value):
+              bits=struct.unpack('<I',struct.pack('<f',value))[0]
+              return ((bits+0x7fff+((bits>>16)&1))&0xffffffff)>>16
+          def compare(a,b):
+              assert len(a)==len(b)
+              norm=math.fsum(x*x for x in a)
+              err=math.fsum((x-y)**2 for x,y in zip(a,b))
+              return format(math.sqrt(err/norm),'.12g'),sum(x!=y for x,y in zip(a,b))
+          stages=('L00_mlp_block_input_fp32','L00_mlp_block_input',
+                  'L00_mlp_injection','L00_mlp_block_output',
+                  'L00_hyper_after_mlp','ple_injection',
+                  'L01_attn_block_input_fp32')
+          for stage in stages:
+              a=read(cpu,stage)
+              for label,base in (('natural',natural),('matched',matched)):
+                  b=read(base,stage)
+                  nrmse,changed=compare(a,b)
+                  print(label,stage,'nrmse',nrmse,'different',changed,'count',len(a))
+                  if stage in ('L00_mlp_block_input','L00_mlp_block_output'):
+                      print(label,stage,'difference_indices',
+                            [i for i,(x,y) in enumerate(zip(a,b)) if x!=y][:30])
+          for label,base in (('natural',natural),('matched',matched)):
+              cp=read(cpu,'L00_hyper_after_attn')
+              out=read(base,'L00_mlp_block_output')
+              gate=read(base,'L00_mlp_injection')
+              actual=read(base,'L00_hyper_after_mlp')
+              assert len(cp)==len(actual)==10240
+              assert len(out)==2560 and len(gate)==4
+              predicted=tuple(libc.fmaf(gate[i//2560],out[i%2560],cp[i]) for i in range(10240))
+              nrmse,changed=compare(predicted,actual)
+              print(label,'cpu_prestate_gpu_gate_output_fmaf_vs_gpu_master',
+                    'nrmse',nrmse,'different',changed)
+              cpu_master=read(cpu,'L00_hyper_after_mlp')
+              shadow=[(i,bf16(x),bf16(y),x,y) for i,(x,y) in enumerate(zip(cpu_master,actual))
+                      if bf16(x)!=bf16(y)]
+              print(label,'cpu_vs_gpu_postmlp_shadow_bf16_differ',len(shadow))
+              if label=='matched':
+                  print('matched','fmaf_prediction_first_differences',
+                        [(i,predicted[i],actual[i]) for i in range(10240)
+                         if predicted[i]!=actual[i]][:12])
+                  print('matched','postmlp_bf16_shadow_differences',shadow[:12])
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phase11-position-zero-matched-boundary-report
+          path: position-zero-matched-report.txt
+          retention-days: 14
