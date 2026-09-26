@@ -1,0 +1,67 @@
+name: Phase 11 CPU Attention Raw Versus Stored Boundary
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-profile-attention-cpu-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Download completed independent CPU raw trace
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36211013815 --repo "$GITHUB_REPOSITORY"             --name cpu-raw-attention-reference-14 --dir cpu
+          gh run download 36078905618 --repo "$GITHUB_REPOSITORY"             --name v100-mlp-raw-layer1-14 --dir gpu
+      - name: Validate CPU conversion and the 16 stored disagreements
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee cpu-attention-boundary.txt
+          import math,struct
+          from pathlib import Path
+          names=('L01_attn_block_input_fp32','L01_attn_block_input')
+          roots={'profile':Path('cpu/v100-phase11-storage/pos0007'),
+                 'oracle':Path('cpu/fp32/pos0007'),
+                 'v100':Path('gpu/candidate-stage/pos0007')}
+          def values(root,name):
+              data=(root/(name+'.bin')).read_bytes()
+              assert len(data)==10240,(root,name,len(data))
+              return struct.unpack('<2560f',data)
+          def nrmse(a,b):
+              return math.sqrt(math.fsum((x-y)**2 for x,y in zip(a,b))/
+                               math.fsum(x*x for x in a))
+          def bf16(x):
+              bits=struct.unpack('<I',struct.pack('<f',x))[0]
+              assert (bits&0x7f800000)!=0x7f800000
+              bits=(bits+0x7fff+((bits>>16)&1))&0xffffffff
+              return struct.unpack('<f',struct.pack('<I',bits&0xffff0000))[0]
+          raw=values(roots['profile'],names[0])
+          stored=values(roots['profile'],names[1])
+          oracle=values(roots['oracle'],names[0])
+          gpu=values(roots['v100'],names[1])
+          mismatches=[i for i,(r,s) in enumerate(zip(raw,stored)) if bf16(r)!=s]
+          changed=[i for i,(p,g) in enumerate(zip(stored,gpu)) if p!=g]
+          print('CPU_raw_to_stored_RNE_mismatches',len(mismatches))
+          print('profile_v100_stored_disagreements',len(changed),changed)
+          print('CPU_raw_vs_oracle_raw_NRMSE',format(nrmse(oracle,raw),'.12g'))
+          print('CPU_raw_vs_v100_stored_NRMSE',format(nrmse(raw,gpu),'.12g'))
+          print('CPU_stored_vs_v100_stored_NRMSE',format(nrmse(stored,gpu),'.12g'))
+          print('changed_values',[(i,raw[i],stored[i],gpu[i]) for i in changed])
+          assert not mismatches
+          assert len(changed)==16
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cpu-attention-raw-boundary-report
+          path: cpu-attention-boundary.txt
+          retention-days: 14
