@@ -956,12 +956,22 @@ differences persist on matched shadows, the independent CPU
 arithmetic model or the V100 mixer implementation needs further
 calibration.
 
-The next direct trace captures each independent implementation's FP32
-layer-one attention mixer output before BF16 storage. It will distinguish
-a genuine mismatch before conversion from BF16 threshold amplification
-at this boundary. The independent CPU storage profile has not yet
-been quantitatively validated over complete prefixes; natural V100
-Phase 11 remains unqualified.
+The [matched post-PLE state experiment](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36212825856)
+injects the independently reconstructed CPU-profile FP32 master into
+the V100 at position 7, after PLE and before the layer-one attention
+preparation, while evaluating all 14 prefixes. The natural V100 raw
+mixer differs from the CPU profile by 9.61637e-5 NRMSE; with matched
+post-PLE master, it differs by only 4.91144e-8. The local V100 mixer
+therefore reproduces the independent CPU calculation on matched input,
+and the measured natural raw divergence comes from its upstream state
+on this position. The intervention worsens whole-prefix mean oracle KL
+from 0.057752 to 0.094542 and top-1 from 13/14 to 12/14; both CTests
+fail the unchanged Phase 11 gate. This is a causal calibration test,
+not a serving-time correction. The next check separates the layer-zero
+master-state and PLE-injection contributions to this near-BF16-boundary
+difference. The independent CPU storage profile is not quantitatively
+matched to natural V100 over complete prefixes, and natural V100 Phase 11
+remains unqualified.
 
 ## 1. Environment Setup
 
