@@ -99,6 +99,24 @@ jobs:
                   print(label,name,'cpu_vs_gpu_mean_kl',
                         format(math.fsum(rows)/14,'.12g'),
                         'router_sets_equal',sets,'of',672)
+          for position in range(14):
+              prev=read(old,position,'L00_mlp_block_output')
+              fresh=read(new,position,'L00_mlp_block_output')
+              if prev!=fresh:
+                  print('first_changed_layer0_output_position',position,
+                        'values_changed',sum(x!=y for x,y in zip(prev,fresh)),
+                        'nrmse',format(nrmse(prev,fresh),'.12g'))
+                  break
+          else:
+              print('no_layer0_bf16_output_change_across_14_positions')
+          for position in range(14):
+              prev=read(old,position,'logits')
+              fresh=read(new,position,'logits')
+              if prev!=fresh:
+                  print('first_changed_logits_position',position,
+                        'values_changed',sum(x!=y for x,y in zip(prev,fresh)),
+                        'old_to_new_kl',format(kl(prev,fresh),'.12g'))
+                  break
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
