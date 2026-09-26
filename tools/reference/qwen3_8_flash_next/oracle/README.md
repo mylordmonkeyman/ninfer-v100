@@ -929,6 +929,33 @@ stage from the test dumper's explicit selection list. The corrected
 GPU trace is pending. These are capture errors, not evidence of a
 V100 arithmetic fault or a change in the natural model result.
 
+The [completed V100 raw capture](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36212350682)
+stores all 2,560 values after the prefill hook was added to the
+test dumper's allowlist. All stored values exactly match BF16
+round-to-nearest-even of the captured V100 FP32 output, and natural
+CTest still fails with mean KL 0.057752. The
+[three-way raw comparison](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36212649875)
+measures CPU-profile-to-V100 **raw** attention mixer NRMSE
+9.6164e-5, increasing to 1.1601e-4 after BF16 storage. Both paths
+round all 2,560 captured values correctly, but their FP32 mixer
+outputs already differ. The largest raw difference, at output index
+750, is 0.0019360; output index 2519 differs by 0.00022493.
+Conversion amplifies part of the gap and does not cause all of it.
+
+The [preparation-input reconstruction](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36212703851)
+sums each implementation's captured FP32 layer-zero master and BF16
+PLE injection. Its CPU–V100 FP32 state NRMSE is 1.2702e-6, yet
+rounding those reconstructed states to the BF16 shadow yields **six
+different values out of 10,240**. This is consistent with an upstream
+near-boundary materialization feeding a different attention mixer
+calculation, but the reconstruction is not a direct matched-input
+experiment. Inject the independently reconstructed CPU FP32 master
+at the V100 post-PLE boundary before attention preparation, then
+compare raw mixer outputs on complete prefixes. If the large raw
+differences persist on matched shadows, the independent CPU
+arithmetic model or the V100 mixer implementation needs further
+calibration.
+
 The next direct trace captures each independent implementation's FP32
 layer-one attention mixer output before BF16 storage. It will distinguish
 a genuine mismatch before conversion from BF16 threshold amplification
