@@ -1019,11 +1019,24 @@ by 1.17502e-7 NRMSE and layer-one raw attention by 8.19131e-6.
 The 14-position top-1 rises to 14/14, but mean KL 0.054267 still
 fails the unchanged gate. The test dumper exports the pre-injection
 stage, so its reported post-attention NRMSE remains the natural
-6.24941e-7. The next matched-input experiment supplies both the CPU
-post-attention state and CPU BF16 MLP output, isolating the remaining
-MLP hyper-state update arithmetic. The independent CPU storage
-profile is not yet quantitatively matched to natural V100 over
-complete prefixes, and natural V100 Phase 11 remains unqualified.
+6.24941e-7. The [two-boundary matched run](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36246240789)
+supplies the CPU post-attention master and BF16 MLP output. The
+post-MLP master difference drops only from 1.17502e-7 to
+8.48047e-8 NRMSE; the layer-one raw attention NRMSE stays exactly
+8.19131e-6. Its 14-position top-1 remains 14/14, but mean KL
+0.057063 fails the unchanged gate. The
+[shadow residual report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36246577156)
+reconstructs six differing BF16 shadow entries on the natural path,
+versus just one (index 5609) after either matched post-attention
+experiment. At that index CPU post-PLE sum is 0.000844955444336;
+the matched V100 sum is about 4.66e-10 lower and rounds to the
+adjacent BF16 value. This tiny residual is upstream of the layer-one
+attention mixer and survives matching the MLP block output.
+The next diagnostic captures the four independent MLP injection
+scales to distinguish gate arithmetic from the final fused update.
+The independent CPU storage profile is not yet quantitatively
+matched to natural V100 over complete prefixes, and natural V100
+Phase 11 remains unqualified.
 
 ## 1. Environment Setup
 
