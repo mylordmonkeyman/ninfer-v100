@@ -1,0 +1,100 @@
+name: Phase 11 Position Zero Routed FMA Profile Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-pos0-routed-fma-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-fused-hyper-router-pos0-14
+          run-id: 36262275865
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: cpu-old
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-position0-matched-layer0-router-14
+          run-id: 36262293345
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: gpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-fused-hyper-routed-fma-pos0-14
+          run-id: 36263573484
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: cpu-new
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-layer0-gdn-pos0-14
+          run-id: 36251205720
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: gpu-natural
+      - name: Compare earliest position-zero precision boundaries
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee position-zero-routed-fma-report.txt
+          import math,struct
+          from pathlib import Path
+          old=Path('cpu-old/v100-phase11-storage')
+          new=Path('cpu-new/v100-phase11-storage')
+          actual=Path('gpu-natural')
+          matched=Path('gpu/matched')
+          def read(root,position,stage):
+              raw=(root/f'pos{position:04d}'/(stage+'.bin')).read_bytes()
+              assert len(raw)%4==0,(root,position,stage,len(raw))
+              return struct.unpack('<'+str(len(raw)//4)+'f',raw)
+          def nrmse(a,b):
+              assert len(a)==len(b)
+              return math.sqrt(math.fsum((x-y)**2 for x,y in zip(a,b))/
+                               math.fsum(x*x for x in a))
+          def kl(a,b):
+              assert len(a)==len(b)
+              am=max(a);bm=max(b)
+              al=am+math.log(math.fsum(math.exp(x-am) for x in a))
+              bl=bm+math.log(math.fsum(math.exp(x-bm) for x in b))
+              return math.fsum(math.exp(x-al)*((x-al)-(y-bl)) for x,y in zip(a,b))
+          for stage in ('L00_mlp_block_input','L00_moe_router_ids',
+                        'L00_moe_router_alpha','L00_mlp_block_output',
+                        'L00_hyper_after_mlp','L01_attn_block_input_fp32'):
+              x,y=read(old,0,stage),read(new,0,stage)
+              z=read(matched,0,stage)
+              print(stage,'old_to_new_nrmse',format(nrmse(x,y),'.12g'),
+                    'old_new_different',sum(a!=b for a,b in zip(x,y)),
+                    'old_to_matched_v100_nrmse',format(nrmse(x,z),'.12g'),
+                    'new_to_matched_v100_nrmse',format(nrmse(y,z),'.12g'),
+                    'old_v100_exact',sum(a==b for a,b in zip(x,z)),
+                    'new_v100_exact',sum(a==b for a,b in zip(y,z)))
+              if stage=='L00_mlp_block_output':
+                  print('old_new_output_difference_indices',
+                        [i for i,(a,b) in enumerate(zip(x,y)) if a!=b][:35])
+                  print('new_gpu_output_difference_indices',
+                        [i for i,(a,b) in enumerate(zip(y,z)) if a!=b][:35])
+          for label,gpu in (('natural',actual),('matched',matched)):
+              for name,cpu in (('old',old),('new',new)):
+                  rows=[kl(read(gpu,i,'logits'),read(cpu,i,'logits')) for i in range(14)]
+                  sets=sum(set(read(gpu,i,f'L{layer:02d}_moe_router_ids'))==
+                           set(read(cpu,i,f'L{layer:02d}_moe_router_ids'))
+                           for i in range(14) for layer in range(48))
+                  print(label,name,'cpu_vs_gpu_mean_kl',
+                        format(math.fsum(rows)/14,'.12g'),
+                        'router_sets_equal',sets,'of',672)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phase11-position-zero-routed-fma-report
+          path: position-zero-routed-fma-report.txt
+          retention-days: 14
