@@ -43,6 +43,13 @@ jobs:
           repository: ${{ github.repository }}
           github-token: ${{ github.token }}
           path: gpu-natural
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-moe-routing-layer0-14
+          run-id: 36072336918
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: v100-full
       - name: Compare earliest position-zero precision boundaries
         run: |
           set -euo pipefail
@@ -51,7 +58,7 @@ jobs:
           from pathlib import Path
           old=Path('cpu-old/v100-phase11-storage')
           new=Path('cpu-new/v100-phase11-storage')
-          actual=Path('gpu-natural')
+          actual=Path('v100-full/candidate-stage')
           matched=Path('gpu/matched')
           def read(root,position,stage):
               raw=(root/f'pos{position:04d}'/(stage+'.bin')).read_bytes()
@@ -83,7 +90,7 @@ jobs:
                         [i for i,(a,b) in enumerate(zip(x,y)) if a!=b][:35])
                   print('new_gpu_output_difference_indices',
                         [i for i,(a,b) in enumerate(zip(y,z)) if a!=b][:35])
-          for label,gpu in (('natural',actual),('matched',matched)):
+          for label,gpu in (('natural',actual),):
               for name,cpu in (('old',old),('new',new)):
                   rows=[kl(read(gpu,i,'logits'),read(cpu,i,'logits')) for i in range(14)]
                   sets=sum(set(read(gpu,i,f'L{layer:02d}_moe_router_ids'))==
