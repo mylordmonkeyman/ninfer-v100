@@ -914,6 +914,21 @@ An initial upstream workflow
 mistakenly read position-13 CSV rows while labeling them position 7;
 its numbers are excluded.
 
+The [independent CPU raw-attention run](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36211013815)
+preserves the modeled profile's mean oracle KL at 0.031902. Its
+[position-7 conversion report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36211671912)
+shows every one of the 2,560 stored layer-one attention-input values
+matches BF16 round-to-nearest-even of the profile's raw FP32 mixer
+output. Exactly 16 stored values differ from V100. Some span more
+than one BF16 step; without V100's raw mixer values they cannot be
+attributed solely to near-midpoint rounding. The first two
+[V100 raw-capture jobs](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36211500054)
+completed the natural CTest but did not upload the new stage: the
+initial hook covered only decode, and the next run omitted the
+stage from the test dumper's explicit selection list. The corrected
+GPU trace is pending. These are capture errors, not evidence of a
+V100 arithmetic fault or a change in the natural model result.
+
 The next direct trace captures each independent implementation's FP32
 layer-one attention mixer output before BF16 storage. It will distinguish
 a genuine mismatch before conversion from BF16 threshold amplification
