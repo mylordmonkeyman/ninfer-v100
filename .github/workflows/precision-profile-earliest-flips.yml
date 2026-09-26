@@ -1,0 +1,77 @@
+name: Phase 11 Precision Profile Earliest Flip Calibration
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-profile-earliest-flips.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Download frozen complete-prefix traces
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36087743583 --repo "$GITHUB_REPOSITORY" --name cpu-router-replay-14 --dir cpu
+          gh run download 36078905618 --repo "$GITHUB_REPOSITORY" --name v100-mlp-raw-layer1-14 --dir v100
+      - name: Compare first V100-only flip boundaries against both references
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee precision-profile-earliest-flips.txt
+          import csv, struct, math
+          from pathlib import Path
+          roots={'oracle':Path('cpu/fp32'),'profile':Path('cpu/v100-phase11-storage'),
+                 'v100':Path('v100/candidate-stage')}
+          rows={(int(r['position']),r['stage']):r for r in
+                csv.DictReader(Path('cpu/comparison/stage_comparison.csv').open())}
+          def get(kind,position,name):
+              p=roots[kind]/f'pos{position:04d}/{name}.bin'
+              assert p.is_file(),p
+              return [x[0] for x in struct.iter_unpack('<f',p.read_bytes())]
+          def sets(position,layer):
+              stem=f'L{layer:02d}_moe_router_'
+              scores={k:get(k,position,stem+'scores') for k in roots}
+              ids={k:set(map(int,get(k,position,stem+'ids'))) for k in roots}
+              for k in roots:
+                  rank=sorted(range(512),key=lambda i:(-scores[k][i],i))
+                  assert set(rank[:10])==ids[k]
+              return scores,ids
+          for position,layer in ((7,31),(9,20),(10,27),(11,15),(12,2)):
+              scores,ids=sets(position,layer)
+              assert ids['oracle']==ids['profile'] and ids['oracle']!=ids['v100'],(position,layer)
+              lost=sorted(ids['oracle']-ids['v100'])
+              gained=sorted(ids['v100']-ids['oracle'])
+              print('first_v100_only',position,layer,'lost',lost,'gained',gained)
+              for k in roots:
+                  rank=sorted(range(512),key=lambda i:(-scores[k][i],i))
+                  margin=scores[k][lost[0]]-scores[k][gained[0]]
+                  print(' ',k,'pair_margin',format(margin,'.9g'),
+                        'cutoff_gap',format(scores[k][rank[9]]-scores[k][rank[10]],'.9g'))
+              for suffix in ('attn_block_input','attn_block_output','hyper_after_attn',
+                             'mlp_block_input','mlp_block_output','hyper_after_mlp'):
+                  row=rows.get((position,f'L{layer:02d}_{suffix}'))
+                  if row:
+                      print(' ',suffix,'profile_oracle',row['cpu_vs_oracle_nrmse'],
+                            'v100_oracle',row['v100_vs_oracle_nrmse'],
+                            'profile_v100',row['v100_vs_cpu_nrmse'])
+              for source in ('oracle','profile'):
+                  a=get(source,position,f'L{layer:02d}_mlp_block_input')
+                  b=get('v100',position,f'L{layer:02d}_mlp_block_input')
+                  assert len(a)==len(b)==2560
+                  count=sum(x==y for x,y in zip(a,b))
+                  print(' ',source,'exact_input_values_with_v100',count,'of',len(a))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: precision-profile-earliest-flips
+          path: precision-profile-earliest-flips.txt
+          retention-days: 14
