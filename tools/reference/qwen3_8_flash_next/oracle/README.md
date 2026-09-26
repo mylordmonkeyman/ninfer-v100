@@ -1192,9 +1192,23 @@ comparator now labels their separately validated incremental-FP32
 comparison explicitly; the hosted comparison validates each stage's
 size and finiteness. The
 [V100 component capture](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36264641453)
-succeeded. A controlled routed-sum injection will determine whether
-these small FP32 routed differences account for all six BF16
-output changes, or whether shared-down/merge arithmetic also differs.
+succeeded. The [controlled CPU routed-sum replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36265864614)
+readback-verifies a position-zero/layer-zero FP32 injection before
+the V100 shared-down merge. The
+[three-way frozen report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36266771350)
+shows that all **six** different BF16 MLP-output values then match
+the CPU profile exactly (2,560/2,560). CPU-to-V100 post-MLP master
+NRMSE falls from 7.62926e-5 to 6.05620e-8; BF16 post-MLP shadow
+mismatches fall from six to three. The PLE injection differs at six
+rather than 45 values. The 14-position oracle mean KL improves
+from 0.0925233 to 0.0818202, with top-1 still 12/14. That remains
+worse than natural V100's 0.057752 and fails the unchanged CTest
+gate. This proves the six local BF16 output differences on the
+matched input are caused by the routed FP32 sum difference at this
+boundary; it does not imply that copying CPU sums is a deployable
+improvement or that other positions/layers are precision-only.
+The next isolation is per-selected-expert output and weight/activation
+arithmetic before the routed reduction.
 
 Neither this local injection nor the matched precision profile
 establishes that all residual routing differences are due to
