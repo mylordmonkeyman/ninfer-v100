@@ -511,6 +511,22 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
 
     host_expert_worker_pool().run(cpu.tasks);
 
+    if (emit && tokens == 1 &&
+        std::getenv("NINFER_PHASE11_TRACE_MOE_PAIRS") != nullptr) {
+        // Trace complete unweighted host expert outputs in selected-path order.
+        // The callback copies the tensor synchronously before this buffer is freed.
+        float* pairs_device = nullptr;
+        const std::size_t bytes = cpu.pair_outputs.size() * sizeof(float);
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&pairs_device), bytes));
+        CUDA_CHECK(cudaMemcpyAsync(pairs_device, cpu.pair_outputs.data(), bytes,
+                                   cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        Tensor pair_trace(pairs_device, DType::FP32,
+                          {kFlashNextExpertHidden, 10});
+        emit("moe_pair_outputs", pair_trace);
+        CUDA_CHECK(cudaFree(pairs_device));
+    }
+
     for (std::int32_t token = 0; token < tokens; ++token) {
         float* token_sum =
             cpu.routed_sum.data() +
