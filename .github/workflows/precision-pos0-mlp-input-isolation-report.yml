@@ -1,0 +1,84 @@
+name: Phase 11 Position Zero MLP Input Isolation Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-pos0-mlp-input-isolation-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-fused-hyper-profile-reference-14
+          run-id: 36250285355
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-layer0-gdn-pos0-14
+          run-id: 36251205720
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: natural
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-position0-matched-layer0-hyper-14
+          run-id: 36261356310
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: matched
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-position0-matched-layer0-hyper-mlp-input-14
+          run-id: 36261707460
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: double
+      - name: Compare earliest position-zero precision boundaries
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee position-zero-mlp-input-isolation-report.txt
+          import math,struct
+          from pathlib import Path
+          cpu=Path('cpu/v100-phase11-storage/pos0000')
+          once=Path('matched/matched/pos0000')
+          twice=Path('double/matched/pos0000')
+          def read(base,name):
+              raw=(base/(name+'.bin')).read_bytes()
+              assert len(raw)%4==0
+              return struct.unpack('<'+str(len(raw)//4)+'f',raw)
+          for name in ('L00_mlp_block_input','L00_mlp_block_output',
+                       'L00_mlp_injection','L00_hyper_after_mlp',
+                       'L01_attn_block_input_fp32','ple_injection'):
+              a,b,c=read(cpu,name),read(once,name),read(twice,name)
+              assert len(a)==len(b)==len(c)
+              changed=[i for i,(x,y) in enumerate(zip(b,c)) if x!=y]
+              norm=math.fsum(x*x for x in a)
+              delta=math.fsum((x-y)**2 for x,y in zip(b,c))
+              print(name,'old_to_second_injection_different',len(changed),
+                    'indices',changed[:30],'nrmse_vs_cpu',
+                    format(math.sqrt(delta/norm),'.12g'))
+              print(name,'once_cpu_different',sum(x!=y for x,y in zip(a,b)),
+                    'twice_cpu_different',sum(x!=y for x,y in zip(a,c)))
+          for label,base in (('once',Path('matched/matched.log')),
+                             ('twice',Path('double/matched.log'))):
+              log=base.read_text()
+              for term in ('phase11.mean_kl=','phase11.top1_agreement=',
+                           'phase11.oracle_injection.position=0 stage=L00_mlp_block_input'):
+                  print(label,term,
+                        [line.strip() for line in log.splitlines() if term in line][-1:])
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phase11-position-zero-mlp-input-isolation-report
+          path: position-zero-mlp-input-isolation-report.txt
+          retention-days: 14
