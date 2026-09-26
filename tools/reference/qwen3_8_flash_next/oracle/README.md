@@ -1102,9 +1102,31 @@ positions the injected V100 mean oracle KL worsens from natural
 0.057752 to 0.092523 and top-1 falls from 13/14 to 12/14;
 the unchanged CTest acceptance gate fails. The diagnostic workflow
 itself succeeds because it collects these results, not because the
-engine qualifies. Neither this local injection nor the matched
-precision profile establishes that all residual routing differences
-are due to rounding. Natural V100 Phase 11 remains unqualified.
+engine qualifies. The [matched-boundary report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36261633080)
+uses an additional V100 trace of the layer-zero MLP output
+([replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36261356310)).
+Matching the CPU post-attention state reduces differing stored MLP
+inputs from four of 2,560 to **one**, at index 1841. The number of
+differing BF16 MLP outputs falls from 62 to six, and the four MLP gate
+scales still differ at three values. With the CPU post-attention
+state as its input, the V100 post-MLP master is exactly reconstructed
+at all 10,240 entries by an independent FP32 fused multiply-add
+using the captured V100 gate and MLP output. Reconstructing the CPU
+FMA master using CPU gate and output also matches all 10,240 entries.
+The CPU gate plus V100 output and V100 gate plus CPU output
+counterfactuals each produce three BF16 shadow differences versus
+the CPU post-MLP master; both V100 components together produce six.
+This isolates the residual here to inputs of the hyper update, rather
+than a faulty fused update at this boundary. The PLE injection has
+45 differing values against CPU and is unchanged by this
+position-zero post-attention match. The next test supplies the CPU
+stored MLP input as a second position-zero boundary to determine
+whether the one remaining input difference causes the six output
+differences.
+
+Neither this local injection nor the matched precision profile
+establishes that all residual routing differences are due to
+rounding. Natural V100 Phase 11 remains unqualified.
 
 ## 1. Environment Setup
 
