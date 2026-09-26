@@ -1,0 +1,120 @@
+name: Phase 11 V100 Layer Zero Master Precision Calibration
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-profile-layer0-master-v100.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  matched-router-input:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Validate input and build raw-attention diagnostic
+        run: |
+          set -euo pipefail
+          test -r /models/qwen3-8b-flash-next
+          test -s /oracle/phase11-stage-trace14/pos0007/L31_mlp_block_input.bin
+          cmake -S . -B build-precision-v100 -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-precision-v100 -j --target \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test
+      - name: Check V100 memory before model loading
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free \
+              --format=csv,noheader,nounits | tr -d '[:space:]')
+            echo "V100 free memory: ${free_mib} MiB (attempt ${attempt}/30)"
+            [[ "$free_mib" =~ ^[0-9]+$ ]] || exit 1
+            if (( free_mib >= 28000 )); then exit 0; fi
+            if (( attempt < 30 )); then sleep 30; fi
+          done
+          exit 1
+      - name: Validate raw-to-stored V100 attention input and unchanged gate
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "14"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace14
+          NINFER_PHASE11_STAGE_ORACLE_POSITION: "7"
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_PHASE11_CANDIDATE_TRACE_ROOT: ${{ github.workspace }}/raw-attention
+          NINFER_PHASE11_TRACE_ATTENTION_PREPARE_RAW: "1"
+          NINFER_PHASE11_TRACE_HYPER_LAYER0: "1"
+          NINFER_PHASE11_TRACE_MLP_LAYER0: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
+        run: |
+          set -euo pipefail
+          mkdir -p raw-attention
+          set +e
+          ctest --test-dir build-precision-v100 -V \
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+            > raw-attention/ctest.log 2>&1
+          status=$?
+          set -e
+          echo "Natural V100 unchanged Phase 11 CTest status $status"
+          python3 - <<'PY' | tee raw-attention/rounding.txt
+          import math,struct
+          from pathlib import Path
+          base=Path('raw-attention/pos0007')
+          raw=(base/'L01_attn_block_input_fp32.bin').read_bytes()
+          stored=(base/'L01_attn_block_input.bin').read_bytes()
+          assert len(raw)==len(stored)==2560*4
+          for early in ('L00_hyper_after_attn','L00_mlp_block_output','L00_hyper_after_mlp'):
+              assert (base/(early+'.bin')).is_file(),early
+          input_values=struct.unpack('<2560f',raw)
+          stored_values=struct.unpack('<2560f',stored)
+          def round_bf16(value):
+              bits=struct.unpack('<I',struct.pack('<f',value))[0]
+              assert (bits & 0x7f800000)!=0x7f800000
+              bits=(bits+0x7fff+((bits>>16)&1))&0xffffffff
+              return struct.unpack('<f',struct.pack('<I',bits&0xffff0000))[0]
+          mismatches=[i for i,(x,y) in enumerate(zip(input_values,stored_values))
+                      if round_bf16(x)!=y]
+          print('position7_layer1_count',len(input_values))
+          print('raw_to_stored_bf16_rne_mismatches',len(mismatches))
+          print('first_mismatch_indices',mismatches[:12])
+          log=Path('raw-attention/ctest.log').read_text()
+          assert 'phase11.positions=14' in log
+          for line in log.splitlines():
+              if 'phase11.mean_kl=' in line or 'phase11.top1_agreement=' in line:
+                  print(line[:350])
+          assert not mismatches
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: v100-layer0-master-pos7-14
+          path: raw-attention
+          if-no-files-found: ignore
+          retention-days: 14
