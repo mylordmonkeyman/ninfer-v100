@@ -795,6 +795,26 @@ It shows that the router chooses the expected experts on the matched input,
 while upstream differences and subsequent choices still require diagnosis.
 
 
+### Position-13 upstream map and scoped membership experiment
+
+A [frozen stage report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36208272784)
+maps the complete position-13 path through layer 26. CPU and V100
+layer-zero attention inputs are identical. Their MLP inputs differ by
+0.000912 NRMSE at layer zero and 0.008951 by layer 14, before the
+CPU-only swap of oracle expert 46 for 70. The CPU's post-MLP hyper
+output then differs from the oracle by 0.018615 NRMSE while V100
+remains at 0.005894. The CPU has another oracle-relative expert swap
+at layer 25 (457 to 140), which V100 does not. By layer 26 the CPU and
+V100 MLP inputs differ by 0.067561 NRMSE, but that distance contains
+CPU-only routing errors; it is not a measure of an isolated V100 defect.
+The first V100-only swap at layer 26 still warrants a causal test on
+the V100's own path.
+
+A scoped V100 offline membership replay runs the unchanged short-sample
+gate with oracle IDs restricted to position 13, and separately to
+position-13 layers 26–47. The runs are diagnostics using unavailable
+oracle IDs. Only natural, unmodified routing can qualify the candidate.
+
 ## 1. Environment Setup
 
 Run the setup script using Python 3.14 to create the isolated virtual environment:
