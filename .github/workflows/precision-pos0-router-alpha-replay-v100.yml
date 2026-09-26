@@ -85,10 +85,6 @@ jobs:
           set -euo pipefail
           test -s cpu/v100-phase11-storage/pos0000/L00_hyper_after_attn.bin
           test -s cpu/v100-phase11-storage/pos0000/L00_moe_router_alpha.bin
-          mkdir -p stage-oracle/pos0000
-          cp -as /oracle/phase11-stage-trace14/pos0000/. stage-oracle/pos0000/
-          ln -s "$GITHUB_WORKSPACE/cpu/v100-phase11-storage/pos0000/L00_moe_router_alpha.bin" stage-oracle/pos0000/L00_moe_router_alpha.bin
-          export NINFER_PHASE11_STAGE_ORACLE_ROOT="$GITHUB_WORKSPACE/stage-oracle"
           mkdir -p replay
           for mode in matched; do
             export NINFER_PHASE11_CANDIDATE_TRACE_ROOT="$GITHUB_WORKSPACE/replay/$mode"
