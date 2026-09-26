@@ -1,0 +1,162 @@
+name: Phase 11 V100 Position Seven Matched Precision Profile Input
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-profile-position7-matched-v100.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  matched-router-input:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-router-replay-14
+          run-id: 36087743583
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: cpu
+      - name: Validate CPU layer-31 input and compile real-model diagnostic
+        run: |
+          set -euo pipefail
+          test -r /models/qwen3-8b-flash-next
+          test -s /oracle/phase11-stage-trace14/pos0007/L31_mlp_block_input.bin
+          test "$(stat -c %s cpu/v100-phase11-storage/pos0007/L31_mlp_block_input.bin)" -eq 10240
+          cmake -S . -B build-precision-v100 -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-precision-v100 -j --target \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test
+      - name: Check V100 memory before model loading
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free \
+              --format=csv,noheader,nounits | tr -d '[:space:]')
+            echo "V100 free memory: ${free_mib} MiB (attempt ${attempt}/30)"
+            [[ "$free_mib" =~ ^[0-9]+$ ]] || exit 1
+            if (( free_mib >= 28000 )); then exit 0; fi
+            if (( attempt < 30 )); then sleep 30; fi
+          done
+          exit 1
+      - name: Compare natural and CPU matched position-7 layer-31 router
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "14"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace14
+          NINFER_PHASE11_STAGE_ORACLE_POSITION: "7"
+          NINFER_PHASE11_CALIBRATE_FIRST_FLIPS: "1"
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_PHASE11_TRACE_HYPER_LAYER0: "1"
+          NINFER_PHASE11_TRACE_GDN_LAYER0: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
+        run: |
+          set -euo pipefail
+          mkdir -p matched-input
+          for mode in baseline cpu; do
+            export NINFER_PHASE11_CANDIDATE_TRACE_ROOT="$GITHUB_WORKSPACE/matched-input/$mode"
+            if [[ "$mode" == cpu ]]; then
+              export NINFER_PHASE11_ORACLE_INJECT_STAGE=L31_mlp_block_input
+              export NINFER_PHASE11_INJECT_SOURCE_ROOT="$GITHUB_WORKSPACE/cpu/v100-phase11-storage"
+            else
+              unset NINFER_PHASE11_ORACLE_INJECT_STAGE NINFER_PHASE11_INJECT_SOURCE_ROOT
+            fi
+            set +e
+            ctest --test-dir build-precision-v100 -V \
+              -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+              > "matched-input/$mode.log" 2>&1
+            status=$?
+            set -e
+            echo "$mode: unchanged Phase 11 CTest status $status"
+            python3 - "$mode" <<'PY'
+          import sys
+          from pathlib import Path
+          mode=sys.argv[1]
+          root=Path('matched-input')/mode/'pos0007'
+          log=Path(f'matched-input/{mode}.log').read_text()
+          assert 'phase11.positions=14' in log
+          if mode=='cpu':
+              assert 'phase11.oracle_injection.position=7 stage=L31_mlp_block_input source=independent-cpu ' in log
+          for stage,size in [('L31_mlp_block_input',10240),
+                             ('L31_moe_router_ids',40),('logits',0)]:
+              path=root/(stage+'.bin')
+              if stage=='logits':
+                  continue
+              assert path.stat().st_size==size, (path,path.stat().st_size)
+          for line in log.splitlines():
+              if ('phase11.oracle_injection.position=7 stage=L31_mlp_block_input ' in line or
+                  'phase11.mean_kl=' in line or 'phase11.top1_agreement=' in line):
+                  print(line[:350])
+          PY
+          done
+          python3 - <<'PY' | tee matched-input/report.txt
+          from array import array
+          import math
+          from pathlib import Path
+          root=Path('matched-input')
+          def read(path):
+              data=array('f')
+              data.frombytes(path.read_bytes())
+              return list(data)
+          def ids(mode):
+              return {int(x) for x in read(root/mode/'pos0007/L31_moe_router_ids.bin')}
+          baseline=ids('baseline')
+          cpu_input=ids('cpu')
+          profile={int(x) for x in read(Path('cpu/v100-phase11-storage/pos0007/L31_moe_router_ids.bin'))}
+          oracle={int(x) for x in read(Path('/oracle/phase11-stage-trace14/pos0007/L31_moe_router_ids.bin'))}
+          print('baseline_v100_ids',sorted(baseline))
+          print('matched_profile_input_v100_ids',sorted(cpu_input))
+          print('independent_profile_ids',sorted(profile))
+          print('oracle_ids',sorted(oracle))
+          assert baseline-oracle=={385} and oracle-baseline=={220}
+          assert profile==oracle
+          for mode in ('baseline','cpu'):
+              gpu=read(root/mode/'pos0007/L31_moe_router_scores.bin')[:512]
+              assert len(gpu)==512
+              profile_scores=read(Path('cpu/v100-phase11-storage/pos0007/L31_moe_router_scores.bin'))
+              assert len(profile_scores)==512
+              diff=math.sqrt(math.fsum((a-b)**2 for a,b in zip(gpu,profile_scores))/512)
+              scale=math.sqrt(math.fsum(x*x for x in profile_scores)/512)
+              print(mode,'score_rms_delta_vs_profile',format(diff,'.9g'),
+                    'normalized',format(diff/scale,'.9g'),
+                    'gpu_pair_margin_220_minus_385',format(gpu[220]-gpu[385],'.9g'),
+                    'profile_pair_margin',format(profile_scores[220]-profile_scores[385],'.9g'))
+          assert cpu_input==profile, 'router differs on the independent profile input'
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: v100-position7-layer31-matched-input-14
+          path: matched-input
+          if-no-files-found: ignore
+          retention-days: 14
