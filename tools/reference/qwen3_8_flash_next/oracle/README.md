@@ -1003,11 +1003,20 @@ between BF16 0.0703125 and 0.07080078125; CPU ties to even down and
 V100 stores up. In this diagnostic path the V100 fused convolution
 uses its FP32 accumulator for the current token and writes the BF16
 mirror separately for history, so those mirror differences alone do
-not explain the current-token GDN output. The matched CPU GDN output
-injection checks whether the local hyper update then reproduces the
-CPU reference over full prefixes. The independent CPU storage profile
-is not yet quantitatively matched to natural V100 over complete
-prefixes, and natural V100 Phase 11 remains unqualified.
+not explain the current-token GDN output. The [matched GDN-output experiment](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36245710491)
+injects the CPU-profile FP32 attention block output into V100 at
+position 7/layer 0. The post-attention hyper-state difference falls
+from 6.24941e-7 to 2.09458e-7 NRMSE, post-MLP master from
+3.66576e-7 to 2.57289e-7, and layer-one raw attention from
+9.61637e-5 to 1.34904e-5. A remaining matched-output difference
+at the hyper operation therefore contributes independently of the
+GDN output. The 14-prefix mean KL worsens from 0.057752 to
+0.093440, top-1 falls from 13/14 to 12/14, and both CTests fail
+the unchanged gate. A direct CPU post-attention hyper-state injection
+is the next matched-input calibration of the MLP hyper update.
+The independent CPU storage profile is not yet quantitatively matched
+to natural V100 over complete prefixes, and natural V100 Phase 11
+remains unqualified.
 
 ## 1. Environment Setup
 
