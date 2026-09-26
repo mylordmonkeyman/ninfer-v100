@@ -1,0 +1,69 @@
+name: Phase 11 Position Seven Hyper Shadow Comparison
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-profile-pos7-shadow-compare.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Download CPU and V100 complete-prefix stage data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36211013815 --repo "$GITHUB_REPOSITORY" --name cpu-raw-attention-reference-14 --dir cpu
+          gh run download 36212350682 --repo "$GITHUB_REPOSITORY" --name v100-raw-attention-pos7-14 --dir gpu
+      - name: Reconstruct BF16 shadow entering layer-one attention preparation
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee position7-shadow.txt
+          import math,struct
+          from pathlib import Path
+          roots={'cpu':Path('cpu/v100-phase11-storage/pos0007'),
+                 'v100':Path('gpu/pos0007')}
+          def read(root,name,count):
+              data=(root/(name+'.bin')).read_bytes()
+              assert len(data)==count*4,(root,name,len(data))
+              return struct.unpack('<'+str(count)+'f',data)
+          def f32(x):
+              return struct.unpack('<f',struct.pack('<f',x))[0]
+          def bf16(x):
+              bits=struct.unpack('<I',struct.pack('<f',x))[0]
+              bits=(bits+0x7fff+((bits>>16)&1))&0xffffffff
+              return struct.unpack('<f',struct.pack('<I',bits&0xffff0000))[0]
+          states={}
+          shadows={}
+          for label,root in roots.items():
+              master=read(root,'L00_hyper_after_mlp',10240)
+              ple=read(root,'ple_injection',10240)
+              states[label]=[f32(float(x)+float(y)) for x,y in zip(master,ple)]
+              shadows[label]=[bf16(x) for x in states[label]]
+          differs=[i for i,(x,y) in enumerate(zip(shadows['cpu'],shadows['v100'])) if x!=y]
+          state_rms=math.sqrt(math.fsum((x-y)**2 for x,y in zip(states['cpu'],states['v100']))/10240)
+          state_norm=math.sqrt(math.fsum(x*x for x in states['cpu'])/10240)
+          print('fp32_after_ple_reconstructed_NRMSE',format(state_rms/state_norm,'.12g'))
+          print('bf16_shadow_differing_values',len(differs))
+          print('first_shadow_differences',[(i,states['cpu'][i],states['v100'][i],
+                                               shadows['cpu'][i],shadows['v100'][i])
+                                              for i in differs[:32]])
+          raw={k:read(r,'L01_attn_block_input_fp32',2560) for k,r in roots.items()}
+          ranked=sorted(range(2560),key=lambda i:abs(raw['cpu'][i]-raw['v100'][i]),reverse=True)
+          print('largest_raw_mixer_deltas',[(i,raw['cpu'][i],raw['v100'][i],
+                                              raw['v100'][i]-raw['cpu'][i])
+                                             for i in ranked[:16]])
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: position7-shadow-comparison
+          path: position7-shadow.txt
+          retention-days: 14
