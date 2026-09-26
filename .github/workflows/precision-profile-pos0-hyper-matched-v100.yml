@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           test -r /models/qwen3-8b-flash-next
-          test -s /oracle/phase11-stage-trace14/pos0007/L31_mlp_block_input.bin
+          test -s /oracle/phase11-stage-trace14/pos0000/L00_hyper_after_attn.bin
           cmake -S . -B build-precision-v100 -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
@@ -105,7 +105,7 @@ jobs:
           log=Path(f'replay/{mode}.log').read_text()
           assert 'phase11.positions=14' in log
           if mode=='matched':
-              assert 'phase11.oracle_injection.position=7 stage=L00_hyper_after_attn source=independent-cpu count=10240' in log
+              assert 'phase11.oracle_injection.position=0 stage=L00_hyper_after_attn source=independent-cpu count=10240' in log
           base=Path('replay')/mode/'pos0000'
           for stage,count in (('L00_hyper_after_attn',10240),
                               ('L00_mlp_block_input_fp32',2560),
@@ -130,7 +130,7 @@ jobs:
               assert len(a)==len(b)
               return math.sqrt(math.fsum((x-y)**2 for x,y in zip(a,b))/math.fsum(x*x for x in a))
           for mode in ('matched',):
-              base=Path('replay')/mode/'pos0007'
+              base=Path('replay')/mode/'pos0000'
               for stage in ('L00_hyper_after_attn','L00_mlp_block_input_fp32','L00_mlp_block_input','L00_hyper_after_mlp','L01_attn_block_input_fp32'):
                   print(mode,stage,'CPU_V100_NRMSE',
                         format(nrmse(read(cpu/(stage+'.bin')),read(base/(stage+'.bin'))),'.12g'))
