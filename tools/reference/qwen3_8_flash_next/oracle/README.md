@@ -1131,12 +1131,19 @@ pre-injection difference at index 1841. The sink callback is called
 before MoE consumes the input. The
 [router ID comparison](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36262066897)
 finds the same selected ten experts, in the same order, in the CPU
-FMA profile and V100 at position-zero/layer-zero. Therefore the six
-remaining BF16 MLP-output differences are not accounted for by that
-one stored input word or expert selection. They could reflect
-different arithmetic/rounding inside the shared or routed expert
-path, differences in router weights or alpha, or an implementation
-error; this experiment does not distinguish those explanations.
+FMA profile and V100 at position-zero/layer-zero. The
+[frozen router-score comparison](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36262195419)
+gives 7.46383e-8 score NRMSE over 512 experts, at most
+1.90735e-6 absolute score error, and a maximum 5.87907e-8
+difference in top-ten softmax probabilities reconstructed from those
+scores. Therefore the six remaining BF16 MLP-output differences are
+not accounted for by that one stored input word or expert selection.
+The tiny score/alpha differences may still affect rounded outputs;
+different accumulation order or casts inside the shared and routed
+expert paths, quantized weight interpretations, or an implementation
+error also remain possible. The frozen score calculation does not
+establish exact equality of the actual CPU and V100 alpha tensors.
+This experiment does not distinguish those explanations.
 The V100 update from measured MoE output and gate still exactly
 matches FP32 fused multiply-add.
 
