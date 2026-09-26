@@ -89,6 +89,8 @@ class LazyExperts(nn.Module):
         # Supplementary CPU precision profile only; the FP32 oracle keeps the
         # independent model's original expert reduction.
         self.route_order_fma = False
+        self.trace_pair_outputs = False
+        self.last_pair_outputs = None
 
     def get_exp_file(self):
         if self.exp_f is None:
@@ -128,7 +130,8 @@ class LazyExperts(nn.Module):
         top_k_weights: torch.Tensor,
     ) -> torch.Tensor:
         final_hidden_states = torch.zeros_like(hidden_states)
-        pair_outputs = {} if self.route_order_fma else None
+        pair_outputs = {} if (self.route_order_fma or self.trace_pair_outputs) else None
+        self.last_pair_outputs = None
         with torch.no_grad():
             expert_mask = torch.nn.functional.one_hot(top_k_index, num_classes=self.num_experts)
             expert_mask = expert_mask.permute(2, 1, 0)
@@ -154,11 +157,17 @@ class LazyExperts(nn.Module):
                 for row, token, path in zip(current_hidden_states,
                                             token_idx.tolist(), top_k_pos.tolist()):
                     pair_outputs[token, path] = row.detach().numpy().astype(np.float32, copy=True)
-            else:
+            if not self.route_order_fma:
                 current_hidden_states = current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
                 final_hidden_states.index_add_(0, token_idx, current_hidden_states.to(final_hidden_states.dtype))
 
-        if pair_outputs is not None:
+        if pair_outputs is not None and self.trace_pair_outputs:
+            if hidden_states.shape[0] != 1 or len(pair_outputs) != 10:
+                raise RuntimeError('pair tracing requires one token and ten paths')
+            self.last_pair_outputs = torch.from_numpy(np.stack(
+                [pair_outputs[0, path] for path in range(10)]))
+
+        if pair_outputs is not None and self.route_order_fma:
             if hidden_states.ndim != 2 or top_k_index.shape != top_k_weights.shape or \
                     top_k_index.shape != (hidden_states.shape[0], 10) or \
                     len(pair_outputs) != hidden_states.shape[0] * 10:
