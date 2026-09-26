@@ -1,0 +1,159 @@
+name: Phase 11 V100 Matched Post PLE Attention Precision
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-profile-pos7-matched-ple-v100.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  matched-state:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-raw-attention-reference-14
+          run-id: 36211013815
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: cpu
+      - name: Build diagnostic and reconstruct CPU post-PLE FP32 state
+        run: |
+          set -euo pipefail
+          test -s /models/qwen3-8b-flash-next
+          test -s /oracle/phase11/manifest.json
+          mkdir -p cpu-state/pos0007
+          python3 - <<'PY'
+          import struct
+          from pathlib import Path
+          root=Path('cpu/v100-phase11-storage/pos0007')
+          def read(name):
+              raw=(root/(name+'.bin')).read_bytes()
+              assert len(raw)==10240*4
+              return struct.unpack('<10240f',raw)
+          master=read('L00_hyper_after_mlp')
+          ple=read('ple_injection')
+          output=Path('cpu-state/pos0007/hyper_after_ple.bin')
+          output.write_bytes(struct.pack('<10240f',*(x+y for x,y in zip(master,ple))))
+          assert output.stat().st_size==40960
+          print('Independent CPU profile reconstructed post-PLE master bytes',output.stat().st_size)
+          PY
+          cmake -S . -B build-precision-v100 -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-precision-v100 -j --target \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test
+      - name: Check V100 memory before loading
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free \
+              --format=csv,noheader,nounits | tr -d '[:space:]')
+            if [[ "$free_mib" =~ ^[0-9]+$ ]] && (( free_mib >= 28000 )); then
+              echo "V100 free memory: $free_mib MiB";exit 0
+            fi
+            if (( attempt < 30 )); then sleep 30; fi
+          done
+          exit 1
+      - name: Compare natural and CPU-matched attention preparation
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "14"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace14
+          NINFER_PHASE11_STAGE_ORACLE_POSITION: "7"
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_PHASE11_TRACE_ATTENTION_PREPARE_RAW: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
+        run: |
+          set -euo pipefail
+          mkdir -p replay
+          export NINFER_PHASE11_STATE_COMPARE_ROOT="$GITHUB_WORKSPACE/cpu-state"
+          for mode in baseline matched; do
+            export NINFER_PHASE11_CANDIDATE_TRACE_ROOT="$GITHUB_WORKSPACE/replay/$mode"
+            if [[ "$mode" == matched ]]; then
+              export NINFER_PHASE11_ORACLE_INJECT_STAGE=hyper_after_ple
+              export NINFER_PHASE11_INJECT_SOURCE_ROOT="$GITHUB_WORKSPACE/cpu-state"
+            else
+              unset NINFER_PHASE11_ORACLE_INJECT_STAGE NINFER_PHASE11_INJECT_SOURCE_ROOT
+            fi
+            set +e
+            ctest --test-dir build-precision-v100 -V \
+              -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+              > "replay/$mode.log" 2>&1
+            status=$?
+            set -e
+            echo "$mode: unchanged Phase 11 CTest status $status"
+            python3 - "$mode" <<'PY'
+          import sys
+          from pathlib import Path
+          mode=sys.argv[1]
+          log=Path(f'replay/{mode}.log').read_text()
+          assert 'phase11.positions=14' in log
+          if mode=='matched':
+              assert 'phase11.oracle_injection.position=7 stage=hyper_after_ple source=independent-cpu ' in log
+          root=Path('replay')/mode/'pos0007'
+          for name,count in [('hyper_after_ple',10240),
+                             ('L01_attn_block_input_fp32',2560),
+                             ('L01_attn_block_input',2560)]:
+              assert (root/(name+'.bin')).stat().st_size==count*4
+          for line in log.splitlines():
+              if ('phase11.mean_kl=' in line or 'phase11.top1_agreement=' in line or
+                  'phase11.oracle_injection.position=7 stage=hyper_after_ple ' in line):
+                  print(line[:320])
+          PY
+          done
+          python3 - <<'PY' | tee replay/report.txt
+          import math,struct
+          from pathlib import Path
+          def read(path,count):
+              raw=path.read_bytes();assert len(raw)==count*4,(path,len(raw))
+              return struct.unpack('<'+str(count)+'f',raw)
+          cpu=Path('cpu/v100-phase11-storage/pos0007')
+          expected=read(cpu/'L01_attn_block_input_fp32.bin',2560)
+          state=read(Path('cpu-state/pos0007/hyper_after_ple.bin'),10240)
+          def nrmse(a,b):
+              return math.sqrt(math.fsum((x-y)**2 for x,y in zip(a,b))/
+                               math.fsum(x*x for x in a))
+          for mode in ('baseline','matched'):
+              base=Path('replay')/mode/'pos0007'
+              raw=read(base/'L01_attn_block_input_fp32.bin',2560)
+              observed_state=read(base/'hyper_after_ple.bin',10240)
+              print(mode,'pre_injection_post_PLE_master_NRMSE',format(nrmse(state,observed_state),'.12g'),
+                    'downstream_raw_attention_NRMSE',format(nrmse(expected,raw),'.12g'))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: v100-position7-matched-post-ple-14
+          path: replay
+          retention-days: 14
+          if-no-files-found: ignore
