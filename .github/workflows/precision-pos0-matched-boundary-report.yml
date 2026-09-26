@@ -94,6 +94,26 @@ jobs:
                         [(i,predicted[i],actual[i]) for i in range(10240)
                          if predicted[i]!=actual[i]][:12])
                   print('matched','postmlp_bf16_shadow_differences',shadow[:12])
+          cpu_pre=read(cpu,'L00_hyper_after_attn')
+          cpu_gate=read(cpu,'L00_mlp_injection')
+          gpu_gate=read(matched,'L00_mlp_injection')
+          cpu_out=read(cpu,'L00_mlp_block_output')
+          gpu_out=read(matched,'L00_mlp_block_output')
+          cpu_post=read(cpu,'L00_hyper_after_mlp')
+          gpu_post=read(matched,'L00_hyper_after_mlp')
+          for label,gate,out in (('cpu_gate_cpu_output',cpu_gate,cpu_out),
+                                 ('gpu_gate_cpu_output',gpu_gate,cpu_out),
+                                 ('cpu_gate_gpu_output',cpu_gate,gpu_out),
+                                 ('gpu_gate_gpu_output',gpu_gate,gpu_out)):
+              pred=tuple(libc.fmaf(gate[i//2560],out[i%2560],cpu_pre[i])
+                         for i in range(10240))
+              nc,changed_cpu=compare(cpu_post,pred)
+              ng,changed_gpu=compare(gpu_post,pred)
+              bf16_delta=sum(bf16(x)!=bf16(y) for x,y in zip(cpu_post,pred))
+              print('counterfactual',label,'cpu_master_nrmse',nc,
+                    'cpu_master_different',changed_cpu,
+                    'gpu_master_nrmse',ng,'gpu_master_different',changed_gpu,
+                    'cpu_bf16_shadow_mismatches',bf16_delta)
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
