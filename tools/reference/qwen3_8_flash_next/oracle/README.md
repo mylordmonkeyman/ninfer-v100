@@ -1138,12 +1138,23 @@ gives 7.46383e-8 score NRMSE over 512 experts, at most
 difference in top-ten softmax probabilities reconstructed from those
 scores. Therefore the six remaining BF16 MLP-output differences are
 not accounted for by that one stored input word or expert selection.
-The tiny score/alpha differences may still affect rounded outputs;
-different accumulation order or casts inside the shared and routed
-expert paths, quantized weight interpretations, or an implementation
-error also remain possible. The frozen score calculation does not
-establish exact equality of the actual CPU and V100 alpha tensors.
-This experiment does not distinguish those explanations.
+The [actual alpha and shared-scale trace](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36262808705)
+shows all ten alpha values differ, at most 5.96046e-8 absolute
+(2.83210e-7 NRMSE), while the shared scale is bitwise identical.
+The [controlled CPU-alpha replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36263059873)
+injects the ten CPU alpha values at position-zero/layer-zero after
+matching the CPU post-attention state. Its
+[byte-for-byte frozen report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36263290151)
+shows zero changes to the BF16 MLP output, MLP gate, post-MLP master,
+PLE injection and layer-one attention input. Mean oracle KL remains
+0.0925233 and top-1 12/14; CTest still fails. Thus neither the
+one differing stored MLP input nor substituting these actual alpha
+values causes any of the six observed output-word differences in
+these two local replays. Differences in accumulation order or casts
+inside the shared and routed expert paths, quantized weight
+interpretations, or an implementation error remain possible.
+The selected CPU/V100 expert set and shared scale agree; those
+facts do not establish complete path parity.
 The V100 update from measured MoE output and gate still exactly
 matches FP32 fused multiply-add.
 
