@@ -1032,11 +1032,29 @@ experiment. At that index CPU post-PLE sum is 0.000844955444336;
 the matched V100 sum is about 4.66e-10 lower and rounds to the
 adjacent BF16 value. This tiny residual is upstream of the layer-one
 attention mixer and survives matching the MLP block output.
-The next diagnostic captures the four independent MLP injection
-scales to distinguish gate arithmetic from the final fused update.
-The independent CPU storage profile is not yet quantitatively
-matched to natural V100 over complete prefixes, and natural V100
-Phase 11 remains unqualified.
+The [matched-input gate report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36249192885)
+compares four CPU-profile and V100 FP32 MLP injection scales using
+[the corrected CPU](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36247796256)
+and [V100](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36247843768)
+complete-prefix traces. For stream 2, CPU uses 0.734752237797
+and V100 0.734752178192, one FP32 ULP apart. At index 5609 both
+receive matched FP32 pre-MLP state -0.00347781414166 and BF16 MLP
+output 0.0069580078125. V100 post-MLP state
+0.00163459731266 exactly equals FP32 fused multiply-add of those
+inputs and its captured gate. CPU post-MLP state 0.00163459777832
+equals an FP32 multiply rounded before the add. With even the CPU
+gate, substituting FP32 fused multiply-add yields
+0.0016345976619 and the lower BF16 post-PLE shadow word 14941;
+the separate CPU arithmetic yields upper word 14942. The V100
+gate's one-ULP difference adds to the master-state gap, but the
+unmodeled fused update alone is sufficient for this shadow flip.
+This is an explicit CPU precision-profile arithmetic mismatch;
+the captured V100 update behaves as its implemented fused operation
+specifies. It does not explain every later routing decision or
+qualify the natural engine. The optional full-prefix CPU FMA
+variant will test whether matching this arithmetic improves the
+independent profile's agreement with V100. Natural V100 Phase 11
+remains unqualified.
 
 ## 1. Environment Setup
 
