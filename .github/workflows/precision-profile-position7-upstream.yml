@@ -47,7 +47,7 @@ jobs:
               print('layer',layer)
               for suffix in ('attn_block_input','attn_block_output','hyper_after_attn',
                              'mlp_block_input','mlp_block_output','hyper_after_mlp'):
-                  key=(13,f'L{layer:02d}_{suffix}')
+                  key=(7,f'L{layer:02d}_{suffix}')
                   if key not in rows: continue
                   row=rows[key]
                   d=float(row['v100_vs_cpu_nrmse'])
@@ -63,7 +63,7 @@ jobs:
                   print('router_swaps',json.dumps({k:{'lost':sorted(ids['oracle']-v),
                                                         'gained':sorted(v-ids['oracle'])}
                                                    for k,v in ids.items() if k!='oracle'},sort_keys=True))
-          assert (13,'L26_mlp_block_input') in rows
+          assert (7,'L31_mlp_block_input') in rows
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
