@@ -129,7 +129,6 @@ jobs:
             --trace-hyper-layer0 \
             --trace-hyper-layer1 \
             --fused-hyper-updates \
-            --v100-trace "$GITHUB_WORKSPACE/v100-input" \
             --out-dir "$GITHUB_WORKSPACE/precision-reference-results"
 
       - name: Validate FP32 and profile raw attention stages
