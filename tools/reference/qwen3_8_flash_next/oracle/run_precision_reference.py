@@ -155,6 +155,17 @@ def _stage_hooks(model, captured, trace_gdn_internals=False,
         handles.append(layer.mlp_hyper_connection.register_forward_hook(
             capture(prefix + "mlp_block_input", lambda output: output[0])
         ))
+        if index == 1 and trace_hyper_layer1:
+            hyper = layer.attn_hyper_connection
+            hyper._phase11_capture_attention_raw = True
+            def capture_attention_raw(module, _args, output, stem=prefix):
+                raw = getattr(module, "_phase11_attention_raw", output[0])
+                captured[stem + "attn_block_input_fp32"] = (
+                    raw.detach().to(torch.float32).cpu().clone()
+                )
+                if hasattr(module, "_phase11_attention_raw"):
+                    delattr(module, "_phase11_attention_raw")
+            handles.append(hyper.register_forward_hook(capture_attention_raw))
         if index == 0 and trace_hyper_layer0:
             handles.append(layer.attn_hyper_connection.register_forward_pre_hook(
                 capture_input(prefix + "hyper_before_attn")))
@@ -300,6 +311,11 @@ def run_decode(model, head, token_ids, profile, out_root,
     finally:
         for handle in handles:
             handle.remove()
+        if trace_hyper_layer1:
+            hyper = model.layers[1].attn_hyper_connection
+            for name in ("_phase11_capture_attention_raw", "_phase11_attention_raw"):
+                if hasattr(hyper, name):
+                    delattr(hyper, name)
         for gate, original in originals:
             gate.forward = original
     if out_root is not None:
