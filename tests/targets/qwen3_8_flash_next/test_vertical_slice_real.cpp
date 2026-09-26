@@ -1483,6 +1483,42 @@ int main() {
                                         {"file", (fs::path(pos_dir) /
                                                   (std::string(name) + ".bin")).string()}}
                                 << '\n' << std::flush;
+                if (name == "L00_moe_routed_sum" &&
+                    current_stage_trace_position == stage_trace_position &&
+                    second_inject_stage == name) {
+                    if (second_inject_source_root.empty()) {
+                        throw std::runtime_error("MoE routed-sum injection requires an explicit CPU source");
+                    }
+                    const fs::path source_path = second_inject_source_root /
+                                                 pos_dir / (std::string(name) + ".bin");
+                    if (!fs::is_regular_file(source_path) ||
+                        fs::file_size(source_path) != count * sizeof(float)) {
+                        throw std::runtime_error("MoE routed-sum injection source is missing or wrong size");
+                    }
+                    std::vector<float> injected(count), verified(count);
+                    std::ifstream source(source_path, std::ios::binary);
+                    source.read(reinterpret_cast<char*>(injected.data()),
+                                static_cast<std::streamsize>(count * sizeof(float)));
+                    if (!source ||
+                        !std::all_of(injected.begin(), injected.end(),
+                                     [](float value) { return std::isfinite(value); })) {
+                        throw std::runtime_error("MoE routed-sum injection source is invalid");
+                    }
+                    CUDA_CHECK(cudaMemcpy(tensor.data, injected.data(),
+                                          count * sizeof(float), cudaMemcpyHostToDevice));
+                    CUDA_CHECK(cudaMemcpy(verified.data(), tensor.data,
+                                          count * sizeof(float), cudaMemcpyDeviceToHost));
+                    for (std::size_t i = 0; i < count; ++i) {
+                        if (std::bit_cast<std::uint32_t>(verified[i]) !=
+                            std::bit_cast<std::uint32_t>(injected[i])) {
+                            throw std::runtime_error("MoE routed-sum injection readback mismatch");
+                        }
+                    }
+                    std::cout << "phase11.oracle_injection.position="
+                              << current_stage_trace_position << " stage=" << name
+                              << " source=independent-cpu count=" << count
+                              << '\n' << std::flush;
+                }
                 return;
             }
             if (!fs::is_regular_file(expected_path)) {
