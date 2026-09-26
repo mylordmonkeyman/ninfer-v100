@@ -14,7 +14,6 @@ on:
 
 permissions:
   contents: read
-  workflows: write
 
 concurrency:
   group: v100-phase11-runtime-${{ github.ref }}
@@ -113,9 +112,9 @@ jobs:
 
           # This runner shares the V100 with the agent's own inference model,
           # which llama-swap (127.0.0.1:9292) keeps loaded (~30 GiB). Unload it
-          # for the duration of the run; llama-swap lazily reloads it on the
-          # agent's next inference request. This runs before the build so a
-          # contended GPU fails fast and the auto-retry job can re-dispatch.
+          # and wait for the GPU here: the agent typically goes idle between
+          # sessions, so the run waits in place (up to 90 minutes, re-issuing
+          # the unload every 60 s) instead of failing and burning the run.
           swap_base=http://127.0.0.1:9292
           agent_model=qwen3.8-27b-omp
 
@@ -133,7 +132,7 @@ jobs:
           esac
 
           required_free_mib=20480
-          deadline=$(( $(date +%s) + 900 ))
+          deadline=$(( $(date +%s) + 5400 ))
           last_unload=0
           while :; do
             free_mib=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -n1 | tr -d '[:space:]')
@@ -143,8 +142,8 @@ jobs:
               break
             fi
             if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "ERROR: GPU free memory stayed below ${required_free_mib} MiB for 15 minutes after unloading the agent model." >&2
-              echo "The V100 is contended (the agent model is loaded or the agent is actively in use). The auto-retry job will re-dispatch this workflow after a cooldown; keep the agent on this V100 idle so the retry can reserve the GPU." >&2
+              echo "ERROR: GPU free memory stayed below ${required_free_mib} MiB for 90 minutes after unloading the agent model." >&2
+              echo "The V100 is contended (the agent model is loaded or the agent is actively in use). Keep the agent on this V100 idle and re-run this workflow." >&2
               exit 1
             fi
             now=$(date +%s)
@@ -650,54 +649,3 @@ jobs:
           path: ${{ github.workspace }}/.v100-phase11-results/${{ github.run_id }}-${{ github.run_attempt }}/
           if-no-files-found: warn
           retention-days: 14
-
-  retry-v100-on-contention:
-    name: Retry V100 Phase 11 Runtime (auto)
-    needs: v100-phase11
-    if: needs['v100-phase11'].result == 'failure'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Re-dispatch after cooldown (capped at 2 consecutive failures)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # Count failed completed runs of this same head SHA, excluding the
-          # current one. The cap stops an auto-retry storm from a single push;
-          # failures of other commits (e.g. from before the reserve step was
-          # fixed) do not count against this push.
-          n=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/v100-phase11-runtime.yml/runs?per_page=8" \
-            | python3 -c '
-          import json, sys
-          d = json.load(sys.stdin)
-          current_id = int(sys.argv[1])
-          current_sha = sys.argv[2]
-          c = 0
-          for r in d["workflow_runs"]:
-              if r["id"] == current_id:
-                  continue
-              if r.get("head_sha") != current_sha:
-                  continue
-              if r["status"] != "completed" or r["conclusion"] == "success":
-                  continue
-              if r["conclusion"] == "cancelled":
-                  continue
-              c += 1
-              if c >= 2:
-                  break
-          print(c)
-          ' "$GITHUB_RUN_ID" "$GITHUB_SHA")
-          if [ "$n" -ge 2 ]; then
-            echo "Two or more consecutive failures: skipping auto-retry; needs human review."
-            exit 0
-          fi
-          echo "Re-dispatching after a 10 minute cooldown so the V100 agent can go idle."
-          sleep 600
-          curl -s -X POST \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/v100-phase11-runtime.yml/dispatches" \
-            -d '{"ref":"'"${GITHUB_REF_NAME}"'"}' \
-            -o /tmp/dispatch-response.json -w 'dispatch -> HTTP %{http_code}\n'
