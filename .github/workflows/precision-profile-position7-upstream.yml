@@ -1,0 +1,72 @@
+name: Phase 11 Position Seven Precision Profile Upstream Stages
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-profile-position7-upstream.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Download matched frozen CPU and V100 traces
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36087743583 --repo "$GITHUB_REPOSITORY" --name cpu-router-replay-14 --dir cpu
+          gh run download 36078905618 --repo "$GITHUB_REPOSITORY" --name v100-mlp-raw-layer1-14 --dir v100
+      - name: Map pre-router amplification and validate stage coverage
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee position7-upstream.txt
+          import csv, math, json, struct
+          from pathlib import Path
+          rows={(int(r['position']),r['stage']):r for r in
+                csv.DictReader(Path('cpu/comparison/stage_comparison.csv').open())}
+          def values(path):
+              return [x[0] for x in struct.iter_unpack('<f',path.read_bytes())]
+          roots={'cpu':Path('cpu/v100-phase11-storage'),
+                 'oracle':Path('cpu/fp32'),
+                 'v100':Path('v100/candidate-stage')}
+          def stage(kind,layer,suffix):
+              return values(roots[kind]/f'pos0007/L{layer:02d}_{suffix}.bin')
+          def nrmse(a,b):
+              return math.sqrt(math.fsum((x-y)**2 for x,y in zip(a,b))/
+                               max(math.fsum(x*x for x in a),1e-24))
+          assert float(rows[7,'L00_attn_block_input']['v100_vs_cpu_nrmse']) == 0.
+          prior=None
+          for layer in range(32):
+              print('layer',layer)
+              for suffix in ('attn_block_input','attn_block_output','hyper_after_attn',
+                             'mlp_block_input','mlp_block_output','hyper_after_mlp'):
+                  key=(13,f'L{layer:02d}_{suffix}')
+                  if key not in rows: continue
+                  row=rows[key]
+                  d=float(row['v100_vs_cpu_nrmse'])
+                  print(suffix,'cpu_v100',format(d,'.9g'),
+                        'cpu_oracle',row['cpu_vs_oracle_nrmse'],
+                        'v100_oracle',row['v100_vs_oracle_nrmse'],
+                        'vs_prior',format(d/prior,'.5g') if prior and d else '-')
+                  prior=d
+              if layer in (15,20,30,31):
+                  label='moe_router_ids'
+                  ids={kind:set(map(int,stage(kind,layer,label))) for kind in roots}
+                  print('router_sets',json.dumps({k:sorted(v) for k,v in ids.items()},sort_keys=True))
+                  print('router_swaps',json.dumps({k:{'lost':sorted(ids['oracle']-v),
+                                                        'gained':sorted(v-ids['oracle'])}
+                                                   for k,v in ids.items() if k!='oracle'},sort_keys=True))
+          assert (13,'L26_mlp_block_input') in rows
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: position7-upstream-stage-report
+          path: position7-upstream.txt
+          retention-days: 14
