@@ -40,8 +40,8 @@ jobs:
                   'L00_gdn_query','L00_gdn_key','L00_gdn_value',
                   'L00_gdn_g','L00_gdn_beta','L00_gdn_recurrent_output',
                   'L00_gdn_gated_output','L00_attn_block_output',
-                  'L00_hyper_after_attn','L00_mlp_block_input',
-                  'L00_mlp_block_output','L00_hyper_after_mlp',
+                  'L00_hyper_after_attn','L00_mlp_block_input_fp32',
+                  'L00_mlp_block_input','L00_mlp_block_output','L00_hyper_after_mlp',
                   'ple_injection','L01_attn_block_input_fp32')
           def read(path):
               raw=path.read_bytes();assert len(raw)%4==0,(path,len(raw))
@@ -55,6 +55,23 @@ jobs:
                     format(math.sqrt(sq/norm),'.12g'),
                     'exact',sum(x==y for x,y in zip(a,b)),
                     'max_abs',format(max(abs(x-y) for x,y in zip(a,b)),'.12g'))
+          def bf16(x):
+              bits=struct.unpack('<I',struct.pack('<f',x))[0]
+              bits=(bits+0x7fff+((bits>>16)&1))&0xffffffff
+              return bits>>16
+          for stage in ('L00_hyper_after_attn','L00_mlp_block_input'):
+              a,b=read(cpu/(stage+'.bin')),read(gpu/(stage+'.bin'))
+              indices=[i for i,(x,y) in enumerate(zip(a,b)) if x!=y]
+              print(stage,'mismatch_indices',indices[:35],'total',len(indices))
+              if stage=='L00_hyper_after_attn':
+                  shadow=[i for i,(x,y) in enumerate(zip(a,b)) if bf16(x)!=bf16(y)]
+                  print('post_attn_shadow_BF16_mismatches',len(shadow),
+                        'indices',shadow[:45])
+              else:
+                  for i in indices[:12]:
+                      print('mlp_stored_difference',i,
+                            'cpu',format(a[i],'.12g'),
+                            'v100',format(b[i],'.12g'))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
