@@ -6,6 +6,8 @@ on:
       - work/precision-matched-reference
     paths:
       - .github/workflows/precision-profile-raw-attention-v100.yml
+      - src/targets/qwen3_8_flash_next/impl/text_decode.cpp
+      - tests/targets/qwen3_8_flash_next/test_vertical_slice_real.cpp
 
 permissions:
   actions: read
