@@ -397,6 +397,11 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                 model.layers[layer].attention_hyper, round_ws.hyper_scratch, stream);
         }
 #endif
+#if defined(NINFER_VOLTA_BUILD)
+        if (layer == 1 && std::getenv("NINFER_PHASE11_TRACE_ATTENTION_PREPARE_RAW") != nullptr) {
+            emit_state(prefix + "attn_block_input_fp32", round_ws.hyper_scratch.mixed_fp32);
+        }
+#endif
         emit_state(prefix + "attn_block_input", round_ws.block_input);
 
         // Execute QSA or GDN attention
