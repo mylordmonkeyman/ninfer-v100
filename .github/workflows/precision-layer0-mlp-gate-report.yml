@@ -61,6 +61,17 @@ jobs:
               print(name,'gate',format(scale,'.12g'),
                     'predicted_fma',format(fused,'.12g'),
                     'predicted_separate',format(separated,'.12g'))
+          ple=read(cpu/'ple_injection.bin',10240)[idx]
+          def bf16(x):
+              bits=struct.unpack('<I',struct.pack('<f',x))[0]
+              bits=(bits+0x7fff+((bits>>16)&1))&0xffffffff
+              return bits>>16
+          for name,scale in (('CPU gate',cpu_gate[stream]),('V100 gate',gpu_gate[stream])):
+              for mode,value in (('fma',libm.fmaf(block,scale,before)),
+                                 ('separate',f32(f32(block*scale)+before))):
+                  print('shadow_variant',name,mode,'master',format(value,'.12g'),
+                        'post_PLE',format(f32(value+ple),'.12g'),
+                        'BF16_word',bf16(f32(value+ple)))
           print('index',idx,'stream',stream,'channel',channel,
                 'before',format(before,'.12g'),'block',format(block,'.12g'),
                 'cpu_after',format(cpu_after,'.12g'),
