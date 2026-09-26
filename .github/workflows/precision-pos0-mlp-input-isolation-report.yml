@@ -85,8 +85,8 @@ jobs:
               if 'router_ids' in name:
                   aa=(cpu/name).read_bytes();bb=(once/name).read_bytes()
                   assert len(aa)==len(bb) and len(aa)%4==0
-                  a=struct.unpack('<'+str(len(aa)//4)+'i',aa)
-                  b=struct.unpack('<'+str(len(bb)//4)+'i',bb)
+                  a=struct.unpack('<'+str(len(aa)//4)+'f',aa)
+                  b=struct.unpack('<'+str(len(bb)//4)+'f',bb)
                   print('router_ids',name,'cpu',a,'gpu',b,'same',a==b)
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
