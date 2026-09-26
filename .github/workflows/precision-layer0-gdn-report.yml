@@ -1,0 +1,61 @@
+name: Phase 11 Layer Zero GDN Precision Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-layer0-gdn-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-layer0-gdn-reference-14
+          run-id: 36214521162
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-layer0-gdn-pos7-14
+          run-id: 36214528016
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: gpu
+      - name: Compare matched profile inputs and layer-zero master boundaries
+        run: |
+          python3 - <<'PY' | tee layer0-gdn-report.txt
+          import math,struct
+          from pathlib import Path
+          cpu=Path('cpu/v100-phase11-storage/pos0007')
+          gpu=Path('gpu/pos0007')
+          stages=('L00_attn_block_input','L00_attn_block_output','L00_hyper_after_attn',
+                  'L00_mlp_block_input','L00_mlp_block_output',
+                  'L00_hyper_after_mlp','ple_injection',
+                  'L01_attn_block_input_fp32','L01_attn_block_input')
+          def read(root,name):
+              raw=(root/(name+'.bin')).read_bytes()
+              assert len(raw)%4==0,(root,name,len(raw))
+              return struct.unpack('<'+str(len(raw)//4)+'f',raw)
+          for stage in stages:
+              a,b=read(cpu,stage),read(gpu,stage)
+              assert len(a)==len(b),(stage,len(a),len(b))
+              norm=math.fsum(x*x for x in a)
+              err=math.fsum((x-y)**2 for x,y in zip(a,b))
+              print(stage,'count',len(a),
+                    'CPU_V100_NRMSE',format(math.sqrt(err/norm),'.12g'),
+                    'exact_values',sum(x==y for x,y in zip(a,b)),
+                    'max_abs',format(max(abs(x-y) for x,y in zip(a,b)),'.12g'))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phase11-layer0-gdn-precision-report
+          path: layer0-report.txt
+          retention-days: 14
