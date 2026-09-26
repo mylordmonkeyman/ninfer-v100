@@ -62,6 +62,7 @@ jobs:
           NINFER_PHASE11_STAGE_ORACLE_POSITION: "0"
           NINFER_PHASE11_TRACE_POSITIONS: "1"
           NINFER_PHASE11_TRACE_HYPER_LAYER0: "1"
+          NINFER_PHASE11_TRACE_MLP_LAYER0: "1"
           NINFER_PHASE11_TRACE_GDN_LAYER0: "1"
           NINFER_PHASE11_TRACE_ATTENTION_PREPARE_RAW: "1"
           NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
@@ -110,6 +111,7 @@ jobs:
           for stage,count in (('L00_hyper_after_attn',10240),
                               ('L00_mlp_block_input_fp32',2560),
                               ('L00_mlp_block_input',2560),
+                              ('L00_mlp_block_output',2560),
                               ('L00_hyper_after_mlp',10240),
                               ('L01_attn_block_input_fp32',2560)):
               assert (base/(stage+'.bin')).stat().st_size==count*4
