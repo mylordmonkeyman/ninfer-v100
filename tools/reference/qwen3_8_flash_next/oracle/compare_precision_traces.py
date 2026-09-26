@@ -70,6 +70,13 @@ def compare(oracle_root, cpu_root, out_dir, v100_root=None, incremental_fp32_roo
             # independent-oracle logits gate; label this auxiliary reference.
             reference_path = incremental[key]
             reference_source = "incremental-fp32-scores"
+        elif name in ("L00_moe_shared_activation", "L00_moe_routed_sum") and \
+                key in incremental:
+            # Internal MoE components have no frozen full-sequence oracle
+            # stage. Incremental FP32 is separately gated against oracle
+            # logits, and its provenance must remain explicit in the report.
+            reference_path = incremental[key]
+            reference_source = "incremental-fp32-moe-component"
         elif name == "L01_attn_block_input_fp32" and \
                 (position, "L01_attn_block_input") in oracle:
             reference_path = oracle[position, "L01_attn_block_input"]
