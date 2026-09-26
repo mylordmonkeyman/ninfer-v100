@@ -1,0 +1,169 @@
+name: Phase 11 CPU Position Zero Expert Pair Calibration
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-pos0-moe-pairs-cpu.yml
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: phase11-cpu-moe-pairs-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  cpu-reference-14:
+    name: CPU-only 14-position reference
+    runs-on:
+      - self-hosted
+      - v100
+      - sm70
+      - cuda-12-8
+      - ninfer-phase11
+    timeout-minutes: 360
+    env:
+      CUDA_VISIBLE_DEVICES: ""
+      NINFER_ORACLE_DETERMINISTIC: "1"
+      NINFER_ORACLE_THREADS: "16"
+      OMP_NUM_THREADS: "16"
+      MKL_NUM_THREADS: "16"
+      OPENBLAS_NUM_THREADS: "16"
+      NUMEXPR_NUM_THREADS: "16"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-layer0-gdn-pos7-14
+          run-id: 36214528016
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: v100-input
+
+      - name: Locate read-only input assets and CPU Python
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Mounted data path availability:'
+          for root in /models /oracle /srv/ninfer/source /srv/ninfer/oracle \
+              /home/runner/ninfer-v100; do
+            if [[ -d "$root" ]]; then
+              echo "Directory: $root"
+              find "$root" -maxdepth 3 -type f \( -name model.safetensors.index.json \
+                  -o -name 'shard_*.safetensors' -o -name token_ids.json \) \
+                  -print -quit 2>/dev/null || true
+            else
+              echo "Absent: $root"
+            fi
+          done
+          model_dir="${NINFER_PHASE11_MODEL_DIR:-/srv/ninfer/source/mixed}"
+          ple_dir="${NINFER_PHASE11_PLE_DIR:-/srv/ninfer/source/ple/ples_int4}"
+          oracle_dir="${NINFER_PHASE11_STAGE_ORACLE_ROOT:-/oracle/phase11-stage-trace14}"
+          ids_file="${NINFER_PHASE11_IDS_FILE:-/oracle/phase11/token_ids.json}"
+          missing=0
+          for path in "$model_dir/model.safetensors.index.json" "$ple_dir" \
+              "$oracle_dir/manifest.json" "$ids_file"; do
+            if [[ ! -r "$path" ]]; then
+              echo "::error::Missing readable CPU reference input: $path"
+              missing=1
+              continue
+            fi
+            echo "Readable: $path"
+          done
+          python_bin="${NINFER_PHASE11_PYTHON:-}"
+          if [[ -z "$python_bin" ]]; then
+            for candidate in "$GITHUB_WORKSPACE/venv-oracle/bin/python" \
+                "$HOME/ninfer-v100/venv-oracle/bin/python" \
+                /srv/ninfer/venv-oracle/bin/python python3; do
+              if command -v "$candidate" >/dev/null 2>&1 && \
+                  "$candidate" -c 'import numpy, torch, transformers, safetensors' >/dev/null 2>&1; then
+                python_bin="$candidate"
+                break
+              fi
+            done
+          fi
+          if (( missing )); then exit 1; fi
+          {
+            echo "PRECISION_PYTHON=$python_bin"
+            echo "PRECISION_MODEL_DIR=$model_dir"
+            echo "PRECISION_PLE_DIR=$ple_dir"
+            echo "PRECISION_ORACLE_DIR=$oracle_dir"
+            echo "PRECISION_IDS_FILE=$ids_file"
+          } >> "$GITHUB_ENV"
+
+      - name: Prepare CPU Python if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$PRECISION_PYTHON" ]]; then
+            echo "CPU Python: $PRECISION_PYTHON"
+            exit 0
+          fi
+          python3 -m venv "$GITHUB_WORKSPACE/precision-venv"
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            torch --index-url https://download.pytorch.org/whl/cpu
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            numpy safetensors 'transformers>=5.16,<6'
+          echo "PRECISION_PYTHON=$GITHUB_WORKSPACE/precision-venv/bin/python" >> "$GITHUB_ENV"
+
+      - name: Recompute three 14-position prefixes and compare stages
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PRECISION_PYTHON" tests/targets/qwen3_8_flash_next/test_precision_profile.py
+          "$PRECISION_PYTHON" tests/targets/qwen3_8_flash_next/test_precision_trace_compare.py
+          "$PRECISION_PYTHON" tools/reference/qwen3_8_flash_next/oracle/run_precision_reference.py \
+            --model-dir "$PRECISION_MODEL_DIR" \
+            --ple-dir "$PRECISION_PLE_DIR" \
+            --ids-file "$PRECISION_IDS_FILE" \
+            --fp32-oracle "$PRECISION_ORACLE_DIR" \
+            --positions 14 \
+            --trace-mlp-layer0 \
+            --trace-gdn-internals \
+            --trace-hyper-layer0 \
+            --trace-hyper-layer1 \
+            --trace-moe-routing-layer0 \
+            --trace-moe-components-layer0 \
+            --trace-moe-pairs-layer0 \
+            --fused-hyper-updates \
+            --out-dir "$GITHUB_WORKSPACE/precision-reference-results"
+
+      - name: Validate FP32 and profile raw attention stages
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path('precision-reference-results')
+          report=json.loads((root/'precision_report.json').read_text())
+          print('mean_profile_oracle_kl',report['mean_kl'])
+          for name,count in (('L00_moe_shared_activation',640),('L00_moe_routed_sum',2560),('L00_moe_pair_outputs',25600)):
+              stage=root/'v100-phase11-storage'/'pos0000'/(name+'.bin')
+              assert stage.stat().st_size==count*4,(stage,stage.stat().st_size)
+              print(name,'bytes',stage.stat().st_size)
+          assert (Path("v100-input/pos0007/L00_hyper_after_mlp.bin")).is_file()
+          for name in ('fp32','v100-phase11-storage'):
+              stage=root/name/'pos0007/L01_attn_block_input_fp32.bin'
+              stored=root/name/'pos0007/L01_attn_block_input.bin'
+              assert stage.stat().st_size==stored.stat().st_size==10240
+              print(name,'raw_and_stored_stage_bytes',stage.stat().st_size)
+              for early in ('L00_attn_block_output','L00_hyper_after_attn','L00_mlp_injection','L00_mlp_block_output','L00_hyper_after_mlp'):
+                  early_file=root/name/'pos0007'/(early+'.bin')
+                  assert early_file.is_file(),early_file
+                  print(name,early,early_file.stat().st_size)
+          PY
+
+      - name: Upload CPU results and mismatch diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cpu-fused-hyper-moe-pairs-pos0-14
+          path: precision-reference-results
+          if-no-files-found: ignore
+          retention-days: 14
