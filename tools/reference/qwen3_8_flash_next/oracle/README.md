@@ -849,6 +849,15 @@ carry most of the observed final-token routing-history effect in this
 controlled replay. Correcting *all* previous positions still matters
 for the short gate's aggregate requirements.
 
+The [three-token split](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36209558173)
+holds the same position-13 layer-26–47 membership replay fixed.
+Correcting only prior positions 7–9 gives mean KL 0.038098,
+P99 0.501937, and 13/14 top-1. Correcting only positions 10–12
+gives mean KL 0.008119, P99 0.046193, and 13/14 top-1.
+Both CTests fail. The earlier combined 7–12 replay reached 14/14
+top-1 and 0.001085 mean KL, so neither three-position window alone
+is sufficient; their effects interact through the running model state.
+
 ## 1. Environment Setup
 
 Run the setup script using Python 3.14 to create the isolated virtual environment:
