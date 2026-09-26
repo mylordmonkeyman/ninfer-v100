@@ -80,6 +80,12 @@ jobs:
                     format(math.sqrt(err/norm),'.12g'),
                     'CPU_bf16_vs_gpu_mismatches',len(mismatch),
                     'first_mismatches',mismatch[:12])
+              for i in mismatch:
+                  print('projection_BF16_threshold',title,i,
+                        'cpu_raw',format(left[i],'.12g'),
+                        'cpu_rounded',format(bf16(left[i]),'.12g'),
+                        'gpu',format(right[i],'.12g'),
+                        'raw_minus_gpu',format(left[i]-right[i],'.12g'))
               largest=sorted(range(len(a)),key=lambda i:abs(a[i]-b[i]),reverse=True)[:4]
               for i in largest:
                   print('projection_large_delta',title,lo+i,
