@@ -8,8 +8,11 @@ used to attribute a qualification failure to precision alone.
 """
 
 from dataclasses import dataclass
+import ctypes
 import math
 from types import MethodType
+
+import numpy as np
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,56 @@ class _RestoreForward:
 
     def remove(self):
         self.module.forward = self.forward
+
+
+_LIBM_FMAF = ctypes.CDLL("libm.so.6").fmaf
+_LIBM_FMAF.argtypes = (ctypes.c_float, ctypes.c_float, ctypes.c_float)
+_LIBM_FMAF.restype = ctypes.c_float
+
+
+def _fused_hyper_update(master, block_output, gates):
+    """Reproduce CUDA FP32 fused block*gate+master, retaining FP32 master."""
+    import torch
+
+    if master.dtype != torch.float32 or block_output.dtype != torch.float32:
+        raise TypeError("Phase 11 fused hyper update expects FP32 CPU tensors")
+    if master.shape[-1] != 10240 or block_output.shape[-1] != 2560 or gates.shape[-1] != 4:
+        raise ValueError("unexpected hyper injection dimensions")
+    source = master.detach().cpu().reshape(-1, 4, 2560).numpy()
+    block = block_output.detach().cpu().reshape(-1, 2560).numpy()
+    scale = gates.detach().cpu().reshape(-1, 4).numpy()
+    result = np.empty_like(source)
+    for token in range(source.shape[0]):
+        for stream in range(4):
+            gate = float(scale[token, stream])
+            for feature in range(2560):
+                result[token, stream, feature] = _LIBM_FMAF(
+                    float(block[token, feature]), gate,
+                    float(source[token, stream, feature]))
+    return torch.from_numpy(result.reshape(master.shape))
+
+
+def _decoder_forward_fused_hyper(self, hidden_states, position_embeddings,
+                                 attention_mask=None, conv_mask=None,
+                                 past_key_values=None, ple_input_ids=None,
+                                 **kwargs):
+    """Mirror the model decoder while modeling V100 fused hyper updates."""
+    if self.ple is not None:
+        hidden_states = hidden_states + self.ple(
+            hidden_states, ple_input_ids, past_key_values, conv_mask=conv_mask)
+    block_input, master, gates = self.attn_hyper_connection(hidden_states)
+    if self.layer_type == "linear_attention":
+        block_output = self.linear_attn(
+            block_input, cache_params=past_key_values,
+            attention_mask=conv_mask, **kwargs)
+    else:
+        block_output, _ = self.self_attn(
+            block_input, position_embeddings, attention_mask=attention_mask,
+            past_key_values=past_key_values, **kwargs)
+    hidden_states = _fused_hyper_update(master, block_output, gates)
+    block_input, master, gates = self.mlp_hyper_connection(hidden_states)
+    block_output = self.mlp(block_input)
+    return _fused_hyper_update(master, block_output, gates)
 
 
 def _attention_hyper_from_bf16_shadow(self, hyper_input):
@@ -109,7 +162,8 @@ def _ple_from_bf16_shadow(self, hidden_states, input_ids, past_key_values,
 
 
 def install_projection_boundaries(model, profile, *, mlp_block_input_fp32=False,
-                                  mlp_block_input_fp32_layers=()):
+                                  mlp_block_input_fp32_layers=(),
+                                  fused_hyper_updates=False):
     """Materialize selected projection outputs; return removable hook handles.
 
     This only models projected activation storage.  In particular it does not
@@ -127,6 +181,9 @@ def install_projection_boundaries(model, profile, *, mlp_block_input_fp32=False,
         lambda _module, _args, output: round_to_bf16(output)
     ))
     for layer_index, layer in enumerate(model.layers):
+        if fused_hyper_updates:
+            handles.append(_RestoreForward(layer, layer.forward))
+            layer.forward = MethodType(_decoder_forward_fused_hyper, layer)
         projections = []
         hyper = layer.attn_hyper_connection
         handles.append(_RestoreForward(hyper, hyper.forward))
