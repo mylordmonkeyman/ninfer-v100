@@ -810,10 +810,18 @@ CPU-only routing errors; it is not a measure of an isolated V100 defect.
 The first V100-only swap at layer 26 still warrants a causal test on
 the V100's own path.
 
-A scoped V100 offline membership replay runs the unchanged short-sample
-gate with oracle IDs restricted to position 13, and separately to
-position-13 layers 26–47. The runs are diagnostics using unavailable
-oracle IDs. Only natural, unmodified routing can qualify the candidate.
+The [scoped V100 membership replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36208527262)
+uses the V100's own router scores and the frozen oracle IDs. The natural
+14-position path has mean oracle KL 0.057752, P99 0.615417, and 13/14
+top-1. Replacing only position-13 memberships (48 routers) yields
+0.040423 mean KL and 0.372807 P99, while replacing only layers 26–47
+there (22 routers) yields 0.040028 mean KL and 0.367278 P99. Both
+remain 13/14 top-1 and **both CTests fail the unchanged gate**. This
+rejects position-13-only routing correction as sufficient even with
+offline oracle IDs. Earlier full-prefix oracle-membership replay over
+all 672 routers reached 14/14 and passed the short gate, so the next
+diagnostic isolates the earlier-token routing history carried into
+position 13. All offline replays are unavailable at serving time.
 
 ## 1. Environment Setup
 
