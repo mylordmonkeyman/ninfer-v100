@@ -1,0 +1,97 @@
+name: Phase 11 Position Zero Expert Pair Comparison
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-pos0-moe-pairs-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-fused-hyper-moe-pairs-pos0-14
+          run-id: 36267078139
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-position0-matched-moe-pairs-14
+          run-id: 36267079166
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: gpu
+      - name: Compare earliest position-zero precision boundaries
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee position-zero-moe-pairs-report.txt
+          import ctypes,math,struct
+          from pathlib import Path
+          cpu=Path('cpu/v100-phase11-storage/pos0000')
+          gpu=Path('gpu/matched/pos0000')
+          def read(root,name,count):
+              path=root/(name+'.bin')
+              data=path.read_bytes()
+              assert len(data)==count*4,(path,len(data),count)
+              out=struct.unpack('<'+str(count)+'f',data)
+              assert all(math.isfinite(x) for x in out),name
+              return out
+          def metrics(a,b):
+              assert len(a)==len(b)
+              sq=math.fsum((x-y)**2 for x,y in zip(a,b))
+              norm=math.fsum(x*x for x in a)
+              return {'nrmse':math.sqrt(sq/norm),
+                      'different':sum(x!=y for x,y in zip(a,b)),
+                      'max_abs':max(abs(x-y) for x,y in zip(a,b))}
+          cpu_ids=read(cpu,'L00_moe_router_ids',10)
+          gpu_ids=read(gpu,'L00_moe_router_ids',10)
+          print('selected_expert_ids',list(map(int,cpu_ids)))
+          assert cpu_ids==gpu_ids,'expert paths do not align'
+          inputs=metrics(read(cpu,'L00_mlp_block_input',2560),
+                         read(gpu,'L00_mlp_block_input',2560))
+          print('stored_input_cpu_gpu',inputs)
+          cpu_pair=read(cpu,'L00_moe_pair_outputs',25600)
+          gpu_pair=read(gpu,'L00_moe_pair_outputs',25600)
+          print('all_pairs_cpu_gpu',metrics(cpu_pair,gpu_pair))
+          for path in range(10):
+              left=cpu_pair[path*2560:(path+1)*2560]
+              right=gpu_pair[path*2560:(path+1)*2560]
+              print('path',path,'expert',int(cpu_ids[path]),'cpu_gpu',metrics(left,right))
+          cpu_alpha=read(cpu,'L00_moe_router_alpha',10)
+          gpu_alpha=read(gpu,'L00_moe_router_alpha',10)
+          print('alpha_cpu_gpu',metrics(cpu_alpha,gpu_alpha))
+          fmaf=ctypes.CDLL('libm.so.6').fmaf
+          fmaf.argtypes=(ctypes.c_float,ctypes.c_float,ctypes.c_float)
+          fmaf.restype=ctypes.c_float
+          def sum_pairs(pairs,alpha):
+              acc=[0.0]*2560
+              for path in range(10):
+                  for row in range(2560):
+                      acc[row]=fmaf(alpha[path],pairs[path*2560+row],acc[row])
+              return acc
+          cpu_sum=read(cpu,'L00_moe_routed_sum',2560)
+          gpu_sum=read(gpu,'L00_moe_routed_sum',2560)
+          natural=sum_pairs(gpu_pair,gpu_alpha)
+          cpu_with_gpu_alpha=sum_pairs(cpu_pair,gpu_alpha)
+          cpu_with_cpu_alpha=sum_pairs(cpu_pair,cpu_alpha)
+          print('reconstructed_gpu_vs_stored_gpu',metrics(gpu_sum,natural))
+          assert natural==list(gpu_sum),'V100 pair trace does not reconstruct routed sum'
+          print('cpu_pairs_gpu_alpha_vs_gpu_sum',metrics(gpu_sum,cpu_with_gpu_alpha))
+          print('cpu_pairs_cpu_alpha_vs_gpu_sum',metrics(gpu_sum,cpu_with_cpu_alpha))
+          print('cpu_original_sum_vs_gpu_sum',metrics(gpu_sum,cpu_sum))
+          print('cpu_original_sum_vs_cpu_path_fma',metrics(cpu_sum,cpu_with_cpu_alpha))
+
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phase11-position-zero-moe-pairs-report
+          path: position-zero-moe-pairs-report.txt
+          retention-days: 14
