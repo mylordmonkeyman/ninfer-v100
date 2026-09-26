@@ -85,7 +85,7 @@ jobs:
             set +e
             ctest --test-dir build-precision-v100 -V \
               -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
-              > "oracle-membership-results/${variant}.log" 2>&1
+              > "position13-membership-results/${variant}.log" 2>&1
             status=$?
             set -e
             echo "${variant} CTest status: $status (qualification gate unchanged)"
@@ -94,7 +94,7 @@ jobs:
           import sys
           from pathlib import Path
           name = sys.argv[1]
-          data = Path(f'oracle-membership-results/{name}.log').read_text()
+          data = Path(f'position13-membership-results/{name}.log').read_text()
           def marker(key):
               values = re.findall(r'phase11\.'+re.escape(key)+r'=([^\s]+)',data)
               if len(values)!=1:
@@ -115,6 +115,6 @@ jobs:
         if: always()
         with:
           name: v100-position13-scoped-membership-14
-          path: oracle-membership-results
+          path: position13-membership-results
           if-no-files-found: ignore
           retention-days: 14
