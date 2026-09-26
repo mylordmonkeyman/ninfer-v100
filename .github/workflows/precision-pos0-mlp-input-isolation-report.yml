@@ -88,6 +88,26 @@ jobs:
                   a=struct.unpack('<'+str(len(aa)//4)+'f',aa)
                   b=struct.unpack('<'+str(len(bb)//4)+'f',bb)
                   print('router_ids',name,'cpu',a,'gpu',b,'same',a==b)
+          scores_cpu=read(cpu,'L00_moe_router_scores')
+          scores_gpu=read(once,'L00_moe_router_scores')
+          ids=tuple(int(v) for v in read(cpu,'L00_moe_router_ids'))
+          assert len(scores_cpu)==len(scores_gpu) and len(ids)==10
+          norm=math.fsum(x*x for x in scores_cpu)
+          err=math.fsum((x-y)**2 for x,y in zip(scores_cpu,scores_gpu))
+          print('L00_router_scores','count',len(scores_cpu),'nrmse',
+                format(math.sqrt(err/norm),'.12g'),
+                'max_abs',format(max(abs(x-y) for x,y in zip(scores_cpu,scores_gpu)),'.12g'))
+          def normalized_topk(scores):
+              selected=[scores[i] for i in ids]
+              mx=max(selected)
+              exp=[math.exp(x-mx) for x in selected]
+              total=math.fsum(exp)
+              return [x/total for x in exp]
+          a,b=normalized_topk(scores_cpu),normalized_topk(scores_gpu)
+          print('L00_router_top10_ids',ids)
+          print('L00_router_top10_softmax_delta',
+                [format(x-y,'.9g') for x,y in zip(a,b)],
+                'max_abs',format(max(abs(x-y) for x,y in zip(a,b)),'.12g'))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
