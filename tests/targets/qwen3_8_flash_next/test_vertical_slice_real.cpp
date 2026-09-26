@@ -1403,7 +1403,7 @@ int main() {
             }
             fs::path expected_path =
                 stage_root / pos_dir / (oracle_stage_name + ".bin");
-            if (name == "L00_gdn_ssm_source_state") {
+            if (name == "L00_gdn_ssm_source_state" || name == "hyper_after_ple") {
                 const char* state_root = std::getenv("NINFER_PHASE11_STATE_COMPARE_ROOT");
                 if (state_root != nullptr && state_root[0] != '\0') {
                     expected_path = fs::path(state_root) / pos_dir /
@@ -1481,6 +1481,8 @@ int main() {
             const bool selected_stage =
                 name == "embedding" || name == "ple_injection" ||
                 name == "final_hidden" || name == "logits" ||
+                (name == "hyper_after_ple" &&
+                 std::getenv("NINFER_PHASE11_TRACE_ATTENTION_PREPARE_RAW") != nullptr) ||
                 suffix == "attn_block_input" ||
                 suffix == "mlp_block_input" ||
                 suffix == "hyper_after_mlp" ||
