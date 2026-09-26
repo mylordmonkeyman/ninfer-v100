@@ -858,6 +858,21 @@ Both CTests fail. The earlier combined 7–12 replay reached 14/14
 top-1 and 0.001085 mean KL, so neither three-position window alone
 is sufficient; their effects interact through the running model state.
 
+The [frozen prior-position router map](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36209860166)
+finds 38 V100-only, 16 CPU-only, and 35 shared oracle-relative
+changed cells across positions 7–12. Their earliest V100-only swaps
+are position 7/layer 31 (V100 cutoff score gap 0.000587),
+position 9/layer 20 (0.001047), position 10/layer 27 (0.002636),
+position 11/layer 15 (0.004623), and position 12/layer 2
+(0.000284). Position 8 has no V100-only swap, though it has a
+shared oracle-relative layer-40 swap. The input differences before
+these first decisions are much smaller than after their downstream
+cascades: for example position 9/layer 20 V100-oracle MLP input
+NRMSE is 0.004960 and the next layer is 0.049818.
+This map is descriptive; cutoff gaps on the V100 path alone cannot
+establish whether each upstream difference is solely format
+conversion rather than an implementation difference.
+
 ## 1. Environment Setup
 
 Run the setup script using Python 3.14 to create the isolated virtual environment:
