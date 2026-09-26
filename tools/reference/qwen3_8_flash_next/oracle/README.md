@@ -1012,11 +1012,18 @@ from 6.24941e-7 to 2.09458e-7 NRMSE, post-MLP master from
 at the hyper operation therefore contributes independently of the
 GDN output. The 14-prefix mean KL worsens from 0.057752 to
 0.093440, top-1 falls from 13/14 to 12/14, and both CTests fail
-the unchanged gate. A direct CPU post-attention hyper-state injection
-is the next matched-input calibration of the MLP hyper update.
-The independent CPU storage profile is not yet quantitatively matched
-to natural V100 over complete prefixes, and natural V100 Phase 11
-remains unqualified.
+the unchanged gate. The [CPU post-attention master injection](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36246000944)
+sets position-7/layer-zero V100 hyper state to the independent CPU
+profile after attention. The downstream post-MLP master still differs
+by 1.17502e-7 NRMSE and layer-one raw attention by 8.19131e-6.
+The 14-position top-1 rises to 14/14, but mean KL 0.054267 still
+fails the unchanged gate. The test dumper exports the pre-injection
+stage, so its reported post-attention NRMSE remains the natural
+6.24941e-7. The next matched-input experiment supplies both the CPU
+post-attention state and CPU BF16 MLP output, isolating the remaining
+MLP hyper-state update arithmetic. The independent CPU storage
+profile is not yet quantitatively matched to natural V100 over
+complete prefixes, and natural V100 Phase 11 remains unqualified.
 
 ## 1. Environment Setup
 
