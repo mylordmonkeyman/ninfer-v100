@@ -1486,6 +1486,11 @@ int main() {
                 suffix == "hyper_after_mlp" ||
                 suffix == "moe_router_ids" ||
                 ([&] {
+                    const char* extra = std::getenv("NINFER_PHASE11_TRACE_ATTENTION_PREPARE_RAW");
+                    return extra != nullptr && extra[0] == '1' && extra[1] == '\0' &&
+                           name == "L01_attn_block_input_fp32";
+                }()) ||
+                ([&] {
                     const char* extra = std::getenv("NINFER_PHASE11_TRACE_HYPER_LAYER0");
                     return extra != nullptr && extra[0] == '1' && extra[1] == '\0' &&
                            (name == "L00_hyper_after_attn" ||
