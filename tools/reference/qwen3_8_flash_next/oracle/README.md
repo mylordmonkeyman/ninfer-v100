@@ -988,12 +988,26 @@ exactly (2,560/2,560 values each). The post-attention FP32 hyper
 master already differs by 6.24941e-7 NRMSE (largest absolute
 difference 1.00583e-7). The MLP output differs in only 2 of 2,560
 values, with NRMSE 1.23360e-7; the subsequent post-MLP FP32 master
-differs by 3.66576e-7. The next trace compares attention block output
-before the hyper update to see whether the first difference comes
-from GDN output arithmetic or from the hyper-connection operation.
-The independent CPU storage profile is not yet quantitatively matched
-to natural V100 over complete prefixes, and natural V100 Phase 11
-remains unqualified.
+differs by 3.66576e-7. The [layer-zero GDN report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36245498853)
+places the first visible difference before the hyper update: GDN
+attention block output differs by 5.74873e-7 NRMSE on bitwise-identical
+attention inputs. Its query/key/value tensors differ only on the order
+of 1e-7 to 4e-7; recurrent output differs by 3.53406e-6 and final
+attention output by 5.74873e-7. The raw CPU versus BF16 V100
+`gdn_projected` comparison gives a misleading 0.001250 NRMSE:
+[the projection-split report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36245598894)
+shows that after BF16 rounding only two of the 10,240 convolution
+projection mirror values differ, and the 6,144-value z segment matches
+exactly. At index 4978, CPU FP32 0.070556640625 falls exactly halfway
+between BF16 0.0703125 and 0.07080078125; CPU ties to even down and
+V100 stores up. In this diagnostic path the V100 fused convolution
+uses its FP32 accumulator for the current token and writes the BF16
+mirror separately for history, so those mirror differences alone do
+not explain the current-token GDN output. The matched CPU GDN output
+injection checks whether the local hyper update then reproduces the
+CPU reference over full prefixes. The independent CPU storage profile
+is not yet quantitatively matched to natural V100 over complete
+prefixes, and natural V100 Phase 11 remains unqualified.
 
 ## 1. Environment Setup
 
