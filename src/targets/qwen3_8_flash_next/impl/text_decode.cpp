@@ -536,6 +536,12 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         emit_state(prefix + "mlp_block_input", round_ws.block_input);
 #endif
 
+        // Expose the four FP32 MLP injection gates before the block output
+        // updates the hyper state. The sink is diagnostic and absent in serving.
+        if (layer == 0) {
+            emit_state(prefix + "mlp_injection", round_ws.hyper_scratch.injection);
+        }
+
         // MoE
         if (model.host_experts.has_value()) {
             MoeStageEmitter moe_emit{};
