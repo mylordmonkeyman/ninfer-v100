@@ -1,0 +1,63 @@
+name: Phase 11 Position Zero Router Alpha Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-pos0-router-alpha-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-fused-hyper-router-pos0-14
+          run-id: 36262275865
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-position0-matched-layer0-router-14
+          run-id: 36262293345
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: gpu
+      - name: Compare earliest position-zero precision boundaries
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee position-zero-router-alpha-report.txt
+          import math,struct
+          from pathlib import Path
+          a=Path('cpu/v100-phase11-storage/pos0000')
+          b=Path('gpu/matched/pos0000')
+          def read(root,stage):
+              raw=(root/(stage+'.bin')).read_bytes()
+              assert len(raw)%4==0
+              return struct.unpack('<'+str(len(raw)//4)+'f',raw)
+          for stage in ('L00_moe_router_scores','L00_moe_router_ids',
+                        'L00_moe_router_alpha','L00_moe_shared_scale',
+                        'L00_mlp_block_output','L00_hyper_after_mlp'):
+              x,y=read(a,stage),read(b,stage)
+              assert len(x)==len(y)
+              err=math.fsum((i-j)**2 for i,j in zip(x,y))
+              norm=math.fsum(i*i for i in x)
+              print(stage,'count',len(x),'nrmse',
+                    format(math.sqrt(err/norm),'.12g'),
+                    'different',sum(i!=j for i,j in zip(x,y)),
+                    'max_abs',format(max(abs(i-j) for i,j in zip(x,y)),'.12g'))
+              if len(x)<=10:
+                  print(stage,'cpu',x,'v100',y,
+                        'delta',tuple(i-j for i,j in zip(x,y)))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phase11-position-zero-router-alpha-report
+          path: position-zero-router-alpha-report.txt
+          retention-days: 14
