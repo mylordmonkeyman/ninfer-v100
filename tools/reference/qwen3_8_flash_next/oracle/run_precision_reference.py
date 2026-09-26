@@ -205,7 +205,8 @@ def run_decode(model, head, token_ids, profile, out_root,
                trace_mlp_layer0=False, trace_moe_routing_layer0=False,
                trace_gdn_layer1=False, trace_hyper_layer1=False,
                trace_mlp_raw_layer1=False, forced_router_ids=None,
-               mlp_block_input_fp32=False, mlp_block_input_fp32_layers=()):
+               mlp_block_input_fp32=False, mlp_block_input_fp32_layers=(),
+               fused_hyper_updates=False):
     # One token per forward, with one cache for the entire prefix.  Rounding a
     # cache tensor after the update changes all later positions, unlike
     # independently rounding tensors from the completed FP32 oracle.
@@ -226,7 +227,8 @@ def run_decode(model, head, token_ids, profile, out_root,
                 capture_unrounded_mlp))
     handles.extend(install_projection_boundaries(
         model, profile, mlp_block_input_fp32=mlp_block_input_fp32,
-        mlp_block_input_fp32_layers=mlp_block_input_fp32_layers))
+        mlp_block_input_fp32_layers=mlp_block_input_fp32_layers,
+        fused_hyper_updates=fused_hyper_updates))
     handles.extend(_stage_hooks(model, captured, trace_gdn_internals,
                                 trace_hyper_layer0, trace_mlp_layer0,
                                 trace_moe_routing_layer0, trace_gdn_layer1,
@@ -351,6 +353,8 @@ def main():
                         help="collect layer-one hyper state after attention injection")
     parser.add_argument("--trace-mlp-raw-layer1", action="store_true",
                         help="collect layer-one MLP mixer output before BF16 storage")
+    parser.add_argument("--fused-hyper-updates", action="store_true",
+                        help="model CUDA fmaf in attention and MLP hyper updates for CPU storage profile")
     parser.add_argument("--replay-router-ids", action="store_true",
                         help="recompute complete prefixes with frozen oracle and V100 expert IDs")
     parser.add_argument("--ablate-mlp-block-input-bf16", action="store_true",
@@ -395,7 +399,8 @@ def main():
                          trace_moe_routing_layer0=args.trace_moe_routing_layer0,
                          trace_gdn_layer1=args.trace_gdn_layer1,
                          trace_hyper_layer1=args.trace_hyper_layer1,
-                         trace_mlp_raw_layer1=args.trace_mlp_raw_layer1)
+                         trace_mlp_raw_layer1=args.trace_mlp_raw_layer1,
+                         fused_hyper_updates=args.fused_hyper_updates)
     comparison = [compare_logits(item[0], logits)
                   for item, logits in zip(oracle, matched)]
     report = {
