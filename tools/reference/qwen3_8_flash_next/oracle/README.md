@@ -967,11 +967,24 @@ and the measured natural raw divergence comes from its upstream state
 on this position. The intervention worsens whole-prefix mean oracle KL
 from 0.057752 to 0.094542 and top-1 from 13/14 to 12/14; both CTests
 fail the unchanged Phase 11 gate. This is a causal calibration test,
-not a serving-time correction. The next check separates the layer-zero
-master-state and PLE-injection contributions to this near-BF16-boundary
-difference. The independent CPU storage profile is not quantitatively
-matched to natural V100 over complete prefixes, and natural V100 Phase 11
-remains unqualified.
+not a serving-time correction. The [frozen split-state report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36213965871)
+uses the four complete-prefix V100 traces from
+[the split run](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36213259787).
+Replacing only the post-layer-zero FP32 master with the CPU-profile
+master while keeping V100 PLE reduces position-7 raw attention NRMSE
+from 9.61637e-5 to 4.91144e-8, gives exactly matching BF16 attention
+storage, and removes all six reconstructed BF16 shadow mismatches.
+Replacing only PLE while keeping the V100 master leaves the raw NRMSE
+at 9.61637e-5 and all six shadow mismatches. Both individual-swap
+complete-prefix CTests fail the unchanged gate: mean KL becomes
+0.108451 with CPU master and 0.118027 with CPU PLE, versus the natural
+0.057752. A first split workflow had a wrong path for its final
+matched-mode diagnostic and failed after the individual swaps;
+the corrected run and hosted report provide the comparable results.
+The master-state arithmetic before PLE is the next precision-profile
+calibration boundary. The independent CPU storage profile is not yet
+quantitatively matched to natural V100 over complete prefixes, and
+natural V100 Phase 11 remains unqualified.
 
 ## 1. Environment Setup
 
