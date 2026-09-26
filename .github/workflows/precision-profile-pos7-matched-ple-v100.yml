@@ -97,11 +97,30 @@ jobs:
           set -euo pipefail
           mkdir -p replay
           export NINFER_PHASE11_STATE_COMPARE_ROOT="$GITHUB_WORKSPACE/cpu-state"
-          for mode in baseline matched; do
+          for mode in baseline cpu_master cpu_ple matched; do
+            if [[ "$mode" == cpu_master ]]; then
+              python3 - <<'PY'
+          import struct
+          from pathlib import Path
+          cpu=Path('cpu/v100-phase11-storage/pos0007')
+          gpu=Path('replay/baseline/pos0007')
+          def read(path):
+              raw=path.read_bytes()
+              assert len(raw)==40960,(path,len(raw))
+              return struct.unpack('<10240f',raw)
+          for name,left,right in (
+              ('cpu_master',cpu/'L00_hyper_after_mlp.bin',gpu/'ple_injection.bin'),
+              ('cpu_ple',gpu/'L00_hyper_after_mlp.bin',cpu/'ple_injection.bin')):
+              output=Path(name+'-state/pos0007/hyper_after_ple.bin')
+              output.parent.mkdir(parents=True,exist_ok=True)
+              output.write_bytes(struct.pack('<10240f',*(x+y for x,y in zip(read(left),read(right)))))
+              print('reconstructed',name,'post-PLE state',output.stat().st_size)
+          PY
+            fi
             export NINFER_PHASE11_CANDIDATE_TRACE_ROOT="$GITHUB_WORKSPACE/replay/$mode"
-            if [[ "$mode" == matched ]]; then
+            if [[ "$mode" != baseline ]]; then
               export NINFER_PHASE11_ORACLE_INJECT_STAGE=hyper_after_ple
-              export NINFER_PHASE11_INJECT_SOURCE_ROOT="$GITHUB_WORKSPACE/cpu-state"
+              export NINFER_PHASE11_INJECT_SOURCE_ROOT="$GITHUB_WORKSPACE/$mode-state"
             else
               unset NINFER_PHASE11_ORACLE_INJECT_STAGE NINFER_PHASE11_INJECT_SOURCE_ROOT
             fi
