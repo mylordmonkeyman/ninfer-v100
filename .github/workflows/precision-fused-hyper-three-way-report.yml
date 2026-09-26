@@ -109,6 +109,17 @@ jobs:
                     'V100_only',sorted(gpu_ids-fma_ids),
                     'FMA_vs_FP32_set',int(fma_ids==set(ref)),
                     'V100_vs_FP32_set',int(gpu_ids==set(ref)))
+          for layer in range(11):
+              stem=f'pos0000/L{layer:02d}_'
+              values=[]
+              for suffix in ('attn_block_input','mlp_block_input','hyper_after_mlp'):
+                  a=read(fused/(stem+suffix+'.bin'))
+                  b=read(gpu/(stem+suffix+'.bin'))
+                  assert len(a)==len(b)
+                  err=math.sqrt(math.fsum((x-y)**2 for x,y in zip(a,b))/
+                                math.fsum(x*x for x in a))
+                  values.append((suffix,format(err,'.9g')))
+              print('position0_layer_path',layer,values)
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
