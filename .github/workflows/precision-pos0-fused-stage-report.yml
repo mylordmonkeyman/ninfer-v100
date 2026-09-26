@@ -68,10 +68,19 @@ jobs:
                   print('post_attn_shadow_BF16_mismatches',len(shadow),
                         'indices',shadow[:45])
               else:
+                  cpu_raw=read(cpu/'L00_mlp_block_input_fp32.bin')
+                  gpu_raw=read(gpu/'L00_mlp_block_input_fp32.bin')
+                  print('cpu_raw_to_stored_RNE_mismatches',
+                        sum(bf16(x)!=bf16(y) for x,y in zip(cpu_raw,a)))
+                  print('v100_raw_to_stored_RNE_mismatches',
+                        sum(bf16(x)!=bf16(y) for x,y in zip(gpu_raw,b)))
                   for i in indices[:12]:
                       print('mlp_stored_difference',i,
                             'cpu',format(a[i],'.12g'),
-                            'v100',format(b[i],'.12g'))
+                            'v100',format(b[i],'.12g'),
+                            'cpu_raw',format(cpu_raw[i],'.12g'),
+                            'v100_raw',format(gpu_raw[i],'.12g'),
+                            'raw_delta',format(cpu_raw[i]-gpu_raw[i],'.12g'))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
