@@ -120,6 +120,19 @@ jobs:
                                 math.fsum(x*x for x in a))
                   values.append((suffix,format(err,'.9g')))
               print('position0_layer_path',layer,values)
+          for pos,layer in ((0,0),(0,1),(7,0)):
+              stem=f'pos{pos:04d}/L{layer:02d}_'
+              for suffix in ('attn_block_input','mlp_block_input','hyper_after_mlp'):
+                  fp=read(fp32/(stem+suffix+'.bin'))
+                  cpu=read(fused/(stem+suffix+'.bin'))
+                  vr=read(gpu/(stem+suffix+'.bin'))
+                  def nrmse(x,y):
+                      return math.sqrt(math.fsum((a-b)**2 for a,b in zip(x,y))/
+                                       math.fsum(a*a for a in x))
+                  print('first_stage_three_way',pos,layer,suffix,
+                        'FP32_to_CPU_FMA',format(nrmse(fp,cpu),'.12g'),
+                        'FP32_to_V100',format(nrmse(fp,vr),'.12g'),
+                        'CPU_FMA_to_V100',format(nrmse(cpu,vr),'.12g'))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
