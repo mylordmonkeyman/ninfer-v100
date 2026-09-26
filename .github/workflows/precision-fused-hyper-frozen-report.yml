@@ -1,0 +1,73 @@
+name: Phase 11 Fused Hyper Frozen Position Seven Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-fused-hyper-frozen-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-fused-hyper-profile-reference-14
+          run-id: 36249384595
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-layer0-gdn-pos7-14
+          run-id: 36214528016
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: gpu
+      - name: Compare FMA CPU profile with V100 at first divergent prefix
+        run: |
+          python3 - <<'PY' | tee frozen-report.txt
+          import math,struct
+          from pathlib import Path
+          root=Path('cpu')
+          fma=root/'v100-phase11-storage/pos0007'
+          gpu=Path('gpu/pos0007')
+          def read(path):
+              raw=path.read_bytes();assert len(raw)%4==0,(path,len(raw))
+              return struct.unpack('<'+str(len(raw)//4)+'f',raw)
+          def nrmse(a,b):
+              assert len(a)==len(b)
+              return math.sqrt(math.fsum((x-y)**2 for x,y in zip(a,b))/
+                               math.fsum(x*x for x in a))
+          for stage in ('L00_attn_block_output','L00_hyper_after_attn',
+                        'L00_mlp_block_output','L00_hyper_after_mlp',
+                        'L01_attn_block_input_fp32','L01_attn_block_input'):
+              a,b=read(fma/(stage+'.bin')),read(gpu/(stage+'.bin'))
+              print(stage,'count',len(a),'FMA_CPU_V100_NRMSE',format(nrmse(a,b),'.12g'),
+                    'exact',sum(x==y for x,y in zip(a,b)))
+          def kl(teacher,candidate):
+              assert len(teacher)==len(candidate)
+              a=max(teacher);b=max(candidate)
+              ta=[math.exp(x-a) for x in teacher]
+              ca=[math.exp(x-b) for x in candidate]
+              at=a+math.log(math.fsum(ta));bt=b+math.log(math.fsum(ca))
+              return math.fsum(math.exp(x-at)*((x-at)-(y-bt))
+                               for x,y in zip(teacher,candidate))
+          divergences=[]
+          for pos in range(14):
+              name=f'pos{pos:04d}/logits.bin'
+              divergences.append(kl(read(root/'fp32'/name),read(root/'v100-phase11-storage'/name)))
+          print('incremental_FP32_to_fused_profile_mean_KL',
+                format(math.fsum(divergences)/14,'.12g'),
+                'max_KL',format(max(divergences),'.12g'))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phase11-fused-hyper-frozen-pos7-report
+          path: frozen-report.txt
+          retention-days: 14
