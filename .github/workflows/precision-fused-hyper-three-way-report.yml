@@ -59,26 +59,38 @@ jobs:
               assert (root/'pos0007/logits.bin').is_file(),root
           standard_kl=[];fused_kl=[]
           standard_sets=fused_sets=0
+          mismatches_by_pos=[]
           total_sets=0
           for pos in range(14):
               name=f'pos{pos:04d}/logits.bin'
               actual=read(gpu/name)
               standard_kl.append(kl(actual,read(base/name)))
               fused_kl.append(kl(actual,read(fused/name)))
+              bad_standard=[];bad_fused=[]
               for layer in range(48):
                   stage=f'pos{pos:04d}/L{layer:02d}_moe_router_ids.bin'
                   vr=set(read(gpu/stage))
-                  standard_sets+=int(vr==set(read(base/stage)))
-                  fused_sets+=int(vr==set(read(fused/stage)))
+                  same_standard=vr==set(read(base/stage))
+                  same_fused=vr==set(read(fused/stage))
+                  standard_sets+=int(same_standard)
+                  fused_sets+=int(same_fused)
+                  if not same_standard: bad_standard.append(layer)
+                  if not same_fused: bad_fused.append(layer)
                   total_sets+=1
+              mismatches_by_pos.append((bad_standard,bad_fused))
           print('positions',len(standard_kl),'router_cells',total_sets)
           print('V100_to_standard_CPU_mean_KL',format(math.fsum(standard_kl)/14,'.12g'))
           print('V100_to_fused_CPU_mean_KL',format(math.fsum(fused_kl)/14,'.12g'))
           print('V100_to_standard_CPU_router_set_agreement',standard_sets,'/',total_sets)
           print('V100_to_fused_CPU_router_set_agreement',fused_sets,'/',total_sets)
           for i,(x,y) in enumerate(zip(standard_kl,fused_kl)):
+              old,new=mismatches_by_pos[i]
               print('position',i,'standard_KL',format(x,'.9g'),
-                    'fused_KL',format(y,'.9g'))
+                    'fused_KL',format(y,'.9g'),
+                    'standard_router_mismatch_count',len(old),
+                    'fused_router_mismatch_count',len(new),
+                    'first_standard_layer',old[0] if old else 'none',
+                    'first_fused_layer',new[0] if new else 'none')
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
