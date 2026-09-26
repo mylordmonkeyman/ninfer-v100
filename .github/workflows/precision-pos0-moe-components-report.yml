@@ -1,0 +1,73 @@
+name: Phase 11 Position Zero MoE Components Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-pos0-moe-components-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-fused-hyper-moe-components-pos0-14
+          run-id: 36264630390
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-position0-matched-moe-components-14
+          run-id: 36264641453
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: gpu
+      - name: Compare earliest position-zero precision boundaries
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee position-zero-moe-components-report.txt
+          import json,math,struct
+          from pathlib import Path
+          cpu=Path('cpu/v100-phase11-storage/pos0000')
+          fp32=Path('cpu/fp32/pos0000')
+          gpu=Path('gpu/matched/pos0000')
+          def read(root,name,count):
+              path=root/(name+'.bin')
+              raw=path.read_bytes()
+              assert len(raw)==count*4,(path,len(raw),count)
+              a=struct.unpack('<'+str(count)+'f',raw)
+              assert all(math.isfinite(x) for x in a)
+              return a
+          def compare(a,b):
+              assert len(a)==len(b)
+              sq=math.fsum((x-y)**2 for x,y in zip(a,b))
+              norm=math.fsum(x*x for x in a)
+              return format(math.sqrt(sq/norm),'.12g'),sum(x!=y for x,y in zip(a,b)),format(max(abs(x-y) for x,y in zip(a,b)),'.12g')
+          for name,count in (('L00_moe_shared_activation',640),
+                             ('L00_moe_routed_sum',2560),
+                             ('L00_mlp_block_output',2560),
+                             ('L00_moe_router_alpha',10),
+                             ('L00_moe_shared_scale',1)):
+              a=read(cpu,name,count)
+              b=read(gpu,name,count)
+              o=read(fp32,name,count)
+              print(name,'cpu_gpu',compare(a,b),
+                    'fp32_cpu',compare(o,a),
+                    'fp32_gpu',compare(o,b))
+              if name=='L00_moe_shared_activation':
+                  print(name,'difference_indices',[i for i,(x,y) in enumerate(zip(a,b)) if x!=y][:30])
+              if name=='L00_mlp_block_output':
+                  print(name,'difference_indices',[i for i,(x,y) in enumerate(zip(a,b)) if x!=y])
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phase11-position-zero-moe-components-report
+          path: position-zero-moe-components-report.txt
+          retention-days: 14
