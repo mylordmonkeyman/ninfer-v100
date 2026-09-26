@@ -785,6 +785,16 @@ occur by layer 14 at that position, and 6 of V100's 13 oracle-relative
 router-set changes are V100-only. A matched CPU-input replay at layer 26
 is the next causal check, while the complete-prefix gate remains unchanged.
 
+A [matched position-13 replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36188766095)
+supplies the independent CPU layer-26 MLP input to the actual V100 router
+over all 14 positions. Its selected expert set changes from the V100-only
+expert 488 to the CPU/oracle expert 252. Mean oracle KL improves from
+0.057752 to 0.046971, but top-1 remains 13/14; the unchanged CTest
+qualification gate still fails. The intervention uses offline CPU values.
+It shows that the router chooses the expected experts on the matched input,
+while upstream differences and subsequent choices still require diagnosis.
+
+
 ## 1. Environment Setup
 
 Run the setup script using Python 3.14 to create the isolated virtual environment:
