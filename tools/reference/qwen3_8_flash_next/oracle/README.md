@@ -1177,6 +1177,25 @@ six position-zero BF16 MoE-output differences and does not improve
 complete-prefix calibration. It remains supplementary and has not
 been applied to the engine or independent FP32 oracle.
 
+The [CPU/V100 MoE component report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36265784476)
+now separates layer-zero shared and routed paths after matching
+the CPU post-attention state. The 640 BF16 shared activation values
+before shared-down agree **exactly**, as does the shared scale.
+The 2,560 FP32 routed sums differ by 3.21553e-6 NRMSE
+(maximum absolute difference 5.66244e-7). The final BF16 MLP output
+still differs at exactly six values, 9.53111e-5 NRMSE. The
+[supplementary CPU capture](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36264630390)
+computed and uploaded both stages, but its job failed after capture
+because the generic stage comparator initially demanded a frozen
+independent oracle for these two new internal stages. That
+comparator now labels their separately validated incremental-FP32
+comparison explicitly; the hosted comparison validates each stage's
+size and finiteness. The
+[V100 component capture](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36264641453)
+succeeded. A controlled routed-sum injection will determine whether
+these small FP32 routed differences account for all six BF16
+output changes, or whether shared-down/merge arithmetic also differs.
+
 Neither this local injection nor the matched precision profile
 establishes that all residual routing differences are due to
 rounding. Natural V100 Phase 11 remains unqualified.
