@@ -74,7 +74,8 @@ def compare(oracle_root, cpu_root, out_dir, v100_root=None, incremental_fp32_roo
                 (position, "L01_attn_block_input") in oracle:
             reference_path = oracle[position, "L01_attn_block_input"]
             reference_source = "independent-fp32-unrounded-attention-mixer"
-        elif name in ("L00_hyper_before_attn", "L00_attn_injection") and key in incremental:
+        elif name in ("L00_hyper_before_attn", "L00_attn_injection",
+                      "L00_mlp_injection") and key in incremental:
             # These optional internal boundaries have no frozen full-sequence
             # oracle tensors. Their incremental FP32 reference has passed the
             # independent oracle logits parity check; label the provenance.
