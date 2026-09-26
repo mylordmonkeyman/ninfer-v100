@@ -1,0 +1,78 @@
+name: Phase 11 Matched CPU V100 Raw Attention Mixer Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-profile-attention-raw-compare.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Download complete-prefix independent and V100 raw traces
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 36211013815 --repo "$GITHUB_REPOSITORY" \
+            --name cpu-raw-attention-reference-14 --dir cpu
+          gh run download 36212350682 --repo "$GITHUB_REPOSITORY" \
+            --name v100-raw-attention-pos7-14 --dir gpu
+      - name: Compare raw mixer and BF16 storage stage at position seven
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee matched-attention-raw-report.txt
+          import math,struct
+          from pathlib import Path
+          roots={'cpu':Path('cpu/v100-phase11-storage/pos0007'),
+                 'oracle':Path('cpu/fp32/pos0007'),
+                 'v100':Path('gpu/pos0007')}
+          def read(kind,stage):
+              data=(roots[kind]/(stage+'.bin')).read_bytes()
+              assert len(data)==2560*4,(kind,stage,len(data))
+              return struct.unpack('<2560f',data)
+          def nrmse(a,b):
+              return math.sqrt(math.fsum((x-y)**2 for x,y in zip(a,b))/
+                               max(math.fsum(x*x for x in a),1e-24))
+          def bf16(x):
+              bits=struct.unpack('<I',struct.pack('<f',x))[0]
+              assert math.isfinite(x)
+              rounded=(bits+0x7fff+((bits>>16)&1))&0xffffffff
+              return struct.unpack('<f',struct.pack('<I',rounded&0xffff0000))[0]
+          raw_name='L01_attn_block_input_fp32'
+          stored_name='L01_attn_block_input'
+          raw={k:read(k,raw_name) for k in roots}
+          stored={k:read(k,stored_name) for k in roots}
+          for k in ('cpu','v100'):
+              misses=[i for i in range(2560) if bf16(raw[k][i])!=stored[k][i]]
+              print(k,'RNE_mismatches',len(misses))
+              assert not misses
+          changed=[i for i in range(2560) if stored['cpu'][i]!=stored['v100'][i]]
+          print('changed_stored_indices',changed)
+          assert len(changed)==16
+          for left,right in (('cpu','v100'),('oracle','cpu'),('oracle','v100')):
+              print(left,right,'raw_NRMSE',format(nrmse(raw[left],raw[right]),'.12g'),
+                    'stored_NRMSE',format(nrmse(stored[left],stored[right]),'.12g'))
+          print('raw_RMS_on_disagreed_16',
+                format(math.sqrt(math.fsum((raw['cpu'][i]-raw['v100'][i])**2
+                                           for i in changed)/len(changed)),'.12g'))
+          for i in changed:
+              x,y=raw['cpu'][i],raw['v100'][i]
+              print('changed',i,'cpu_raw',format(x,'.12g'),
+                    'v100_raw',format(y,'.12g'),
+                    'raw_delta',format(y-x,'.12g'),
+                    'cpu_bf16',format(stored['cpu'][i],'.12g'),
+                    'v100_bf16',format(stored['v100'][i],'.12g'))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: matched-attention-raw-report
+          path: matched-attention-raw-report.txt
+          retention-days: 14
