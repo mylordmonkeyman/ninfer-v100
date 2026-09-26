@@ -1119,10 +1119,26 @@ the CPU post-MLP master; both V100 components together produce six.
 This isolates the residual here to inputs of the hyper update, rather
 than a faulty fused update at this boundary. The PLE injection has
 45 differing values against CPU and is unchanged by this
-position-zero post-attention match. The next test supplies the CPU
-stored MLP input as a second position-zero boundary to determine
-whether the one remaining input difference causes the six output
-differences.
+position-zero post-attention match. The [two-boundary replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36261707460)
+supplies that CPU stored MLP input after the CPU post-attention
+state. Its injection readback succeeds. The
+[byte-for-byte frozen comparison](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36261966342)
+finds no change at all to the MLP output, gate, post-MLP state, PLE
+injection, or layer-one attention input; the oracle mean KL stays
+0.0925233 and top-1 stays 12/14. The stage dumper records the MLP
+input before injection, so its trace still reports the single
+pre-injection difference at index 1841. The sink callback is called
+before MoE consumes the input. The
+[router ID comparison](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36262066897)
+finds the same selected ten experts, in the same order, in the CPU
+FMA profile and V100 at position-zero/layer-zero. Therefore the six
+remaining BF16 MLP-output differences are not accounted for by that
+one stored input word or expert selection. They could reflect
+different arithmetic/rounding inside the shared or routed expert
+path, differences in router weights or alpha, or an implementation
+error; this experiment does not distinguish those explanations.
+The V100 update from measured MoE output and gate still exactly
+matches FP32 fused multiply-add.
 
 Neither this local injection nor the matched precision profile
 establishes that all residual routing differences are due to
