@@ -1438,6 +1438,33 @@ int main() {
                                 << '\n' << std::flush;
                 return;
             }
+            if (dump_candidate_trace &&
+                std::getenv("NINFER_PHASE11_TRACE_MOE_PAIRS") != nullptr &&
+                name == "L00_moe_pair_outputs") {
+                constexpr std::size_t count = 10 * 2'560;
+                if (tensor.dtype != ninfer::DType::FP32 || tensor.numel() != count) {
+                    throw std::runtime_error("Phase 11 MoE pair trace shape mismatch");
+                }
+                std::vector<float> values(count);
+                CUDA_CHECK(cudaMemcpy(values.data(), tensor.data,
+                                      count * sizeof(float), cudaMemcpyDeviceToHost));
+                const fs::path folder = candidate_root / pos_dir;
+                fs::create_directories(folder);
+                const fs::path path = folder / "L00_moe_pair_outputs.bin";
+                std::ofstream output_file(path, std::ios::binary | std::ios::trunc);
+                output_file.write(reinterpret_cast<const char*>(values.data()),
+                                  static_cast<std::streamsize>(count * sizeof(float)));
+                if (!output_file) {
+                    throw std::runtime_error("failed to write MoE pair trace");
+                }
+                candidate_index << json{{"position", current_stage_trace_position},
+                                        {"name", name}, {"dtype", "FP32"},
+                                        {"count", count},
+                                        {"file", (fs::path(pos_dir) /
+                                                  "L00_moe_pair_outputs.bin").string()}}
+                                << '\n' << std::flush;
+                return;
+            }
             // These supplementary MoE component stages have no frozen FP32
             // stage oracle. Export their live values solely for CPU-profile
             // calibration when the explicit diagnostic switch is enabled.
