@@ -1,0 +1,87 @@
+name: Phase 11 Complete Prefix FMA Profile Versus V100
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-fused-hyper-three-way-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-precision-reference-14
+          run-id: 36249361324
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: standard
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-fused-hyper-profile-reference-14
+          run-id: 36250285355
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: fused
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-moe-routing-layer0-14
+          run-id: 36072336918
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: v100
+      - name: Measure complete-prefix profile versus natural V100 logits and router memberships
+        run: |
+          python3 - <<'PY' | tee three-way-report.txt
+          import math,struct
+          from pathlib import Path
+          def read(path):
+              raw=path.read_bytes()
+              assert len(raw)%4==0,(path,len(raw))
+              return struct.unpack('<'+str(len(raw)//4)+'f',raw)
+          def kl(teacher,candidate):
+              assert len(teacher)==len(candidate)
+              a=max(teacher);b=max(candidate)
+              ta=a+math.log(math.fsum(math.exp(x-a) for x in teacher))
+              cb=b+math.log(math.fsum(math.exp(x-b) for x in candidate))
+              return math.fsum(math.exp(x-ta)*((x-ta)-(y-cb))
+                               for x,y in zip(teacher,candidate))
+          base=Path('standard/v100-phase11-storage')
+          fused=Path('fused/v100-phase11-storage')
+          gpu=Path('v100/candidate-stage')
+          for root in (base,fused,gpu):
+              assert (root/'pos0007/logits.bin').is_file(),root
+          standard_kl=[];fused_kl=[]
+          standard_sets=fused_sets=0
+          total_sets=0
+          for pos in range(14):
+              name=f'pos{pos:04d}/logits.bin'
+              actual=read(gpu/name)
+              standard_kl.append(kl(actual,read(base/name)))
+              fused_kl.append(kl(actual,read(fused/name)))
+              for layer in range(48):
+                  stage=f'pos{pos:04d}/L{layer:02d}_moe_router_ids.bin'
+                  vr=set(read(gpu/stage))
+                  standard_sets+=int(vr==set(read(base/stage)))
+                  fused_sets+=int(vr==set(read(fused/stage)))
+                  total_sets+=1
+          print('positions',len(standard_kl),'router_cells',total_sets)
+          print('V100_to_standard_CPU_mean_KL',format(math.fsum(standard_kl)/14,'.12g'))
+          print('V100_to_fused_CPU_mean_KL',format(math.fsum(fused_kl)/14,'.12g'))
+          print('V100_to_standard_CPU_router_set_agreement',standard_sets,'/',total_sets)
+          print('V100_to_fused_CPU_router_set_agreement',fused_sets,'/',total_sets)
+          for i,(x,y) in enumerate(zip(standard_kl,fused_kl)):
+              print('position',i,'standard_KL',format(x,'.9g'),
+                    'fused_KL',format(y,'.9g'))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phase11-complete-prefix-fma-v100-report
+          path: three-way-report.txt
+          retention-days: 14
