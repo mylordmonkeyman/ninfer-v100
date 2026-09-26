@@ -838,6 +838,17 @@ tokens therefore affect the state reaching the last token materially.
 The next diagnostic splits the prior history to find which positions
 carry the strongest effect.
 
+The [split history replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36209250525)
+keeps the position-13 layer-26–47 oracle memberships constant in both
+cases. Adding oracle memberships only for prior positions 0–6 yields
+mean KL 0.036602 and 13/14 top-1. Adding them instead for positions
+7–12 yields 0.00108463 mean KL, 0.00823096 P99, and 14/14 top-1.
+Both CTests still fail the unchanged short gate; the 7–12 case also
+has relative mean NLL delta 0.00793208. The later prior positions
+carry most of the observed final-token routing-history effect in this
+controlled replay. Correcting *all* previous positions still matters
+for the short gate's aggregate requirements.
+
 ## 1. Environment Setup
 
 Run the setup script using Python 3.14 to create the isolated virtual environment:
