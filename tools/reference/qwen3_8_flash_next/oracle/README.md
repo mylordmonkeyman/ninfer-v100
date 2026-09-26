@@ -873,6 +873,54 @@ This map is descriptive; cutoff gaps on the V100 path alone cannot
 establish whether each upstream difference is solely format
 conversion rather than an implementation difference.
 
+### Precision-profile calibration at the first position-seven flip
+
+The [five-boundary three-way report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36210246925)
+compares FP32 oracle, independent storage profile, and V100 at their
+first V100-only router changes. For position 7/layer 31, oracle expert
+220 leads 385 by only 0.0002222 score units; the CPU profile leads by
+0.0061741, while V100 reverses them by 0.0005865. The CPU and V100
+MLP inputs already differ by 0.0098006 NRMSE before routing. Similar
+pre-router differences occur at positions 9, 10, 11, and 12. The
+reference's agreement on the expert set alone does not establish that
+it matches the V100 precision trajectory.
+
+A [matched-input V100 replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36210352857)
+injects the CPU profile's independent position-7/layer-31 input into
+the real router. V100 then selects the same ten experts, and its 512
+scores differ from the CPU profile by 5.03e-7 RMS (7.62e-8 normalized).
+The natural V100 score RMS difference from the CPU profile is 0.005995.
+This verifies the local router arithmetic on the matched profile
+input and places this expert swap upstream of the router. The injected
+complete-prefix mean oracle KL **worsens** from 0.057752 to 0.060953;
+both underlying CTests fail the unchanged gate. This offline injection
+is a calibration check, not a precision upgrade.
+
+The first visible separation on the natural position-7 path is much
+earlier. The [corrected upstream report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36210663754)
+shows bitwise-identical CPU and V100 layer-zero attention and MLP inputs
+and layer-zero router scores agreeing within 8.71e-8 NRMSE. An
+[early-boundary report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36210712498)
+measures position-7 PLE injection at 1.73e-6 CPU-to-V100 NRMSE, but
+layer-one stored attention input at 0.0001160 and layer-one MLP input
+at 0.0015369. A separate
+[sum check](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36210798630)
+reconstructs the post-PLE master state from exported layer-zero master
+and PLE injection at 1.27e-6 NRMSE; 16 of the 2,560 stored layer-one
+attention input values differ. This sum is a diagnostic approximation
+of the internal update, not a direct capture of both live master states.
+An initial upstream workflow
+([invalid report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36210629008))
+mistakenly read position-13 CSV rows while labeling them position 7;
+its numbers are excluded.
+
+The next direct trace captures each independent implementation's FP32
+layer-one attention mixer output before BF16 storage. It will distinguish
+a genuine mismatch before conversion from BF16 threshold amplification
+at this boundary. The independent CPU storage profile has not yet
+been quantitatively validated over complete prefixes; natural V100
+Phase 11 remains unqualified.
+
 ## 1. Environment Setup
 
 Run the setup script using Python 3.14 to create the isolated virtual environment:
