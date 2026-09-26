@@ -1,0 +1,89 @@
+name: Phase 11 Position Zero Routed Sum Result Report
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-pos0-routed-sum-result-report.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-fused-hyper-moe-components-pos0-14
+          run-id: 36264630390
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-position0-matched-moe-components-14
+          run-id: 36264641453
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: gpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-position0-matched-routed-sum-replay-14
+          run-id: 36265864614
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: injected
+      - name: Compare earliest position-zero precision boundaries
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee position-zero-routed-sum-result-report.txt
+          import math,struct
+          from pathlib import Path
+          cpu=Path('cpu/v100-phase11-storage/pos0000')
+          natural=Path('gpu/matched/pos0000')
+          injected=Path('injected/matched/pos0000')
+          def read(root,name):
+              raw=(root/(name+'.bin')).read_bytes()
+              assert len(raw)%4==0,(root,name,len(raw))
+              return struct.unpack('<'+str(len(raw)//4)+'f',raw)
+          def bf16(value):
+              bits=struct.unpack('<I',struct.pack('<f',value))[0]
+              return ((bits+0x7fff+((bits>>16)&1))&0xffffffff)>>16
+          def measure(a,b):
+              assert len(a)==len(b)
+              return format(math.sqrt(math.fsum((x-y)**2 for x,y in zip(a,b))/
+                                      math.fsum(x*x for x in a)),'.12g'),sum(x!=y for x,y in zip(a,b))
+          for name in ('L00_moe_shared_activation','L00_moe_routed_sum',
+                       'L00_mlp_block_output','L00_mlp_injection',
+                       'L00_hyper_after_mlp','ple_injection',
+                       'L01_attn_block_input_fp32'):
+              a=read(cpu,name);b=read(natural,name);c=read(injected,name)
+              print(name,'cpu_to_natural',measure(a,b),
+                    'cpu_to_injected',measure(a,c),
+                    'natural_to_injected',measure(b,c))
+              if name=='L00_mlp_block_output':
+                  print(name,'natural_difference_indices',
+                        [i for i,(x,y) in enumerate(zip(a,b)) if x!=y])
+                  print(name,'injected_difference_indices',
+                        [i for i,(x,y) in enumerate(zip(a,c)) if x!=y])
+              if name=='L00_hyper_after_mlp':
+                  print(name,'natural_bf16_shadow_mismatch',
+                        sum(bf16(x)!=bf16(y) for x,y in zip(a,b)),
+                        'injected_bf16_shadow_mismatch',
+                        sum(bf16(x)!=bf16(y) for x,y in zip(a,c)))
+          for label,root in (('natural',Path('gpu/matched.log')),
+                             ('injected',Path('injected/matched.log'))):
+              log=root.read_text()
+              for key in ('phase11.mean_kl=','phase11.top1_agreement=',
+                          'phase11.oracle_injection.position=0 stage=L00_moe_routed_sum'):
+                  print(label,key,
+                        [line.strip() for line in log.splitlines() if key in line][-1:])
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phase11-position-zero-routed-sum-result-report
+          path: position-zero-routed-sum-result-report.txt
+          retention-days: 14
