@@ -74,6 +74,20 @@ jobs:
                     'injected_state_NRMSE',format(nrmse(cpu_state,injected),'.12g'),
                     'BF16_shadow_mismatches',len(mismatch),
                     'shadow_indices',mismatch)
+          common=sorted(set(p.name for p in cpu.glob('L00*.bin')) &
+                        set(p.name for p in (gpu/'baseline/pos0007').glob('L00*.bin')))
+          print('common_layer_zero_stage_names',common)
+          for name in common:
+              a=(cpu/name).read_bytes()
+              b=(gpu/'baseline/pos0007'/name).read_bytes()
+              if len(a)%4 or len(a)!=len(b):
+                  continue
+              count=len(a)//4
+              left=struct.unpack('<'+str(count)+'f',a)
+              right=struct.unpack('<'+str(count)+'f',b)
+              print('layer_zero_stage',name,'count',count,
+                    'CPU_V100_NRMSE',format(nrmse(left,right),'.12g'),
+                    'exact_values',sum(x==y for x,y in zip(left,right)))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
