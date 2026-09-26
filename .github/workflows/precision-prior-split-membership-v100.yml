@@ -1,0 +1,120 @@
+name: Phase 11 Split Prior Prefix Membership Diagnostic
+
+on:
+  push:
+    branches:
+      - work/precision-matched-reference
+    paths:
+      - .github/workflows/precision-prior-split-membership-v100.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  replay:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build the real-model V100 diagnostic
+        run: |
+          set -euo pipefail
+          test -s /models/qwen3-8b-flash-next
+          test -s /oracle/phase11/manifest.json
+          test -s /oracle/phase11-stage-trace14/pos0013/L47_moe_router_ids.bin
+          cmake -S . -B build-precision-v100 -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-precision-v100 -j --target \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test
+      - name: Wait for free V100 memory
+        timeout-minutes: 19
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free \
+              --format=csv,noheader,nounits | tr -d '[:space:]')
+            echo "V100 free memory: ${free_mib} MiB (attempt ${attempt}/30)"
+            if (( free_mib >= 28000 )); then exit 0; fi
+            if (( attempt < 30 )); then sleep 30; fi
+          done
+          echo '::error::V100 needs at least 28000 MiB free'
+          exit 1
+      - name: Compare earlier and later prefix routing contributions
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "14"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace14
+          NINFER_PHASE11_STAGE_ORACLE_POSITION: "13"
+          NINFER_PHASE11_STAGE_ORACLE_ALL_POSITIONS: "1"
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
+        run: |
+          set -euo pipefail
+          mkdir -p prior-split-membership-results
+          for variant in early7-layer26plus late6-layer26plus; do
+            if [[ "$variant" == baseline ]]; then
+              unset NINFER_PHASE11_REPLAY_ORACLE_ROUTER_IDS NINFER_PHASE11_REPLAY_ORACLE_ROUTER_SCOPE
+            else
+              export NINFER_PHASE11_REPLAY_ORACLE_ROUTER_IDS=1
+              export NINFER_PHASE11_REPLAY_ORACLE_ROUTER_SCOPE="$variant"
+            fi
+            set +e
+            ctest --test-dir build-precision-v100 -V \
+              -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+              > "prior-split-membership-results/${variant}.log" 2>&1
+            status=$?
+            set -e
+            echo "${variant} CTest status: $status (qualification gate unchanged)"
+            python3 - "$variant" <<'PYREPORT'
+          import re
+          import sys
+          from pathlib import Path
+          name = sys.argv[1]
+          data = Path(f'prior-split-membership-results/{name}.log').read_text()
+          def marker(key):
+              values = re.findall(r'phase11\.'+re.escape(key)+r'=([^\s]+)',data)
+              if len(values)!=1:
+                  raise SystemExit(f'{name} expected one {key}, got {values}')
+              return values[0]
+          if marker('positions')!='14':
+              raise SystemExit(f'{name} did not complete 14 positions')
+          expected={'early7-layer26plus':'358','late6-layer26plus':'310'}.get(name)
+          if expected and marker('oracle_membership_replay.layer_calls')!=expected:
+              raise SystemExit('Missing one or more scoped V100 router interventions')
+          print(name, 'mean_KL',marker('mean_kl'),
+                'P99_KL',marker('p99_kl'),
+                'top1_agreement',marker('top1_agreement'),
+                'relative_mean_NLL_delta',marker('relative_mean_nll_delta'))
+          PYREPORT
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: v100-prior-split-scoped-membership-14
+          path: prior-split-membership-results
+          if-no-files-found: ignore
+          retention-days: 14
