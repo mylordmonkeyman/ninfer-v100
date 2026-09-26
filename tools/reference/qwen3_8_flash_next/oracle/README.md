@@ -1051,9 +1051,33 @@ unmodeled fused update alone is sufficient for this shadow flip.
 This is an explicit CPU precision-profile arithmetic mismatch;
 the captured V100 update behaves as its implemented fused operation
 specifies. It does not explain every later routing decision or
-qualify the natural engine. The optional full-prefix CPU FMA
-variant will test whether matching this arithmetic improves the
-independent profile's agreement with V100. Natural V100 Phase 11
+qualify the natural engine. The optional CPU fused-hyper reference
+[completed a direct independent-oracle run](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36250285355)
+with mean KL 0.0623346, versus 0.031902 for the standard CPU
+storage profile and 0.057752 for natural V100. Neither CPU variant
+qualifies natural V100. The
+[frozen 14-position V100 comparison](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36251007048)
+shows why the FMA arithmetic matters to **calibration** despite the
+worse oracle KL: mean KL between V100 and the CPU profile drops from
+0.040648 to 0.013224, and matching V100 expert sets rise from
+581/672 to 623/672. Position 7 has no residual expert-set mismatch
+under the FMA profile, yet its V100-to-profile logits KL is 0.002506
+and the layer-one raw attention input remains about 9.58e-5 NRMSE
+apart. These are complete-prefix tests; a local FMA correction is
+insufficient to make the reference match V100 quantitatively or pass
+the oracle gate.
+
+The [residual router map](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36251051145)
+finds 49 different router sets; its earliest position-zero mismatch
+is layer 10. At that cell CPU FMA swaps oracle/V100 expert 429 for
+321, with 0.002406 input NRMSE against V100. The
+[position-zero stage report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36251155315)
+shows identical CPU FMA and V100 layer-zero attention inputs, but
+0.00004283 MLP-input NRMSE and 0.00019583 post-MLP master NRMSE
+before the layer-10 expert change. Their individual distances from
+the independent FP32 oracle at this early boundary are similar.
+A dedicated position-zero GDN/hyper trace tests where the CPU FMA
+profile still diverges before routing. Natural V100 Phase 11
 remains unqualified.
 
 ## 1. Environment Setup
