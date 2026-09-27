@@ -1,0 +1,225 @@
+name: Phase 11 Three Way 128 Complete Prefixes
+
+on:
+  push:
+    branches: [work/precision-matched-reference]
+    paths: [.github/workflows/precision-three-way-128.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 360
+    env:
+      NINFER_ORACLE_DETERMINISTIC: "1"
+      NINFER_ORACLE_THREADS: "16"
+      OMP_NUM_THREADS: "16"
+      MKL_NUM_THREADS: "16"
+      OPENBLAS_NUM_THREADS: "16"
+      NUMEXPR_NUM_THREADS: "16"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Locate CPU reference assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          model_dir="${NINFER_PHASE11_MODEL_DIR:-/srv/ninfer/source/mixed}"
+          ple_dir="${NINFER_PHASE11_PLE_DIR:-/srv/ninfer/source/ple/ples_int4}"
+          ids_file="${NINFER_PHASE11_IDS_FILE:-/oracle/phase11/token_ids.json}"
+          for file in "$model_dir/model.safetensors.index.json" "$ple_dir" \
+                      "$ids_file" /oracle/phase11/manifest.json; do
+            test -r "$file"
+          done
+          python_bin="${NINFER_PHASE11_PYTHON:-}"
+          if [[ -z "$python_bin" ]]; then
+            for candidate in "$GITHUB_WORKSPACE/venv-oracle/bin/python" \
+                "$HOME/ninfer-v100/venv-oracle/bin/python" \
+                /srv/ninfer/venv-oracle/bin/python python3; do
+              if command -v "$candidate" >/dev/null 2>&1 && \
+                  "$candidate" -c 'import numpy, torch, transformers, safetensors' >/dev/null 2>&1; then
+                python_bin="$candidate"
+                break
+              fi
+            done
+          fi
+          {
+            echo "PRECISION_MODEL_DIR=$model_dir"
+            echo "PRECISION_PLE_DIR=$ple_dir"
+            echo "PRECISION_IDS_FILE=$ids_file"
+            echo "PRECISION_PYTHON=$python_bin"
+          } >> "$GITHUB_ENV"
+      - name: Prepare CPU Python if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$PRECISION_PYTHON" ]]; then exit 0; fi
+          python3 -m venv "$GITHUB_WORKSPACE/precision-venv"
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            torch --index-url https://download.pytorch.org/whl/cpu
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            numpy safetensors 'transformers>=5.16,<6'
+          echo "PRECISION_PYTHON=$GITHUB_WORKSPACE/precision-venv/bin/python" >> "$GITHUB_ENV"
+      - name: Decode 128 complete prefixes on independent CPU paths
+        shell: bash
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+        run: |
+          set -euo pipefail
+          "$PRECISION_PYTHON" tests/targets/qwen3_8_flash_next/test_precision_profile.py
+          "$PRECISION_PYTHON" tools/reference/qwen3_8_flash_next/oracle/run_precision_reference.py \
+            --model-dir "$PRECISION_MODEL_DIR" \
+            --ple-dir "$PRECISION_PLE_DIR" \
+            --ids-file "$PRECISION_IDS_FILE" \
+            --fp32-oracle /oracle/phase11 \
+            --positions 128 --logits-only --fused-hyper-updates \
+            --out-dir "$GITHUB_WORKSPACE/three-way-128"
+          test "$(find three-way-128/cpu-logits -name '*.bin' | wc -l)" -eq 128
+          test "$(find three-way-128/fp32-logits -name '*.bin' | wc -l)" -eq 128
+      - name: Compile real V100 model test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-precision-v100 -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF \
+            -DBUILD_TESTING=ON
+          cmake --build build-precision-v100 -j --target \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test
+      - name: Wait for free V100 memory
+        shell: bash
+        timeout-minutes: 19
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free \
+              --format=csv,noheader,nounits | tr -d '[:space:]')
+            echo "Free V100 memory: $free_mib MiB"
+            if (( free_mib >= 28000 )); then exit 0; fi
+            if (( attempt < 30 )); then sleep 30; fi
+          done
+          exit 1
+      - name: Decode the same 128 natural V100 prefixes
+        shell: bash
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "128"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
+        run: |
+          set -euo pipefail
+          export NINFER_PHASE11_LOGITS_EXPORT_ROOT="$GITHUB_WORKSPACE/three-way-128/v100-logits"
+          set +e
+          ctest --test-dir build-precision-v100 -V \
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+            > three-way-128/v100-test.log 2>&1
+          test_status=$?
+          set -e
+          echo "Unchanged V100 CTest exit status: $test_status"
+          test "$(find three-way-128/v100-logits -name '*.bf16' | wc -l)" -eq 128
+          rg 'phase11.(mean_kl|top1_agreement|relative_mean_nll_delta)' \
+             three-way-128/v100-test.log | tail -10 || true
+          echo "$test_status" > three-way-128/v100-test-exit-code.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: phase11-three-way-128-captures
+          path: three-way-128
+          if-no-files-found: ignore
+          retention-days: 14
+
+  report:
+    needs: capture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: phase11-three-way-128-captures
+          path: captured
+      - name: Compare all 128 complete prefixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv compare-venv
+          compare-venv/bin/pip install numpy
+          compare-venv/bin/python - <<'PY' | tee three-way-128-report.txt
+          import json, numpy as np
+          from pathlib import Path
+          root=Path('captured')
+          report=json.loads((root/'precision_report.json').read_text())
+          assert report['positions']==128
+          assert report['fp32_decode_worst_kl'] <= 1e-4
+          assert len(report['token_ids'])==128
+          def read(pos, name):
+              suffix='.bf16' if name=='v100-logits' else '.bin'
+              path=root/name/f'pos{pos:04d}{suffix}'
+              raw=np.fromfile(path,dtype='<u2' if name=='v100-logits' else '<f4')
+              if name=='v100-logits':
+                  raw=(raw.astype('<u4')<<16).view('<f4')
+              assert raw.size and np.isfinite(raw).all(),path
+              return raw.astype(np.float64)
+          def logp(v):
+              m=np.max(v); return v-m-np.log(np.sum(np.exp(v-m)))
+          def kl(a,b):
+              x,y=logp(a),logp(b)
+              return float(np.sum(np.exp(x)*(x-y),dtype=np.float64))
+          data=[]
+          for pos in range(128):
+              o,c,v=[read(pos,n) for n in ('fp32-logits','cpu-logits','v100-logits')]
+              assert o.shape==c.shape==v.shape,(pos,o.shape,c.shape,v.shape)
+              vals=(kl(o,c),kl(o,v),kl(c,v))
+              tops=(int(np.argmax(o)==np.argmax(c)),
+                    int(np.argmax(o)==np.argmax(v)))
+              data.append((*vals,*tops))
+          assert abs(np.mean([r[0] for r in data[:14]])-.0623343274)<1e-4
+          assert abs(np.mean([r[1] for r in data[:14]])-.05775215442)<1e-4
+          print('positions 128; each path retains its own complete sequential prefix')
+          print('incremental FP32 worst KL against frozen full oracle',
+                report['fp32_decode_worst_kl'])
+          print('unchanged V100 CTest exit', (root/'v100-test-exit-code.txt').read_text().strip())
+          print('range oracle_CPU_mean_KL oracle_V100_mean_KL CPU_V100_mean_KL '
+                'oracle_CPU_top1 oracle_V100_top1 V100_lower_KL_positions')
+          for lo,hi in ((0,14),(14,64),(64,128),(128,192),(192,128),(0,128)):
+              d=np.asarray(data[lo:hi])
+              print(f'{lo}:{hi}',*[f'{v:.9g}' for v in d[:,:3].mean(axis=0)],
+                    int(d[:,3].sum()),int(d[:,4].sum()),int((d[:,1]<d[:,0]).sum()))
+          for col,name in ((0,'CPU'),(1,'V100')):
+              values=np.array([r[col] for r in data])
+              print(name,'P99_KL',np.quantile(values,.99),'max_KL',max(values))
+          path=Path('three-way-128-per-position.csv')
+          with path.open('w') as f:
+              f.write('position,oracle_cpu_kl,oracle_v100_kl,cpu_v100_kl,oracle_cpu_top1,oracle_v100_top1\n')
+              for pos,row in enumerate(data):
+                  f.write(str(pos)+','+','.join(map(str,row))+'\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phase11-three-way-128-report
+          path: |
+            three-way-128-report.txt
+            three-way-128-per-position.csv
+          retention-days: 14
