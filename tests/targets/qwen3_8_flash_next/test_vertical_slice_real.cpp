@@ -631,6 +631,89 @@ int main() {
         device.synchronize();
         vram.after_model_load = phase11_cuda_memory_snapshot();
 
+        if (const char* audit_root = std::getenv("NINFER_PHASE11_WEIGHT_AUDIT_ROOT");
+            audit_root != nullptr && audit_root[0] != '\0') {
+            using ninfer::DType;
+            using ninfer::QType;
+            using ninfer::QuantLayout;
+            using ninfer::Weight;
+            const fs::path root(audit_root);
+            const auto write_plane = [&](std::string_view object,
+                                         std::string_view plane, const void* data,
+                                         std::size_t bytes) {
+                if (data == nullptr || bytes == 0) {
+                    throw std::runtime_error("Phase 11 weight audit has an empty plane");
+                }
+                const fs::path path = root / (std::string(object) + "." +
+                                              std::string(plane) + ".bin");
+                fs::create_directories(path.parent_path());
+                std::vector<std::byte> host(bytes);
+                CUDA_CHECK(cudaMemcpy(host.data(), data, bytes, cudaMemcpyDeviceToHost));
+                std::ofstream output(path, std::ios::binary | std::ios::trunc);
+                output.write(reinterpret_cast<const char*>(host.data()),
+                             static_cast<std::streamsize>(host.size()));
+                if (!output) {
+                    throw std::runtime_error("Phase 11 weight audit cannot write " +
+                                             path.string());
+                }
+                std::cout << "phase11.weight_audit.object=" << object
+                          << " plane=" << plane << " bytes=" << bytes << '\n';
+            };
+            const auto audit = [&](const Weight& weight, std::string_view object,
+                                   QType format, std::int32_t rows,
+                                   std::int32_t columns) {
+                if (weight.qtype != format || weight.n != rows ||
+                    weight.k != columns || weight.qdata == nullptr) {
+                    throw std::runtime_error("Phase 11 weight audit shape/format mismatch: " +
+                                             std::string(object));
+                }
+                const auto cells = static_cast<std::size_t>(rows) * columns;
+                if (format == QType::BF16_CTRL) {
+                    if (weight.layout != QuantLayout::Contiguous) {
+                        throw std::runtime_error("Phase 11 BF16 weight layout mismatch");
+                    }
+                    write_plane(object, "bf16", weight.qdata,
+                                cells * sizeof(std::uint16_t));
+                } else if (format == QType::FP8_E4M3FN_ROW_F32S) {
+                    if (weight.layout != QuantLayout::RowScale ||
+                        weight.scale_dtype != DType::FP32) {
+                        throw std::runtime_error("Phase 11 FP8 weight layout mismatch");
+                    }
+                    write_plane(object, "codes", weight.qdata, cells);
+                    write_plane(object, "scales", weight.scales,
+                                static_cast<std::size_t>(rows) * sizeof(float));
+                } else {
+                    throw std::runtime_error("Phase 11 weight audit format unsupported");
+                }
+            };
+            const auto& text = model.text_view();
+            for (const int layer : {0, 2}) {
+                const std::string prefix = "text/layers/" + std::to_string(layer) + "/";
+                const auto& weights = text.layers[layer];
+                audit(weights.moe.router, prefix + "mlp/router",
+                      QType::BF16_CTRL, 512, 2'560);
+                const auto& norm = weights.mlp_hyper.norm;
+                if (norm.data == nullptr || norm.dtype != DType::BF16 ||
+                    norm.numel() != 10'240 || !norm.is_contiguous()) {
+                    throw std::runtime_error("Phase 11 weight audit norm mismatch");
+                }
+                write_plane(prefix + "mlp/hyper_connection/norm", "bf16",
+                            norm.data, 10'240ULL * sizeof(std::uint16_t));
+                audit(weights.mlp_hyper.input_mix_down,
+                      prefix + "mlp/hyper_connection/input_mix/down",
+                      QType::BF16_CTRL, 320, 10'240);
+                audit(weights.mlp_hyper.input_mix_up,
+                      prefix + "mlp/hyper_connection/input_mix/up",
+                      QType::BF16_CTRL, 10'240, 320);
+                audit(text.gdn[layer].query_key_value_z,
+                      prefix + "gdn/query_key_value_z",
+                      QType::FP8_E4M3FN_ROW_F32S, 16'384, 2'560);
+                audit(text.gdn[layer].output, prefix + "gdn/output",
+                      QType::FP8_E4M3FN_ROW_F32S, 2'560, 6'144);
+            }
+            return 0;
+        }
+
         if (const char* isolation_root =
                 std::getenv("NINFER_PHASE11_GDN_CONV_ISOLATION_ROOT");
             isolation_root != nullptr && isolation_root[0] != '\0') {
@@ -758,6 +841,24 @@ int main() {
             stage_root_env != nullptr && stage_root_env[0] != '\0';
         const fs::path stage_root =
             stage_trace_enabled ? fs::path(stage_root_env) : fs::path{};
+        const char* candidate_root_env =
+            std::getenv("NINFER_PHASE11_CANDIDATE_TRACE_ROOT");
+        const bool dump_candidate_trace =
+            candidate_root_env != nullptr && candidate_root_env[0] != '\0';
+        if (dump_candidate_trace && !stage_trace_enabled) {
+            throw std::invalid_argument(
+                "Phase 11 candidate trace requires a stage oracle root");
+        }
+        const fs::path candidate_root = dump_candidate_trace
+            ? fs::path(candidate_root_env) : fs::path{};
+        std::ofstream candidate_index;
+        if (dump_candidate_trace) {
+            fs::create_directories(candidate_root);
+            candidate_index.open(candidate_root / "stages.jsonl", std::ios::trunc);
+            if (!candidate_index) {
+                throw std::runtime_error("cannot create Phase 11 candidate trace index");
+            }
+        }
         const char* conv_history_layer_env =
             std::getenv("NINFER_PHASE11_ORACLE_GDN_CONV_HISTORY_LAYER");
         const bool inject_conv_history =
@@ -787,15 +888,47 @@ int main() {
             std::getenv("NINFER_PHASE11_ORACLE_INJECT_STAGE");
         const std::string oracle_inject_stage =
             oracle_inject_stage_env != nullptr ? oracle_inject_stage_env : "";
+        const char* inject_source_env =
+            std::getenv("NINFER_PHASE11_INJECT_SOURCE_ROOT");
+        const fs::path inject_source_root =
+            inject_source_env != nullptr && inject_source_env[0] != '\0'
+                ? fs::path(inject_source_env) : fs::path{};
         const char* second_inject_env =
             std::getenv("NINFER_PHASE11_ORACLE_INJECT_SECOND_STAGE");
         const std::string second_inject_stage =
             second_inject_env != nullptr ? second_inject_env : "";
+        const char* second_inject_source_env =
+            std::getenv("NINFER_PHASE11_INJECT_SECOND_SOURCE_ROOT");
+        const fs::path second_inject_source_root =
+            second_inject_source_env != nullptr && second_inject_source_env[0] != '\0'
+                ? fs::path(second_inject_source_env) : fs::path{};
         const bool oracle_inject_all_positions =
             std::getenv("NINFER_PHASE11_ORACLE_INJECT_ALL_POSITIONS") != nullptr;
+        const bool replay_oracle_router_ids =
+            std::getenv("NINFER_PHASE11_REPLAY_ORACLE_ROUTER_IDS") != nullptr;
+        const char* replay_scope_env =
+            std::getenv("NINFER_PHASE11_REPLAY_ORACLE_ROUTER_SCOPE");
+        const std::string replay_scope =
+            replay_scope_env != nullptr ? replay_scope_env : "all";
+        if (replay_scope != "all" && replay_scope != "position13" &&
+            replay_scope != "position13-layer26plus" &&
+            replay_scope != "prior13" && replay_scope != "prior13-layer26plus" &&
+            replay_scope != "early7-layer26plus" &&
+            replay_scope != "late6-layer26plus" &&
+            replay_scope != "middle3-layer26plus" &&
+            replay_scope != "last3-layer26plus") {
+            throw std::invalid_argument("Phase 11 oracle-membership replay scope is invalid");
+        }
+        if (!replay_oracle_router_ids && replay_scope != "all") {
+            throw std::invalid_argument("Phase 11 scoped membership replay requires replay enabled");
+        }
         if (!oracle_inject_stage.empty() && !stage_trace_enabled) {
             throw std::invalid_argument(
                 "NINFER_PHASE11_ORACLE_INJECT_STAGE requires a stage oracle root");
+        }
+        if (!inject_source_root.empty() && oracle_inject_stage.empty()) {
+            throw std::invalid_argument(
+                "NINFER_PHASE11_INJECT_SOURCE_ROOT requires an injection stage");
         }
         if (oracle_inject_all_positions &&
             (!stage_trace_all_positions || oracle_inject_stage.empty())) {
@@ -807,6 +940,17 @@ int main() {
             throw std::invalid_argument(
                 "Phase 11 second injection requires a distinct stage and stage oracle");
         }
+        if (!second_inject_source_root.empty() && second_inject_stage.empty()) {
+            throw std::invalid_argument(
+                "NINFER_PHASE11_INJECT_SECOND_SOURCE_ROOT requires a second injection stage");
+        }
+        if (replay_oracle_router_ids &&
+            (!stage_trace_all_positions || !oracle_inject_stage.empty() ||
+             !second_inject_stage.empty() || !inject_source_root.empty() ||
+             !second_inject_source_root.empty())) {
+            throw std::invalid_argument(
+                "Phase 11 oracle-membership replay requires all-position tracing and no other injection");
+        }
         std::uint32_t current_stage_trace_position = stage_trace_position;
         std::vector<std::string> first_bad_stage_by_position(records.size());
         std::vector<double> first_bad_cosine_by_position(records.size(), 1.0);
@@ -814,6 +958,48 @@ int main() {
         std::vector<double> first_bad_max_error_by_position(records.size(), 0.0);
         std::vector<float> last_router_scores;
         std::string last_router_score_prefix;
+        std::vector<float> pending_router_alpha;
+        std::string pending_router_prefix;
+        std::uint64_t replayed_router_layers = 0;
+        const auto replay_selected = [&](std::string_view name) {
+            if (!replay_oracle_router_ids || replay_scope == "all") {
+                return replay_oracle_router_ids;
+            }
+            if (replay_scope == "prior13" || replay_scope == "prior13-layer26plus" ||
+                replay_scope == "early7-layer26plus" ||
+                replay_scope == "late6-layer26plus" ||
+                replay_scope == "middle3-layer26plus" ||
+                replay_scope == "last3-layer26plus") {
+                if (current_stage_trace_position < 13) {
+                    if (replay_scope == "early7-layer26plus") {
+                        return current_stage_trace_position < 7;
+                    }
+                    if (replay_scope == "late6-layer26plus") {
+                        return current_stage_trace_position >= 7;
+                    }
+                    if (replay_scope == "middle3-layer26plus") {
+                        return current_stage_trace_position >= 7 &&
+                               current_stage_trace_position < 10;
+                    }
+                    if (replay_scope == "last3-layer26plus") {
+                        return current_stage_trace_position >= 10;
+                    }
+                    return true;
+                }
+                if (replay_scope == "prior13" || current_stage_trace_position != 13) {
+                    return false;
+                }
+            } else if (current_stage_trace_position != 13) {
+                return false;
+            }
+            if (name.size() < 3 || name[0] != 'L' ||
+                name[1] < '0' || name[1] > '9' ||
+                name[2] < '0' || name[2] > '9') {
+                return false;
+            }
+            const int layer = (name[1] - '0') * 10 + (name[2] - '0');
+            return replay_scope == "position13" || layer >= 26;
+        };
         constexpr std::size_t kRouterHidden = 2'560;
         constexpr std::size_t kRouterExperts = 512;
         std::array<std::vector<std::uint16_t>, 48> router_weight_words;
@@ -826,10 +1012,18 @@ int main() {
             }
             return (name[1] - '0') * 10 + (name[2] - '0');
         };
+        const bool calibrate_first_flips =
+            std::getenv("NINFER_PHASE11_CALIBRATE_FIRST_FLIPS") != nullptr;
         const auto is_pre_router_autopsy_target =
-            [](std::uint32_t position, int layer) {
+            [calibrate_first_flips](std::uint32_t position, int layer) {
                 return (position == 0 && layer >= 7 && layer <= 10) ||
-                       (position == 1 && layer >= 12 && layer <= 15);
+                       (position == 1 && layer >= 12 && layer <= 15) ||
+                       (calibrate_first_flips &&
+                        ((position == 7 && layer == 31) ||
+                         (position == 9 && layer == 20) ||
+                         (position == 10 && layer == 27) ||
+                         (position == 11 && layer == 15) ||
+                         (position == 12 && layer == 2)));
             };
         const auto round_fp32_to_bf16 = [](float value) {
             std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
@@ -1204,8 +1398,200 @@ int main() {
                 oracle_stage_name =
                     std::string(name.substr(0, 4)) + "mlp_block_input";
             }
-            const fs::path expected_path =
+            if (name == "L01_attn_block_input_fp32") {
+                oracle_stage_name = "L01_attn_block_input";
+            }
+            fs::path expected_path =
                 stage_root / pos_dir / (oracle_stage_name + ".bin");
+            if (name == "L00_gdn_ssm_source_state" || name == "hyper_after_ple") {
+                const char* state_root = std::getenv("NINFER_PHASE11_STATE_COMPARE_ROOT");
+                if (state_root != nullptr && state_root[0] != '\0') {
+                    expected_path = fs::path(state_root) / pos_dir /
+                        (oracle_stage_name + ".bin");
+                }
+            }
+            if (name == "L00_mlp_injection" && dump_candidate_trace &&
+                !fs::is_regular_file(expected_path) &&
+                std::getenv("NINFER_PHASE11_TRACE_HYPER_LAYER0") != nullptr) {
+                if (tensor.dtype != ninfer::DType::FP32 || tensor.numel() != 4) {
+                    throw std::runtime_error("Phase 11 MLP gate trace shape mismatch");
+                }
+                std::array<float, 4> values{};
+                CUDA_CHECK(cudaMemcpy(values.data(), tensor.data,
+                                      values.size() * sizeof(float),
+                                      cudaMemcpyDeviceToHost));
+                const fs::path folder = candidate_root / pos_dir;
+                fs::create_directories(folder);
+                const fs::path path = folder / "L00_mlp_injection.bin";
+                std::ofstream output_file(path, std::ios::binary | std::ios::trunc);
+                output_file.write(reinterpret_cast<const char*>(values.data()),
+                                  values.size() * sizeof(float));
+                if (!output_file) {
+                    throw std::runtime_error("failed to write MLP gate trace");
+                }
+                candidate_index << json{{"position", current_stage_trace_position},
+                                        {"name", "L00_mlp_injection"},
+                                        {"dtype", "FP32"},
+                                        {"count", 4},
+                                        {"file", (fs::path(pos_dir) /
+                                                  "L00_mlp_injection.bin").string()}}
+                                << '\n' << std::flush;
+                return;
+            }
+            if ((name == "L00_hyper_before_attn" || name == "L00_attn_injection") &&
+                dump_candidate_trace && !fs::is_regular_file(expected_path) &&
+                std::getenv("NINFER_PHASE11_TRACE_HYPER_LAYER0") != nullptr) {
+                const std::size_t count = tensor.numel();
+                const bool injection = name == "L00_attn_injection";
+                if ((injection && (tensor.dtype != ninfer::DType::FP32 || count != 4)) ||
+                    (!injection &&
+                     ((tensor.dtype != ninfer::DType::FP32 &&
+                       tensor.dtype != ninfer::DType::BF16) || count != 2'560))) {
+                    throw std::runtime_error(
+                        "Phase 11 hyper boundary trace shape mismatch");
+                }
+                std::vector<float> values(count);
+                if (tensor.dtype == ninfer::DType::FP32) {
+                    CUDA_CHECK(cudaMemcpy(values.data(), tensor.data,
+                                          count * sizeof(float),
+                                          cudaMemcpyDeviceToHost));
+                } else {
+                    std::vector<std::uint16_t> words(count);
+                    CUDA_CHECK(cudaMemcpy(words.data(), tensor.data,
+                                          count * sizeof(std::uint16_t),
+                                          cudaMemcpyDeviceToHost));
+                    for (std::size_t i = 0; i < count; ++i) {
+                        values[i] = bf16_to_float(words[i]);
+                    }
+                }
+                const fs::path folder = candidate_root / pos_dir;
+                fs::create_directories(folder);
+                const fs::path path = folder / (std::string(name) + ".bin");
+                std::ofstream output_file(path, std::ios::binary | std::ios::trunc);
+                output_file.write(reinterpret_cast<const char*>(values.data()),
+                                  static_cast<std::streamsize>(count * sizeof(float)));
+                if (!output_file) {
+                    throw std::runtime_error("failed to write hyper boundary trace");
+                }
+                candidate_index << json{{"position", current_stage_trace_position},
+                                        {"name", std::string(name)},
+                                        {"dtype", "FP32"},
+                                        {"count", count},
+                                        {"file", (fs::path(pos_dir) /
+                                                  (std::string(name) + ".bin")).string()}}
+                            << '\n' << std::flush;
+                return;
+            }
+            if (dump_candidate_trace &&
+                std::getenv("NINFER_PHASE11_TRACE_MOE_PAIRS") != nullptr &&
+                name == "L00_moe_pair_outputs") {
+                constexpr std::size_t count = 10 * 2'560;
+                if (tensor.dtype != ninfer::DType::FP32 || tensor.numel() != count) {
+                    throw std::runtime_error("Phase 11 MoE pair trace shape mismatch");
+                }
+                std::vector<float> values(count);
+                CUDA_CHECK(cudaMemcpy(values.data(), tensor.data,
+                                      count * sizeof(float), cudaMemcpyDeviceToHost));
+                const fs::path folder = candidate_root / pos_dir;
+                fs::create_directories(folder);
+                const fs::path path = folder / "L00_moe_pair_outputs.bin";
+                std::ofstream output_file(path, std::ios::binary | std::ios::trunc);
+                output_file.write(reinterpret_cast<const char*>(values.data()),
+                                  static_cast<std::streamsize>(count * sizeof(float)));
+                if (!output_file) {
+                    throw std::runtime_error("failed to write MoE pair trace");
+                }
+                candidate_index << json{{"position", current_stage_trace_position},
+                                        {"name", name}, {"dtype", "FP32"},
+                                        {"count", count},
+                                        {"file", (fs::path(pos_dir) /
+                                                  "L00_moe_pair_outputs.bin").string()}}
+                                << '\n' << std::flush;
+                return;
+            }
+            // These supplementary MoE component stages have no frozen FP32
+            // stage oracle. Export their live values solely for CPU-profile
+            // calibration when the explicit diagnostic switch is enabled.
+            if (dump_candidate_trace &&
+                std::getenv("NINFER_PHASE11_TRACE_MOE_COMPONENTS") != nullptr &&
+                (name == "L00_moe_shared_activation" ||
+                 name == "L00_moe_routed_sum")) {
+                const std::size_t count = tensor.numel();
+                const bool shared = name == "L00_moe_shared_activation";
+                if ((shared && (tensor.dtype != ninfer::DType::BF16 ||
+                                count != 640)) ||
+                    (!shared && (tensor.dtype != ninfer::DType::FP32 ||
+                                 count != 2'560))) {
+                    throw std::runtime_error("Phase 11 MoE component trace shape mismatch");
+                }
+                std::vector<float> values(count);
+                if (shared) {
+                    std::vector<std::uint16_t> words(count);
+                    CUDA_CHECK(cudaMemcpy(words.data(), tensor.data,
+                                          count * sizeof(std::uint16_t),
+                                          cudaMemcpyDeviceToHost));
+                    for (std::size_t i = 0; i < count; ++i) {
+                        values[i] = bf16_to_float(words[i]);
+                    }
+                } else {
+                    CUDA_CHECK(cudaMemcpy(values.data(), tensor.data,
+                                          count * sizeof(float),
+                                          cudaMemcpyDeviceToHost));
+                }
+                const fs::path folder = candidate_root / pos_dir;
+                fs::create_directories(folder);
+                const fs::path path = folder / (std::string(name) + ".bin");
+                std::ofstream output_file(path, std::ios::binary | std::ios::trunc);
+                output_file.write(reinterpret_cast<const char*>(values.data()),
+                                  static_cast<std::streamsize>(count * sizeof(float)));
+                if (!output_file) {
+                    throw std::runtime_error("failed to write MoE component trace");
+                }
+                candidate_index << json{{"position", current_stage_trace_position},
+                                        {"name", name},
+                                        {"dtype", "FP32"},
+                                        {"count", count},
+                                        {"file", (fs::path(pos_dir) /
+                                                  (std::string(name) + ".bin")).string()}}
+                                << '\n' << std::flush;
+                if (name == "L00_moe_routed_sum" &&
+                    current_stage_trace_position == stage_trace_position &&
+                    second_inject_stage == name) {
+                    if (second_inject_source_root.empty()) {
+                        throw std::runtime_error("MoE routed-sum injection requires an explicit CPU source");
+                    }
+                    const fs::path source_path = second_inject_source_root /
+                                                 pos_dir / (std::string(name) + ".bin");
+                    if (!fs::is_regular_file(source_path) ||
+                        fs::file_size(source_path) != count * sizeof(float)) {
+                        throw std::runtime_error("MoE routed-sum injection source is missing or wrong size");
+                    }
+                    std::vector<float> injected(count), verified(count);
+                    std::ifstream source(source_path, std::ios::binary);
+                    source.read(reinterpret_cast<char*>(injected.data()),
+                                static_cast<std::streamsize>(count * sizeof(float)));
+                    if (!source ||
+                        !std::all_of(injected.begin(), injected.end(),
+                                     [](float value) { return std::isfinite(value); })) {
+                        throw std::runtime_error("MoE routed-sum injection source is invalid");
+                    }
+                    CUDA_CHECK(cudaMemcpy(tensor.data, injected.data(),
+                                          count * sizeof(float), cudaMemcpyHostToDevice));
+                    CUDA_CHECK(cudaMemcpy(verified.data(), tensor.data,
+                                          count * sizeof(float), cudaMemcpyDeviceToHost));
+                    for (std::size_t i = 0; i < count; ++i) {
+                        if (std::bit_cast<std::uint32_t>(verified[i]) !=
+                            std::bit_cast<std::uint32_t>(injected[i])) {
+                            throw std::runtime_error("MoE routed-sum injection readback mismatch");
+                        }
+                    }
+                    std::cout << "phase11.oracle_injection.position="
+                              << current_stage_trace_position << " stage=" << name
+                              << " source=independent-cpu count=" << count
+                              << '\n' << std::flush;
+                }
+                return;
+            }
             if (!fs::is_regular_file(expected_path)) {
                 return;
             }
@@ -1268,6 +1654,59 @@ int main() {
                     cudaMemcpyDeviceToHost));
             } else {
                 return;
+            }
+
+            // The CPU precision experiment compares these same stage values
+            // against the FP32 oracle and the live V100.  Dump before any
+            // diagnostic oracle injection modifies the device tensor.
+            const std::string_view suffix = name.size() > 4 ? name.substr(4) : name;
+            // Every oracle-gated stage is dumped: the hosted report builds
+            // the full per-stage three-way table from this one candidate
+            // trace without a second V100 run.
+            if (dump_candidate_trace) {
+                const fs::path folder = candidate_root / pos_dir;
+                fs::create_directories(folder);
+                const fs::path path = folder / (std::string(name) + ".bin");
+                std::ofstream output_file(path, std::ios::binary | std::ios::trunc);
+                output_file.write(
+                    reinterpret_cast<const char*>(candidate.data()),
+                    static_cast<std::streamsize>(count * sizeof(float)));
+                if (!output_file) {
+                    throw std::runtime_error("failed to write Phase 11 candidate stage");
+                }
+                candidate_index << json{{"position", current_stage_trace_position},
+                                        {"name", std::string(name)},
+                                        {"dtype", "FP32"},
+                                        {"count", count},
+                                        {"file", (fs::path(pos_dir) /
+                                                  (std::string(name) + ".bin")).string()}}
+                                << '\n' << std::flush;
+                // The frozen oracle has router IDs but no full score vector.
+                // Scores were captured before top-k and before any diagnostic
+                // injection. Export them alongside the ID stage so the CPU
+                // storage profile can compare near-tie decisions directly.
+                if (suffix == "moe_router_ids" &&
+                    last_router_score_prefix == name.substr(0, 4) &&
+                    last_router_scores.size() >= kRouterExperts) {
+                    const std::string score_name =
+                        std::string(name.substr(0, 4)) + "moe_router_scores";
+                    const fs::path score_path = folder / (score_name + ".bin");
+                    std::ofstream scores_file(
+                        score_path, std::ios::binary | std::ios::trunc);
+                    scores_file.write(
+                        reinterpret_cast<const char*>(last_router_scores.data()),
+                        static_cast<std::streamsize>(kRouterExperts * sizeof(float)));
+                    if (!scores_file) {
+                        throw std::runtime_error("failed to write Phase 11 router scores");
+                    }
+                    candidate_index << json{{"position", current_stage_trace_position},
+                                            {"name", score_name},
+                                            {"dtype", "FP32"},
+                                            {"count", kRouterExperts},
+                                            {"file", (fs::path(pos_dir) /
+                                                      (score_name + ".bin")).string()}}
+                                    << '\n' << std::flush;
+                }
             }
 
             long double dot = 0.0L;
@@ -1406,10 +1845,32 @@ int main() {
                     throw std::invalid_argument(
                         "Phase 11 oracle injection does not support integer stages");
                 }
+                std::vector<float> injected = expected;
+                const fs::path& selected_source_root =
+                    inject_second ? second_inject_source_root : inject_source_root;
+                if (!selected_source_root.empty()) {
+                    const fs::path source_path = selected_source_root / pos_dir /
+                        (oracle_stage_name + ".bin");
+                    if (!fs::is_regular_file(source_path) ||
+                        fs::file_size(source_path) != expected_bytes) {
+                        throw std::runtime_error(
+                            "Phase 11 injection source missing or shape mismatch: " +
+                            source_path.string());
+                    }
+                    std::ifstream source(source_path, std::ios::binary);
+                    source.read(reinterpret_cast<char*>(injected.data()),
+                                static_cast<std::streamsize>(expected_bytes));
+                    if (!source || !std::all_of(injected.begin(), injected.end(),
+                                                [](float value) { return std::isfinite(value); })) {
+                        throw std::runtime_error(
+                            "Phase 11 injection source unreadable or nonfinite: " +
+                            source_path.string());
+                    }
+                }
                 if (tensor.dtype == ninfer::DType::BF16) {
                     std::vector<std::uint16_t> words(count);
                     for (std::size_t i = 0; i < count; ++i) {
-                        words[i] = round_fp32_to_bf16(expected[i]);
+                        words[i] = round_fp32_to_bf16(injected[i]);
                     }
                     CUDA_CHECK(cudaMemcpy(
                         tensor.data, words.data(),
@@ -1424,14 +1885,14 @@ int main() {
                     }
                 } else if (tensor.dtype == ninfer::DType::FP32) {
                     CUDA_CHECK(cudaMemcpy(
-                        tensor.data, expected.data(),
+                        tensor.data, injected.data(),
                         count * sizeof(float),
                         cudaMemcpyHostToDevice));
                     std::vector<float> verified(count);
                     CUDA_CHECK(cudaMemcpy(verified.data(), tensor.data,
                                           count * sizeof(float),
                                           cudaMemcpyDeviceToHost));
-                    if (!std::equal(verified.begin(), verified.end(), expected.begin(),
+                    if (!std::equal(verified.begin(), verified.end(), injected.begin(),
                                     [](float a, float b) {
                                         return std::bit_cast<std::uint32_t>(a) ==
                                                std::bit_cast<std::uint32_t>(b);
@@ -1445,8 +1906,77 @@ int main() {
                 std::cout << "phase11.oracle_injection.position="
                           << current_stage_trace_position
                           << " stage=" << name
+                          << " source=" << (!selected_source_root.empty()
+                                              ? "independent-cpu" : "oracle")
                           << " count=" << count << '\n'
                           << std::flush;
+            }
+
+            // Diagnostic only: isolate the effect of expert membership on
+            // the actual V100 decode. The selected expert weights still come
+            // from this token's own V100 router scores, never oracle scores.
+            if (replay_selected(name) && name.size() == 18 &&
+                name.substr(4) == "moe_router_ids") {
+                if (!integer_tensor || count != 10 ||
+                    last_router_score_prefix != name.substr(0, 4) ||
+                    last_router_scores.size() != 513 ||
+                    !pending_router_alpha.empty()) {
+                    throw std::runtime_error("Phase 11 oracle-membership router state is invalid");
+                }
+                std::vector<std::int32_t> ids = expected_i32;
+                std::vector<std::int32_t> unique = ids;
+                std::sort(unique.begin(), unique.end());
+                if (unique.front() < 0 || unique.back() >= 512 ||
+                    std::adjacent_find(unique.begin(), unique.end()) != unique.end()) {
+                    throw std::runtime_error("Phase 11 oracle expert IDs are invalid");
+                }
+                for (const auto id : ids) {
+                    if (!std::isfinite(last_router_scores[id])) {
+                        throw std::runtime_error("Phase 11 replay router score is nonfinite");
+                    }
+                }
+                std::sort(ids.begin(), ids.end(), [&](std::int32_t a, std::int32_t b) {
+                    const float score_a = last_router_scores[a];
+                    const float score_b = last_router_scores[b];
+                    return score_a != score_b ? score_a > score_b : a < b;
+                });
+                const float maximum = last_router_scores[ids.front()];
+                pending_router_alpha.resize(ids.size());
+                float denominator = 0.0F;
+                for (std::size_t i = 0; i < ids.size(); ++i) {
+                    pending_router_alpha[i] = std::exp(last_router_scores[ids[i]] - maximum);
+                    denominator += pending_router_alpha[i];
+                }
+                for (float& alpha : pending_router_alpha) { alpha /= denominator; }
+                pending_router_prefix = std::string(name.substr(0, 4));
+                CUDA_CHECK(cudaMemcpy(tensor.data, ids.data(),
+                                      ids.size() * sizeof(std::int32_t), cudaMemcpyHostToDevice));
+                std::vector<std::int32_t> verified(ids.size());
+                CUDA_CHECK(cudaMemcpy(verified.data(), tensor.data,
+                                      ids.size() * sizeof(std::int32_t), cudaMemcpyDeviceToHost));
+                if (verified != ids) {
+                    throw std::runtime_error("Phase 11 replay expert-ID readback mismatch");
+                }
+            } else if (replay_selected(name) && name.size() == 20 &&
+                       name.substr(4) == "moe_router_alpha") {
+                if (tensor.dtype != ninfer::DType::FP32 ||
+                    pending_router_prefix != name.substr(0, 4) ||
+                    pending_router_alpha.size() != tensor.numel()) {
+                    throw std::runtime_error("Phase 11 replay alpha has no matching router IDs");
+                }
+                CUDA_CHECK(cudaMemcpy(tensor.data, pending_router_alpha.data(),
+                                      pending_router_alpha.size() * sizeof(float),
+                                      cudaMemcpyHostToDevice));
+                std::vector<float> verified(pending_router_alpha.size());
+                CUDA_CHECK(cudaMemcpy(verified.data(), tensor.data,
+                                      verified.size() * sizeof(float),
+                                      cudaMemcpyDeviceToHost));
+                if (verified != pending_router_alpha) {
+                    throw std::runtime_error("Phase 11 replay router-alpha readback mismatch");
+                }
+                pending_router_alpha.clear();
+                pending_router_prefix.clear();
+                ++replayed_router_layers;
             }
 
             if (integer_tensor && !pass) {
@@ -1932,6 +2462,22 @@ int main() {
 
         executor.release_lane(lane);
         device.synchronize();
+
+        if (replay_oracle_router_ids) {
+            if (!pending_router_alpha.empty() ||
+                replayed_router_layers !=
+                    (replay_scope == "all" ? records.size() * 48ULL :
+                     replay_scope == "position13" ? 48ULL :
+                     replay_scope == "position13-layer26plus" ? 22ULL :
+                     replay_scope == "prior13" ? 624ULL :
+                     replay_scope == "prior13-layer26plus" ? 646ULL :
+                     replay_scope == "early7-layer26plus" ? 358ULL :
+                     replay_scope == "late6-layer26plus" ? 310ULL : 166ULL)) {
+                throw std::runtime_error("Phase 11 did not replay all oracle expert memberships");
+            }
+            std::cout << "phase11.oracle_membership_replay.layer_calls="
+                      << replayed_router_layers << '\n';
+        }
 
         const auto expert_stats =
             flash_next_host_expert_execution_stats();

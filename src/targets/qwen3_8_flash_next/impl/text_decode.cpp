@@ -380,6 +380,15 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
 
         // Attention hyper prepare -> block_input [2560, B]
         sync_hyper_shadow();
+#if defined(NINFER_VOLTA_BUILD)
+        // The CPU reference's layer-zero hyper boundary hooks need the
+        // pre-attention hyper input. Emit the FP32 master when the
+        // diagnostic chain is active, otherwise the BF16 shadow.
+        if (layer == 0 && std::getenv("NINFER_PHASE11_TRACE_HYPER_LAYER0") != nullptr) {
+            emit_state(prefix + "hyper_before_attn",
+                       fp32_hyper_state ? round_ws.hyper_hidden_fp32 : round_ws.hyper_hidden);
+        }
+#endif
         flash_next_hyper_prepare(round_ws.hyper_hidden, model.layers[layer].attention_hyper,
                                  round_ws.hyper_scratch, round_ws.block_input, stream);
 #if defined(NINFER_VOLTA_BUILD)
@@ -395,6 +404,14 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
             flash_next_hyper_prepare_fp32_injection_stage(
                 round_ws.hyper_hidden_fp32, round_ws.hyper_after_attn_stage_fp32,
                 model.layers[layer].attention_hyper, round_ws.hyper_scratch, stream);
+        }
+        if (layer == 0 && std::getenv("NINFER_PHASE11_TRACE_HYPER_LAYER0") != nullptr) {
+            emit_state(prefix + "attn_injection", round_ws.hyper_scratch.injection);
+        }
+#endif
+#if defined(NINFER_VOLTA_BUILD)
+        if (layer == 1 && std::getenv("NINFER_PHASE11_TRACE_ATTENTION_PREPARE_RAW") != nullptr) {
+            emit_state(prefix + "attn_block_input_fp32", round_ws.hyper_scratch.mixed_fp32);
         }
 #endif
         emit_state(prefix + "attn_block_input", round_ws.block_input);
@@ -530,6 +547,12 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                                  round_ws.hyper_scratch, round_ws.block_input, stream);
         emit_state(prefix + "mlp_block_input", round_ws.block_input);
 #endif
+
+        // Expose the four FP32 MLP injection gates before the block output
+        // updates the hyper state. The sink is diagnostic and absent in serving.
+        if (layer == 0) {
+            emit_state(prefix + "mlp_injection", round_ws.hyper_scratch.injection);
+        }
 
         // MoE
         if (model.host_experts.has_value()) {
@@ -751,6 +774,11 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
         flash_next_hyper_prepare(round_ws.hyper_hidden, model.layers[layer].attention_hyper,
                                  round_ws.hyper_scratch, round_ws.block_input, stream);
         stage_ledger_record(stream, FlashNextStageId::Hyper_PrepareAttn);
+#if defined(NINFER_VOLTA_BUILD)
+        if (layer == 1 && std::getenv("NINFER_PHASE11_TRACE_ATTENTION_PREPARE_RAW") != nullptr) {
+            emit_state(prefix + "attn_block_input_fp32", round_ws.hyper_scratch.mixed_fp32);
+        }
+#endif
         emit_state(prefix + "attn_block_input", round_ws.block_input);
 
         // Execute QSA or GDN attention
