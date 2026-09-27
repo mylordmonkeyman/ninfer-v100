@@ -38,7 +38,24 @@ jobs:
           MKL_NUM_THREADS: "16"
         run: |
           set -euo pipefail
-          python_bin="${NINFER_PHASE11_PYTHON:-$HOME/ninfer-v100/venv-oracle/bin/python}"
+          python_bin=""
+          for candidate in "${NINFER_PHASE11_PYTHON:-}" \
+              "$HOME/ninfer-v100/venv-oracle/bin/python" \
+              /srv/ninfer/venv-oracle/bin/python python3; do
+            if [[ -n "$candidate" ]] && command -v "$candidate" >/dev/null 2>&1 && \
+                "$candidate" -c 'import numpy, torch, transformers, safetensors' >/dev/null 2>&1; then
+              python_bin="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$python_bin" ]]; then
+            python3 -m venv "$GITHUB_WORKSPACE/precision-venv"
+            "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+              torch --index-url https://download.pytorch.org/whl/cpu
+            "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+              numpy safetensors 'transformers>=5.16,<6'
+            python_bin="$GITHUB_WORKSPACE/precision-venv/bin/python"
+          fi
           "$python_bin" - <<'PY' | tee down-counterfactual.txt
           import math, sys
           from pathlib import Path
