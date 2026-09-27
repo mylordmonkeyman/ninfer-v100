@@ -1268,6 +1268,13 @@ threshold effect. It neither establishes exact lossless weight
 decoding at every expert nor explains the full 14-position oracle
 failure. In particular, the controlled 14-position V100 run still
 fails §7, and the full 4,096-position qualification is outstanding.
+The [14-position V100 FP32 expert-intermediate ablation](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36295665056)
+compares the unchanged baseline and the existing diagnostic that removes
+the routed expert's BF16 intermediate cast. The baseline gives mean KL
+0.05775208, P99 KL 0.61541675, top-1 13/14, and relative mean-NLL
+delta 0.00714438. The FP32-intermediate variant worsens these to
+0.09148259, 1.16052802, 12/14, and 0.02238142. Both fail §7;
+removing this one cast does not correct the phase-level divergence.
 
 ## 1. Environment Setup
 
