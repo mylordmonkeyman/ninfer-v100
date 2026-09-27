@@ -107,8 +107,7 @@ def _stage_hooks(model, captured, trace_gdn_internals=False,
                  trace_moe_routing_layer0=False, trace_gdn_layer1=False,
                  trace_hyper_layer1=False, trace_moe_components_layer0=False,
                  trace_moe_pairs_layer0=False,
-                 trace_moe_intermediate_path5_layer0=False,
-               logits_sink=None, retain_logits=True):
+                 trace_moe_intermediate_path5_layer0=False):
     handles = []
 
     def capture(name, select=lambda output: output):
@@ -233,7 +232,8 @@ def run_decode(model, head, token_ids, profile, out_root,
                mlp_block_input_fp32=False, mlp_block_input_fp32_layers=(),
                fused_hyper_updates=False, trace_moe_components_layer0=False,
                trace_moe_pairs_layer0=False,
-               trace_moe_intermediate_path5_layer0=False):
+               trace_moe_intermediate_path5_layer0=False,
+               logits_sink=None, retain_logits=True):
     # One token per forward, with one cache for the entire prefix.  Rounding a
     # cache tensor after the update changes all later positions, unlike
     # independently rounding tensors from the completed FP32 oracle.
