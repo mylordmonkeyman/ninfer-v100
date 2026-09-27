@@ -1439,6 +1439,33 @@ int main() {
                 return;
             }
             if (dump_candidate_trace &&
+                std::getenv("NINFER_PHASE11_TRACE_MOE_GATE_UP_PATH5") != nullptr &&
+                name == "L00_moe_gate_up_path5") {
+                constexpr std::size_t count = 1280;
+                if (tensor.dtype != ninfer::DType::FP32 || tensor.numel() != count) {
+                    throw std::runtime_error("Phase 11 MoE gate/up trace shape mismatch");
+                }
+                std::vector<float> values(count);
+                CUDA_CHECK(cudaMemcpy(values.data(), tensor.data,
+                                      count * sizeof(float), cudaMemcpyDeviceToHost));
+                const fs::path folder = candidate_root / pos_dir;
+                fs::create_directories(folder);
+                const fs::path filename = folder / "L00_moe_gate_up_path5.bin";
+                std::ofstream output_file(filename, std::ios::binary | std::ios::trunc);
+                output_file.write(reinterpret_cast<const char*>(values.data()),
+                                  static_cast<std::streamsize>(count * sizeof(float)));
+                if (!output_file) {
+                    throw std::runtime_error("failed to write MoE gate/up trace");
+                }
+                candidate_index << json{{"position", current_stage_trace_position},
+                                        {"name", "L00_moe_gate_up_path5"},
+                                        {"dtype", "FP32"}, {"count", count},
+                                        {"file", (fs::path(pos_dir) /
+                                                  "L00_moe_gate_up_path5.bin").string()}}
+                                << '\n' << std::flush;
+                return;
+            }
+            if (dump_candidate_trace &&
                 std::getenv("NINFER_PHASE11_TRACE_MOE_INTERMEDIATE_PATH5") != nullptr &&
                 name == "L00_moe_intermediate_path5") {
                 constexpr std::size_t count = 640;

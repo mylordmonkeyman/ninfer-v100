@@ -1,0 +1,165 @@
+name: Phase 11 Expert 414 Gate Up Boundary
+
+on:
+  push:
+    branches: [work/precision-matched-reference]
+    paths: [.github/workflows/precision-pos0-gate-up-path5.yml]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-fused-hyper-moe-intermediate-pos0-14
+          run-id: 36291714488
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: cpu
+      - name: Build V100 diagnostic
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-precision-v100 -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-precision-v100 -j --target \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test
+      - name: Wait for model memory
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free \
+              --format=csv,noheader,nounits | tr -d '[:space:]')
+            if (( free_mib >= 28000 )); then exit 0; fi
+            if (( attempt < 30 )); then sleep 30; fi
+          done
+          exit 1
+      - name: Capture matched gate and up values
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "1"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace14
+          NINFER_PHASE11_STAGE_ORACLE_POSITION: "0"
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_PHASE11_TRACE_MOE_GATE_UP_PATH5: "1"
+          NINFER_PHASE11_TRACE_MOE_INTERMEDIATE_PATH5: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
+        run: |
+          set -euo pipefail
+          export NINFER_PHASE11_CANDIDATE_TRACE_ROOT="$GITHUB_WORKSPACE/gpu"
+          export NINFER_PHASE11_ORACLE_INJECT_STAGE=L00_hyper_after_attn
+          export NINFER_PHASE11_INJECT_SOURCE_ROOT="$GITHUB_WORKSPACE/cpu/v100-phase11-storage"
+          export NINFER_PHASE11_ORACLE_INJECT_SECOND_STAGE=L00_mlp_block_input
+          export NINFER_PHASE11_INJECT_SECOND_SOURCE_ROOT="$GITHUB_WORKSPACE/cpu/v100-phase11-storage"
+          set +e
+          ctest --test-dir build-precision-v100 -V \
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' > gpu.log 2>&1
+          status=$?
+          set -e
+          echo "Unchanged CTest status: $status"
+          test -s gpu/pos0000/L00_moe_gate_up_path5.bin
+          test -s gpu/pos0000/L00_moe_intermediate_path5.bin
+          test -s gpu/pos0000/L00_mlp_block_input.bin
+          test -s gpu/pos0000/L00_moe_router_ids.bin
+          grep 'phase11.oracle_injection.position=0' gpu.log
+      - name: Compare CPU gate and up arithmetic with exact input
+        run: |
+          set -euo pipefail
+          python_bin=""
+          for candidate in "${NINFER_PHASE11_PYTHON:-}" \
+              "$HOME/ninfer-v100/venv-oracle/bin/python" \
+              /srv/ninfer/venv-oracle/bin/python python3; do
+            if [[ -n "$candidate" ]] && command -v "$candidate" >/dev/null 2>&1 && \
+                "$candidate" -c 'import numpy, torch, transformers, safetensors' >/dev/null 2>&1; then
+              python_bin="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$python_bin" ]]; then
+            python3 -m venv "$GITHUB_WORKSPACE/precision-venv"
+            "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+              torch --index-url https://download.pytorch.org/whl/cpu
+            "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+              numpy safetensors 'transformers>=5.16,<6'
+            python_bin="$GITHUB_WORKSPACE/precision-venv/bin/python"
+          fi
+          CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=16 MKL_NUM_THREADS=16 \
+            "$python_bin" - <<'PY' | tee gate-up-report.txt
+          import os, sys
+          from pathlib import Path
+          from types import SimpleNamespace
+          import numpy as np
+          import torch
+          import torch.nn.functional as F
+          torch.set_num_threads(16)
+          sys.path.insert(0,'tools/reference/qwen3_8_flash_next/oracle')
+          from run_oracle import LazyExperts
+          cpu=Path('cpu/v100-phase11-storage/pos0000')
+          gpu=Path('gpu/pos0000')
+          def read(root,name,n):
+              p=root/(name+'.bin')
+              data=np.fromfile(p,dtype='<f4')
+              assert len(data)==n,(p,len(data),n)
+              return data
+          ids=read(gpu,'L00_moe_router_ids',10)
+          assert ids[5]==414
+          x=read(cpu,'L00_mlp_block_input',2560)
+          assert np.array_equal(x,read(gpu,'L00_mlp_block_input',2560))
+          cfg=SimpleNamespace(num_experts=512,hidden_size=2560,
+                              moe_intermediate_size=640,hidden_act='silu')
+          e=LazyExperts(cfg,0,os.environ.get('NINFER_PHASE11_MODEL_DIR','/srv/ninfer/source/mixed'))
+          weights,_=e.get_expert_weights(414)
+          reference=F.linear(torch.from_numpy(x).reshape(1,-1),weights).flatten().detach().numpy()
+          actual=read(gpu,'L00_moe_gate_up_path5',1280)
+          cpu_activation=read(cpu,'L00_moe_intermediate_path5',640)
+          gpu_activation=read(gpu,'L00_moe_intermediate_path5',640)
+          delta=actual-reference
+          print('gate_up_nrmse',float(np.linalg.norm(delta)/np.linalg.norm(reference)))
+          print('gate_up_max_abs',float(np.max(np.abs(delta))))
+          for i in (200,572):
+              cg,cu=map(float,(reference[i],reference[640+i]))
+              vg,vu=map(float,(actual[i],actual[640+i]))
+              cr=float(F.silu(torch.tensor(cg))*cu)
+              vr=float(torch.tensor(vg)/(1+torch.exp(torch.tensor(-vg)))*vu)
+              print('index',i,'cpu_gate',cg,'v100_gate',vg,
+                    'cpu_up',cu,'v100_up',vu,'cpu_raw',cr,'v100_raw',vr,
+                    'cpu_bf16',float(cpu_activation[i]),'v100_bf16',float(gpu_activation[i]))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: phase11-gate-up-path5-report
+          path: |
+            gpu.log
+            gate-up-report.txt
+            gpu/pos0000/L00_moe_gate_up_path5.bin
+          if-no-files-found: ignore
+          retention-days: 14
