@@ -103,6 +103,12 @@ jobs:
           print('ROUTER_SET_AGREEMENT oracle_CPU oracle_V100 CPU_V100',*router,'/672')
           print('FIRST_CPU_V100_ROUTER_MISMATCH_BY_POSITION',first_differing)
 
+          reverse_kl=math.fsum(kl(read(engine,pos,'logits'),
+                                  read(profile,pos,'logits'))
+                               for pos in range(14))/14
+          print('MEAN_KL V100_CPU',f'{reverse_kl:.10g}',
+                '(reverse direction from CPU_V100 above)')
+
           # Compare represented state at the earliest common boundary of each
           # prefix; the three distances separate profile error from engine error.
           print('position L00_attn_input_FP32_CPU L00_attn_input_FP32_V100 '
@@ -115,6 +121,20 @@ jobs:
                   assert a is not None and b is not None and c is not None,(pos,name)
                   values.extend((nrmse(a,b),nrmse(a,c),nrmse(b,c)))
               print(pos,*[f'{v:.9g}' for v in values])
+
+          print('LAYER_ZERO_THREE_WAY_STATE_NRMSE '
+                'position stage FP32_CPU FP32_V100 CPU_V100')
+          for pos in range(14):
+              for stage in ('L00_attn_block_input','L00_attn_block_output',
+                            'L00_hyper_after_attn','L00_mlp_block_input',
+                            'L00_mlp_block_output','L00_hyper_after_mlp'):
+                  a,b,c=[read(r,pos,stage) for r in (fp32,profile,engine)]
+                  if a is None or b is None or c is None:
+                      print(pos,stage,'MISSING_SHARED_STAGE')
+                      continue
+                  assert len(a)==len(b)==len(c),(pos,stage)
+                  print(pos,stage,*[f'{v:.9g}' for v in
+                        (nrmse(a,b),nrmse(a,c),nrmse(b,c))])
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
