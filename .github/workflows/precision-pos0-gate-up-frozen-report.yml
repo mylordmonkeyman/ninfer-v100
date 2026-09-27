@@ -1,0 +1,113 @@
+name: Phase 11 Frozen Expert 414 Gate Up Comparison
+
+on:
+  push:
+    branches: [work/precision-matched-reference]
+    paths: [.github/workflows/precision-pos0-gate-up-frozen-report.yml]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-fused-hyper-moe-intermediate-pos0-14
+          run-id: 36291714488
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: phase11-gate-up-path5-report
+          run-id: 36295013422
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: trace
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-position0-matched-expert-intermediate-14
+          run-id: 36291715140
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: gpu
+      - name: Compare exact injected input at the cast boundary
+        run: |
+          set -euo pipefail
+          python_bin=""
+          for candidate in "${NINFER_PHASE11_PYTHON:-}" \
+              "$HOME/ninfer-v100/venv-oracle/bin/python" \
+              /srv/ninfer/venv-oracle/bin/python python3; do
+            if [[ -n "$candidate" ]] && command -v "$candidate" >/dev/null 2>&1 && \
+                "$candidate" -c 'import numpy, torch, transformers, safetensors' >/dev/null 2>&1; then
+              python_bin="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$python_bin" ]]; then
+            python3 -m venv "$GITHUB_WORKSPACE/precision-venv"
+            "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+              torch --index-url https://download.pytorch.org/whl/cpu
+            "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+              numpy safetensors 'transformers>=5.16,<6'
+            python_bin="$GITHUB_WORKSPACE/precision-venv/bin/python"
+          fi
+          CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=16 MKL_NUM_THREADS=16 \
+            "$python_bin" - <<'PY' | tee gate-up-frozen-report.txt
+          import os, sys
+          from pathlib import Path
+          from types import SimpleNamespace
+          import numpy as np
+          import torch
+          import torch.nn.functional as F
+          torch.set_num_threads(16)
+          sys.path.insert(0,'tools/reference/qwen3_8_flash_next/oracle')
+          from run_oracle import LazyExperts
+          cpu=Path('cpu/v100-phase11-storage/pos0000')
+          trace=Path('trace/gpu/pos0000')
+          gpu=Path('gpu/matched/pos0000')
+          def read(root,name,n):
+              p=root/(name+'.bin')
+              a=np.fromfile(p,dtype='<f4')
+              assert len(a)==n,(p,len(a),n)
+              return a
+          log=Path('trace/gpu.log').read_text()
+          assert 'phase11.oracle_injection.position=0 stage=L00_hyper_after_attn source=independent-cpu count=10240' in log
+          assert 'phase11.oracle_injection.position=0 stage=L00_mlp_block_input source=independent-cpu count=2560' in log
+          ids=read(gpu,'L00_moe_router_ids',10)
+          assert ids[5]==414
+          x=read(cpu,'L00_mlp_block_input',2560)
+          cfg=SimpleNamespace(num_experts=512,hidden_size=2560,
+                              moe_intermediate_size=640,hidden_act='silu')
+          e=LazyExperts(cfg,0,os.environ.get('NINFER_PHASE11_MODEL_DIR','/srv/ninfer/source/mixed'))
+          weights,_=e.get_expert_weights(414)
+          reference=F.linear(torch.from_numpy(x).reshape(1,-1),weights).flatten().detach().numpy()
+          actual=read(trace,'L00_moe_gate_up_path5',1280)
+          cpu_activation=read(cpu,'L00_moe_intermediate_path5',640)
+          gpu_activation=read(gpu,'L00_moe_intermediate_path5',640)
+          delta=actual-reference
+          print('gate_up_nrmse',float(np.linalg.norm(delta)/np.linalg.norm(reference)))
+          print('gate_up_max_abs',float(np.max(np.abs(delta))))
+          for i in (200,572):
+              cg,cu=map(float,(reference[i],reference[640+i]))
+              vg,vu=map(float,(actual[i],actual[640+i]))
+              cr=float(F.silu(torch.tensor(cg))*cu)
+              vr=float(torch.tensor(vg)/(1+torch.exp(torch.tensor(-vg)))*vu)
+              print('index',i,'cpu_gate',cg,'v100_gate',vg,
+                    'cpu_up',cu,'v100_up',vu,'cpu_raw',cr,'v100_raw',vr,
+                    'cpu_bf16',float(cpu_activation[i]),'v100_bf16',float(gpu_activation[i]))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: phase11-gate-up-frozen-comparison
+          path: gate-up-frozen-report.txt
+          if-no-files-found: ignore
+          retention-days: 14
