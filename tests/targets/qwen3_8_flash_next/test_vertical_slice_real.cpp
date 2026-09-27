@@ -781,22 +781,6 @@ int main() {
                 cudaMemcpyDeviceToHost, device.stream));
             device.synchronize();
 
-            // Compact natural-path logits for extended three-way prefix comparison.
-            if (const char* root = std::getenv("NINFER_PHASE11_LOGITS_EXPORT_ROOT");
-                root != nullptr && root[0] != '\0') {
-                const fs::path folder(root);
-                fs::create_directories(folder);
-                char filename[32];
-                std::snprintf(filename, sizeof(filename), "pos%04u.bf16", record.position);
-                std::ofstream output(folder / filename, std::ios::binary | std::ios::trunc);
-                output.write(reinterpret_cast<const char*>(candidate_bf16.data()),
-                             static_cast<std::streamsize>(candidate_bf16.size() *
-                                                          sizeof(std::uint16_t)));
-                if (!output) {
-                    throw std::runtime_error("Phase 11 candidate logits export failed");
-                }
-            }
-
             std::vector<float> candidate(candidate_bf16.size());
             for (std::size_t i = 0; i < candidate.size(); ++i) {
                 candidate[i] = bf16_to_float(candidate_bf16[i]);
@@ -2439,6 +2423,22 @@ int main() {
                 candidate_bf16.size() * sizeof(std::uint16_t),
                 cudaMemcpyDeviceToHost, device.stream));
             device.synchronize();
+
+            // Compact natural-path logits for extended three-way prefix comparison.
+            if (const char* root = std::getenv("NINFER_PHASE11_LOGITS_EXPORT_ROOT");
+                root != nullptr && root[0] != '\0') {
+                const fs::path folder(root);
+                fs::create_directories(folder);
+                char filename[32];
+                std::snprintf(filename, sizeof(filename), "pos%04u.bf16", record.position);
+                std::ofstream output(folder / filename, std::ios::binary | std::ios::trunc);
+                output.write(reinterpret_cast<const char*>(candidate_bf16.data()),
+                             static_cast<std::streamsize>(candidate_bf16.size() *
+                                                          sizeof(std::uint16_t)));
+                if (!output) {
+                    throw std::runtime_error("Phase 11 candidate logits export failed");
+                }
+            }
 
             std::vector<float> candidate(candidate_bf16.size());
             for (std::size_t i = 0; i < candidate.size(); ++i) {
