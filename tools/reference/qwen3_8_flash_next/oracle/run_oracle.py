@@ -91,6 +91,8 @@ class LazyExperts(nn.Module):
         self.route_order_fma = False
         self.trace_pair_outputs = False
         self.last_pair_outputs = None
+        self.trace_intermediate_path5 = False
+        self.last_intermediate_path5 = None
 
     def get_exp_file(self):
         if self.exp_f is None:
@@ -131,6 +133,7 @@ class LazyExperts(nn.Module):
     ) -> torch.Tensor:
         final_hidden_states = torch.zeros_like(hidden_states)
         pair_outputs = {} if (self.route_order_fma or self.trace_pair_outputs) else None
+        self.last_intermediate_path5 = None
         self.last_pair_outputs = None
         with torch.no_grad():
             expert_mask = torch.nn.functional.one_hot(top_k_index, num_classes=self.num_experts)
@@ -150,6 +153,11 @@ class LazyExperts(nn.Module):
             current_hidden_states = self.act_fn(gate) * up
             if self.round_activations_to_bf16:
                 current_hidden_states = current_hidden_states.to(torch.bfloat16).float()
+            if self.trace_intermediate_path5:
+                for row, token, path in zip(current_hidden_states,
+                                            token_idx.tolist(), top_k_pos.tolist()):
+                    if token == 0 and path == 5:
+                        self.last_intermediate_path5 = row.detach().float().cpu().clone()
             current_hidden_states = F.linear(current_hidden_states, down)
             if pair_outputs is not None:
                 # Preserve the unweighted expert pair output. The V100 host
