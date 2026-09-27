@@ -1,0 +1,74 @@
+name: Phase 11 Frozen Expert Intermediate Comparison
+
+on:
+  push:
+    branches: [work/precision-matched-reference]
+    paths: [.github/workflows/precision-pos0-moe-intermediate-report.yml]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-fused-hyper-moe-intermediate-pos0-14
+          run-id: 36291714488
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-position0-matched-expert-intermediate-14
+          run-id: 36291715140
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: gpu
+      - name: Compare selected path five and its output
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee intermediate-report.txt
+          import math, struct
+          from pathlib import Path
+
+          cpu = Path('cpu/v100-phase11-storage/pos0000')
+          gpu = Path('gpu/matched/pos0000')
+
+          def read(root, stage, count):
+              path = root / (stage + '.bin')
+              data = path.read_bytes()
+              assert len(data) == 4 * count, (path, len(data), count)
+              values = struct.unpack('<' + str(count) + 'f', data)
+              assert all(math.isfinite(x) for x in values), path
+              return values
+
+          def compare(a, b):
+              assert len(a) == len(b)
+              sq = math.fsum((x-y)**2 for x,y in zip(a,b))
+              norm = math.fsum(x*x for x in a)
+              differences = [(i,x,y) for i,(x,y) in enumerate(zip(a,b)) if x != y]
+              return {'different': len(differences),
+                      'nrmse': math.sqrt(sq/norm) if norm else math.sqrt(sq),
+                      'max_abs': max((abs(x-y) for _,x,y in differences), default=0),
+                      'examples': differences[:16]}
+
+          ids_cpu = read(cpu, 'L00_moe_router_ids', 10)
+          ids_gpu = read(gpu, 'L00_moe_router_ids', 10)
+          assert ids_cpu == ids_gpu, 'selected expert paths differ'
+          print('path5_expert', ids_cpu[5])
+          for stage,count in (('L00_moe_intermediate_path5',640),
+                              ('L00_moe_pair_outputs',25600),
+                              ('L00_moe_routed_sum',2560)):
+              left,right = read(cpu,stage,count),read(gpu,stage,count)
+              if stage == 'L00_moe_pair_outputs':
+                  left,right = left[5*2560:6*2560],right[5*2560:6*2560]
+              print(stage,compare(left,right))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phase11-frozen-expert-intermediate-report
+          path: intermediate-report.txt
+          retention-days: 14
