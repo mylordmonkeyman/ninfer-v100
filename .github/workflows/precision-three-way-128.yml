@@ -203,7 +203,7 @@ jobs:
           print('unchanged V100 CTest exit', (root/'v100-test-exit-code.txt').read_text().strip())
           print('range oracle_CPU_mean_KL oracle_V100_mean_KL CPU_V100_mean_KL '
                 'oracle_CPU_top1 oracle_V100_top1 V100_lower_KL_positions')
-          for lo,hi in ((0,14),(14,64),(64,128),(128,192),(192,128),(0,128)):
+          for lo,hi in ((0,14),(14,64),(64,96),(96,128),(0,128)):
               d=np.asarray(data[lo:hi])
               print(f'{lo}:{hi}',*[f'{v:.9g}' for v in d[:,:3].mean(axis=0)],
                     int(d[:,3].sum()),int(d[:,4].sum()),int((d[:,1]<d[:,0]).sum()))
