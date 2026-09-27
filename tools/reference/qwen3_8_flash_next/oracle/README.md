@@ -1207,8 +1207,30 @@ gate. This proves the six local BF16 output differences on the
 matched input are caused by the routed FP32 sum difference at this
 boundary; it does not imply that copying CPU sums is a deployable
 improvement or that other positions/layers are precision-only.
-The next isolation is per-selected-expert output and weight/activation
-arithmetic before the routed reduction.
+The [matched expert-pair report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36268754474)
+compares ten unweighted FP32 outputs (25,600 values) in selected
+path order from the [CPU profile](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36267078139)
+and [real V100 host expert path](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36267079166).
+Their selected IDs are identical. Overall pair-output NRMSE is
+1.09306e-5 (24,279 different FP32 values), with maximum absolute
+difference 7.24941e-6. Expert 414 at selected path five has the
+largest relative difference, 8.29239e-5 NRMSE; expert 142 at path
+nine has 1.65229e-5. The V100 pair outputs and V100 alpha
+reconstruct its stored routed sum **exactly at all 2,560 values**
+using ordered FP32 FMA. Substituting the CPU pair outputs while
+keeping V100 alpha leaves 3.21586e-6 routed-sum NRMSE, nearly
+the original CPU-versus-V100 3.21553e-6. Changing the reduction
+order to path-ordered FMA using CPU pairs and CPU alpha instead
+changes the CPU sum by only 5.95543e-8 NRMSE. The pair
+calculation, rather than reduction order or measured alpha
+difference, dominates the local sum mismatch. The matched
+post-attention replay still leaves one stored MLP-input word
+different (2.38419e-7 absolute), so this comparison does not
+yet establish identical expert inputs. The next controlled step
+is to trace pairs with that stored input matched too, followed by
+a targeted check of gate/up, BF16 expert activation, weight
+dequantization and FP32 matrix accumulation for the largest
+differing pair. No arithmetic change is justified yet.
 
 Neither this local injection nor the matched precision profile
 establishes that all residual routing differences are due to
