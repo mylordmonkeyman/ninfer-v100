@@ -161,8 +161,8 @@ def _build_mtp_specs() -> tuple[TensorSpec, ...]:
     specs.extend(_hyper_connection("mtp/layer/mlp/hyper_connection/"))
     specs.extend(
         (
-            tensor_spec("mtp/layer/mlp/experts/gate_up", (512, 1_280, 2_560), NVFP4),
-            tensor_spec("mtp/layer/mlp/experts/down", (512, 2_560, 640), NVFP4),
+            tensor_spec("mtp/layer/mlp/experts/gate_up", (512, 1_280, 2_560), BF16),
+            tensor_spec("mtp/layer/mlp/experts/down", (512, 2_560, 640), BF16),
             tensor_spec("mtp/layer/attention/indexer/query_key", (640, 2_560), BF16),
             tensor_spec("mtp/layer/attention/indexer/key_norm", (128,), BF16),
             tensor_spec("mtp/layer/attention/indexer/query_norm", (128,), BF16),

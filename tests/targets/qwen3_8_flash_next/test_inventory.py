@@ -48,6 +48,8 @@ def test_projection_and_ple_shapes_match_runtime_objects():
     assert by_name["text/layers/0/mlp/experts/gate_up"].layout == (
         "expert-blockscale-k16-m128x4-v1"
     )
+    assert by_name["mtp/layer/mlp/experts/gate_up"].format == "BF16"
+    assert by_name["mtp/layer/mlp/experts/down"].layout == "contiguous-le-v1"
     assert by_name["text/layers/1/ple/embedding/shards/127"].layout == (
         "packed-u4-g16-v1"
     )

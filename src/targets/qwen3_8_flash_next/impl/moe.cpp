@@ -439,6 +439,18 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         use_shared_expert_input_fp32 ? shared_expert_input_fp32 : nullptr,
         use_shared_fp32_intermediate);
 
+    const bool trace_moe_components =
+        emit && tokens == 1 &&
+        std::getenv("NINFER_PHASE11_TRACE_MOE_COMPONENTS") != nullptr;
+    if (trace_moe_components) {
+        // Shared path occupies the eleventh 640-wide BF16 slab. Its down
+        // projection has not run yet, so this is the stored activation input.
+        auto* shared = static_cast<std::uint16_t*>(scratch.activations.data) +
+                       10 * kFlashNextExpertIntermediate;
+        Tensor activation(shared, DType::BF16, {kFlashNextExpertIntermediate, 1});
+        emit("moe_shared_activation", activation);
+    }
+
     const std::size_t input_words =
         static_cast<std::size_t>(tokens) * kFlashNextExpertHidden;
     const std::size_t routed_paths = static_cast<std::size_t>(tokens) * 10ULL;
@@ -499,6 +511,22 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
 
     host_expert_worker_pool().run(cpu.tasks);
 
+    if (emit && tokens == 1 &&
+        std::getenv("NINFER_PHASE11_TRACE_MOE_PAIRS") != nullptr) {
+        // Trace complete unweighted host expert outputs in selected-path order.
+        // The callback copies the tensor synchronously before this buffer is freed.
+        float* pairs_device = nullptr;
+        const std::size_t bytes = cpu.pair_outputs.size() * sizeof(float);
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&pairs_device), bytes));
+        CUDA_CHECK(cudaMemcpyAsync(pairs_device, cpu.pair_outputs.data(), bytes,
+                                   cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        Tensor pair_trace(pairs_device, DType::FP32,
+                          {kFlashNextExpertHidden, 10});
+        emit("moe_pair_outputs", pair_trace);
+        CUDA_CHECK(cudaFree(pairs_device));
+    }
+
     for (std::int32_t token = 0; token < tokens; ++token) {
         float* token_sum =
             cpu.routed_sum.data() +
@@ -536,6 +564,13 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         cpu.routed_sum.data(), kRoutedBytesPerToken,
         kRoutedBytesPerToken, static_cast<std::size_t>(tokens),
         cudaMemcpyHostToDevice, stream));
+    if (trace_moe_components) {
+        // For one decode token the first slab holds 2,560 contiguous FP32
+        // routed-sum values, before the shared-down merge and BF16 output.
+        Tensor routed_sum(scratch.activations.data, DType::FP32,
+                          {kFlashNextExpertHidden, 1});
+        emit("moe_routed_sum", routed_sum);
+    }
     flash_next_moe_host_routed_merge_launch(
         resident_weights, scratch, output, tokens, stream,
         use_shared_fp32_intermediate);
