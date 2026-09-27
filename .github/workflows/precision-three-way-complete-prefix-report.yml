@@ -1,0 +1,123 @@
+name: Phase 11 Three Way Complete Prefix Comparison
+
+on:
+  push:
+    branches: [work/precision-matched-reference]
+    paths: [.github/workflows/precision-three-way-complete-prefix-report.yml]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-fused-hyper-profile-reference-14
+          run-id: 36250285355
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-moe-routing-layer0-14
+          run-id: 36072336918
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: v100
+      - name: Compare the same fourteen full sequential prefixes
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee three-way-complete-prefix-report.txt
+          import json, math, struct
+          from pathlib import Path
+
+          root=Path('cpu')
+          fp32=root/'fp32'
+          profile=root/'v100-phase11-storage'
+          engine=Path('v100/candidate-stage')
+          report=json.loads((root/'precision_report.json').read_text())
+          assert report['positions']==14
+          assert report['fp32_decode_worst_kl'] <= 1e-4, 'FP32 incremental oracle parity failed'
+          print('FP32 incremental decode worst KL against independent oracle',
+                report['fp32_decode_worst_kl'])
+          print('Sources: independently validated FP32 decode; CPU fused-hyper precision profile; natural V100')
+          print('No V100 state injection; each path carries its own complete sequential prefix.')
+
+          def read(root,pos,name):
+              path=root/f'pos{pos:04d}'/(name+'.bin')
+              if not path.is_file(): return None
+              raw=path.read_bytes()
+              assert len(raw)%4==0 and raw,(path,len(raw))
+              a=struct.unpack('<'+str(len(raw)//4)+'f',raw)
+              assert all(math.isfinite(x) for x in a),path
+              return a
+          def normed(x):
+              m=max(x)
+              z=m+math.log(math.fsum(math.exp(y-m) for y in x))
+              return (y-z for y in x)
+          def kl(x,y):
+              a=tuple(normed(x)); b=tuple(normed(y))
+              return math.fsum(math.exp(u)*(u-v) for u,v in zip(a,b))
+          def nrmse(x,y):
+              assert len(x)==len(y)
+              return math.sqrt(math.fsum((u-v)**2 for u,v in zip(x,y))/
+                               math.fsum(u*u for u in x))
+          def top(x):return max(range(len(x)),key=x.__getitem__)
+
+          sums=[0.,0.,0.]
+          top_agree=[0,0,0]
+          router=[0,0,0]
+          first_differing={}
+          print('position oracle_CPU_KL oracle_V100_KL CPU_V100_KL '
+                'oracle_CPU_top1 oracle_V100_top1 CPU_V100_top1 '
+                'oracle_CPU_router oracle_V100_router CPU_V100_router first_CPU_V100_router_layer')
+          for pos in range(14):
+              logits=[read(r,pos,'logits') for r in (fp32,profile,engine)]
+              assert all(v is not None for v in logits),(pos,'missing logits')
+              assert len({len(v) for v in logits})==1
+              pairs=((0,1),(0,2),(1,2))
+              kval=[kl(logits[i],logits[j]) for i,j in pairs]
+              agreement=[int(top(logits[i])==top(logits[j])) for i,j in pairs]
+              matching=[0,0,0]
+              different=[]
+              for layer in range(48):
+                  name=f'L{layer:02d}_moe_router_ids'
+                  ids=[read(r,pos,name) for r in (fp32,profile,engine)]
+                  assert all(v is not None and len(v)==10 for v in ids),(pos,layer)
+                  sets=list(map(set,ids))
+                  for k,(i,j) in enumerate(pairs): matching[k]+=sets[i]==sets[j]
+                  if sets[1]!=sets[2]: different.append(layer)
+              first_differing[pos]=different[0] if different else None
+              for k in range(3):
+                  sums[k]+=kval[k]
+                  top_agree[k]+=agreement[k]
+                  router[k]+=matching[k]
+              print(pos,*[f'{v:.9g}' for v in kval],*agreement,*matching,
+                    first_differing[pos] if different else 'none')
+          print('MEAN_KL oracle_CPU oracle_V100 CPU_V100',
+                *[f'{v/14:.10g}' for v in sums])
+          print('TOP1_AGREEMENT oracle_CPU oracle_V100 CPU_V100',*top_agree,'/14')
+          print('ROUTER_SET_AGREEMENT oracle_CPU oracle_V100 CPU_V100',*router,'/672')
+          print('FIRST_CPU_V100_ROUTER_MISMATCH_BY_POSITION',first_differing)
+
+          # Compare represented state at the earliest common boundary of each
+          # prefix; the three distances separate profile error from engine error.
+          print('position L00_attn_input_FP32_CPU L00_attn_input_FP32_V100 '
+                'L00_attn_input_CPU_V100 L00_mlp_input_FP32_CPU '
+                'L00_mlp_input_FP32_V100 L00_mlp_input_CPU_V100')
+          for pos in range(14):
+              values=[]
+              for name in ('L00_attn_block_input','L00_mlp_block_input'):
+                  a,b,c=[read(r,pos,name) for r in (fp32,profile,engine)]
+                  assert a is not None and b is not None and c is not None,(pos,name)
+                  values.extend((nrmse(a,b),nrmse(a,c),nrmse(b,c)))
+              print(pos,*[f'{v:.9g}' for v in values])
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phase11-three-way-complete-prefix-report
+          path: three-way-complete-prefix-report.txt
+          retention-days: 14
