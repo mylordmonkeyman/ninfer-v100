@@ -41,6 +41,13 @@ jobs:
           repository: ${{ github.repository }}
           github-token: ${{ github.token }}
           path: v100-detailed
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-mlp-layer0-calibration-14
+          run-id: 36064757282
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: v100-mlp
       - name: Compare the same fourteen full sequential prefixes
         run: |
           set -euo pipefail
@@ -139,13 +146,15 @@ jobs:
           detailed_fp32=Path('cpu-detailed/fp32')
           detailed_profile=Path('cpu-detailed/v100-phase11-storage')
           detailed_engine=Path('v100-detailed/candidate-stage')
+          mlp_engine=Path('v100-mlp/candidate-stage')
           print('DETAILED_CAPTURE_PARITY position CPU_logit_NRMSE V100_logit_NRMSE')
           for pos in range(14):
               old_cpu,new_cpu=read(profile,pos,'logits'),read(detailed_profile,pos,'logits')
               old_v100,new_v100=read(engine,pos,'logits'),read(detailed_engine,pos,'logits')
+              mlp_v100=read(mlp_engine,pos,'logits')
               assert all(x is not None for x in (old_cpu,new_cpu,old_v100,new_v100)),pos
               print(pos,f'{nrmse(old_cpu,new_cpu):.9g}',f'{nrmse(old_v100,new_v100):.9g}')
-              assert old_cpu==new_cpu and old_v100==new_v100,(
+              assert old_cpu==new_cpu and old_v100==new_v100==mlp_v100,(
                   pos,'detailed capture is not same natural prefix')
           print('LAYER_ZERO_THREE_WAY_STATE_NRMSE '
                 'position stage FP32_CPU FP32_V100 CPU_V100')
@@ -153,8 +162,10 @@ jobs:
               for stage in ('L00_attn_block_input','L00_attn_block_output',
                             'L00_hyper_after_attn','L00_mlp_block_input',
                             'L00_mlp_block_output','L00_hyper_after_mlp'):
+                  v100_stage_root=(mlp_engine if stage=='L00_mlp_block_output'
+                                   else detailed_engine)
                   a,b,c=[read(r,pos,stage) for r in
-                         (detailed_fp32,detailed_profile,detailed_engine)]
+                         (detailed_fp32,detailed_profile,v100_stage_root)]
                   if a is None or b is None or c is None:
                       print(pos,stage,'MISSING_SHARED_STAGE')
                       continue
