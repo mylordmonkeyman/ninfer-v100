@@ -40,6 +40,49 @@ candidate storage or routing rule that warrants changing the reference
 or engine. The 14-position diagnostic does not replace the frozen
 4,096-position qualification corpus.
 
+### Extended 128-prefix three-way result
+
+The [guarded CPU capture](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36321284374)
+passed independent incremental-FP32 parity over 128 complete sequential
+prefixes: worst logits KL against the frozen full-sequence oracle was
+5.22074e-10. Its V100 compilation stopped because a diagnostic export was
+initially placed in the test's earlier probe path. The export was moved
+into the natural decode loop, and the
+[V100 continuation and frozen three-way report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36323087769)
+reused the successful CPU capture. Its first 14 positions reproduce the
+earlier three-way mean KL values.
+
+| 128 complete prefixes | CPU precision profile | Natural V100 |
+| --- | ---: | ---: |
+| Mean logits KL against independent FP32 oracle | 0.01930779 | 0.01610404 |
+| Oracle top-1 agreement | 120 / 128 | 122 / 128 |
+| P99 logits KL, nearest-rank method | 0.19077774 | 0.23042733 |
+| Positions with lower KL than the other path | 46 / 128 | 82 / 128 |
+
+CPU-to-V100 mean logits KL is 0.01645019. V100 has the lower mean KL
+and better top-1 agreement on this longer sample, but the CPU profile
+has the lower P99. The comparison artifact originally also printed
+NumPy's linearly interpolated P99 (CPU 0.18394, V100 0.21050);
+the nearest-rank values above use the Phase 11 gate's convention.
+The natural V100 test reports mean KL 0.01610402, P99 KL 0.23042362,
+relative mean-NLL delta 0.01365744, and exits 8 under the unchanged
+short-sample CTest. The slight P99 difference between raw-logit
+recalculation and CTest is due to their metric arithmetic.
+
+The longer comparison supports the narrow statement that natural V100
+has lower *mean* oracle KL than this CPU precision-profile reference.
+It does not show uniformly lower error: V100's P99 is higher, and
+CPU/V100 distributions still differ. This is not the required
+4,096-position Phase 11 qualification, and it does not establish a
+precision-only explanation for the natural V100 error.
+
+An attempted
+[256-prefix CPU run](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36318837856)
+stopped at the existing independent-FP32 parity guard: worst KL
+0.00833672 at position 190 exceeded 1e-4. No V100 inference or
+three-way result was produced by that run. The 128-prefix comparison
+retains that guard unchanged.
+
 ## Phase 11 sequential storage-profile experiment
 
 `run_precision_reference.py` is a CPU-only supplementary diagnostic. It first
