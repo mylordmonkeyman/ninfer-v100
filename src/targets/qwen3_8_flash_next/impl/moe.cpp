@@ -8,6 +8,7 @@
 #include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -37,6 +38,7 @@ struct HostExpertTask {
     const std::uint16_t* input = nullptr;
     const float* input_fp32 = nullptr;
     float* output = nullptr;
+    float* intermediate_trace = nullptr;
 };
 
 unsigned resolve_host_expert_worker_count() {
@@ -192,6 +194,10 @@ class HostExpertWorkerPool {
                         std::span<const std::uint16_t>(task.input, kFlashNextExpertHidden),
                         std::span<float>(task.output, kFlashNextExpertHidden), scratch);
                 }
+                if (task.intermediate_trace != nullptr) {
+                    std::copy(scratch.intermediate.begin(),
+                              scratch.intermediate.end(), task.intermediate_trace);
+                }
             } catch (...) {
                 std::lock_guard<std::mutex> error_lock(error_mutex_);
                 if (!error_) { error_ = std::current_exception(); }
@@ -232,6 +238,7 @@ struct HostMoeCpuBuffers {
     std::vector<float> alpha;
     std::vector<float> routed_sum;
     std::vector<float> pair_outputs;
+    std::array<float, kFlashNextExpertIntermediate> intermediate_path5{};
     std::vector<HostExpertTask> tasks;
 };
 
@@ -465,6 +472,9 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     cpu.routed_sum.resize(
         static_cast<std::size_t>(tokens) * kFlashNextExpertHidden);
     cpu.pair_outputs.resize(routed_paths * kFlashNextExpertHidden);
+    const bool trace_intermediate_path5 =
+        emit && tokens == 1 &&
+        std::getenv("NINFER_PHASE11_TRACE_MOE_INTERMEDIATE_PATH5") != nullptr;
     cpu.tasks.resize(routed_paths);
     std::fill(cpu.routed_sum.begin(), cpu.routed_sum.end(), 0.0F);
 
@@ -505,11 +515,26 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                 .input_fp32 = token_input_fp32,
                 .output = cpu.pair_outputs.data() +
                           route_index * kFlashNextExpertHidden,
+                .intermediate_trace = trace_intermediate_path5 && path == 5
+                    ? cpu.intermediate_path5.data() : nullptr,
             };
         }
     }
 
     host_expert_worker_pool().run(cpu.tasks);
+
+    if (trace_intermediate_path5) {
+        // Trace the BF16-rounded activation for selected path five.
+        float* trace_device = nullptr;
+        constexpr std::size_t bytes = kFlashNextExpertIntermediate * sizeof(float);
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&trace_device), bytes));
+        CUDA_CHECK(cudaMemcpyAsync(trace_device, cpu.intermediate_path5.data(), bytes,
+                                   cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        Tensor trace(trace_device, DType::FP32, {kFlashNextExpertIntermediate, 1});
+        emit("moe_intermediate_path5", trace);
+        CUDA_CHECK(cudaFree(trace_device));
+    }
 
     if (emit && tokens == 1 &&
         std::getenv("NINFER_PHASE11_TRACE_MOE_PAIRS") != nullptr) {
