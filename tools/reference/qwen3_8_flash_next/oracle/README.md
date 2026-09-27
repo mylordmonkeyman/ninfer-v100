@@ -1249,6 +1249,26 @@ Neither this local injection nor the matched precision profile
 establishes that all residual routing differences are due to
 rounding. Natural V100 Phase 11 remains unqualified.
 
+The [frozen intermediate comparison](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36294451985)
+for selected expert 414 at position zero/layer zero finds only two
+different BF16 activations out of 640. Their NRMSE is 8.21214e-5;
+the 2,560-value unweighted pair output differs by 8.29239e-5 NRMSE.
+The [down-projection counterfactual](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36294614128)
+uses the independent source-weight decode to apply these two activation
+deltas: it explains 99.998675% of the pair-output difference energy,
+with residual NRMSE 3.01847e-7. The
+[frozen gate/up comparison](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36295374729)
+uses the controlled injected input and measures gate/up NRMSE
+8.32903e-7 over 1,280 values. At activation index 200, raw CPU
+and V100 results straddle the BF16 midpoint near -0.0280151367,
+producing adjacent BF16 words; index 572 also rounds to an adjacent
+word after a small up-projection difference. This accounts for the
+largest local expert-pair mismatch as a matrix arithmetic and BF16
+threshold effect. It neither establishes exact lossless weight
+decoding at every expert nor explains the full 14-position oracle
+failure. In particular, the controlled 14-position V100 run still
+fails §7, and the full 4,096-position qualification is outstanding.
+
 ## 1. Environment Setup
 
 Run the setup script using Python 3.14 to create the isolated virtual environment:

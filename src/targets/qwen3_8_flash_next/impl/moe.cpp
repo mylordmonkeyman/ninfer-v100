@@ -174,6 +174,7 @@ class HostExpertWorkerPool {
 
             try {
                 const HostExpertTask& task = tasks_[index];
+                scratch.capture_gate_up = task.gate_up_trace != nullptr;
                 if (task.input_fp32 != nullptr) {
                     flash_next_cpu_nvfp4_expert_pair_reference_fp32_input(
                         task.expert,

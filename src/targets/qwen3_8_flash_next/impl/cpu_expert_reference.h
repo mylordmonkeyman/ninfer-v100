@@ -15,6 +15,7 @@ struct CpuNvfp4ExpertReferenceScratch {
     std::array<float, kFlashNextExpertHidden> input{};
     std::array<float, kFlashNextExpertIntermediate> intermediate{};
     std::array<float, 2 * kFlashNextExpertIntermediate> gate_up{};
+    bool capture_gate_up = false;
 };
 
 // Correctness-first Phase-10 CPU path. Persistent weights remain in the canonical

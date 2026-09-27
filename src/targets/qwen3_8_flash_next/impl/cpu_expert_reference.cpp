@@ -120,8 +120,10 @@ void expert_pair_reference_compute(
         const float gate = matrix_row(expert.gate_up, row, input);
         const float up = matrix_row(
             expert.gate_up, row + static_cast<int>(kFlashNextExpertIntermediate), input);
-        scratch.gate_up[static_cast<std::size_t>(row)] = gate;
-        scratch.gate_up[kFlashNextExpertIntermediate + static_cast<std::size_t>(row)] = up;
+        if (scratch.capture_gate_up) {
+            scratch.gate_up[static_cast<std::size_t>(row)] = gate;
+            scratch.gate_up[kFlashNextExpertIntermediate + static_cast<std::size_t>(row)] = up;
+        }
         const float activation = gate / (1.0F + std::exp(-gate)) * up;
         scratch.intermediate[static_cast<std::size_t>(row)] =
             round_intermediate_to_bf16 ? round_to_bf16_rne(activation) : activation;
