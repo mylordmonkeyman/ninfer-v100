@@ -1,0 +1,100 @@
+name: Phase 11 V100 FP32 Expert Intermediate Ablation
+
+on:
+  push:
+    branches: [work/precision-matched-reference]
+    paths: [.github/workflows/precision-expert-fp32-intermediate-v100.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  ablation:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build V100 real-model test
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-precision-v100 -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-precision-v100 -j --target \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test
+      - name: Wait for model memory
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free \
+              --format=csv,noheader,nounits | tr -d '[:space:]')
+            if (( free_mib >= 28000 )); then exit 0; fi
+            if (( attempt < 30 )); then sleep 30; fi
+          done
+          exit 1
+      - name: Compare 14 full prefixes against the unchanged oracle gate
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "14"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
+        run: |
+          set -euo pipefail
+          for mode in baseline fp32_intermediate; do
+            if [[ "$mode" == fp32_intermediate ]]; then
+              export NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE=1
+            else
+              unset NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE
+            fi
+            set +e
+            ctest --test-dir build-precision-v100 -V \
+              -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+              > "$mode.log" 2>&1
+            status=$?
+            set -e
+            echo "$mode unchanged CTest exit $status"
+            grep -E 'phase11.(positions|top1_agreement|mean_kl|p99_kl|relative_mean_nll_delta)=' "$mode.log"
+            test "$(sed -n 's/.*phase11.positions=\([0-9]*\).*/\1/p' "$mode.log" | tail -1)" = 14
+          done
+          python3 - <<'PY' | tee summary.txt
+          from pathlib import Path
+          for mode in ('baseline','fp32_intermediate'):
+              lines=Path(mode+'.log').read_text().splitlines()
+              print(mode)
+              for key in ('phase11.positions=','phase11.top1_agreement=',
+                          'phase11.mean_kl=','phase11.p99_kl=',
+                          'phase11.relative_mean_nll_delta='):
+                  matches=[line.strip() for line in lines if key in line]
+                  print(matches[-1] if matches else key+' MISSING')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: phase11-expert-fp32-intermediate-ablation
+          path: |
+            baseline.log
+            fp32_intermediate.log
+            summary.txt
+          if-no-files-found: ignore
+          retention-days: 14
