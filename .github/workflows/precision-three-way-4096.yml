@@ -73,6 +73,13 @@ jobs:
           CUDA_VISIBLE_DEVICES: ""
         run: |
           set -euo pipefail
+          "$PRECISION_PYTHON" - <<'PY'
+          import inspect, sys
+          sys.path.insert(0, "tools/reference/qwen3_8_flash_next/oracle")
+          from run_precision_reference import run_decode
+          params = inspect.signature(run_decode).parameters
+          assert "logits_sink" in params and "retain_logits" in params
+          PY
           "$PRECISION_PYTHON" tests/targets/qwen3_8_flash_next/test_precision_profile.py
           "$PRECISION_PYTHON" tools/reference/qwen3_8_flash_next/oracle/run_full_prefix_profile.py \
             --model-dir "$PRECISION_MODEL_DIR" \
