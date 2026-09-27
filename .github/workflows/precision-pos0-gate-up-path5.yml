@@ -49,7 +49,7 @@ jobs:
         env:
           NINFER_WEIGHTS: /models/qwen3-8b-flash-next
           NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
-          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "1"
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "2"
           NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
           NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
           NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace14
