@@ -1439,6 +1439,33 @@ int main() {
                 return;
             }
             if (dump_candidate_trace &&
+                std::getenv("NINFER_PHASE11_TRACE_MOE_INTERMEDIATE_PATH5") != nullptr &&
+                name == "L00_moe_intermediate_path5") {
+                constexpr std::size_t count = 640;
+                if (tensor.dtype != ninfer::DType::FP32 || tensor.numel() != count) {
+                    throw std::runtime_error("Phase 11 MoE intermediate trace shape mismatch");
+                }
+                std::vector<float> values(count);
+                CUDA_CHECK(cudaMemcpy(values.data(), tensor.data,
+                                      count * sizeof(float), cudaMemcpyDeviceToHost));
+                const fs::path folder = candidate_root / pos_dir;
+                fs::create_directories(folder);
+                const fs::path filename = folder / "L00_moe_intermediate_path5.bin";
+                std::ofstream output_file(filename, std::ios::binary | std::ios::trunc);
+                output_file.write(reinterpret_cast<const char*>(values.data()),
+                                  static_cast<std::streamsize>(count * sizeof(float)));
+                if (!output_file) {
+                    throw std::runtime_error("failed to write MoE intermediate trace");
+                }
+                candidate_index << json{{"position", current_stage_trace_position},
+                                        {"name", name}, {"dtype", "FP32"},
+                                        {"count", count},
+                                        {"file", (fs::path(pos_dir) /
+                                                  "L00_moe_intermediate_path5.bin").string()}}
+                                << '\n' << std::flush;
+                return;
+            }
+            if (dump_candidate_trace &&
                 std::getenv("NINFER_PHASE11_TRACE_MOE_PAIRS") != nullptr &&
                 name == "L00_moe_pair_outputs") {
                 constexpr std::size_t count = 10 * 2'560;
