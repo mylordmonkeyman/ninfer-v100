@@ -107,7 +107,8 @@ def _stage_hooks(model, captured, trace_gdn_internals=False,
                  trace_moe_routing_layer0=False, trace_gdn_layer1=False,
                  trace_hyper_layer1=False, trace_moe_components_layer0=False,
                  trace_moe_pairs_layer0=False,
-                 trace_moe_intermediate_path5_layer0=False):
+                 trace_moe_intermediate_path5_layer0=False,
+               logits_sink=None, retain_logits=True):
     handles = []
 
     def capture(name, select=lambda output: output):
@@ -322,7 +323,10 @@ def run_decode(model, head, token_ids, profile, out_root,
                 if profile.logits_bf16:
                     logit = round_to_bf16(logit)
                 logit = logit.detach().cpu().numpy().astype("<f4", copy=False)
-                logits.append(logit)
+                if logits_sink is not None:
+                    logits_sink(position, logit)
+                if retain_logits:
+                    logits.append(logit)
                 if out_root is not None:
                     folder = out_root / f"pos{position:04d}"
                     folder.mkdir(parents=True, exist_ok=True)
