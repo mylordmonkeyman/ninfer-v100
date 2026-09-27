@@ -209,7 +209,8 @@ jobs:
                     int(d[:,3].sum()),int(d[:,4].sum()),int((d[:,1]<d[:,0]).sum()))
           for col,name in ((0,'CPU'),(1,'V100')):
               values=np.array([r[col] for r in data])
-              print(name,'P99_KL_nearest_rank',sorted(values)[int(np.ceil(.99*len(values)))-1],\n                    'max_KL',max(values))
+              print(name,'P99_KL_nearest_rank',sorted(values)[int(np.ceil(.99*len(values)))-1],
+                    'max_KL',max(values))
           path=Path('three-way-128-per-position.csv')
           with path.open('w') as f:
               f.write('position,oracle_cpu_kl,oracle_v100_kl,cpu_v100_kl,oracle_cpu_top1,oracle_v100_top1\n')
