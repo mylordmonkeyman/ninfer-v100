@@ -2,6 +2,44 @@
 
 This directory provides the authoritative CPU FP32 reference forward pass and state divergence analysis harness for Qwen3.8-Flash-Next.
 
+## Complete-prefix three-way comparison (September 27, 2026)
+
+The [frozen three-way report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36307116853)
+compares the independently validated FP32 oracle, the CPU fused-hyper
+precision-profile reference, and natural V100 execution on the same 14
+teacher-forced positions. Each path advances its own complete sequential
+prefix. The FP32 incremental decode agrees with the independent oracle at
+worst logits KL 2.98664e-11. Separate detailed captures were accepted only
+after their logits matched the original CPU and V100 captures exactly at
+every position.
+
+| Complete-prefix measurement | FP32 oracle vs CPU profile | FP32 oracle vs V100 | CPU profile vs V100 |
+| --- | ---: | ---: | ---: |
+| Mean logits KL (row to column direction) | 0.0623343 | 0.0577522 | 0.0124381 |
+| Top-1 agreement, 14 positions | 12 | 13 | 13 |
+| Matching router sets, 672 layer-position cells | 571 | 575 | 623 |
+
+The reverse V100-to-CPU mean logits KL is 0.0132244. CPU and V100
+attention block inputs at layer zero match exactly at all 14 positions.
+At position zero, their post-attention FP32 hyper states differ by
+4.815e-7 NRMSE, stored MLP inputs by 4.283e-5, stored MLP outputs by
+2.446e-4, and post-MLP states by 1.958e-4. At position 11, those
+distances are 2.665e-4, 1.420e-3, 1.552e-3, and 1.000e-3
+respectively. The first CPU/V100 router-set difference occurs at layer
+10 for position zero and at layer 2 for position 12. These are
+complete-prefix effects, including persistent state and routing feedback.
+
+Both the CPU precision profile and V100 miss the unchanged Phase 11
+acceptance gate, and their 0.0124381 mean logits KL and 49 different
+router sets show that the reference does not yet track V100 closely
+enough to label its oracle error a pure precision floor. The captured
+differences are consistent with small arithmetic differences being
+amplified at BF16 boundaries, but this three-way result does not prove
+that rounding explains every mismatch. It identifies no incorrect
+candidate storage or routing rule that warrants changing the reference
+or engine. The 14-position diagnostic does not replace the frozen
+4,096-position qualification corpus.
+
 ## Phase 11 sequential storage-profile experiment
 
 `run_precision_reference.py` is a CPU-only supplementary diagnostic. It first
