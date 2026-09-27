@@ -1,0 +1,94 @@
+name: Phase 11 Expert 414 Down Projection Counterfactual
+
+on:
+  push:
+    branches: [work/precision-matched-reference]
+    paths: [.github/workflows/precision-pos0-expert-down-counterfactual.yml]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-fused-hyper-moe-intermediate-pos0-14
+          run-id: 36291714488
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: cpu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-position0-matched-expert-intermediate-14
+          run-id: 36291715140
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: gpu
+      - name: Test whether two BF16 input differences explain the pair
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+          OMP_NUM_THREADS: "16"
+          MKL_NUM_THREADS: "16"
+        run: |
+          set -euo pipefail
+          python_bin="${NINFER_PHASE11_PYTHON:-$HOME/ninfer-v100/venv-oracle/bin/python}"
+          "$python_bin" - <<'PY' | tee down-counterfactual.txt
+          import math, sys
+          from pathlib import Path
+          from types import SimpleNamespace
+          import numpy as np
+          import torch
+
+          sys.path.insert(0, 'tools/reference/qwen3_8_flash_next/oracle')
+          from run_oracle import LazyExperts
+          cpu = Path('cpu/v100-phase11-storage/pos0000')
+          gpu = Path('gpu/matched/pos0000')
+          def read(root, name, count):
+              path = root / (name + '.bin')
+              raw = path.read_bytes()
+              assert len(raw) == 4 * count, (path, len(raw), count)
+              a = np.frombuffer(raw, dtype='<f4').copy()
+              assert np.isfinite(a).all(), path
+              return a
+          ids_cpu = read(cpu,'L00_moe_router_ids',10)
+          ids_gpu = read(gpu,'L00_moe_router_ids',10)
+          assert np.array_equal(ids_cpu,ids_gpu) and ids_cpu[5] == 414
+          a = read(cpu,'L00_moe_intermediate_path5',640)
+          b = read(gpu,'L00_moe_intermediate_path5',640)
+          p = read(cpu,'L00_moe_pair_outputs',25600)[5*2560:6*2560]
+          q = read(gpu,'L00_moe_pair_outputs',25600)[5*2560:6*2560]
+          import os
+          model_dir = os.environ.get('NINFER_PHASE11_MODEL_DIR','/srv/ninfer/source/mixed')
+          cfg=SimpleNamespace(num_experts=512,hidden_size=2560,
+                              moe_intermediate_size=640,hidden_act='silu')
+          expert=LazyExperts(cfg,0,model_dir)
+          _, down=expert.get_expert_weights(414)
+          w=down.double()
+          delta=(w @ torch.from_numpy((b.astype('f8')-a.astype('f8')))).numpy()
+          residual=q.astype('f8')-p.astype('f8')-delta
+          actual=q.astype('f8')-p.astype('f8')
+          def rms(x): return math.sqrt(np.mean(x*x))
+          print('activation_different',int(np.count_nonzero(a!=b)))
+          print('pair_delta_rms',rms(actual))
+          print('prediction_residual_rms',rms(residual))
+          print('fraction_delta_energy_explained',1-float(np.sum(residual*residual)/np.sum(actual*actual)))
+          print('pair_delta_nrmse',float(np.linalg.norm(actual)/np.linalg.norm(p)))
+          print('prediction_residual_nrmse',float(np.linalg.norm(residual)/np.linalg.norm(p)))
+          print('max_prediction_residual',float(np.max(np.abs(residual))))
+          for i in np.flatnonzero(a!=b):
+              print('activation',int(i),'cpu',float(a[i]),'gpu',float(b[i]),'delta',float(b[i]-a[i]))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: phase11-expert414-down-counterfactual
+          path: down-counterfactual.txt
+          if-no-files-found: ignore
+          retention-days: 14
