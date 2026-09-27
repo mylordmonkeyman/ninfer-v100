@@ -106,7 +106,8 @@ def _stage_hooks(model, captured, trace_gdn_internals=False,
                  trace_hyper_layer0=False, trace_mlp_layer0=False,
                  trace_moe_routing_layer0=False, trace_gdn_layer1=False,
                  trace_hyper_layer1=False, trace_moe_components_layer0=False,
-                 trace_moe_pairs_layer0=False):
+                 trace_moe_pairs_layer0=False,
+                 trace_moe_intermediate_path5_layer0=False):
     handles = []
 
     def capture(name, select=lambda output: output):
@@ -188,6 +189,14 @@ def _stage_hooks(model, captured, trace_gdn_internals=False,
         handles.append(layer.mlp.gate.register_forward_hook(
             capture(prefix + "moe_router_scores", lambda output: output[0])
         ))
+        if index == 0 and trace_moe_intermediate_path5_layer0:
+            layer.mlp.experts.trace_intermediate_path5 = True
+            def capture_intermediate_path5(module, _args, _output, stem=prefix):
+                value = module.last_intermediate_path5
+                if value is None or tuple(value.shape) != (640,):
+                    raise ValueError('missing path-five expert intermediate')
+                captured[stem + 'moe_intermediate_path5'] = value.clone()
+            handles.append(layer.mlp.experts.register_forward_hook(capture_intermediate_path5))
         if index == 0 and trace_moe_pairs_layer0:
             layer.mlp.experts.trace_pair_outputs = True
             def capture_pair_outputs(module, _args, _output, stem=prefix):
@@ -222,7 +231,8 @@ def run_decode(model, head, token_ids, profile, out_root,
                trace_mlp_raw_layer1=False, forced_router_ids=None,
                mlp_block_input_fp32=False, mlp_block_input_fp32_layers=(),
                fused_hyper_updates=False, trace_moe_components_layer0=False,
-               trace_moe_pairs_layer0=False):
+               trace_moe_pairs_layer0=False,
+               trace_moe_intermediate_path5_layer0=False):
     # One token per forward, with one cache for the entire prefix.  Rounding a
     # cache tensor after the update changes all later positions, unlike
     # independently rounding tensors from the completed FP32 oracle.
@@ -249,7 +259,8 @@ def run_decode(model, head, token_ids, profile, out_root,
                                 trace_hyper_layer0, trace_mlp_layer0,
                                 trace_moe_routing_layer0, trace_gdn_layer1,
                                 trace_hyper_layer1, trace_moe_components_layer0,
-                                trace_moe_pairs_layer0))
+                                trace_moe_pairs_layer0,
+                                trace_moe_intermediate_path5_layer0))
     cache = None
     logits = []
     conv_projection_history = {}
@@ -368,6 +379,8 @@ def main():
                         help="capture layer-zero shared activation and routed FP32 sum")
     parser.add_argument("--trace-moe-pairs-layer0", action="store_true",
                         help="capture ten FP32 expert outputs in selected path order")
+    parser.add_argument("--trace-moe-intermediate-path5-layer0", action="store_true",
+                        help="capture BF16 gate/up expert activation on selected path five")
     parser.add_argument("--trace-gdn-layer1", action="store_true",
                         help="collect layer-one GDN output before hyper injection")
     parser.add_argument("--trace-hyper-layer1", action="store_true",
@@ -400,6 +413,7 @@ def main():
                       trace_moe_routing_layer0=args.trace_moe_routing_layer0,
                       trace_moe_components_layer0=args.trace_moe_components_layer0,
                       trace_moe_pairs_layer0=args.trace_moe_pairs_layer0,
+                      trace_moe_intermediate_path5_layer0=args.trace_moe_intermediate_path5_layer0,
                       trace_gdn_layer1=args.trace_gdn_layer1,
                       trace_hyper_layer1=args.trace_hyper_layer1,
                       trace_mlp_raw_layer1=args.trace_mlp_raw_layer1)
@@ -426,6 +440,7 @@ def main():
                          trace_moe_routing_layer0=args.trace_moe_routing_layer0,
                          trace_moe_components_layer0=args.trace_moe_components_layer0,
                          trace_moe_pairs_layer0=args.trace_moe_pairs_layer0,
+                         trace_moe_intermediate_path5_layer0=args.trace_moe_intermediate_path5_layer0,
                          trace_gdn_layer1=args.trace_gdn_layer1,
                          trace_hyper_layer1=args.trace_hyper_layer1,
                          trace_mlp_raw_layer1=args.trace_mlp_raw_layer1,
