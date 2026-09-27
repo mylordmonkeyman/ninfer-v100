@@ -363,6 +363,8 @@ def main():
     parser.add_argument("--ids-file", type=Path, required=True)
     parser.add_argument("--fp32-oracle", type=Path, required=True)
     parser.add_argument("--positions", type=int, default=14)
+    parser.add_argument("--logits-only", action="store_true",
+                        help="save compact full-prefix logits without stage dumps")
     parser.add_argument("--max-fp32-kl", type=float, default=1e-4)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--v100-trace", type=Path,
@@ -406,7 +408,8 @@ def main():
     model.eval()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    fp32 = run_decode(model, head, token_ids, PROFILES["fp32"], args.out_dir / "fp32",
+    fp32 = run_decode(model, head, token_ids, PROFILES["fp32"],
+                      None if args.logits_only else args.out_dir / "fp32",
                       trace_gdn_internals=args.trace_gdn_internals,
                       trace_hyper_layer0=args.trace_hyper_layer0,
                       trace_mlp_layer0=args.trace_mlp_layer0,
@@ -433,7 +436,7 @@ def main():
     if args.fused_routed_layer0:
         model.layers[0].mlp.experts.route_order_fma = True
     matched = run_decode(model, head, token_ids, PROFILES["v100-phase11-storage"],
-                         args.out_dir / "v100-phase11-storage",
+                         None if args.logits_only else args.out_dir / "v100-phase11-storage",
                          trace_gdn_internals=args.trace_gdn_internals,
                          trace_hyper_layer0=args.trace_hyper_layer0,
                          trace_mlp_layer0=args.trace_mlp_layer0,
@@ -461,11 +464,22 @@ def main():
                         "PLE and QSA internal materializations not fully represented",
                         "V100 stage parity still required"],
     }
-    report["stage_comparison"] = compare_stages(
-        args.fp32_oracle, args.out_dir / "v100-phase11-storage",
-        args.out_dir / "comparison", args.v100_trace,
-        incremental_fp32_root=args.out_dir / "fp32"
-    )
+    if args.logits_only:
+        if args.v100_trace or args.replay_router_ids or args.ablate_mlp_block_input_bf16 or args.ablate_mlp_layer1_input_bf16:
+            parser.error("--logits-only does not support stage or ablation options")
+        for label, logits_list in (("fp32-logits", fp32), ("cpu-logits", matched)):
+            folder = args.out_dir / label
+            folder.mkdir(parents=True, exist_ok=True)
+            for position, values in enumerate(logits_list):
+                np.asarray(values, dtype="<f4").tofile(folder / f"pos{position:04d}.bin")
+        report["token_ids"] = token_ids
+        report["meaning"] = "each path carries its own complete sequential prefix"
+    else:
+        report["stage_comparison"] = compare_stages(
+            args.fp32_oracle, args.out_dir / "v100-phase11-storage",
+            args.out_dir / "comparison", args.v100_trace,
+            incremental_fp32_root=args.out_dir / "fp32"
+        )
     if args.v100_trace is not None:
         candidate = candidate_entries(args.v100_trace)
         candidate_logits = []
