@@ -1,0 +1,647 @@
+name: Phase 11 Matched Precision Reference
+
+on:
+  push:
+    branches:
+      - forwardport/v100-flash-next-omp
+    paths:
+      - .github/workflows/precision-matched-reference.yml
+      - tools/reference/qwen3_8_flash_next/oracle/run_precision_reference.py
+      - tools/reference/qwen3_8_flash_next/oracle/precision_profile.py
+      - tools/reference/qwen3_8_flash_next/oracle/precision_metrics.py
+      - tools/reference/qwen3_8_flash_next/oracle/compare_precision_traces.py
+      - tools/reference/qwen3_8_flash_next/oracle/analyze_expert_pairs.py
+      - src/targets/qwen3_8_flash_next/impl/gdn.cpp
+      - src/targets/qwen3_8_flash_next/impl/moe.cpp
+      - src/targets/qwen3_8_flash_next/impl/text_decode.cpp
+      - tests/targets/qwen3_8_flash_next/test_vertical_slice_real.cpp
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: phase11-matched-precision-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  cpu-reference:
+    name: CPU Matched Storage Profile
+    if: ${{ github.actor == github.repository_owner }}
+    environment: "Oh my pi"
+    runs-on:
+      - self-hosted
+      - v100
+      - sm70
+      - cuda-12-8
+      - ninfer-phase11
+    timeout-minutes: 300
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Resolve Python with the reference stack
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          for candidate in /srv/ninfer/venv-oracle "$HOME/venv-oracle" /opt/ninfer/venv-oracle; do
+            if [ -x "$candidate/bin/python3" ] && \
+               "$candidate/bin/python3" -c "import torch, transformers, numpy, safetensors" >/dev/null 2>&1; then
+              echo "PRECISION_PY=$candidate/bin/python3" >> "$GITHUB_ENV"
+              echo "Using existing reference venv: $candidate"
+              exit 0
+            fi
+          done
+
+          echo "No existing reference venv; creating a CPU-only one"
+          python3 -m venv "$GITHUB_WORKSPACE/venv-precision"
+          "$GITHUB_WORKSPACE/venv-precision/bin/pip" install --upgrade pip
+          "$GITHUB_WORKSPACE/venv-precision/bin/pip" install numpy
+          "$GITHUB_WORKSPACE/venv-precision/bin/pip" install torch \
+            --index-url https://download.pytorch.org/whl/cpu
+          "$GITHUB_WORKSPACE/venv-precision/bin/pip" install transformers safetensors
+          "$GITHUB_WORKSPACE/venv-precision/bin/python3" \
+            -c "import torch, transformers, numpy, safetensors"
+          echo "PRECISION_PY=$GITHUB_WORKSPACE/venv-precision/bin/python3" >> "$GITHUB_ENV"
+
+      - name: Run reference stack unit tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          "$PRECISION_PY" -m unittest discover \
+            -s tests/targets/qwen3_8_flash_next \
+            -p 'test_precision_*.py' \
+            -v
+
+      - name: Verify mounted model and oracle assets
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          test -r /srv/ninfer/source/mixed
+          test -r /srv/ninfer/source/ple/ples_int4
+          test -r /oracle/phase11/token_ids.json
+          test -r /oracle/phase11-stage-trace14/manifest.json
+          test -r /oracle/phase11-stage-trace14/pos0013/logits.bin
+
+      - name: Run the matched storage profile
+        shell: bash
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+          OMP_NUM_THREADS: "16"
+          MKL_NUM_THREADS: "16"
+          OPENBLAS_NUM_THREADS: "16"
+          NUMEXPR_NUM_THREADS: "16"
+        run: |
+          set -euxo pipefail
+
+          "$PRECISION_PY" tools/reference/qwen3_8_flash_next/oracle/run_precision_reference.py \
+            --model-dir /srv/ninfer/source/mixed \
+            --ple-dir /srv/ninfer/source/ple/ples_int4 \
+            --ids-file /oracle/phase11/token_ids.json \
+            --fp32-oracle /oracle/phase11-stage-trace14 \
+            --positions 14 \
+            --max-fp32-kl 1e-4 \
+            --out-dir "$GITHUB_WORKSPACE/precision-cpu" \
+            --trace-mlp-layer0 \
+            --trace-gdn-internals \
+            --trace-hyper-layer0 \
+            --trace-hyper-layer1 \
+            --trace-mlp-raw-layer1 \
+            --trace-moe-routing-layer0 \
+            --trace-moe-components-layer0 \
+            --trace-moe-pairs-layer0 \
+            --fused-routed-layer0 \
+            --fused-hyper-updates
+
+      - name: Validate the reference report
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          "$PRECISION_PY" - "$GITHUB_WORKSPACE/precision-cpu/precision_report.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          report = json.loads(Path(sys.argv[1]).read_text())
+          if report.get("positions") != 14:
+              raise SystemExit(f"expected 14 profiled positions, got {report.get('positions')}")
+          worst_kl = float(report["fp32_decode_worst_kl"])
+          if worst_kl > 1e-4:
+              raise SystemExit(f"incremental FP32 decode drifts from the oracle: worst KL {worst_kl:.6g}")
+          stage_rows = int(report["stage_comparison"]["stage_rows"])
+          if stage_rows < 2000:
+              raise SystemExit(f"stage comparison is unexpectedly sparse: {stage_rows} rows")
+          worst_stage = report["stage_comparison"]["worst_cpu_stage"]
+          print(
+              "CPU storage profile: "
+              f"positions=14 fp32_worst_kl={worst_kl:.6g} "
+              f"stage_rows={stage_rows} "
+              f"worst_cpu_stage={worst_stage['stage']} "
+              f"(pos {worst_stage['position']}, {worst_stage['reference_source']}) "
+              f"nrmse={worst_stage['cpu_vs_oracle_nrmse']:.6g} "
+              f"router_flips_cpu={report['stage_comparison']['router_set_flips_cpu']}"
+          )
+          PY
+
+      - name: Upload CPU reference artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cpu-matched-reference-14
+          path: ${{ github.workspace }}/precision-cpu/
+          if-no-files-found: warn
+          retention-days: 14
+
+  v100-trace:
+    name: V100 Candidate and Matched Traces
+    if: ${{ github.actor == github.repository_owner }}
+    needs: cpu-reference
+    environment: "Oh my pi"
+    runs-on:
+      - self-hosted
+      - v100
+      - sm70
+      - cuda-12-8
+      - ninfer-phase11
+    timeout-minutes: 480
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify V100 environment
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          git rev-parse HEAD
+          nvidia-smi
+          nvcc --version
+          cmake --version
+          ninja --version
+          test -r /models/qwen3-8b-flash-next
+          test -r /oracle/phase11/manifest.json
+          test -r /oracle/phase11-stage-trace14/manifest.json
+          test -r /oracle/phase11-stage-trace14/pos0013/logits.bin
+
+      - name: Reserve the GPU from llama-swap
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # This runner shares the V100 with the agent's own inference model,
+          # which llama-swap (127.0.0.1:9292) keeps loaded (~30 GiB). Unload it
+          # and wait for the GPU here: the agent typically goes idle between
+          # sessions, so the run waits in place (up to 90 minutes, re-issuing
+          # the unload every 60 s) instead of failing and burning the run.
+          swap_base=http://127.0.0.1:9292
+          agent_model=qwen3.8-27b-omp
+
+          unload() {
+            code=$(curl -s -m 10 -X POST -o /tmp/unload-response.json -w '%{http_code}' \
+              "$swap_base/api/models/unload/$agent_model" || true)
+            echo "unload $agent_model -> HTTP $code: $(head -c 200 /tmp/unload-response.json 2>/dev/null)"
+          }
+          unload
+          case "$code" in
+            200|204|404) ;;
+            000) echo "WARNING: llama-swap (127.0.0.1:9292) is not reachable from the runner (separate network namespace)."
+                 echo "The agent side must have pre-unloaded the model; the nvidia-smi poll below is the real gate." ;;
+            *) echo "WARNING: llama-swap unload request failed (HTTP $code); the nvidia-smi poll below is the real gate." ;;
+          esac
+
+          required_free_mib=20480
+          deadline=$(( $(date +%s) + 5400 ))
+          last_unload=0
+          while :; do
+            free_mib=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -n1 | tr -d '[:space:]')
+            echo "GPU free memory: ${free_mib} MiB (need at least ${required_free_mib} MiB)"
+            if [ "$free_mib" -ge "$required_free_mib" ]; then
+              echo "GPU is available; proceeding"
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "ERROR: GPU free memory stayed below ${required_free_mib} MiB for 90 minutes after unloading the agent model." >&2
+              echo "The V100 is contended (the agent model is loaded or the agent is actively in use). Keep the agent on this V100 idle and re-run this workflow." >&2
+              exit 1
+            fi
+            now=$(date +%s)
+            if [ $(( now - last_unload )) -ge 60 ]; then
+              last_unload=$now
+              unload
+            fi
+            sleep 15
+          done
+
+      - name: Configure CUDA 12.8 SM70
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cmake \
+            -S . \
+            -B build-v100 \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF \
+            -DBUILD_TESTING=ON
+
+      - name: Build the vertical slice test
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cmake --build build-v100 \
+            --target ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            -j "$(nproc)"
+
+      - name: Download the CPU reference artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-matched-reference-14
+          path: precision-cpu
+
+      - name: Resolve numpy for the comparator
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          if python3 -c "import numpy" >/dev/null 2>&1; then
+            echo "NUMPY_PY=python3" >> "$GITHUB_ENV"
+          else
+            python3 -m venv "$GITHUB_WORKSPACE/venv-numpy"
+            "$GITHUB_WORKSPACE/venv-numpy/bin/pip" install numpy
+            echo "NUMPY_PY=$GITHUB_WORKSPACE/venv-numpy/bin/python3" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run the natural candidate trace
+        shell: bash
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "14"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace14
+          NINFER_PHASE11_STAGE_ORACLE_POSITION: "13"
+          NINFER_PHASE11_STAGE_ORACLE_ALL_POSITIONS: "1"
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_PHASE11_CANDIDATE_TRACE_ROOT: ${{ github.workspace }}/precision-candidate/candidate-stage
+          NINFER_PHASE11_TRACE_HYPER_LAYER0: "1"
+          NINFER_PHASE11_TRACE_MLP_LAYER0: "1"
+          NINFER_PHASE11_TRACE_MOE_ROUTING_LAYER0: "1"
+          NINFER_PHASE11_TRACE_MOE_COMPONENTS: "1"
+          NINFER_PHASE11_TRACE_MOE_PAIRS: "1"
+          NINFER_PHASE11_TRACE_GDN_LAYER0: "1"
+          NINFER_PHASE11_TRACE_GDN_LAYER1: "1"
+          NINFER_PHASE11_TRACE_HYPER_LAYER1: "1"
+          NINFER_PHASE11_TRACE_MLP_RAW_LAYER1: "1"
+          NINFER_PHASE11_TRACE_ATTENTION_PREPARE_RAW: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
+        run: |
+          set -euxo pipefail
+
+          result_dir="${GITHUB_WORKSPACE}/.precision-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$result_dir"
+          ctest --test-dir build-v100 -V \
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+            2>&1 | tee "$result_dir/natural-candidate.log" || true
+
+          python3 - "$result_dir" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          result_dir = Path(sys.argv[1])
+          log = (result_dir / "natural-candidate.log").read_text()
+          if "phase11.top1_agreement=" not in log:
+              tail = " | ".join(l.strip() for l in log.splitlines() if l.strip())[-2500:]
+              raise SystemExit("natural candidate trace did not reach the summary; tail: " + tail)
+          index = result_dir.parent / "precision-candidate" / "candidate-stage" / "stages.jsonl"
+          if not index.is_file():
+              raise SystemExit("candidate stage index is missing: " + str(index))
+          entries = {}
+          for line in index.read_text().splitlines():
+              record = json.loads(line)
+              entries[(record["position"], record["name"])] = record
+          required = (
+              "logits", "final_hidden", "embedding", "ple_injection", "hyper_after_ple",
+              "L00_hyper_before_attn", "L00_attn_injection", "L00_mlp_injection",
+              "L00_hyper_after_attn", "L00_mlp_block_input_fp32", "L00_mlp_block_input",
+              "L00_mlp_block_output", "L00_moe_router_ids", "L00_moe_router_alpha",
+              "L00_moe_router_scores", "L00_moe_shared_activation", "L00_moe_routed_sum",
+              "L00_moe_pair_outputs", "L00_hyper_after_mlp",
+              "L01_hyper_after_attn", "L01_attn_block_input_fp32",
+              "L24_attn_block_input", "L24_attn_block_output",
+              "L24_gdn_projected", "L24_gdn_recurrent_output", "L47_hyper_after_mlp",
+          )
+          missing = []
+          for position in (0, 13):
+              for name in required:
+                  if (position, name) not in entries:
+                      missing.append(f"pos{position:04d}/{name}")
+          if missing:
+              raise SystemExit(
+                  f"candidate trace is missing {len(missing)} required stages; "
+                  f"first: {missing[:8]}")
+          print(f"natural candidate trace: {len(entries)} stage entries; all required stages present")
+          PY
+
+      - name: Run the matched-input candidate trace
+        shell: bash
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: "14"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_PHASE11_STAGE_ORACLE_ROOT: /oracle/phase11-stage-trace14
+          NINFER_PHASE11_STAGE_ORACLE_POSITION: "13"
+          NINFER_PHASE11_STAGE_ORACLE_ALL_POSITIONS: "1"
+          NINFER_PHASE11_ORACLE_INJECT_ALL_POSITIONS: "1"
+          NINFER_PHASE11_ORACLE_INJECT_STAGE: L00_mlp_block_input
+          NINFER_PHASE11_INJECT_SOURCE_ROOT: ${{ github.workspace }}/precision-cpu/v100-phase11-storage
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_PHASE11_CANDIDATE_TRACE_ROOT: ${{ github.workspace }}/precision-candidate/matched-stage
+          NINFER_PHASE11_TRACE_HYPER_LAYER0: "1"
+          NINFER_PHASE11_TRACE_MLP_LAYER0: "1"
+          NINFER_PHASE11_TRACE_MOE_ROUTING_LAYER0: "1"
+          NINFER_PHASE11_TRACE_MOE_COMPONENTS: "1"
+          NINFER_PHASE11_TRACE_MOE_PAIRS: "1"
+          NINFER_PHASE11_TRACE_GDN_LAYER0: "1"
+          NINFER_PHASE11_TRACE_GDN_LAYER1: "1"
+          NINFER_PHASE11_TRACE_HYPER_LAYER1: "1"
+          NINFER_PHASE11_TRACE_MLP_RAW_LAYER1: "1"
+          NINFER_PHASE11_TRACE_ATTENTION_PREPARE_RAW: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
+        run: |
+          set -euxo pipefail
+
+          test -r "$NINFER_PHASE11_INJECT_SOURCE_ROOT/pos0000/L00_mlp_block_input.bin"
+          test -r "$NINFER_PHASE11_INJECT_SOURCE_ROOT/pos0013/L00_mlp_block_input.bin"
+
+          result_dir="${GITHUB_WORKSPACE}/.precision-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$result_dir"
+          ctest --test-dir build-v100 -V \
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+            2>&1 | tee "$result_dir/matched-candidate.log" || true
+
+          python3 - "$result_dir" <<'PY'
+          import sys
+          from pathlib import Path
+
+          result_dir = Path(sys.argv[1])
+          log = (result_dir / "matched-candidate.log").read_text()
+          injected = [
+              line for line in log.splitlines()
+              if "phase11.oracle_injection.position=" in line
+              and "stage=L00_mlp_block_input " in line
+              and "source=independent-cpu" in line
+          ]
+          positions = {
+              int(line.split("phase11.oracle_injection.position=", 1)[1].split()[0])
+              for line in injected
+          }
+          if positions != set(range(14)) or len(injected) != 14:
+              tail = " | ".join(l.strip() for l in log.splitlines() if l.strip())[-2500:]
+              raise SystemExit(
+                  f"expected 14 verified matched-input injections, got {sorted(positions)}; tail: {tail}")
+          if "phase11.top1_agreement=" not in log:
+              raise SystemExit("matched candidate trace did not reach the summary")
+          index = result_dir.parent / "precision-candidate" / "matched-stage" / "stages.jsonl"
+          if not index.is_file():
+              raise SystemExit("matched stage index is missing: " + str(index))
+          count = len(index.read_text().splitlines())
+          print(f"matched candidate trace: {count} stage entries; 14 verified injections")
+          PY
+
+      - name: Run the three-way stage comparator
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          result_dir="${GITHUB_WORKSPACE}/.precision-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$result_dir"
+          "$NUMPY_PY" tools/reference/qwen3_8_flash_next/oracle/compare_precision_traces.py \
+            --oracle /oracle/phase11-stage-trace14 \
+            --cpu "$GITHUB_WORKSPACE/precision-cpu/v100-phase11-storage" \
+            --v100 "$GITHUB_WORKSPACE/precision-candidate/candidate-stage" \
+            --incremental-fp32 "$GITHUB_WORKSPACE/precision-cpu/fp32" \
+            --out-dir "$GITHUB_WORKSPACE/precision-candidate/v100-comparison" \
+            | tee "$result_dir/stage-comparison-summary.json"
+
+          "$NUMPY_PY" - "$GITHUB_WORKSPACE/precision-candidate/v100-comparison/stage_comparison.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          report = json.loads(Path(sys.argv[1]).read_text())
+          if report.get("has_v100") is not True:
+              raise SystemExit("comparator did not consume the V100 trace")
+          if report.get("positions") != 14:
+              raise SystemExit(f"comparator covered {report.get('positions')} positions, expected 14")
+          print(
+              "three-way stage comparison: "
+              f"rows={report['stage_rows']} "
+              f"router_flips_cpu={report['router_set_flips_cpu']} "
+              f"router_flips_v100={report['router_set_flips_v100']}"
+          )
+          PY
+
+      - name: Capture final GPU state
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          result_dir="${GITHUB_WORKSPACE}/.precision-results/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$result_dir"
+          nvidia-smi | tee "$result_dir/nvidia-smi.txt"
+          git rev-parse HEAD | tee "$result_dir/commit.txt"
+
+      - name: Upload V100 trace artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: v100-precision-trace-14
+          path: ${{ github.workspace }}/precision-candidate/
+          if-no-files-found: warn
+          retention-days: 14
+
+  report:
+    name: Matched Precision Report
+    needs: [cpu-reference, v100-trace]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Download the CPU reference artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-matched-reference-14
+          path: precision-cpu
+
+      - name: Download the V100 trace artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v100-precision-trace-14
+          path: precision-candidate
+
+      - name: Prepare report Python
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          python3 -m venv report-venv
+          ./report-venv/bin/pip install --upgrade pip
+          ./report-venv/bin/pip install numpy
+          echo "REPORT_PY=$GITHUB_WORKSPACE/report-venv/bin/python3" >> "$GITHUB_ENV"
+
+      - name: Decompose the layer-zero MoE boundary
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p precision-report
+          "$REPORT_PY" tools/reference/qwen3_8_flash_next/oracle/analyze_expert_pairs.py \
+            --cpu-root precision-cpu/v100-phase11-storage \
+            --v100-root precision-candidate/candidate-stage \
+            --matched-root precision-candidate/matched-stage \
+            --positions 14 \
+            --out precision-report/expert-pairs-report.txt
+
+      - name: Build the per-boundary verdict table
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p precision-report
+          "$REPORT_PY" - precision-report/verdict-table.txt <<'PY'
+          import csv
+          import json
+          import math
+          from collections import defaultdict
+          from pathlib import Path
+
+          csv_path = Path("precision-candidate/v100-comparison/stage_comparison.csv")
+          json_path = Path("precision-candidate/v100-comparison/stage_comparison.json")
+          summary = json.loads(json_path.read_text())
+
+          # Aggregate per stage name over all 14 positions.
+          stages = defaultdict(lambda: {"rows": 0, "cpu": [], "v100_oracle": [],
+                                        "v100_cpu": [], "sources": set()})
+          with csv_path.open(newline="") as handle:
+              for row in csv.DictReader(handle):
+                  bucket = stages[row["stage"]]
+                  bucket["rows"] += 1
+                  bucket["sources"].add(row["reference_source"])
+                  for column, key in (("cpu_vs_oracle_nrmse", "cpu"),
+                                      ("v100_vs_oracle_nrmse", "v100_oracle"),
+                                      ("v100_vs_cpu_nrmse", "v100_cpu")):
+                      value = row[column]
+                      if value not in ("", None):
+                          bucket[key].append(float(value))
+
+          lines = [
+              "Phase 11 matched precision reference: per-boundary verdict table",
+              f"positions=14 stage_rows={summary['stage_rows']} "
+              f"router_flips_cpu={summary['router_set_flips_cpu']} "
+              f"router_flips_v100={summary['router_set_flips_v100']}",
+              "worst CPU stage: "
+              f"{summary['worst_cpu_stage']['stage']} "
+              f"nrmse={summary['worst_cpu_stage']['cpu_vs_oracle_nrmse']:.6g} "
+              f"({summary['worst_cpu_stage']['reference_source']})",
+              "",
+              f"{'stage':44s} {'n':>4s} {'cpu_vs_oracle':>22s} {'v100_vs_oracle':>22s} {'v100_vs_cpu':>22s}  verdict",
+          ]
+
+          def fmt(values):
+              if not values:
+                  return " ".ljust(22)
+              return f"max={max(values):.4g} mean={math.fsum(values) / len(values):.4g}"
+
+          flagged = []
+          for name in sorted(stages):
+              bucket = stages[name]
+              cpu = fmt(bucket["cpu"])
+              v100_oracle = fmt(bucket["v100_oracle"])
+              v100_cpu = fmt(bucket["v100_cpu"])
+              # Informational flag: a BF16 storage boundary rounds each element
+              # to 8 mantissa bits, a random-walk floor near 2^-8/sqrt(3).
+              verdict = ""
+              if bucket["v100_cpu"]:
+                  if max(bucket["v100_cpu"]) <= 5e-3:
+                      verdict = "within BF16 rounding floor"
+                  else:
+                      verdict = "ABOVE FLOOR - inspect"
+                      flagged.append(name)
+              elif bucket["cpu"]:
+                  verdict = "cpu-only reference"
+              lines.append(f"{name:44s} {bucket['rows']:4d} {cpu} {v100_oracle} {v100_cpu}  {verdict}")
+
+          lines.append("")
+          if flagged:
+              lines.append("stages above the BF16 rounding floor on v100-vs-cpu:")
+              for name in flagged:
+                  lines.append(f"  {name}")
+          else:
+              lines.append("no stage exceeds the BF16 rounding floor on v100-vs-cpu")
+
+          output = Path("precision-report/verdict-table.txt")
+          output.write_text("\n".join(lines) + "\n")
+          print("\n".join(lines))
+          PY
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: phase11-matched-precision-report
+          path: precision-report/
+          if-no-files-found: warn
+          retention-days: 14
