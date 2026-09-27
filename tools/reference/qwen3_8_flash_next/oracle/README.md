@@ -29,8 +29,8 @@ respectively. The first CPU/V100 router-set difference occurs at layer
 10 for position zero and at layer 2 for position 12. These are
 complete-prefix effects, including persistent state and routing feedback.
 
-Both the CPU precision profile and V100 miss the unchanged Phase 11
-acceptance gate, and their 0.0124381 mean logits KL and 49 different
+Both the CPU precision profile and V100 miss the short-sample oracle
+thresholds, and their 0.0124381 mean logits KL and 49 different
 router sets show that the reference does not yet track V100 closely
 enough to label its oracle error a pure precision floor. The captured
 differences are consistent with small arithmetic differences being
