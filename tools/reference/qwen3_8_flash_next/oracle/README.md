@@ -1226,11 +1226,24 @@ calculation, rather than reduction order or measured alpha
 difference, dominates the local sum mismatch. The matched
 post-attention replay still leaves one stored MLP-input word
 different (2.38419e-7 absolute), so this comparison does not
-yet establish identical expert inputs. The next controlled step
-is to trace pairs with that stored input matched too, followed by
-a targeted check of gate/up, BF16 expert activation, weight
-dequantization and FP32 matrix accumulation for the largest
-differing pair. No arithmetic change is justified yet.
+yet establish identical expert inputs. The [exact-input V100 replay](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36291174026)
+also injects the CPU's stored layer-zero MLP input after the
+matched post-attention state, with a verified 2,560-value readback.
+Its [frozen three-way report](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36291545930)
+shows **zero changed V100 expert-pair values (25,600/25,600)
+and zero changed routed-sum values (2,560/2,560)** relative to the
+earlier matched-state V100 run. The one pre-injection stored input
+word cannot account for the measured pair-output differences in
+this replay. On this run the card reported only 1,437 MiB free for
+seven precheck attempts, then 32,495 MiB and ran successfully;
+this was a transient occupancy observation before the test loaded
+the model. Its unchanged CTest exits 8 (14-position mean oracle KL
+0.09252330, top-1 12/14). The next isolation is the gate/up
+matrix outputs and 640 BF16 expert intermediates for the largest
+differing pair (expert 414), followed by its down matrix:
+weight dequantization, FP32 accumulation order and BF16 threshold
+crossings remain unseparated. No engine arithmetic change is
+justified yet.
 
 Neither this local injection nor the matched precision profile
 establishes that all residual routing differences are due to
