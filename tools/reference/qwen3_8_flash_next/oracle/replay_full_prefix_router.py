@@ -72,9 +72,11 @@ def main():
     for layer, block in enumerate(model.layers):
         def capture(_module, _args, output, layer=layer):
             selected = output[2].detach().cpu()
-            if selected.shape != (1, count, 10):
-                raise ValueError(f"unexpected full-forward routing shape at layer {layer}")
-            routed[layer] = selected[0].clone()
+            if selected.numel() != count * 10 or selected.shape[-1] != 10:
+                raise ValueError(
+                    f"unexpected full-forward routing shape {tuple(selected.shape)} "
+                    f"at layer {layer}")
+            routed[layer] = selected.reshape(count, 10).clone()
         handles.append(block.mlp.gate.register_forward_hook(capture))
     try:
         with torch.inference_mode():
