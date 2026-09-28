@@ -88,6 +88,7 @@ jobs:
             --oracle-root /oracle/phase11 \
             --out-dir "$GITHUB_WORKSPACE/router-stage"
           test "$(find router-stage -name 'L??_moe_router_ids.bin' | wc -l)" -eq 36864
+          test "$(find router-stage -name 'L??_moe_router_alpha.bin' | wc -l)" -eq 36864
       - name: Compile real V100 model test
         shell: bash
         run: |
@@ -157,7 +158,7 @@ jobs:
           set -e
           echo "$status" > v100-router-replay-768/v100-test-exit-code.txt
           test "$(find v100-router-replay-768/v100-logits -name '*.bf16' | wc -l)" -eq 768
-          rg 'phase11.oracle_membership_replay.layer_calls=36864' \
+          grep -F 'phase11.oracle_membership_replay.layer_calls=36864' \
             v100-router-replay-768/v100-test.log
       - name: Compare frozen oracle, natural paths, and controlled replays
         shell: bash
