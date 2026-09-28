@@ -1,0 +1,121 @@
+name: Phase 11 FP32 Context Consistency 256
+
+on:
+  push:
+    branches: [work/precision-matched-reference]
+    paths: [.github/workflows/precision-fp32-context-256.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 240
+    env:
+      NINFER_ORACLE_DETERMINISTIC: "1"
+      NINFER_ORACLE_THREADS: "16"
+      OMP_NUM_THREADS: "16"
+      MKL_NUM_THREADS: "16"
+      OPENBLAS_NUM_THREADS: "16"
+      NUMEXPR_NUM_THREADS: "16"
+      CUDA_VISIBLE_DEVICES: ""
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Find Python and frozen assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -r /srv/ninfer/source/mixed/model.safetensors.index.json
+          test -d /srv/ninfer/source/ple/ples_int4
+          test -r /oracle/phase11/token_ids.json
+          test -r /oracle/phase11/manifest.json
+          python3 -m venv "$GITHUB_WORKSPACE/fp32-context-venv"
+          "$GITHUB_WORKSPACE/fp32-context-venv/bin/pip" install torch --index-url https://download.pytorch.org/whl/cpu
+          "$GITHUB_WORKSPACE/fp32-context-venv/bin/pip" install numpy safetensors 'transformers>=5.16,<6'
+      - name: Compare fresh 256-token full forward, incremental decode, and frozen 4096 oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fp32-context-256
+          "$GITHUB_WORKSPACE/fp32-context-venv/bin/python" - <<'PY' 2>&1 | tee fp32-context-256/run.log
+          import json, sys, gc
+          from pathlib import Path
+          import numpy as np
+          import torch
+          import torch.nn.functional as F
+          sys.path.insert(0, "tools/reference/qwen3_8_flash_next/oracle")
+          from run_oracle import build_oracle
+          from run_precision_reference import read_ids, run_decode
+          from precision_profile import PROFILES
+          from precision_metrics import compare_logits
+
+          count = 256
+          oracle_root = Path("/oracle/phase11")
+          root = Path("fp32-context-256")
+          ids = read_ids(oracle_root / "token_ids.json", count)
+          manifest = json.loads((oracle_root / "manifest.json").read_text())
+          frozen = []
+          for pos, token in enumerate(ids):
+              entry = manifest["positions"][pos]
+              assert entry["position"] == pos and entry["token_id"] == token
+              traces = [t for t in entry["tensors"] if t["name"] == "logits"]
+              assert len(traces) == 1
+              logits = np.fromfile(oracle_root / traces[0]["file"], dtype="<f4")
+              assert logits.size == int(np.prod(traces[0]["shape"])) and np.isfinite(logits).all()
+              frozen.append(logits)
+          print("frozen oracle manifests match 256 token IDs", flush=True)
+
+          model, head = build_oracle("/srv/ninfer/source/mixed",
+                                     "/srv/ninfer/source/ple/ples_int4")
+          model.eval()
+          with torch.inference_mode():
+              forward = model(input_ids=torch.tensor([ids], dtype=torch.long),
+                              use_cache=False)
+              hidden = forward.last_hidden_state
+              assert hidden.shape[1] == count
+              fresh = []
+              for lo in range(0, count, 8):
+                  part = F.linear(hidden[:, lo:lo+8, :], head)[0]
+                  fresh.extend(part.detach().cpu().numpy().astype("<f4", copy=False))
+          del forward, hidden
+          gc.collect()
+          print("fresh 256-token full forward completed", flush=True)
+
+          rows = []
+          def capture(pos, decoded):
+              values = dict(position=pos,
+                  fresh_frozen=compare_logits(frozen[pos], fresh[pos])["kl"],
+                  incremental_frozen=compare_logits(frozen[pos], decoded)["kl"],
+                  incremental_fresh=compare_logits(fresh[pos], decoded)["kl"],
+                  frozen_top1=int(np.argmax(frozen[pos])),
+                  fresh_top1=int(np.argmax(fresh[pos])),
+                  incremental_top1=int(np.argmax(decoded)))
+              rows.append(values)
+              if pos in (0, 13, 127, 128, 189, 190, 191, 255):
+                  print(json.dumps(values), flush=True)
+          run_decode(model, head, ids, PROFILES["fp32"], None,
+                     logits_sink=capture, retain_logits=False)
+          assert len(rows) == count
+          (root / "per_position.jsonl").write_text(
+              "".join(json.dumps(row) + "\n" for row in rows))
+          summary = {"positions":count,
+                     "frozen_oracle_prefix_length":4096,
+                     "fresh_full_forward_prefix_length":count,
+                     "definitions":"KL(reference || candidate)",
+                     "max_kl":{key:max(r[key] for r in rows) for key in
+                               ("fresh_frozen","incremental_frozen","incremental_fresh")},
+                     "first_over_1e_4":{key:next((r["position"] for r in rows if r[key] > 1e-4),None)
+                                         for key in ("fresh_frozen","incremental_frozen","incremental_fresh")}}
+          (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+          print(json.dumps(summary, indent=2), flush=True)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: phase11-fp32-context-256
+          path: fp32-context-256/
+          if-no-files-found: warn
+          retention-days: 21
