@@ -1014,16 +1014,20 @@ int main() {
         };
         const bool calibrate_first_flips =
             std::getenv("NINFER_PHASE11_CALIBRATE_FIRST_FLIPS") != nullptr;
+        const bool skip_pre_router_autopsy =
+            std::getenv("NINFER_PHASE11_SKIP_PRE_ROUTER_AUTOPSY") != nullptr;
         const auto is_pre_router_autopsy_target =
-            [calibrate_first_flips](std::uint32_t position, int layer) {
-                return (position == 0 && layer >= 7 && layer <= 10) ||
+            [calibrate_first_flips, skip_pre_router_autopsy](
+                std::uint32_t position, int layer) {
+                return !skip_pre_router_autopsy &&
+                       ((position == 0 && layer >= 7 && layer <= 10) ||
                        (position == 1 && layer >= 12 && layer <= 15) ||
                        (calibrate_first_flips &&
                         ((position == 7 && layer == 31) ||
                          (position == 9 && layer == 20) ||
                          (position == 10 && layer == 27) ||
                          (position == 11 && layer == 15) ||
-                         (position == 12 && layer == 2)));
+                         (position == 12 && layer == 2))));
             };
         const auto round_fp32_to_bf16 = [](float value) {
             std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
