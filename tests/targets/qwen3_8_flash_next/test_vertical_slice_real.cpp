@@ -1446,7 +1446,7 @@ int main() {
                 if ((injection && (tensor.dtype != ninfer::DType::FP32 || count != 4)) ||
                     (!injection &&
                      ((tensor.dtype != ninfer::DType::FP32 &&
-                       tensor.dtype != ninfer::DType::BF16) || count != 2'560))) {
+                       tensor.dtype != ninfer::DType::BF16) || count != 10'240))) {
                     throw std::runtime_error(
                         "Phase 11 hyper boundary trace shape mismatch");
                 }
