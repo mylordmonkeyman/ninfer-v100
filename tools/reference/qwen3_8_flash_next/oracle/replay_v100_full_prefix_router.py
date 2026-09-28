@@ -11,6 +11,15 @@ import numpy as np
 COUNT = 768
 
 
+def parse_top1(value):
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true"}:
+        return 1
+    if normalized in {"0", "false"}:
+        return 0
+    raise ValueError(f"invalid top-1 value {value!r}")
+
+
 def export(args):
     import torch
     from run_oracle import build_oracle
@@ -87,9 +96,9 @@ def report(args):
             "replayed_cpu_kl": float(cpu_replay[pos]["replayed_cpu_kl"]),
             "natural_v100_kl": float(natural[pos]["oracle_v100_kl"]),
             "replayed_v100_kl": replay_kl,
-            "natural_cpu_top1": int(natural[pos]["oracle_cpu_top1"]),
-            "replayed_cpu_top1": int(cpu_replay[pos]["replayed_cpu_top1"]),
-            "natural_v100_top1": int(natural[pos]["oracle_v100_top1"]),
+            "natural_cpu_top1": parse_top1(natural[pos]["oracle_cpu_top1"]),
+            "replayed_cpu_top1": parse_top1(cpu_replay[pos]["replayed_cpu_top1"]),
+            "natural_v100_top1": parse_top1(natural[pos]["oracle_v100_top1"]),
             "replayed_v100_top1": int(np.argmax(oracle) == np.argmax(v100)),
         })
     args.out_dir.mkdir(parents=True, exist_ok=True)
