@@ -2074,7 +2074,9 @@ int main() {
                 if (name.size() == 18 &&
                     name.substr(4) == "moe_router_ids" &&
                     last_router_score_prefix == name.substr(0, 4) &&
-                    last_router_scores.size() >= 512) {
+                    last_router_scores.size() >= 512 &&
+                    !(replay_oracle_router_ids &&
+                      std::getenv("NINFER_PHASE11_SKIP_ROUTER_MARGIN_DIAGNOSTIC") != nullptr)) {
                     const int layer = router_layer_from_stage(name);
                     if (layer < 0 || layer >= 48) {
                         throw std::runtime_error(
