@@ -3,7 +3,9 @@ name: Phase 11 Complete Prefix FP32 Router Replay 768
 on:
   push:
     branches: [work/precision-matched-reference]
-    paths: [.github/workflows/precision-router-replay-768.yml]
+    paths:
+      - .github/workflows/precision-router-replay-768.yml
+      - tools/reference/qwen3_8_flash_next/oracle/replay_full_prefix_router.py
 
 permissions:
   actions: read
