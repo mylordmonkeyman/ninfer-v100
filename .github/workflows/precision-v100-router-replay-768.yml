@@ -165,6 +165,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          "$PRECISION_PYTHON" -c \
+            'from tools.reference.qwen3_8_flash_next.oracle.replay_v100_full_prefix_router import parse_top1; assert [parse_top1(x) for x in ("True", "False", "1", "0")] == [1, 0, 1, 0]'
           "$PRECISION_PYTHON" tools/reference/qwen3_8_flash_next/oracle/replay_v100_full_prefix_router.py report \
             --oracle-root /oracle/phase11 \
             --three-way-csv frozen-three-way/report/per_position.csv \
