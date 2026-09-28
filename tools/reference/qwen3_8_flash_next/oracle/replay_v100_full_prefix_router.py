@@ -41,6 +41,11 @@ def export(args):
     if len(routed) != 48:
         raise RuntimeError(f"only {len(routed)} router layers captured")
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    # The V100 trace callback reaches the replay hook only for stages that have
+    # a same-shaped oracle fixture.  Alpha is recomputed below from the V100's
+    # own scores, so these values are deliberately inert placeholders: they
+    # keep the callback on the replay path and are overwritten before MoE use.
+    alpha_fixture = np.zeros(10, dtype="<f4")
     for pos in range(COUNT):
         folder = args.out_dir / f"pos{pos:04d}"
         folder.mkdir()
@@ -49,6 +54,7 @@ def export(args):
             if (len(set(ids.tolist())) != 10 or ids.min() < 0 or ids.max() >= 512):
                 raise ValueError(f"invalid expert set at position {pos}, layer {layer}")
             ids.astype("<f4").tofile(folder / f"L{layer:02d}_moe_router_ids.bin")
+            alpha_fixture.tofile(folder / f"L{layer:02d}_moe_router_alpha.bin")
     print(f"exported {COUNT * 48} full-forward FP32 expert sets", flush=True)
 
 
