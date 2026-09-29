@@ -1,0 +1,98 @@
+name: Phase 11 Router Input Only Comparison 4096
+
+on:
+  push:
+    branches: [work/precision-matched-reference]
+    paths:
+      - .github/workflows/precision-router-input-only-4096.yml
+      - tools/reference/qwen3_8_flash_next/oracle/compare_router_input_only.py
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: phase11-router-input-only-4096
+  cancel-in-progress: false
+
+jobs:
+  compare:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 2880
+    env:
+      NINFER_ORACLE_DETERMINISTIC: "1"
+      NINFER_ORACLE_THREADS: "16"
+      OMP_NUM_THREADS: "16"
+      MKL_NUM_THREADS: "16"
+      OPENBLAS_NUM_THREADS: "16"
+      NUMEXPR_NUM_THREADS: "16"
+      CUDA_VISIBLE_DEVICES: ""
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: phase11-three-way-4096-report
+          run-id: 36324622296
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: frozen-three-way
+      - name: Locate CPU reference inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -r /srv/ninfer/source/mixed/model.safetensors.index.json
+          test -d /srv/ninfer/source/ple/ples_int4
+          test -r /oracle/phase11/token_ids.json
+          test -r /oracle/phase11/manifest.json
+          test -r frozen-three-way/report/per_position.csv
+          python_bin="${NINFER_PHASE11_PYTHON:-}"
+          if [[ -z "$python_bin" ]]; then
+            for candidate in "$HOME/ninfer-v100/venv-oracle/bin/python" \
+                /srv/ninfer/venv-oracle/bin/python python3; do
+              if command -v "$candidate" >/dev/null 2>&1 && \
+                  "$candidate" -c 'import numpy, torch, transformers, safetensors' >/dev/null 2>&1; then
+                python_bin="$candidate"
+                break
+              fi
+            done
+          fi
+          echo "PRECISION_PYTHON=$python_bin" >> "$GITHUB_ENV"
+      - name: Prepare Python if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$PRECISION_PYTHON" ]]; then exit 0; fi
+          python3 -m venv "$GITHUB_WORKSPACE/precision-venv"
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            torch --index-url https://download.pytorch.org/whl/cpu
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            numpy safetensors 'transformers>=5.16,<6'
+          echo "PRECISION_PYTHON=$GITHUB_WORKSPACE/precision-venv/bin/python" >> "$GITHUB_ENV"
+      - name: Check comparison harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PRECISION_PYTHON" -m py_compile \
+            tools/reference/qwen3_8_flash_next/oracle/compare_router_input_only.py
+          "$PRECISION_PYTHON" tools/reference/qwen3_8_flash_next/oracle/compare_router_input_only.py --help >/dev/null
+      - name: Compare router-only precision over complete prefixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p router-input-only-4096
+          "$PRECISION_PYTHON" tools/reference/qwen3_8_flash_next/oracle/compare_router_input_only.py \
+            --model-dir /srv/ninfer/source/mixed \
+            --ple-dir /srv/ninfer/source/ple/ples_int4 \
+            --oracle-root /oracle/phase11 \
+            --three-way-csv frozen-three-way/report/per_position.csv \
+            --positions 4096 \
+            --out-dir router-input-only-4096 2>&1 | tee router-input-only-4096/run.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: phase11-router-input-only-4096
+          path: router-input-only-4096/
+          if-no-files-found: warn
+          retention-days: 21
