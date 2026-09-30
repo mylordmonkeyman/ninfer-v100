@@ -1,0 +1,37 @@
+name: Phase 11 Stop Unintended Push Runs
+on:
+  push:
+    branches: [work/precision-matched-reference]
+    paths: [.github/workflows/phase11-stop-unintended-runs.yml]
+permissions:
+  actions: write
+  contents: read
+jobs:
+  stop-unintended:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Stop only the two unintended runs from the late-router commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, urllib.request
+          root = "https://api.github.com/repos/" + os.environ["GH_REPO"] + "/actions/runs/"
+          headers = {"Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                     "Accept": "application/vnd.github+json"}
+          expected = {36731451633: "Phase 11 Late Router Input Comparison 4096",
+                      36731451610: "Phase 11 V100 Raw Attention Precision Calibration"}
+          for run_id, name in expected.items():
+              url = root + str(run_id)
+              run = json.load(urllib.request.urlopen(urllib.request.Request(url, headers=headers)))
+              if run["head_sha"] != "c80a044838d81957c56c0d4a55606a6596525cdc" or run["name"] != name:
+                  raise ValueError("Unintended run identity mismatch")
+              if run["status"] == "completed":
+                  print(f"{run_id}: already completed")
+                  continue
+              urllib.request.urlopen(urllib.request.Request(url + "/cancel", headers=headers, method="POST")).close()
+              print(f"{run_id}: canceled unintended push-triggered run")
+          PY
