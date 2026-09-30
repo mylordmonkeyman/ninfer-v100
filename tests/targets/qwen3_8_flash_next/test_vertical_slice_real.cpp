@@ -1228,8 +1228,58 @@ int main() {
                 return reference_scores;
             };
 
+        const char* late_precision_env = std::getenv("NINFER_FLASH_NEXT_FP32_ROUTER_INPUT_LAYERS_32_47");
+        const bool verify_late_precision = late_precision_env &&
+            std::string_view(late_precision_env) == "1";
+        std::uint64_t late_precision_checks = 0, early_precision_checks = 0;
+        std::vector<float> precision_router_input;
+        std::string precision_input_prefix;
         FlashNextDecodeStateSink stage_sink;
         stage_sink.on_state = [&](std::string_view name, const ninfer::Tensor& tensor) {
+            if (verify_late_precision && name.size() > 4 &&
+                name.substr(4) == "moe_precision_router_input") {
+                const int layer = router_layer_from_stage(name);
+                if (!precision_router_input.empty() || layer < 0 ||
+                    late_precision_checks + early_precision_checks !=
+                        current_stage_trace_position * 48ULL + layer ||
+                    tensor.dtype != (layer >= 32 ? ninfer::DType::FP32 : ninfer::DType::BF16)) {
+                    throw std::runtime_error("Late precision router input order/dtype mismatch");
+                }
+                precision_input_prefix = std::string(name.substr(0, 4));
+                precision_router_input.resize(tensor.numel());
+                if (layer >= 32) {
+                    CUDA_CHECK(cudaMemcpy(precision_router_input.data(), tensor.data,
+                        tensor.numel() * sizeof(float), cudaMemcpyDeviceToHost));
+                } else {
+                    std::vector<std::uint16_t> words(tensor.numel());
+                    CUDA_CHECK(cudaMemcpy(words.data(), tensor.data,
+                        words.size() * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+                    for (std::size_t i = 0; i < words.size(); ++i) {
+                        precision_router_input[i] = bf16_to_float(words[i]);
+                    }
+                }
+                return;
+            }
+            if (verify_late_precision && name.size() > 4 &&
+                name.substr(4) == "moe_precision_expert_input") {
+                if (precision_input_prefix != name.substr(0, 4) ||
+                    precision_router_input.size() != tensor.numel() ||
+                    tensor.dtype != ninfer::DType::BF16) {
+                    throw std::runtime_error("Late precision expert input shape/dtype mismatch");
+                }
+                std::vector<std::uint16_t> words(tensor.numel());
+                CUDA_CHECK(cudaMemcpy(words.data(), tensor.data,
+                    words.size() * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+                for (std::size_t i = 0; i < words.size(); ++i) {
+                    if (words[i] != float_to_bf16_rn(precision_router_input[i])) {
+                        throw std::runtime_error("Late precision experts lost BF16 materialization");
+                    }
+                }
+                if (router_layer_from_stage(name) >= 32) { ++late_precision_checks; }
+                else { ++early_precision_checks; }
+                precision_router_input.clear();
+                return;
+            }
             if (!stage_trace_enabled) {
                 return;
             }
@@ -2404,9 +2454,9 @@ int main() {
 
             current_stage_trace_position = record.position;
             const FlashNextDecodeStateSink* round_sink =
-                stage_trace_enabled &&
+                (verify_late_precision || (stage_trace_enabled &&
                         (stage_trace_all_positions ||
-                         record.position == stage_trace_position)
+                         record.position == stage_trace_position)))
                     ? &stage_sink
                     : nullptr;
             auto round = executor.execute_round(
@@ -2570,6 +2620,14 @@ int main() {
                       << replayed_router_layers << '\n';
         }
 
+        if (verify_late_precision) {
+            if (!precision_router_input.empty() || late_precision_checks != records.size() * 16ULL ||
+                early_precision_checks != records.size() * 32ULL) {
+                throw std::runtime_error("Incomplete late precision input verification");
+            }
+            std::cout << "phase11.late_router_precision.bf16_expert_checks=" << late_precision_checks << '\n'
+                      << "phase11.late_router_precision.early_bf16_router_checks=" << early_precision_checks << '\n';
+        }
         const auto expert_stats =
             flash_next_host_expert_execution_stats();
         const std::uint64_t expected_layer_calls =

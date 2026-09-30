@@ -43,7 +43,7 @@ void flash_next_route(const Tensor& input, const Weight& router, const Weight& s
 void flash_next_route_fp32_input(const Tensor& input, const Weight& router,
                                  const Weight& shared_gate, Tensor& score_workspace,
                                  Tensor& ids, Tensor& alpha, Tensor& shared_scale,
-                                 cudaStream_t stream);
+                                 cudaStream_t stream, const Tensor* shared_input_bf16 = nullptr);
 #endif
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

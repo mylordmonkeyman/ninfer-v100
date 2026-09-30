@@ -39,7 +39,15 @@ def main():
     p.add_argument("--cpu-root", type=Path, required=True)
     p.add_argument("--v100-root", type=Path, required=True)
     p.add_argument("--out-dir", type=Path, required=True)
+    p.add_argument("--natural-baseline", type=Path)
+    p.add_argument("--profile-description", default="natural candidate precision profile")
     args = p.parse_args()
+    baseline = None
+    if args.natural_baseline:
+        with args.natural_baseline.open(newline="") as stream:
+            baseline = list(csv.DictReader(stream))
+        if len(baseline) != 4096 or any(int(r["position"]) != i for i, r in enumerate(baseline)):
+            raise ValueError("natural baseline must contain 4096 contiguous positions")
     entries = json.loads((args.oracle_root / "manifest.json").read_text())["positions"]
     if len(entries) < 4096:
         raise ValueError("frozen oracle has fewer than 4096 positions")
@@ -87,6 +95,12 @@ def main():
             "oracle_v100_top1": int(np.argmax(o) == np.argmax(v)),
             "v100_lower_kl": int(kov < koc),
         }
+        if baseline is not None:
+            prior = baseline[pos]
+            row.update(natural_cpu_kl=float(prior["oracle_cpu_kl"]),
+                       natural_v100_kl=float(prior["oracle_v100_kl"]),
+                       natural_cpu_top1=int(prior["oracle_cpu_top1"]),
+                       natural_v100_top1=int(prior["oracle_v100_top1"]))
         rows.append(row)
         for i, value in enumerate((koc, kov, kcv)):
             sums[i] += value
@@ -97,8 +111,10 @@ def main():
         writer.writeheader()
         writer.writerows(rows)
     def summarise(chunk):
-        return {
+        result = {
             "positions": len(chunk),
+            "cpu_p99_kl_nearest_rank": nearest_p99([x["oracle_cpu_kl"] for x in chunk]),
+            "v100_p99_kl_nearest_rank": nearest_p99([x["oracle_v100_kl"] for x in chunk]),
             "oracle_cpu_mean_kl": sum(x["oracle_cpu_kl"] for x in chunk) / len(chunk),
             "oracle_v100_mean_kl": sum(x["oracle_v100_kl"] for x in chunk) / len(chunk),
             "cpu_v100_mean_kl": sum(x["cpu_v100_kl"] for x in chunk) / len(chunk),
@@ -106,17 +122,29 @@ def main():
             "oracle_v100_top1": sum(x["oracle_v100_top1"] for x in chunk),
             "v100_lower_kl_positions": sum(x["v100_lower_kl"] for x in chunk),
         }
+        if baseline is not None:
+            for target in ("natural_cpu", "natural_v100"):
+                result[target] = {
+                    "mean_kl": sum(x[target + "_kl"] for x in chunk) / len(chunk),
+                    "p99_kl": nearest_p99([x[target + "_kl"] for x in chunk]),
+                    "top1": sum(x[target + "_top1"] for x in chunk),
+                    "cpu_variant_lower_kl_positions": sum(x["oracle_cpu_kl"] < x[target + "_kl"] for x in chunk),
+                    "v100_variant_lower_kl_positions": sum(x["oracle_v100_kl"] < x[target + "_kl"] for x in chunk),
+                }
+        return result
     report = {
         "provenance": {
             "fp32": "frozen independent full-sequence oracle",
             "cpu": "separate quantized-weight, BF16-storage, fused-hyper precision-profile reference",
-            "v100": "natural V100 implementation",
+            "v100": "actual V100 implementation",
+            "profile_description": args.profile_description,
             "prefix": "all paths carry their own complete sequential history",
             "incremental_fp32_guard": "not used to stop this full-corpus diagnostic; prior 256-position mismatch remains recorded",
         },
         "all": summarise(rows),
         "ranges": {f"{lo}:{hi}": summarise(rows[lo:hi]) for lo, hi in
-                   ((0,128),(128,512),(512,1024),(1024,2048),
+                   ((0,768),(512,768),(0,1024),(0,4096),
+                    (0,128),(128,512),(512,1024),(1024,2048),
                     (2048,3072),(3072,4096))},
         "cpu_p99_kl_nearest_rank": nearest_p99([x["oracle_cpu_kl"] for x in rows]),
         "v100_p99_kl_nearest_rank": nearest_p99([x["oracle_v100_kl"] for x in rows]),

@@ -1481,3 +1481,23 @@ E:\NInfer\venv-qwen4exp\Scripts\python.exe compare_states.py `
 ```
 
 The script reports $\max |d|$, $\text{rel-L2}$, and $\text{cosine}$ similarity per stage and immediately isolates the exact layer and operator where the numerical divergence starts.
+
+### Actual V100 late-router input experiment
+
+`precision-v100-late-router-4096.yml` tests the opt-in
+`NINFER_FLASH_NEXT_FP32_ROUTER_INPUT_LAYERS_32_47=1` over 4096 complete
+sequential prefixes. Only router projections in layers 32–47 consume the
+unrounded FP32 MLP hyper mixture. Layers 0–31, routed/shared expert inputs,
+and the shared gate retain BF16 materialization. The mode requires the existing
+FP32 MLP hyper-apply profile for decode and rejects simultaneous all-layer
+FP32 routing or FP32 expert inputs. Default execution is unchanged.
+
+The matching independent CPU run exports BF16 logits for direct CPU–V100 KL;
+the report also compares both candidates with the frozen independent FP32
+oracle and the existing natural CPU/V100 corpus. Readback checks verify 65536
+late BF16 expert inputs and 131072 early BF16 router inputs. This experiment
+uses natural routing, without forced oracle memberships. It records the
+unchanged §7 CTest metrics and exit code separately. CUDA compilation and
+numerical results are runner validation; the optional mode is not qualified
+merely by being implemented. Chunked prefill uses the corresponding raw hyper
+mixture but is not evaluated by this sequential-decode corpus.

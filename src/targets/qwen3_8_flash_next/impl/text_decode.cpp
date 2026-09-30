@@ -264,6 +264,13 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_ROUTER_INPUT");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
     }();
+    const bool late_fp32_router_input = [] {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_ROUTER_INPUT_LAYERS_32_47");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+    }();
+    if (late_fp32_router_input && fp32_router_input) {
+        throw std::invalid_argument("Choose late-only or all-layer FP32 router input");
+    }
     const bool fp32_hyper_inject_stage = fp32_hyper_state && [] {
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
@@ -312,6 +319,11 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_MOE_SHARED_INPUT");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
     }();
+    if (late_fp32_router_input &&
+        (!fp32_mlp_hyper_apply || !model.host_experts.has_value() ||
+         fp32_moe_routed_input || fp32_moe_shared_input)) {
+        throw std::invalid_argument("Late FP32 routing requires FP32 MLP hyper apply and BF16 host expert inputs");
+    }
     auto sync_hyper_shadow = [&] {
         if (fp32_hyper_state) {
             hyper_fp32_to_bf16(round_ws.hyper_hidden_fp32, round_ws.hyper_hidden, stream);
@@ -320,6 +332,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
 #else
     constexpr bool fp32_hyper_state = false;
     constexpr bool fp32_router_input = false;
+    constexpr bool late_fp32_router_input = false;
     constexpr bool fp32_hyper_inject_stage = false;
     constexpr bool fp32_hyper_inject_apply = false;
     constexpr bool fp32_attn_hyper_injection = false;
@@ -552,7 +565,8 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
             }
             const Tensor* router_input =
 #if defined(NINFER_VOLTA_BUILD)
-                fp32_router_input ? &round_ws.hyper_scratch.mixed_fp32 : nullptr;
+                (fp32_router_input || (late_fp32_router_input && layer >= 32))
+                    ? &round_ws.hyper_scratch.mixed_fp32 : nullptr;
 #else
                 nullptr;
 #endif
@@ -700,6 +714,13 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_ROUTER_INPUT");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
     }();
+    const bool late_fp32_router_input = [] {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_ROUTER_INPUT_LAYERS_32_47");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+    }();
+    if (late_fp32_router_input && fp32_router_input) {
+        throw std::invalid_argument("Choose late-only or all-layer FP32 router input");
+    }
     auto sync_hyper_shadow = [&] {
         if (fp32_hyper_state) {
             hyper_fp32_to_bf16(round_ws.hyper_hidden_fp32, round_ws.hyper_hidden, stream);
@@ -708,6 +729,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
 #else
     constexpr bool fp32_hyper_state = false;
     constexpr bool fp32_router_input = false;
+    constexpr bool late_fp32_router_input = false;
     auto sync_hyper_shadow = [&] {};
 #endif
 
@@ -825,7 +847,8 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
         if (model.host_experts.has_value()) {
             const Tensor* router_input =
 #if defined(NINFER_VOLTA_BUILD)
-                fp32_router_input ? &round_ws.hyper_scratch.mixed_fp32 : nullptr;
+                (fp32_router_input || (late_fp32_router_input && layer >= 32))
+                    ? &round_ws.hyper_scratch.mixed_fp32 : nullptr;
 #else
                 nullptr;
 #endif

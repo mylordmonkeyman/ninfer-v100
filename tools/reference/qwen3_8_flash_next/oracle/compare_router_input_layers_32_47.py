@@ -29,6 +29,8 @@ def main():
     parser.add_argument("--three-way-csv", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--positions", type=int, choices=(768, 4096), default=768)
+    parser.add_argument("--export-logits", action="store_true",
+                        help="Retain BF16 logits and JSONL for actual V100 comparison")
     args = parser.parse_args()
     count, membership_length = args.positions, 768
     ids = read_ids(args.oracle_root / "token_ids.json", count)
@@ -51,6 +53,9 @@ def main():
         raise ValueError("natural three-way report lacks aligned 4096 positions")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    if args.export_logits:
+        (args.out_dir / "cpu-logits").mkdir(exist_ok=True)
+        (args.out_dir / "cpu-vs-oracle.jsonl").write_text("")
     model, head = build_oracle(str(args.model_dir), str(args.ple_dir))
     model.eval()
     reference_sets, fp32_parity = router_sets(
@@ -122,6 +127,14 @@ def main():
                 raise ValueError(f"incomplete router calls at position {position}")
             metrics = compare_logits(np.fromfile(frozen_paths[position], dtype="<f4"),
                                      logits)
+            if args.export_logits:
+                bits = logits.view("<u4")
+                if not np.isfinite(logits).all() or np.any(bits & 0xffff):
+                    raise ValueError(f"invalid BF16 CPU logits at {position}")
+                (bits >> 16).astype("<u2").tofile(
+                    args.out_dir / "cpu-logits" / f"pos{position:04d}.bf16")
+                with (args.out_dir / "cpu-vs-oracle.jsonl").open("a") as stream:
+                    stream.write(json.dumps({**metrics, "position": position}) + "\n")
             prior = natural[position]
             rows.append({
                 "position": position,

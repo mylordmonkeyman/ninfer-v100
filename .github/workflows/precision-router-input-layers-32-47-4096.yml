@@ -5,7 +5,6 @@ on:
     branches: [work/precision-matched-reference]
     paths:
       - .github/workflows/precision-router-input-layers-32-47-4096.yml
-      - tools/reference/qwen3_8_flash_next/oracle/compare_router_input_layers_32_47.py
 
 permissions:
   actions: read

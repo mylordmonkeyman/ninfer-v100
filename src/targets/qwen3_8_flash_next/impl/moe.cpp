@@ -423,11 +423,17 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     FlashNextMoeWorkspace scratch = allocate_flash_next_moe_workspace(workspace, tokens);
 
 #if defined(NINFER_VOLTA_BUILD)
+    const char* late_env = std::getenv("NINFER_FLASH_NEXT_FP32_ROUTER_INPUT_LAYERS_32_47");
+    const bool router_only = late_env && late_env[0] == '1' && late_env[1] == '\0';
+    if (router_only && emit) {
+        emit("moe_precision_router_input", router_input_fp32 ? *router_input_fp32 : input);
+        emit("moe_precision_expert_input", input);
+    }
     if (router_input_fp32 != nullptr && router_input_fp32->data != nullptr) {
         flash_next_route_fp32_input(
             *router_input_fp32, resident_weights.router,
             resident_weights.shared_gate_weight, scratch.scores, scratch.ids,
-            scratch.alpha, scratch.shared_scale, stream);
+            scratch.alpha, scratch.shared_scale, stream, router_only ? &input : nullptr);
     } else
 #endif
     {
