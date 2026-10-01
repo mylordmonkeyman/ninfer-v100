@@ -1525,3 +1525,32 @@ candidate engine fault. No incremental-oracle error guard stops this diagnostic.
 Only this workflow is triggered by its workflow-file push. The old CPU
 768-position replay is manual-only to avoid duplicate runs when shared tools
 change. Healthy jobs are never cancelled by the concurrency group.
+
+### Bounded FP32 combined MoE output comparison
+
+`precision-v100-moe-output-4096.yml` tests the opt-in
+`NINFER_FLASH_NEXT_FP32_MOE_OUTPUT=1` boundary. It preserves the existing
+FP32 routed/shared merge result through the FP32 master hyper-state update,
+in decode and prefill. The default remains off. Router and expert inputs,
+expert weights, intermediate rounding, routing rules, and §7 thresholds are
+unchanged. The option requires the host-backed expert path and FP32 hyper state.
+The retained BF16 diagnostic output is still emitted under its original name;
+`mlp_block_output_fp32` is the value injected when enabled.
+
+The independent CPU profile removes only its final MoE-output BF16 hook.
+The workflow checks fresh full FP32 oracle consistency at the generator's
+32-thread default, then compares natural CPU and V100 over 4096 sequential
+positions against the frozen oracle. Oracle inconsistency is reported rather
+than silently replacing the reference. Coverage must include all 196608
+FP32-output layer calls. CTest's numerical exit code is retained separately
+from diagnostic workflow success.
+
+Paired timing uses fresh 64-token prefixes, a warm-up pair and three measured
+pairs with alternating order, in one loaded process. Timed regions contain
+model execution, commit, and synchronization; exclude oracle reads and logits
+exports. Median prefill and decode throughput must each retain at least 95%
+of baseline for the proposed performance budget. This measures the current
+host-backed correctness path, not optimized server throughput or long-context
+performance. After this bounded experiment, retain the option only if the
+accuracy benefit and measured cost justify it; otherwise leave it disabled.
+Do not launch further speculative precision variants.

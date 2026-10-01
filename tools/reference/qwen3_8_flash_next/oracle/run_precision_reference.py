@@ -233,7 +233,7 @@ def run_decode(model, head, token_ids, profile, out_root,
                fused_hyper_updates=False, trace_moe_components_layer0=False,
                trace_moe_pairs_layer0=False,
                trace_moe_intermediate_path5_layer0=False,
-               logits_sink=None, retain_logits=True):
+               logits_sink=None, retain_logits=True, moe_output_fp32=False):
     # One token per forward, with one cache for the entire prefix.  Rounding a
     # cache tensor after the update changes all later positions, unlike
     # independently rounding tensors from the completed FP32 oracle.
@@ -255,7 +255,7 @@ def run_decode(model, head, token_ids, profile, out_root,
     handles.extend(install_projection_boundaries(
         model, profile, mlp_block_input_fp32=mlp_block_input_fp32,
         mlp_block_input_fp32_layers=mlp_block_input_fp32_layers,
-        fused_hyper_updates=fused_hyper_updates))
+        fused_hyper_updates=fused_hyper_updates, moe_output_fp32=moe_output_fp32))
     handles.extend(_stage_hooks(model, captured, trace_gdn_internals,
                                 trace_hyper_layer0, trace_mlp_layer0,
                                 trace_moe_routing_layer0, trace_gdn_layer1,

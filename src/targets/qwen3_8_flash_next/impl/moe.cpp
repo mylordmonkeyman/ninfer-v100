@@ -30,6 +30,7 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 namespace {
 
 std::atomic<std::uint64_t> s_host_expert_layer_calls{0};
+std::atomic<std::uint64_t> s_host_expert_fp32_output_calls{0};
 std::atomic<std::uint64_t> s_host_expert_routed_tokens{0};
 std::atomic<std::uint64_t> s_host_expert_pairs{0};
 
@@ -284,6 +285,7 @@ bool exact_bf16_expert_bank(const Bf16ExpertBankView& bank, std::int32_t rows, s
 
 void reset_flash_next_host_expert_execution_stats() noexcept {
     s_host_expert_layer_calls.store(0, std::memory_order_relaxed);
+    s_host_expert_fp32_output_calls.store(0, std::memory_order_relaxed);
     s_host_expert_routed_tokens.store(0, std::memory_order_relaxed);
     s_host_expert_pairs.store(0, std::memory_order_relaxed);
 }
@@ -293,6 +295,8 @@ flash_next_host_expert_execution_stats() noexcept {
     return FlashNextHostExpertExecutionStats{
         .completed_layer_calls =
             s_host_expert_layer_calls.load(std::memory_order_relaxed),
+        .fp32_output_layer_calls =
+            s_host_expert_fp32_output_calls.load(std::memory_order_relaxed),
         .routed_tokens =
             s_host_expert_routed_tokens.load(std::memory_order_relaxed),
         .expert_pairs =
@@ -371,7 +375,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                                 const MoeStageEmitter& emit,
                                 const Tensor* router_input_fp32,
                                 const Tensor* routed_expert_input_fp32,
-                                const Tensor* shared_expert_input_fp32) {
+                                const Tensor* shared_expert_input_fp32,
+                                Tensor* output_fp32) {
     const std::int32_t tokens = input.ne[1];
     if (input.dtype != DType::BF16 || output.dtype != DType::BF16 || input.ne[0] != 2'560 ||
         output.ne[0] != 2'560 || tokens < 1 || output.ne[1] != tokens ||
@@ -388,6 +393,13 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         throw std::invalid_argument("Flash-Next host-backed MoE received an invalid exact target view");
     }
 
+    if (output_fp32 != nullptr &&
+        (output_fp32->data == nullptr || output_fp32->dtype != DType::FP32 ||
+         output_fp32->ne[0] != 2'560 || output_fp32->ne[1] != tokens ||
+         output_fp32->ne[2] != 1 || output_fp32->ne[3] != 1 ||
+         !output_fp32->is_contiguous() || !aligned_to(output_fp32->data, 16))) {
+        throw std::invalid_argument("Flash-Next MoE received an invalid FP32 output");
+    }
     const bool use_routed_expert_input_fp32 =
         routed_expert_input_fp32 != nullptr && routed_expert_input_fp32->data != nullptr;
     if (use_routed_expert_input_fp32 &&
@@ -628,7 +640,10 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     }
     flash_next_moe_host_routed_merge_launch(
         resident_weights, scratch, output, tokens, stream,
-        use_shared_fp32_intermediate);
+        use_shared_fp32_intermediate, output_fp32);
+    if (output_fp32 != nullptr) {
+        s_host_expert_fp32_output_calls.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 
 void flash_next_moe_bf16(const Tensor& input, const MoeBf16Weights& weights, Tensor& output,

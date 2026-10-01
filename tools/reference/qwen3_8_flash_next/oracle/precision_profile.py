@@ -163,7 +163,7 @@ def _ple_from_bf16_shadow(self, hidden_states, input_ids, past_key_values,
 
 def install_projection_boundaries(model, profile, *, mlp_block_input_fp32=False,
                                   mlp_block_input_fp32_layers=(),
-                                  fused_hyper_updates=False):
+                                  fused_hyper_updates=False, moe_output_fp32=False):
     """Materialize selected projection outputs; return removable hook handles.
 
     This only models projected activation storage.  In particular it does not
@@ -236,9 +236,10 @@ def install_projection_boundaries(model, profile, *, mlp_block_input_fp32=False,
                 lambda _module, _args, output:
                     (round_to_bf16(output[0]), output[1], output[2])
             ))
-        handles.append(layer.mlp.register_forward_hook(
-            lambda _module, _args, output: round_to_bf16(output)
-        ))
+        if not moe_output_fp32:
+            handles.append(layer.mlp.register_forward_hook(
+                lambda _module, _args, output: round_to_bf16(output)
+            ))
         # The V100 host-backed shared path keeps gate/up dot products in FP32
         # and rounds only SiLU(gate)*up to BF16 before shared_down. Its FP32
         # down result joins the routed FP32 sum before the final BF16 output.

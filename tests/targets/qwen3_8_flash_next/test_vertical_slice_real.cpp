@@ -741,6 +741,78 @@ int main() {
 
         reset_flash_next_host_expert_execution_stats();
 
+        // Paired, warmed model-execution timing. No oracle I/O, logits export or
+        // stage tracing is inside the measured region. Both modes use fresh lanes.
+        if (const char* bench = std::getenv("NINFER_PHASE11_MOE_OUTPUT_BENCHMARK");
+            bench != nullptr && std::string_view(bench) == "1") {
+            constexpr std::size_t count = 64;
+            if (records.size() < count || contract.runtime.prefill_chunk < count) {
+                throw std::runtime_error("MoE output benchmark needs 64 positions/chunk");
+            }
+            std::vector<std::int32_t> tokens(count);
+            std::vector<std::array<std::int32_t, 3>> mrope(count);
+            for (std::size_t i = 0; i < count; ++i) {
+                tokens[i] = records[i].token_id;
+                const auto p = static_cast<std::int32_t>(i);
+                mrope[i] = {p, p, p};
+            }
+            for (bool prefill : {false, true}) {
+                // Pair 0 warms both modes; reverse order in alternating pairs.
+                for (int pair = 0; pair < 4; ++pair) {
+                    for (int turn = 0; turn < 2; ++turn) {
+                        const bool enabled = ((pair + turn) % 2) != 0;
+                        if (setenv("NINFER_FLASH_NEXT_FP32_MOE_OUTPUT", enabled ? "1" : "0", 1) != 0) {
+                            throw std::runtime_error("Cannot select benchmark precision");
+                        }
+                        auto bench_lane = executor.allocate_lane();
+                        reset_flash_next_host_expert_execution_stats();
+                        device.synchronize();
+                        const auto started = std::chrono::steady_clock::now();
+                        const std::array<LaneCommitDecision, 1> accept{{
+                            LaneCommitDecision{.accept = true},
+                        }};
+                        if (prefill) {
+                            auto round = executor.execute_prefill_chunk(bench_lane, tokens, mrope, 0);
+                            round.commit(accept);
+                        } else {
+                            for (std::size_t i = 0; i < count; ++i) {
+                                LaneStepRequest request{
+                                    .handle = bench_lane,
+                                    .token_id = tokens[i],
+                                    .token_index = static_cast<std::int32_t>(i),
+                                    .mrope_positions = mrope[i],
+                                    .sampling = {},
+                                    .custom_embedding = nullptr,
+                                };
+                                auto round = executor.execute_round(
+                                    std::span<const LaneStepRequest>(&request, 1), nullptr);
+                                round.commit(accept);
+                            }
+                        }
+                        device.synchronize();
+                        const double elapsed = std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - started).count();
+                        const auto stats = flash_next_host_expert_execution_stats();
+                        const auto calls = prefill ? 48ULL : count * 48ULL;
+                        if (stats.completed_layer_calls != calls ||
+                            stats.fp32_output_layer_calls != (enabled ? calls : 0ULL) ||
+                            stats.routed_tokens != count * 48ULL ||
+                            executor.committed_frontier(bench_lane) != count) {
+                            throw std::runtime_error("Incomplete MoE output timing coverage");
+                        }
+                        std::cout << std::setprecision(10)
+                                  << "phase11.moe_output_benchmark mode=" << (prefill ? "prefill" : "decode")
+                                  << " pair=" << pair << " fp32=" << enabled
+                                  << " positions=" << count << " elapsed_s=" << elapsed
+                                  << " tokens_per_s=" << count / elapsed << '\n' << std::flush;
+                        executor.release_lane(bench_lane);
+                        device.synchronize();
+                    }
+                }
+            }
+            return 0;
+        }
+
         if (const char* prefill_probe =
                 std::getenv("NINFER_PHASE11_PREFILL_PROBE_POSITIONS");
             prefill_probe != nullptr && prefill_probe[0] != '\0') {
@@ -2642,6 +2714,15 @@ int main() {
                   << expert_stats.expert_pairs << '\n'
                   << "phase11.sampled_tokens=" << sampled_tokens << '\n';
 
+        const char* fp32_output_env = std::getenv("NINFER_FLASH_NEXT_FP32_MOE_OUTPUT");
+        const bool fp32_output_enabled = fp32_output_env != nullptr &&
+            std::string_view(fp32_output_env) == "1";
+        std::cout << "phase11.host_expert.fp32_output_layer_calls="
+                  << expert_stats.fp32_output_layer_calls << '\n';
+        if (expert_stats.fp32_output_layer_calls !=
+                (fp32_output_enabled ? expected_layer_calls : 0ULL)) {
+            throw std::runtime_error("Phase 11 FP32 MoE output coverage mismatch");
+        }
         if (expert_stats.completed_layer_calls != expected_layer_calls ||
             expert_stats.routed_tokens != expected_layer_calls ||
             expert_stats.expert_pairs != expected_pairs) {

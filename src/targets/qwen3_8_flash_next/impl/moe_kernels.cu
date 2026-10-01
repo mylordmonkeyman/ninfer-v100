@@ -1843,7 +1843,8 @@ __global__ void flash_next_moe_host_routed_merge_kernel(
     const float* __restrict__ shared_scale,
     const __nv_bfloat16* __restrict__ activations,
     const __nv_bfloat16* __restrict__ shared_down,
-    __nv_bfloat16* __restrict__ output) {
+    __nv_bfloat16* __restrict__ output,
+    float* __restrict__ output_fp32) {
     const int token = static_cast<int>(blockIdx.y);
     const int tid   = static_cast<int>(threadIdx.x);
     const int warp  = tid >> 5;
@@ -1859,8 +1860,10 @@ __global__ void flash_next_moe_host_routed_merge_kernel(
     if (lane == 0) {
         const float routed =
             reinterpret_cast<const float*>(token_activations)[row];
-        output[static_cast<std::int64_t>(token) * kHidden + row] =
-            __float2bfloat16_rn(fmaf(shared_scale[token], shared_value, routed));
+        const auto index = static_cast<std::int64_t>(token) * kHidden + row;
+        const float combined = fmaf(shared_scale[token], shared_value, routed);
+        output[index] = __float2bfloat16_rn(combined);
+        if (output_fp32 != nullptr) { output_fp32[index] = combined; }
     }
 }
 
@@ -1871,7 +1874,8 @@ __global__ void flash_next_moe_host_routed_merge_shared_fp32_intermediate_kernel
     const float* __restrict__ shared_scale,
     const __nv_bfloat16* __restrict__ activations,
     const __nv_bfloat16* __restrict__ shared_down,
-    __nv_bfloat16* __restrict__ output) {
+    __nv_bfloat16* __restrict__ output,
+    float* __restrict__ output_fp32) {
     const int token = static_cast<int>(blockIdx.y);
     const int tid   = static_cast<int>(threadIdx.x);
     const int warp  = tid >> 5;
@@ -1887,8 +1891,10 @@ __global__ void flash_next_moe_host_routed_merge_shared_fp32_intermediate_kernel
     if (lane == 0) {
         const float routed =
             reinterpret_cast<const float*>(token_activations)[row];
-        output[static_cast<std::int64_t>(token) * kHidden + row] =
-            __float2bfloat16_rn(fmaf(shared_scale[token], shared_value, routed));
+        const auto index = static_cast<std::int64_t>(token) * kHidden + row;
+        const float combined = fmaf(shared_scale[token], shared_value, routed);
+        output[index] = __float2bfloat16_rn(combined);
+        if (output_fp32 != nullptr) { output_fp32[index] = combined; }
     }
 }
 
@@ -2490,7 +2496,8 @@ void flash_next_moe_host_routed_merge_launch(const MoeWeights& weights,
                                              const FlashNextMoeWorkspace& workspace,
                                              Tensor& output, int tokens,
                                              cudaStream_t stream,
-                                             bool shared_fp32_intermediate) {
+                                             bool shared_fp32_intermediate,
+                                             Tensor* output_fp32) {
     if (tokens <= 0) {
         throw std::invalid_argument("Flash-Next host routed merge requires positive tokens");
     }
@@ -2500,13 +2507,15 @@ void flash_next_moe_host_routed_merge_launch(const MoeWeights& weights,
             static_cast<const float*>(workspace.shared_scale.data),
             static_cast<const __nv_bfloat16*>(workspace.activations.data),
             static_cast<const __nv_bfloat16*>(weights.shared_down.qdata),
-            static_cast<__nv_bfloat16*>(output.data));
+            static_cast<__nv_bfloat16*>(output.data),
+            output_fp32 ? static_cast<float*>(output_fp32->data) : nullptr);
     } else {
         flash_next_moe_host_routed_merge_kernel<<<grid, kDownWarps * 32, 0, stream>>>(
             static_cast<const float*>(workspace.shared_scale.data),
             static_cast<const __nv_bfloat16*>(workspace.activations.data),
             static_cast<const __nv_bfloat16*>(weights.shared_down.qdata),
-            static_cast<__nv_bfloat16*>(output.data));
+            static_cast<__nv_bfloat16*>(output.data),
+            output_fp32 ? static_cast<float*>(output_fp32->data) : nullptr);
     }
     CUDA_CHECK(cudaGetLastError());
     stage_ledger_record(stream, FlashNextStageId::MoE_Reduce);

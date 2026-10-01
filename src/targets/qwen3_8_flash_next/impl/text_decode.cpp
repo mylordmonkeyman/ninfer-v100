@@ -260,6 +260,13 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_HYPER_STATE");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
     }();
+    const bool fp32_moe_output = [] {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_MOE_OUTPUT");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+    }();
+    if (fp32_moe_output && (!fp32_hyper_state || !model.host_experts.has_value())) {
+        throw std::invalid_argument("FP32 MoE output requires FP32 hyper state and host experts");
+    }
     const bool fp32_router_input = [] {
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_ROUTER_INPUT");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
@@ -586,19 +593,36 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                 round_ws.block_input, model.layers[layer].moe,
                 model.host_experts->layers[layer], round_ws.block_output,
                 workspace, stream, moe_emit, router_input, routed_expert_input,
-                shared_expert_input);
+                shared_expert_input,
+#if defined(NINFER_VOLTA_BUILD)
+                fp32_moe_output ? &round_ws.moe_output_fp32 : nullptr
+#else
+                nullptr
+#endif
+            );
         } else {
             flash_next_moe(round_ws.block_input, model.layers[layer].moe,
                            round_ws.block_output, workspace, stream);
         }
         emit_state(prefix + "mlp_block_output", round_ws.block_output);
+#if defined(NINFER_VOLTA_BUILD)
+        if (fp32_moe_output) {
+            emit_state(prefix + "mlp_block_output_fp32", round_ws.moe_output_fp32);
+        }
+#endif
 
         // MLP hyper inject
 #if defined(NINFER_VOLTA_BUILD)
         if (fp32_hyper_state) {
-            hyper_inject_bf16_to_fp32(
-                round_ws.block_output, round_ws.hyper_scratch.injection,
-                round_ws.hyper_hidden_fp32, stream);
+            if (fp32_moe_output) {
+                hyper_inject_fp32_to_fp32_stage(
+                    round_ws.moe_output_fp32, round_ws.hyper_scratch.injection,
+                    round_ws.hyper_hidden_fp32, round_ws.hyper_hidden_fp32, stream);
+            } else {
+                hyper_inject_bf16_to_fp32(
+                    round_ws.block_output, round_ws.hyper_scratch.injection,
+                    round_ws.hyper_hidden_fp32, stream);
+            }
             emit_state(prefix + "hyper_after_mlp", round_ws.hyper_hidden_fp32);
         } else
 #endif
@@ -710,6 +734,13 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_HYPER_STATE");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
     }();
+    const bool fp32_moe_output = [] {
+        const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_MOE_OUTPUT");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+    }();
+    if (fp32_moe_output && (!fp32_hyper_state || !model.host_experts.has_value())) {
+        throw std::invalid_argument("FP32 MoE output requires FP32 hyper state and host experts");
+    }
     const bool fp32_router_input = [] {
         const char* env = std::getenv("NINFER_FLASH_NEXT_FP32_ROUTER_INPUT");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
@@ -855,19 +886,36 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
             flash_next_moe_host_backed(
                 round_ws.block_input, model.layers[layer].moe,
                 model.host_experts->layers[layer], round_ws.block_output,
-                workspace, stream, {}, router_input);
+                workspace, stream, {}, router_input, nullptr, nullptr,
+#if defined(NINFER_VOLTA_BUILD)
+                fp32_moe_output ? &round_ws.moe_output_fp32 : nullptr
+#else
+                nullptr
+#endif
+            );
         } else {
             flash_next_moe(round_ws.block_input, model.layers[layer].moe,
                            round_ws.block_output, workspace, stream);
         }
         emit_state(prefix + "mlp_block_output", round_ws.block_output);
+#if defined(NINFER_VOLTA_BUILD)
+        if (fp32_moe_output) {
+            emit_state(prefix + "mlp_block_output_fp32", round_ws.moe_output_fp32);
+        }
+#endif
 
         // MLP hyper inject
 #if defined(NINFER_VOLTA_BUILD)
         if (fp32_hyper_state) {
-            hyper_inject_bf16_to_fp32(
-                round_ws.block_output, round_ws.hyper_scratch.injection,
-                round_ws.hyper_hidden_fp32, stream);
+            if (fp32_moe_output) {
+                hyper_inject_fp32_to_fp32_stage(
+                    round_ws.moe_output_fp32, round_ws.hyper_scratch.injection,
+                    round_ws.hyper_hidden_fp32, round_ws.hyper_hidden_fp32, stream);
+            } else {
+                hyper_inject_bf16_to_fp32(
+                    round_ws.block_output, round_ws.hyper_scratch.injection,
+                    round_ws.hyper_hidden_fp32, stream);
+            }
             stage_ledger_record(stream, FlashNextStageId::Hyper_InjectMlp);
             emit_state(prefix + "hyper_after_mlp", round_ws.hyper_hidden_fp32);
         } else

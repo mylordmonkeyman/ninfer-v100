@@ -17,6 +17,7 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 // Counters are process-local diagnostics; they do not participate in scheduling.
 struct FlashNextHostExpertExecutionStats {
     std::uint64_t completed_layer_calls = 0;
+    std::uint64_t fp32_output_layer_calls = 0;
     std::uint64_t routed_tokens = 0;
     std::uint64_t expert_pairs = 0;
 };
@@ -45,7 +46,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                                 const MoeStageEmitter& emit = {},
                                 const Tensor* router_input_fp32 = nullptr,
                                 const Tensor* routed_expert_input_fp32 = nullptr,
-                                const Tensor* shared_expert_input_fp32 = nullptr);
+                                const Tensor* shared_expert_input_fp32 = nullptr,
+                                Tensor* output_fp32 = nullptr);
 
 void flash_next_moe_bf16(const Tensor& input, const MoeBf16Weights& weights, Tensor& output,
                          WorkspaceArena& workspace, cudaStream_t stream);
