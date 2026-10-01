@@ -1501,3 +1501,27 @@ unchanged §7 CTest metrics and exit code separately. CUDA compilation and
 numerical results are runner validation; the optional mode is not qualified
 merely by being implemented. Chunked prefill uses the corresponding raw hyper
 mixture but is not evaluated by this sequential-decode corpus.
+
+### Full-corpus controlled membership replay
+
+`precision-v100-router-replay-4096.yml` extends the existing all-layer replay to
+4096 complete sequential prefixes. One fresh independent FP32 full forward
+supplies both replay paths' expert sets and is checked against every frozen
+oracle logit. `replay_full_prefix_router.py --positions 4096
+--export-v100-stage --export-logits` then runs the separate CPU candidate
+precision profile. The actual V100 uses those same sets, recomputing its own
+weights from its own scores; all other precision boundaries remain unchanged.
+The late FP32 router-input option remains disabled.
+
+The workflow verifies 196608 membership layer calls and 4096 logits from each
+implementation. The CPU summary records fresh-versus-frozen oracle consistency;
+the combined report compares natural and replayed error by corpus segment.
+`direct-report` adds CPU-to-V100 KL, nearest-rank P99, top-1 agreement, and
+next-token NLL. The unchanged CTest exit and gate metrics are stored separately.
+Forced membership is a causal diagnostic and cannot qualify natural routing.
+Fresh-oracle inconsistency invalidates its interpretation rather than proving a
+candidate engine fault. No incremental-oracle error guard stops this diagnostic.
+
+Only this workflow is triggered by its workflow-file push. The old CPU
+768-position replay is manual-only to avoid duplicate runs when shared tools
+change. Healthy jobs are never cancelled by the concurrency group.

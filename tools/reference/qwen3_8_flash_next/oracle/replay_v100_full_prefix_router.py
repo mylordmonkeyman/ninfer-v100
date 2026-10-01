@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""Export full-forward FP32 expert sets and compare a V100 replay over 768 prefixes."""
+"""Export full-forward FP32 expert sets and compare a V100 replay over complete prefixes."""
 import argparse
 import csv
 import json
 from pathlib import Path
 
 import numpy as np
-
-
-COUNT = 768
 
 
 def parse_top1(value):
@@ -21,11 +18,12 @@ def parse_top1(value):
 
 
 def export(args):
+    count = args.positions
     import torch
     from run_oracle import build_oracle
     from run_precision_reference import read_ids
 
-    ids = read_ids(args.oracle_root / "token_ids.json", COUNT)
+    ids = read_ids(args.oracle_root / "token_ids.json", count)
     manifest = json.loads((args.oracle_root / "manifest.json").read_text())
     for pos, token in enumerate(ids):
         entry = manifest["positions"][pos]
@@ -37,9 +35,9 @@ def export(args):
     for layer, block in enumerate(model.layers):
         def capture(_module, _inputs, output, layer=layer):
             selected = output[2].detach().cpu()
-            if selected.numel() != COUNT * 10 or selected.shape[-1] != 10:
+            if selected.numel() != count * 10 or selected.shape[-1] != 10:
                 raise ValueError(f"router shape {tuple(selected.shape)} at layer {layer}")
-            routed[layer] = selected.reshape(COUNT, 10).clone()
+            routed[layer] = selected.reshape(count, 10).clone()
         handles.append(block.mlp.gate.register_forward_hook(capture))
     try:
         with torch.inference_mode():
@@ -55,7 +53,7 @@ def export(args):
     # own scores, so these values are deliberately inert placeholders: they
     # keep the callback on the replay path and are overwritten before MoE use.
     alpha_fixture = np.zeros(10, dtype="<f4")
-    for pos in range(COUNT):
+    for pos in range(count):
         folder = args.out_dir / f"pos{pos:04d}"
         folder.mkdir()
         for layer in range(48):
@@ -64,10 +62,11 @@ def export(args):
                 raise ValueError(f"invalid expert set at position {pos}, layer {layer}")
             ids.astype("<f4").tofile(folder / f"L{layer:02d}_moe_router_ids.bin")
             alpha_fixture.tofile(folder / f"L{layer:02d}_moe_router_alpha.bin")
-    print(f"exported {COUNT * 48} full-forward FP32 expert sets", flush=True)
+    print(f"exported {count * 48} full-forward FP32 expert sets", flush=True)
 
 
 def report(args):
+    count = args.positions
     from compare_full_prefix import kl, logp, read_bf16
 
     entries = json.loads((args.oracle_root / "manifest.json").read_text())["positions"]
@@ -75,10 +74,10 @@ def report(args):
         natural = list(csv.DictReader(stream))
     with args.cpu_replay_csv.open(newline="") as stream:
         cpu_replay = list(csv.DictReader(stream))
-    if len(natural) < COUNT or len(cpu_replay) != COUNT:
+    if len(natural) < count or len(cpu_replay) != count:
         raise ValueError("missing complete-prefix comparison rows")
     rows = []
-    for pos in range(COUNT):
+    for pos in range(count):
         if int(natural[pos]["position"]) != pos or int(cpu_replay[pos]["position"]) != pos:
             raise ValueError(f"comparison position mismatch at {pos}")
         entry = entries[pos]
@@ -87,6 +86,8 @@ def report(args):
             raise ValueError(f"oracle logits missing at {pos}")
         oracle = np.fromfile(args.oracle_root / logits[0]["file"], dtype="<f4")
         v100 = read_bf16(args.v100_root / f"pos{pos:04d}.bf16")
+        if not np.isfinite(oracle).all():
+            raise ValueError(f"nonfinite oracle at {pos}")
         if oracle.size != v100.size:
             raise ValueError(f"V100 replay logits shape mismatch at {pos}")
         replay_kl = kl(logp(oracle.astype(np.float64)), logp(v100))
@@ -117,9 +118,12 @@ def report(args):
             r["replayed_v100_kl"] < r["natural_v100_kl"] for r in part)
         return result
     summary = {
-        "provenance": "frozen full FP32 oracle, natural CPU and V100 4096-prefix report, and controlled full-FP32-membership CPU/V100 replays through 768 complete prefixes",
+        "provenance": f"frozen full FP32 oracle, natural CPU and V100 4096-prefix report, and controlled full-FP32-membership CPU/V100 replays through {count} complete prefixes",
+        "diagnostic_only": True,
+        "natural_qualification": "Not established by forced membership; evaluate natural-routing runs separately",
         "ranges": {f"{lo}:{hi}": summarize(lo, hi)
-                   for lo, hi in ((0, 512), (512, 768), (0, 768))},
+                   for lo, hi in (((0, 512), (512, 768), (0, 768)) if count == 768 else
+                                 ((0, 768), (512, 768), (768, 1024), (1024, 2048), (2048, 3072), (3072, 4096), (0, 4096)))},
     }
     (args.out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2), flush=True)
@@ -139,6 +143,8 @@ def main():
     reporter.add_argument("--cpu-replay-csv", type=Path, required=True)
     reporter.add_argument("--v100-root", type=Path, required=True)
     reporter.add_argument("--out-dir", type=Path, required=True)
+    for command in (exporter, reporter):
+        command.add_argument("--positions", type=int, choices=(768, 4096), default=768)
     args = parser.parse_args()
     {"export": export, "report": report}[args.command](args)
 

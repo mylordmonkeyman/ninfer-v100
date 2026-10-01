@@ -1,0 +1,207 @@
+name: Phase 11 V100 Full Prefix Router Replay 4096
+
+on:
+  push:
+    branches: [work/precision-matched-reference]
+    paths: [.github/workflows/precision-v100-router-replay-4096.yml]
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: phase11-v100-router-replay-4096
+  cancel-in-progress: false
+
+jobs:
+  compare:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 4320
+    env:
+      NINFER_ORACLE_DETERMINISTIC: "1"
+      NINFER_ORACLE_THREADS: "16"
+      OMP_NUM_THREADS: "16"
+      MKL_NUM_THREADS: "16"
+      OPENBLAS_NUM_THREADS: "16"
+      NUMEXPR_NUM_THREADS: "16"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: phase11-three-way-4096-report
+          run-id: 36324622296
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: frozen-three-way
+      - name: Locate read-only inputs and CPU Python
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -r /srv/ninfer/source/mixed/model.safetensors.index.json
+          test -d /srv/ninfer/source/ple/ples_int4
+          test -r /oracle/phase11/manifest.json
+          test -r /oracle/phase11/token_ids.json
+          test -s /models/qwen3-8b-flash-next
+          test -r frozen-three-way/report/per_position.csv
+          python_bin="${NINFER_PHASE11_PYTHON:-}"
+          if [[ -z "$python_bin" ]]; then
+            for candidate in "$HOME/ninfer-v100/venv-oracle/bin/python" \
+                /srv/ninfer/venv-oracle/bin/python python3; do
+              if command -v "$candidate" >/dev/null 2>&1 && \
+                  "$candidate" -c 'import numpy, torch, transformers, safetensors' >/dev/null 2>&1; then
+                python_bin="$candidate"
+                break
+              fi
+            done
+          fi
+          echo "PRECISION_PYTHON=$python_bin" >> "$GITHUB_ENV"
+      - name: Prepare Python if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$PRECISION_PYTHON" ]]; then exit 0; fi
+          python3 -m venv "$GITHUB_WORKSPACE/precision-venv"
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            torch --index-url https://download.pytorch.org/whl/cpu
+          "$GITHUB_WORKSPACE/precision-venv/bin/pip" install \
+            numpy safetensors 'transformers>=5.16,<6'
+          echo "PRECISION_PYTHON=$GITHUB_WORKSPACE/precision-venv/bin/python" >> "$GITHUB_ENV"
+      - name: Compile real V100 model test
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/last_router_scores.size() != 513/last_router_scores.size() < 512/' \
+            tests/targets/qwen3_8_flash_next/test_vertical_slice_real.cpp
+          grep -nF 'last_router_scores.size() < 512' \
+            tests/targets/qwen3_8_flash_next/test_vertical_slice_real.cpp
+          cmake -S . -B build-precision-v100 -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-precision-v100 -j --target \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test
+      - name: Full FP32 routing capture and controlled CPU replay for 4096 positions
+        shell: bash
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+        run: |
+          set -euo pipefail
+          mkdir -p cpu-router-replay-4096
+          "$PRECISION_PYTHON" tools/reference/qwen3_8_flash_next/oracle/replay_full_prefix_router.py \
+            --positions 4096 --export-v100-stage --export-logits \
+            --model-dir /srv/ninfer/source/mixed \
+            --ple-dir /srv/ninfer/source/ple/ples_int4 \
+            --oracle-root /oracle/phase11 \
+            --three-way-csv frozen-three-way/report/per_position.csv \
+            --out-dir "$GITHUB_WORKSPACE/cpu-router-replay-4096" \
+            2>&1 | tee cpu-router-replay-4096/run.log
+          test "$(find cpu-router-replay-4096/router-stage -name 'L??_moe_router_ids.bin' | wc -l)" -eq 196608
+          test "$(find cpu-router-replay-4096/router-stage -name 'L??_moe_router_alpha.bin' | wc -l)" -eq 196608
+          test "$(find cpu-router-replay-4096/cpu-logits -name '*.bf16' | wc -l)" -eq 4096
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: phase11-cpu-router-replay-4096
+          path: |
+            cpu-router-replay-4096/run.log
+            cpu-router-replay-4096/summary.json
+            cpu-router-replay-4096/oracle-parity.json
+            cpu-router-replay-4096/per_position.csv
+            cpu-router-replay-4096/cpu-vs-oracle.jsonl
+          retention-days: 21
+      - name: Wait for free V100 memory
+        shell: bash
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 120); do
+            free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free \
+              --format=csv,noheader,nounits | tr -d '[:space:]')
+            if (( free_mib >= 28000 )); then exit 0; fi
+            if (( attempt < 120 )); then sleep 30; fi
+          done
+          echo '::error::V100 did not have 28000 MiB free within one hour'
+          exit 1
+      - name: Replay FP32 expert membership on actual V100
+        shell: bash
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_PHASE11_STAGE_ORACLE_ALL_POSITIONS: "1"
+          NINFER_PHASE11_REPLAY_ORACLE_ROUTER_IDS: "1"
+          NINFER_PHASE11_SKIP_ROUTER_MARGIN_DIAGNOSTIC: "1"
+          NINFER_PHASE11_SKIP_PRE_ROUTER_AUTOPSY: "1"
+          NINFER_PHASE11_TRACE_POSITIONS: "1"
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: "32"
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: reference
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: "1"
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: "1"
+        run: |
+          set -euo pipefail
+          mkdir -p v100-router-replay-4096
+          export NINFER_PHASE11_STAGE_ORACLE_ROOT="$GITHUB_WORKSPACE/cpu-router-replay-4096/router-stage"
+          export NINFER_PHASE11_LOGITS_EXPORT_ROOT="$GITHUB_WORKSPACE/v100-router-replay-4096/v100-logits"
+          set +e
+          ctest --test-dir build-precision-v100 -V \
+            -R '^ninfer_qwen3_8_flash_next_vertical_slice_real_test$' \
+            2>&1 | tee v100-router-replay-4096/v100-test.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "$status" > v100-router-replay-4096/v100-test-exit-code.txt
+          test "$(find v100-router-replay-4096/v100-logits -name '*.bf16' | wc -l)" -eq 4096
+          grep -F 'phase11.oracle_membership_replay.layer_calls=196608' \
+            v100-router-replay-4096/v100-test.log
+      - name: Compare frozen oracle, natural paths, and controlled replays
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PRECISION_PYTHON" -c \
+            'from tools.reference.qwen3_8_flash_next.oracle.replay_v100_full_prefix_router import parse_top1; assert [parse_top1(x) for x in ("True", "False", "1", "0")] == [1, 0, 1, 0]'
+          "$PRECISION_PYTHON" tools/reference/qwen3_8_flash_next/oracle/replay_v100_full_prefix_router.py report --positions 4096 \
+            --oracle-root /oracle/phase11 \
+            --three-way-csv frozen-three-way/report/per_position.csv \
+            --cpu-replay-csv cpu-router-replay-4096/per_position.csv \
+            --v100-root v100-router-replay-4096/v100-logits \
+            --out-dir v100-router-replay-4096
+      - name: Direct controlled CPU versus V100 distribution comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PRECISION_PYTHON" tools/reference/qwen3_8_flash_next/oracle/compare_full_prefix.py \
+            --oracle-root /oracle/phase11 \
+            --cpu-root cpu-router-replay-4096 \
+            --v100-root v100-router-replay-4096 \
+            --profile-description 'Diagnostic oracle membership replay; own CPU/V100 scores and weights; not natural qualification' \
+            --out-dir v100-router-replay-4096/direct-report
+          grep -E 'phase11.(mean_kl|p99_kl|top1_agreement|relative_mean_nll_delta|oracle_membership_replay|host_expert)' \
+            v100-router-replay-4096/v100-test.log > v100-router-replay-4096/v100-gate-metrics.txt || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: phase11-v100-router-replay-4096
+          path: |
+            v100-router-replay-4096/direct-report
+            v100-router-replay-4096/v100-gate-metrics.txt
+            v100-router-replay-4096/summary.json
+            v100-router-replay-4096/per_position.csv
+            v100-router-replay-4096/v100-test-exit-code.txt
+            v100-router-replay-4096/v100-test.log
+          if-no-files-found: ignore
+          retention-days: 21
