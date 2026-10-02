@@ -1338,9 +1338,9 @@ The narrow margins and absent preferred headroom must carry into Phase 13:
 derive feasible capacity from the actual VRAM ledger, then validate the real
 cache hit rate and upload timing before making a serving-throughput claim.
 
-The separate resident-GPU MoE prefill benchmark still aborts with an illegal
-memory access. Its failure and exit status are retained in the evidence artifact;
-it is not covered by the CPU gate. The original full-model numerical criterion
+At Phase 12, the separate resident-GPU MoE prefill benchmark aborted with an
+illegal memory access. Its failure is retained in that evidence artifact; Phase
+13 subsequently corrected its workspace allocation, as described below. The original full-model numerical criterion
 also remains unqualified. No Phase 11 precision investigation was restarted.
 
 
@@ -1389,33 +1389,33 @@ original Phase 11 numerical gate or establish a serving token rate.
 
 #### Phase 13 verification and measured capacity
 
-The [cache integration run](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37034072067)
-built the fresh SM70 runtime and passed cache oracle/ownership tests, cache memory
-sanitization, 128-position natural-routing integration, and cold/cached real-model
-128-token prefill. The [hosted SM70 build and host contract check](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37034072059)
-also passed. The separate resident-GPU MoE benchmark failed memory sanitization: at T >= 256,
-the SM70 software prefill kernel received a null FP32 partial-output pointer.
-The workspace allocator selected the Blackwell BF16 MMA staging allocation at
-that threshold even though SM70 executes the software path at every size.
+The [passing V100 cache and prefill run](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37051865620)
+and [hosted SM70 build/host contract check](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37051865649)
+validated the runtime at `b6f48715`. Evidence is retained in the
+`phase13-compressed-cache` artifact (ID 11246349204).
 
-The [first cache run](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37033319618)
-provides the detailed capacity and routing measurements below. Its model execution
-completed; the workflow failed because its shell check expected the wrong text
-for the known Phase 11 oracle rejection. The subsequent run corrected that check
-without relaxing the numerical criterion.
-
-For this 4,096-context, 128-token-prefill, non-MTP test configuration, the measured
+For this 4,096-context, 128-token-prefill, non-MTP configuration, the measured
 budget derived 165 slots per layer, consuming 21,899,243,520 bytes (20.395 GiB) of
 compressed GPU cache. Hit scratch/results reserve 14,745,600 device bytes;
-pinned fill/results storage totals 15,872,256 bytes. These capacities are specific
-to this configuration and are recalculated for other context/concurrency settings.
+pinned fill/results storage totals 15,872,256 bytes. Actual cache/hit allocations
+consumed 21,917,335,552 device bytes including allocator rounding, leaving
+4,089,708,544 bytes free (3.81 GiB) and staying below the 28 GiB operating ceiling.
+These capacities are recalculated for other context/concurrency settings.
 
-Across 128 naturally routed positions and all 48 layers, 34,488 of 61,440 expert
-pairs used Ready GPU entries (56.13%); 26,952 used CPU execution. There were 5,780
-admissions and completed uploads, with no real-model eviction during this cold
-prefix. Small-capacity component tests separately exercised LRU eviction,
-protection of the sole leased slot, layer namespaces and admission cap one.
-No oracle-forced routing was used.
+Across 128 naturally routed positions and all 48 layers, 34,511 of 61,440 expert
+pairs used Ready GPU entries (56.17%); 26,929 used CPU execution. All 5,775
+admissions completed, with no real-model eviction during this cold prefix.
+Small-capacity component tests separately exercised LRU eviction, protection of
+the sole leased slot, layer namespaces and admission cap one. No oracle-forced
+routing was used.
+
+The fills used 4.754 seconds of aggregate worker wall time, averaging 823 us with
+maximum 17.079 ms. This includes pageable-to-pinned staging and completed H2D
+transfer; it is not token-critical-path wait or a pure PCIe bandwidth measurement.
+Cold real-model prefill had zero hits; repeating the 128-token prefill after its
+first fills completed exercised 342 GPU hits. Cap-one admission per layer call
+limits early prefill coverage; these checks establish execution correctness,
+not optimized prefill throughput.
 
 Canonical payload planes and divisors matched their source bytes exactly. The
 independent signed-weight expert checks covered T=1,2,3,4,6,8 and 128; worst
@@ -1424,14 +1424,10 @@ zero errors. These are expert/cache checks, not formal full-model qualification.
 The original Phase 11 numerical gate remains failed. No whole-server speed or
 CPU throughput headroom is inferred from the cache hit rate.
 
-
-The complete cache run observed 21,917,335,552 device bytes added by cache and
-hit buffers, leaving 4,089,708,544 bytes free (3.81 GiB). This includes allocator
-rounding and remains below the 28 GiB non-MTP operating ceiling. The 5,780 fills
-used 4.81 seconds of aggregate worker wall time, averaging 832 us with maximum
-1,266 us. This includes pageable-to-pinned staging and completed H2D transfer;
-it is not token-critical-path wait or a pure PCIe bandwidth measurement.
-Cold prefill had zero cache hits; repeating the 128-token prefill after the first
-48 fills completed exercised 342 GPU hits. Cap-one admission per layer call
-limits early prefill coverage; these checks establish execution correctness,
-not optimized prefill throughput.
+The earlier resident-GPU prefill crash was a workspace allocation error. At
+T >= 256, the allocator selected Blackwell BF16 MMA staging, while SM70 still
+executed the software down kernel requiring FP32 partials. SM70 now allocates
+those FP32 partials at every prefill size. Resident-GPU prefill at T=128,319,512
+and 2048 matched the decode reference with reported relative L2 error zero;
+full resident-MoE memcheck also reported zero errors. Blackwell retains its
+existing allocation policy.
