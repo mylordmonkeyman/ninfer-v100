@@ -1,4 +1,5 @@
 #include "targets/qwen3_8_flash_next/impl/moe.h"
+#include "targets/qwen3_8_flash_next/impl/expert_cache.h"
 
 #include "core/layout.h"
 #include "targets/qwen3_8_flash_next/impl/cpu_expert_pool.h"
@@ -219,7 +220,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                                 const Tensor* router_input_fp32,
                                 const Tensor* routed_expert_input_fp32,
                                 const Tensor* shared_expert_input_fp32,
-                                Tensor* output_fp32) {
+                                Tensor* output_fp32, FlashNextExpertCache* cache, unsigned layer) {
     const std::int32_t tokens = input.ne[1];
     if (input.dtype != DType::BF16 || output.dtype != DType::BF16 || input.ne[0] != 2'560 ||
         output.ne[0] != 2'560 || tokens < 1 || output.ne[1] != tokens ||
@@ -323,7 +324,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     cpu.routed_sum.resize(
         static_cast<std::size_t>(tokens) * kFlashNextExpertHidden);
     cpu.pair_outputs.resize(routed_paths * kFlashNextExpertHidden);
-    cpu.tasks.resize(routed_paths);
+    cpu.tasks.clear();
+    cpu.tasks.reserve(routed_paths);
     std::fill(cpu.routed_sum.begin(), cpu.routed_sum.end(), 0.0F);
 
     if (use_routed_expert_input_fp32) {
@@ -357,17 +359,27 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
             const std::size_t route_index =
                 static_cast<std::size_t>(token) * 10ULL +
                 static_cast<std::size_t>(path);
-            cpu.tasks[route_index] = HostExpertTask{
+            if (cache != nullptr && !use_routed_expert_input_fp32 &&
+                !resolve_fp32_intermediate_diagnostic() && cache->execute(layer,
+                    cpu.ids[route_index], static_cast<const std::uint16_t*>(input.data) +
+                    token_offset, static_cast<unsigned>(route_index), stream)) {
+                continue;
+            }
+            cpu.tasks.push_back(HostExpertTask{
                 .expert = host_experts.expert(cpu.ids[route_index]),
                 .input = token_input,
                 .input_fp32 = token_input_fp32,
                 .output = cpu.pair_outputs.data() +
                           route_index * kFlashNextExpertHidden,
-            };
+            });
         }
     }
 
+    if (cache != nullptr) cache->download(cpu.pair_outputs, stream);
     host_expert_worker_pool().run(cpu.tasks);
+    // Admission is background work and cannot make a miss a current-token GPU dependency.
+    if (cache != nullptr && !use_routed_expert_input_fp32 &&
+        !resolve_fp32_intermediate_diagnostic()) cache->admit(layer, cpu.ids);
 
     for (std::int32_t token = 0; token < tokens; ++token) {
         float* token_sum =

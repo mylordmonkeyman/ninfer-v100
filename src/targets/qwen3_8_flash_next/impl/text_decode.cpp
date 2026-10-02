@@ -574,6 +574,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
 #else
                 nullptr
 #endif
+                , state.expert_cache, static_cast<unsigned>(layer)
             );
         } else {
             flash_next_moe(round_ws.block_input, model.layers[layer].moe,
@@ -853,6 +854,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
 #else
                 nullptr
 #endif
+                , state.expert_cache, static_cast<unsigned>(layer)
             );
         } else {
             flash_next_moe(round_ws.block_input, model.layers[layer].moe,

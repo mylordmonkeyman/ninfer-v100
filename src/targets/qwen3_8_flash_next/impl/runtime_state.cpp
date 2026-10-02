@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
+#include <string_view>
 #include <stdexcept>
 #include <utility>
 
@@ -79,6 +81,24 @@ FlashNextRuntimeAllocation::FlashNextRuntimeAllocation(FlashNextRuntimePlan plan
 
     materialize_views();
     validate_flash_next_decode_state(state_view_, plan_.state_slots);
+}
+
+void FlashNextRuntimeAllocation::configure_expert_cache(const TextModelView& model) {
+    const char* enabled=std::getenv("NINFER_FLASH_NEXT_EXPERT_CACHE");
+    if(!enabled||!*enabled||std::string_view(enabled)=="0")return;
+    if(expert_cache_)return;
+    if(!model.host_experts||plan_.config.use_cuda_graph)
+        throw std::invalid_argument("Flash-Next expert cache requires host experts and graphs disabled");
+    unsigned maximum=512;
+    if(const char* env=std::getenv("NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS");env&&*env){
+        char* end=nullptr;const auto n=std::strtoul(env,&end,10);
+        if(end==env||*end||n>512)throw std::invalid_argument("invalid expert cache maximum slots");
+        maximum=static_cast<unsigned>(n);
+    }
+    expert_cache_=std::make_unique<FlashNextExpertCache>(*model.host_experts,
+        std::max(plan_.config.prefill_chunk,plan_.config.max_concurrency),
+        plan_.config.speculative_draft_tokens>0,maximum);
+    state_view_.expert_cache=expert_cache_.get();
 }
 
 void FlashNextRuntimeAllocation::materialize_views() {

@@ -247,6 +247,11 @@ ninfer_add_test(ninfer_qwen3_8_flash_next_ple_table_test
 ninfer_add_test(ninfer_qwen3_8_flash_next_expert_bank_test
   SOURCES targets/qwen3_8_flash_next/test_expert_bank.cpp
   LIBRARIES ninfer_qwen3_8_flash_next)
+ninfer_add_test(ninfer_qwen3_8_flash_next_expert_cache_test
+  SOURCES targets/qwen3_8_flash_next/test_expert_cache.cpp
+  LIBRARIES ninfer_qwen3_8_flash_next)
+set_tests_properties(ninfer_qwen3_8_flash_next_expert_cache_test
+  PROPERTIES SKIP_RETURN_CODE 77)
 ninfer_add_test(ninfer_qwen3_8_flash_next_cpu_expert_reference_test
   SOURCES targets/qwen3_8_flash_next/test_cpu_expert_reference.cpp
   LIBRARIES ninfer_qwen3_8_flash_next)

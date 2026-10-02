@@ -1,0 +1,121 @@
+name: V100 Phase 13 Compressed Cache
+on:
+  push:
+    branches: [forwardport/v100-flash-next]
+    paths:
+      - '.github/workflows/v100-phase13-cache.yml'
+      - 'src/targets/qwen3_8_flash_next/**'
+      - 'tests/targets/qwen3_8_flash_next/**'
+      - 'tests/CMakeLists.txt'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: v100-phase13-cache
+  cancel-in-progress: false
+jobs:
+  compressed-cache:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 180
+    env:
+      NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+      NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+      NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: '32'
+      NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: auto
+      NINFER_FLASH_NEXT_FP32_HYPER_STATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_CONV: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_READOUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_GATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_MOE_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT_LAYERS_32_47: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_SHARED_INPUT: '0'
+      NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE: '0'
+      NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Build cache integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p phase13-results
+          nvidia-smi > phase13-results/gpu.txt
+          nvcc --version > phase13-results/cuda.txt
+          cmake -S . -B build-phase13 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-phase13 -j --target \
+            ninfer_qwen3_8_flash_next_expert_cache_test \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            ninfer_qwen3_8_flash_next_moe_test \
+            ninfer_qwen3_8_flash_next_text_decode_test
+      - name: Cache ownership and numerical oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build-phase13 -V \
+            -R '^ninfer_qwen3_8_flash_next_(expert_cache|text_decode)_test$' \
+            | tee phase13-results/cache-tests.log
+          compute-sanitizer --tool memcheck --error-exitcode 1 \
+            build-phase13/tests/ninfer_qwen3_8_flash_next_expert_cache_test \
+            > phase13-results/cache-memcheck.log 2>&1
+      - name: Actual budgeted cache natural-routing integration
+        shell: bash
+        env:
+          NINFER_FLASH_NEXT_EXPERT_CACHE: '1'
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '128'
+          NINFER_PHASE12_CPU_TRACE: phase13-results/natural-routing.bin
+        run: |
+          set -euo pipefail
+          set +e
+          build-phase13/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            > phase13-results/integration.log 2>&1
+          status=$?
+          set -e
+          echo "$status" > phase13-results/integration-exit-code.txt
+          cat phase13-results/integration.log
+          test "$status" -le 1
+          test "$(stat -c %s phase13-results/natural-routing.bin)" -eq 31997960
+          grep -Eq 'phase11.host_expert.expert_pairs=61440' phase13-results/integration.log
+          grep -Eq 'phase13.cache.hits=[1-9][0-9]*' phase13-results/integration.log
+          if test "$status" -eq 1; then
+            grep -q 'Phase 11 numerical oracle gate failed' phase13-results/integration.log
+          fi
+      - name: Locate resident GPU prefill memory fault
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          compute-sanitizer --tool memcheck --error-exitcode 1 \
+            --destroy-on-device-error kernel \
+            build-phase13/tests/ninfer_qwen3_8_flash_next_moe_test \
+            > phase13-results/resident-gpu-memcheck.log 2>&1
+          status=$?
+          set -e
+          echo "$status" > phase13-results/resident-gpu-exit-code.txt
+          tail -100 phase13-results/resident-gpu-memcheck.log
+          exit "$status"
+      - name: Preserve cache evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase13-compressed-cache
+          path: phase13-results
+          retention-days: 30

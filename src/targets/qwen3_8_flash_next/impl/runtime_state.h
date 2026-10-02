@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/arena.h"
+#include "targets/qwen3_8_flash_next/impl/expert_cache.h"
 #include "core/device.h"
 #include "core/tensor.h"
 #include "ninfer/ops/sampling.h"
@@ -95,6 +96,9 @@ public:
             static_cast<const std::byte*>(device_ingress_) + offsetof(FlashNextDecodeIngress, sampling));
     }
 
+    // Call after model and all runtime allocations exist; opt-in Phase-13 cache.
+    void configure_expert_cache(const TextModelView& model);
+
     // Initialize device slot tensors and state before the first decode round
     void initialize(cudaStream_t stream);
 
@@ -130,6 +134,7 @@ public:
     }
 
 private:
+    std::unique_ptr<FlashNextExpertCache> expert_cache_;
     FlashNextRuntimePlan plan_;
     std::unique_ptr<DeviceBuffer> storage_;
     std::unique_ptr<WorkspaceArena> workspace_;

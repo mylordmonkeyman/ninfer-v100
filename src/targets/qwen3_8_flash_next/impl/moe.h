@@ -11,6 +11,7 @@
 #include <string_view>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
+class FlashNextExpertCache;
 
 
 // Phase-11 vertical-slice proof that the correctness-first host path actually ran.
@@ -36,10 +37,8 @@ using MoeStageEmitter = std::function<void(std::string_view, const Tensor&)>;
 void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& output,
                     WorkspaceArena& workspace, cudaStream_t stream);
 
-// Phase-10 correctness path for main-text layers whose routed NVFP4 experts remain
-// in the artifact mmap. Routing and the shared expert execute on the GPU; the ten
-// routed expert pairs execute synchronously on the CPU reference path and are merged
-// back into the BF16 output. Performance is intentionally not a goal here.
+// Host-backed main-text MoE: resident routing/shared expert, optional Ready GPU cache hits,
+// AVX2 CPU misses, and ordered FP32 merge. Phase 13 executes hit and miss work serially.
 void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_weights,
                                 const HostNvfp4ExpertLayerView& host_experts, Tensor& output,
                                 WorkspaceArena& workspace, cudaStream_t stream,
@@ -47,7 +46,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                                 const Tensor* router_input_fp32 = nullptr,
                                 const Tensor* routed_expert_input_fp32 = nullptr,
                                 const Tensor* shared_expert_input_fp32 = nullptr,
-                                Tensor* output_fp32 = nullptr);
+                                Tensor* output_fp32 = nullptr,
+                                FlashNextExpertCache* cache = nullptr, unsigned layer = 0);
 
 void flash_next_moe_bf16(const Tensor& input, const MoeBf16Weights& weights, Tensor& output,
                          WorkspaceArena& workspace, cudaStream_t stream);

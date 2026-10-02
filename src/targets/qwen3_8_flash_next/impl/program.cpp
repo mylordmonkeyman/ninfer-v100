@@ -143,6 +143,7 @@ ProgramImpl::ProgramImpl(const LoadedModelData* model_data, FlashNextRuntimePlan
         vision_session_.emplace(*vision_override_, device_, ws, *plan_.vision_workspace,
                                 plan_.config.max_vision_tokens);
     }
+    allocation_.configure_expert_cache(model_data_ != nullptr ? model_data_->text : text_override_);
 }
 
 const std::int32_t* ProgramImpl::upload_constraint_mask(std::uint32_t lane, std::uint32_t column,
@@ -3243,18 +3244,23 @@ MemorySummary Program::memory_summary() const noexcept {
     out.max_context                       = impl_->plan_.config.max_context;
     out.kv_capacity                       = impl_->plan_.resolved_tokens;
     out.kv_cache                          = impl_->plan_.config.kv_cache;
-    out.runtime_reservation_bytes         = impl_->plan_.total_device_bytes;
+    const auto* expert_cache = impl_->allocation_.state_view().expert_cache;
+    const auto cache_weights = expert_cache ? expert_cache->budget().cache_bytes : 0;
+    const auto cache_transfers = expert_cache && expert_cache->budget().slots_per_layer
+        ? expert_cache->budget().transfer_bytes : 0;
+    out.runtime_reservation_bytes = impl_->plan_.total_device_bytes + cache_weights + cache_transfers;
     out.minimum_runtime_reservation_bytes =
         impl_->plan_.capacity_curve.minimum_device_reservation_bytes;
     out.kv_capacity_increment_bytes =
         impl_->plan_.capacity_curve.bytes_per_additional_main_page_group;
     const std::size_t weights_bytes =
         impl_->model_data_ != nullptr ? impl_->model_data_->backing.stats().device_capacity_bytes : 0;
-    out.weights = ArenaMemorySummary{weights_bytes, weights_bytes, weights_bytes};
+    out.weights = ArenaMemorySummary{weights_bytes + cache_weights, weights_bytes + cache_weights,
+                                    weights_bytes + cache_weights};
     out.sequence =
-        ArenaMemorySummary{impl_->plan_.total_device_bytes - impl_->plan_.workspace_bytes,
-                           impl_->plan_.total_device_bytes - impl_->plan_.workspace_bytes,
-                           impl_->plan_.total_device_bytes - impl_->plan_.workspace_bytes};
+        ArenaMemorySummary{impl_->plan_.total_device_bytes - impl_->plan_.workspace_bytes + cache_transfers,
+                           impl_->plan_.total_device_bytes - impl_->plan_.workspace_bytes + cache_transfers,
+                           impl_->plan_.total_device_bytes - impl_->plan_.workspace_bytes + cache_transfers};
     out.workspace = ArenaMemorySummary{impl_->plan_.workspace_bytes, 0, 0};
     out.cuda_graph_allowance_bytes = impl_->plan_.cuda_graph_allowance_bytes;
     if (impl_->vision_session_.has_value()) {

@@ -655,6 +655,7 @@ int main() {
         const auto vram_result =
             reconcile_phase11_vram(preflight.vram_ledger, vram);
         print_vram(preflight.vram_ledger, vram_result);
+        allocation.configure_expert_cache(model.text_view());
 
         reset_flash_next_host_expert_execution_stats();
 
@@ -1998,6 +1999,19 @@ int main() {
                   << "phase11.host_expert.expert_pairs="
                   << expert_stats.expert_pairs << '\n'
                   << "phase11.sampled_tokens=" << sampled_tokens << '\n';
+
+        if (auto* cache=allocation.state_view().expert_cache) {
+            cache->drain();
+            const auto stats=cache->stats();
+            std::cout << "phase13.cache.hits=" << stats.hits << '\n'
+                      << "phase13.cache.misses=" << stats.misses << '\n'
+                      << "phase13.cache.admitted=" << stats.admitted << '\n'
+                      << "phase13.cache.ready=" << stats.ready << '\n'
+                      << "phase13.cache.evicted=" << stats.evicted << '\n';
+            if(stats.hits==0 || stats.hits+stats.misses!=expected_pairs ||
+               stats.admitted>expected_layer_calls || stats.ready!=stats.admitted)
+                throw std::runtime_error("Phase 13 cache integration did not cover hit/miss/admission");
+        }
 
         if (expert_stats.completed_layer_calls != expected_layer_calls ||
             expert_stats.routed_tokens != expected_layer_calls ||

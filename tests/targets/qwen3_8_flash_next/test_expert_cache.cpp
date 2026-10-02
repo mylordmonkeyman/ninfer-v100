@@ -1,0 +1,80 @@
+#include "targets/qwen3_8_flash_next/impl/expert_cache.h"
+#include "targets/qwen3_8_flash_next/impl/cpu_expert_reference.h"
+#include "core/device.h"
+#include <algorithm>
+#include <bit>
+#include <cmath>
+#include <cstring>
+#include <iostream>
+#include <random>
+#include <stdexcept>
+#include <vector>
+using namespace ninfer;
+using namespace ninfer::targets::qwen3_8_flash_next::detail;
+void require(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
+std::uint16_t bf16(float x){auto b=std::bit_cast<std::uint32_t>(x);b+=0x7fff+((b>>16)&1);return b>>16;}
+void compare(const std::vector<float>& actual,const std::vector<float>& expected){
+    double error=0,norm=0,dot=0,aa=0;
+    for(unsigned i=0;i<actual.size();++i){require(std::isfinite(actual[i]),"nonfinite cached output");
+        error+=std::pow(double(actual[i])-expected[i],2);norm+=double(expected[i])*expected[i];
+        dot+=double(actual[i])*expected[i];aa+=double(actual[i])*actual[i];}
+    auto nrmse=std::sqrt(error/std::max(norm,1e-30)),cosine=dot/std::sqrt(aa*norm);
+    std::cout<<"cache.oracle.nrmse="<<nrmse<<" cosine="<<cosine<<'\n';
+    require(nrmse<=.002&&cosine>=.99999,"cache expert mathematical oracle mismatch");
+}
+int main(){try{
+    int count=0;if(cudaGetDeviceCount(&count)!=cudaSuccess||count==0)return 77;
+    DeviceContext device;
+    auto b=flash_next_expert_cache_budget(25ULL<<30,32ULL<<30,64ULL<<20,false);
+    require(b.slots_per_layer>32,"cache budget must derive capacity rather than assume 32");
+    require(b.cache_bytes+b.transfer_bytes+(7ULL<<30)<=(28ULL<<30),"cache operating ceiling");
+    require(flash_next_expert_cache_budget(1ULL<<30,32ULL<<30,64ULL<<20,false).slots_per_layer==0,"cache safety reserve");
+    require(flash_next_expert_cache_budget(10ULL<<30,32ULL<<30,64ULL<<20,false).slots_per_layer<b.slots_per_layer,"larger state reduces cache capacity");
+    std::mt19937 rng(19);
+    std::vector<std::byte> gate_codes(3*1'638'400),gate_scales(3*204'800);
+    std::vector<std::byte> down_codes(3*819'200),down_scales(3*102'400);
+    for(auto& x:gate_codes)x=std::byte(rng()&255);for(auto& x:down_codes)x=std::byte(rng()&255);
+    for(auto& x:gate_scales)x=std::byte(0x28+(rng()%16));
+    for(auto& x:down_scales)x=std::byte(0x28+(rng()%16));
+    float divisors[3]={64,72,80};
+    HostNvfp4ExpertLayerView layer{
+        {gate_codes.data(),gate_scales.data(),divisors,512,1280,2560,1'638'400,204'800},
+        {down_codes.data(),down_scales.data(),divisors,512,2560,640,819'200,102'400}};
+    HostNvfp4ExpertTableView host;host.layers.fill(layer);
+    FlashNextExpertCache cache(host,128,false,2);
+    std::int32_t ids[]={0,1,2};
+    cache.admit(0,ids);cache.drain();
+    require(cache.stats().admitted==1,"admission cap one");
+    cache.admit(0,ids);cache.drain();require(cache.stats().admitted==2,"next missing admission");
+    auto v=cache.ready_view(0,0);
+    auto check_bytes=[](const std::byte* dev,const std::byte* src,std::size_t bytes){
+        std::vector<std::byte> copy(bytes);CUDA_CHECK(cudaMemcpy(copy.data(),dev,bytes,cudaMemcpyDeviceToHost));
+        require(std::memcmp(copy.data(),src,bytes)==0,"canonical cache bytes changed");};
+    check_bytes(v.gate_up.codes,gate_codes.data(),1'638'400);check_bytes(v.gate_up.scales,gate_scales.data(),204'800);
+    check_bytes(v.down.codes,down_codes.data(),819'200);check_bytes(v.down.scales,down_scales.data(),102'400);
+    float divisor=0;CUDA_CHECK(cudaMemcpy(&divisor,v.down.weight_scale_divisor,4,cudaMemcpyDeviceToHost));
+    require(divisor==divisors[0],"canonical divisor changed");
+    std::vector<std::uint16_t> input(128*2560);
+    for(auto& x:input)x=bf16((int(rng()%201)-100)*.002F);
+    DeviceBuffer d_input(input.size()*2);d_input.copy_from_host(input.data(),input.size()*2);
+    CpuNvfp4ExpertReferenceScratch scratch;
+    for(unsigned tokens:{1U,2U,3U,4U,6U,8U,128U}){
+        std::vector<float> out(tokens*2560),expected(tokens*2560);
+        for(unsigned t=0;t<tokens;++t){
+            require(cache.execute(0,t%2,static_cast<std::uint16_t*>(d_input.p)+t*2560,t,device.stream),"Ready hit missing");
+            flash_next_cpu_nvfp4_expert_pair_reference(layer.expert(t%2),
+                std::span(input.data()+t*2560,2560),std::span(expected.data()+t*2560,2560),scratch);
+        }
+        cache.download(out,device.stream);compare(out,expected);
+    }
+    // A leased slot cannot be recycled even when it would otherwise be the LRU victim.
+    require(cache.execute(0,0,d_input.p,0,device.stream),"lease hit");
+    std::int32_t new_id=2;cache.admit(0,std::span(&new_id,1));cache.drain();
+    cache.ready_view(0,0);cache.ready_view(0,2);
+    std::vector<float> out(2560);cache.download(out,device.stream);
+    require(!cache.execute(1,0,d_input.p,0,device.stream),"layer namespace collision");
+    cache.admit(1,std::span(ids,1));cache.drain();cache.ready_view(1,0);
+    require(cache.stats().evicted==1,"LRU victim not replaced");
+    std::cout<<"PASS: budget, canonical bytes, oracle, admission, LRU, leases, namespaces\n";
+    return 0;
+}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

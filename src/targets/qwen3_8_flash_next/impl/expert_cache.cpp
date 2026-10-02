@@ -1,0 +1,176 @@
+#include "targets/qwen3_8_flash_next/impl/expert_cache.h"
+#include "core/device.h"
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
+#include <limits>
+#include <stdexcept>
+
+namespace ninfer::targets::qwen3_8_flash_next::detail {
+namespace { constexpr std::size_t GiB = 1ULL << 30; }
+FlashNextExpertCacheBudget flash_next_expert_cache_budget(
+    std::size_t free, std::size_t total, std::size_t transfer, bool mtp, unsigned maximum) {
+    FlashNextExpertCacheBudget b{.total_bytes=total, .free_before_bytes=free,
+        .transfer_bytes=transfer, .reserve_bytes=2*GiB,
+        .used_limit_bytes=std::min(total, std::size_t(mtp ? 30 : 28)*GiB)};
+    if (free > total || maximum > 512) throw std::invalid_argument("invalid expert cache budget");
+    const auto used = total-free;
+    const auto available = std::min(free > b.reserve_bytes ? free-b.reserve_bytes : 0,
+        b.used_limit_bytes > used ? b.used_limit_bytes-used : 0);
+    const auto weights = available > transfer ? available-transfer : 0;
+    b.slots_per_layer = std::min<std::size_t>(maximum,
+        weights/(kFlashNextRoutedExpertLayers*kExpertSlotBytes));
+    b.cache_bytes = b.slots_per_layer*kFlashNextRoutedExpertLayers*kExpertSlotBytes;
+    return b;
+}
+
+FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
+    unsigned max_tokens, bool mtp, unsigned maximum) : host_(host) {
+    if (!max_tokens) throw std::invalid_argument("zero expert cache token capacity");
+    for (const auto& layer : host.layers) {
+        if (layer.compact_bytes_per_expert_pair() != kExpertPairBytes ||
+            layer.gate_up.experts != 512 || layer.down.experts != 512)
+            throw std::invalid_argument("expert cache requires exact Flash-Next banks");
+    }
+    CUDA_CHECK(cudaGetDevice(&device_));
+    std::size_t free=0,total=0;
+    CUDA_CHECK(cudaMemGetInfo(&free,&total));
+    const std::size_t paths=std::size_t(max_tokens)*10;
+    const auto transfer=paths*(640*sizeof(std::uint16_t)+2560*sizeof(float));
+    budget_=flash_next_expert_cache_budget(free,total,transfer,mtp,maximum);
+    if (!budget_.slots_per_layer) return;
+    storage_=std::make_unique<DeviceBuffer>(budget_.cache_bytes);
+    activations_=std::make_unique<DeviceBuffer>(paths*640*sizeof(std::uint16_t));
+    outputs_=std::make_unique<DeviceBuffer>(paths*2560*sizeof(float));
+    result_buffer_=std::make_unique<PinnedHostBuffer>(outputs_->bytes);
+    // One canonical pair pinned at a time; queued jobs retain only keys into the pageable mmap.
+    fill_buffer_=std::make_unique<PinnedHostBuffer>(kExpertSlotBytes);
+    entries_.resize(std::size_t(budget_.slots_per_layer)*48);
+    CUDA_CHECK(cudaStreamCreateWithFlags(&fill_stream_,cudaStreamNonBlocking));
+    worker_=std::thread([this]{fill_loop();});
+    std::fprintf(stderr,"phase13.cache.slots_per_layer=%u\nphase13.cache.bytes=%zu\n"
+        "phase13.cache.transfer_bytes=%zu\nphase13.cache.free_before_bytes=%zu\n"
+        "phase13.cache.total_bytes=%zu\nphase13.cache.reserve_bytes=%zu\n"
+        "phase13.cache.used_limit_bytes=%zu\nphase13.cache.pinned_bytes=%zu\n",
+        budget_.slots_per_layer,budget_.cache_bytes,transfer,free,total,budget_.reserve_bytes,
+        budget_.used_limit_bytes,result_buffer_->size()+fill_buffer_->size());
+}
+FlashNextExpertCache::~FlashNextExpertCache() {
+    { std::lock_guard lock(mutex_); stop_=true; work_.notify_one(); }
+    if(worker_.joinable())worker_.join();
+    if(fill_stream_)cudaStreamDestroy(fill_stream_);
+}
+void FlashNextExpertCache::check_failure() const { if(failure_)std::rethrow_exception(failure_); }
+HostNvfp4ExpertPairView FlashNextExpertCache::view(unsigned slot) const {
+    auto* base=static_cast<const std::byte*>(storage_->p)+std::size_t(slot)*kExpertSlotBytes;
+    // Keep every plane aligned, including the down codes after the gate divisor.
+    return {{base,base+1'638'400,reinterpret_cast<const float*>(base+2'764'800),
+             1,1280,2560},
+            {base+1'843'200,base+2'662'400,
+             reinterpret_cast<const float*>(base+2'764'804),1,2560,640}};
+}
+HostNvfp4ExpertPairView FlashNextExpertCache::ready_view(unsigned layer,int expert) {
+    std::lock_guard lock(mutex_); check_failure();
+    if(layer>=48||expert<0||expert>=512)throw std::invalid_argument("invalid cache key");
+    for(unsigned i=layer*budget_.slots_per_layer;i<(layer+1)*budget_.slots_per_layer;++i)
+        if(entries_[i].expert==expert&&entries_[i].state==State::Ready)return view(i);
+    throw std::runtime_error("expert cache key is not Ready");
+}
+bool FlashNextExpertCache::execute(unsigned layer,int expert,const void* input,
+    unsigned path,cudaStream_t stream) {
+    unsigned slot=0;
+    {
+        std::lock_guard lock(mutex_); check_failure();
+        if(layer>=48||expert<0||expert>=512)throw std::invalid_argument("invalid cache key");
+        bool found=false;
+        for(unsigned i=layer*budget_.slots_per_layer;i<(layer+1)*budget_.slots_per_layer;++i)
+            if(entries_[i].expert==expert&&entries_[i].state==State::Ready){slot=i;found=true;break;}
+        if(!found){++stats_.misses;return false;}
+        if((std::size_t(path)+1)*2560*sizeof(float)>outputs_->bytes)
+            throw std::out_of_range("expert cache hit buffer capacity");
+        entries_[slot].epoch=++epoch_;++entries_[slot].leases;
+        consumers_.emplace_back(slot,path);++stats_.hits;
+    }
+    flash_next_cached_expert_launch(view(slot),input,
+        static_cast<std::uint16_t*>(activations_->p)+std::size_t(path)*640,
+        static_cast<float*>(outputs_->p)+std::size_t(path)*2560,stream);
+    return true;
+}
+void FlashNextExpertCache::download(std::span<float> output,cudaStream_t stream) {
+    if(consumers_.empty())return;
+    if(output.size_bytes()>outputs_->bytes)throw std::out_of_range("expert cache result capacity");
+    CUDA_CHECK(cudaMemcpyAsync(result_buffer_->data(),outputs_->p,output.size_bytes(),
+        cudaMemcpyDeviceToHost,stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    std::lock_guard lock(mutex_);check_failure();
+    for(auto [slot,path]:consumers_){
+        std::memcpy(output.data()+std::size_t(path)*2560,
+            static_cast<float*>(result_buffer_->data())+std::size_t(path)*2560,2560*sizeof(float));
+        --entries_[slot].leases;
+    }
+    consumers_.clear();
+}
+void FlashNextExpertCache::admit(unsigned layer,std::span<const std::int32_t> ids) {
+    std::lock_guard lock(mutex_);check_failure();
+    if(layer>=48)throw std::invalid_argument("invalid cache layer");
+    if(!budget_.slots_per_layer||queue_.size()+unsigned(filling_)>=4)return;
+    const unsigned begin=layer*budget_.slots_per_layer,end=begin+budget_.slots_per_layer;
+    for(int id:ids){
+        if(id<0||id>=512)throw std::invalid_argument("invalid cache expert id");
+        bool present=false;
+        for(unsigned i=begin;i<end;++i)if(entries_[i].expert==id){present=true;break;}
+        if(present)continue;
+        unsigned victim=end;
+        for(unsigned i=begin;i<end;++i){
+            const auto& e=entries_[i];
+            if(e.leases||e.state==State::Uploading)continue;
+            if(victim==end||e.state==State::Empty||e.epoch<entries_[victim].epoch)victim=i;
+            if(e.state==State::Empty)break;
+        }
+        if(victim==end)return;
+        if(entries_[victim].state!=State::Empty)++stats_.evicted;
+        entries_[victim]={id,State::Uploading,++epoch_,0};
+        queue_.push_back(victim);++stats_.admitted;work_.notify_one();return;
+    }
+}
+void FlashNextExpertCache::fill_loop() noexcept {
+    try {
+        CUDA_CHECK(cudaSetDevice(device_));
+        for(;;){
+            unsigned slot;int id;
+            {
+                std::unique_lock lock(mutex_);
+                work_.wait(lock,[this]{return stop_||!queue_.empty();});
+                if(stop_&&queue_.empty())return;
+                slot=queue_.front();queue_.pop_front();id=entries_[slot].expert;filling_=true;
+            }
+            const auto src=host_.expert(slot/budget_.slots_per_layer,id);
+            auto* dst=static_cast<std::byte*>(fill_buffer_->data());
+            std::memcpy(dst,src.gate_up.codes,1'638'400);
+            std::memcpy(dst+1'638'400,src.gate_up.scales,204'800);
+            std::memcpy(dst+1'843'200,src.down.codes,819'200);
+            std::memcpy(dst+2'662'400,src.down.scales,102'400);
+            std::memcpy(dst+2'764'800,src.gate_up.weight_scale_divisor,4);
+            std::memcpy(dst+2'764'804,src.down.weight_scale_divisor,4);
+            std::memset(dst+kExpertPairBytes,0,kExpertSlotBytes-kExpertPairBytes);
+            CUDA_CHECK(cudaMemcpyAsync(static_cast<std::byte*>(storage_->p)+
+                std::size_t(slot)*kExpertSlotBytes,dst,kExpertSlotBytes,cudaMemcpyHostToDevice,fill_stream_));
+            CUDA_CHECK(cudaStreamSynchronize(fill_stream_));
+            {
+                std::lock_guard lock(mutex_);
+                entries_[slot].state=State::Canonical;
+                // This leaf reads the canonical software-NVFP4 layout directly. No prepack
+                // allocation or Prepacking transition is needed before publishing Ready.
+                entries_[slot].state=State::Ready;++stats_.ready;
+                filling_=false;idle_.notify_all();
+            }
+        }
+    }catch(...){std::lock_guard lock(mutex_);failure_=std::current_exception();
+        filling_=false;queue_.clear();idle_.notify_all();}
+}
+void FlashNextExpertCache::drain(){std::unique_lock lock(mutex_);
+    idle_.wait(lock,[this]{return queue_.empty()&&!filling_;});check_failure();}
+FlashNextExpertCacheStats FlashNextExpertCache::stats() const {
+    std::lock_guard lock(mutex_);check_failure();return stats_;
+}
+} // namespace ninfer::targets::qwen3_8_flash_next::detail

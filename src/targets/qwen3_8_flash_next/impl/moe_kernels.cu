@@ -1,4 +1,5 @@
 #include "targets/qwen3_8_flash_next/impl/moe_kernels.h"
+#include "targets/qwen3_8_flash_next/impl/expert_cache.h"
 
 #include "core/device.h"
 #include "ops/common/math.cuh"
@@ -235,6 +236,33 @@ __device__ __forceinline__ float down_routed_path_value(
     }
 
     return ops::warp_reduce_sum(sum0 + sum1);
+}
+
+__global__ void cached_gate_up_kernel(HostNvfp4ExpertPairView expert,
+    const __nv_bfloat16* input, __nv_bfloat16* activation) {
+    __shared__ ops::detail::Nvfp4GemvSharedStorage<GateGeometry, GateSchedule> shared;
+    const int warp=threadIdx.x>>5, lane=threadIdx.x&31;
+    const int row=blockIdx.x*GateSchedule::kWarpsPerCta+warp;
+    const int rows[GateSchedule::kRowsPerWarp]={row,row+kIntermediate};
+    float sums[GateSchedule::kRowsPerWarp][GateSchedule::kAccumulatorChains]={};
+    ops::detail::compute_nvfp4_rows<GateGeometry,GateSchedule>(input,
+        reinterpret_cast<const std::uint8_t*>(expert.gate_up.codes),
+        reinterpret_cast<const std::uint8_t*>(expert.gate_up.scales),shared,
+        1.0F / *expert.gate_up.weight_scale_divisor,rows,
+        warp*GateSchedule::kRowsPerWarp,lane,sums);
+    float gate=0,up=0;
+    for(int i=0;i<GateSchedule::kAccumulatorChains;++i){gate+=sums[0][i];up+=sums[1][i];}
+    gate=ops::warp_reduce_sum(gate);up=ops::warp_reduce_sum(up);
+    if(lane==0)activation[row]=__float2bfloat16_rn(ops::silu(gate)*up);
+}
+__global__ void cached_down_kernel(HostNvfp4ExpertPairView expert,
+    const __nv_bfloat16* activation,float* output) {
+    const int row=blockIdx.x*8+(threadIdx.x>>5),lane=threadIdx.x&31;
+    const float value=down_routed_path_value(0,
+        reinterpret_cast<const std::uint8_t*>(expert.down.codes),
+        reinterpret_cast<const std::uint8_t*>(expert.down.scales),
+        expert.down.weight_scale_divisor,0,0,activation,row,down_scale_row_base(row),lane);
+    if(lane==0)output[row]=value;
 }
 
 // Eight BF16 weight/activation pairs into the single shared-expert chain, in the fixed
@@ -2552,6 +2580,16 @@ void flash_next_moe_bf16_kernels_launch(const Tensor& input, const MoeBf16Weight
         down_stride,
         static_cast<const __nv_bfloat16*>(weights.shared_down.qdata),
         static_cast<__nv_bfloat16*>(output.data));
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void flash_next_cached_expert_launch(const HostNvfp4ExpertPairView& expert,
+    const void* input,void* intermediate,float* output,cudaStream_t stream) {
+    cached_gate_up_kernel<<<kIntermediate/GateSchedule::kWarpsPerCta,GateSchedule::kThreads,0,stream>>>(
+        expert,static_cast<const __nv_bfloat16*>(input),static_cast<__nv_bfloat16*>(intermediate));
+    CUDA_CHECK(cudaGetLastError());
+    cached_down_kernel<<<kHidden/8,256,0,stream>>>(expert,
+        static_cast<const __nv_bfloat16*>(intermediate),output);
     CUDA_CHECK(cudaGetLastError());
 }
 
