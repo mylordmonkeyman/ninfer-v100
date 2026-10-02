@@ -1557,3 +1557,92 @@ wall time, queue pressure, and CPU/GPU merge timing. CUDA-event H2D bandwidth is
 transfer-stream service rate, not sustainable whole-inference PCIe throughput.
 Active-cache logit drift versus the same shape's cold pass is descriptive; these
 measurements do not reopen or replace the original Phase 11 numerical gate.
+
+#### Phase 15 measured results and decision
+
+The [passing V100 run](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37057133944)
+produced `phase15-cache-admission` (artifact 11249719308). The
+[hosted SM70 build and host contract test](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37057133880)
+also passed. The tested runtime is `479661db`. All ten processes completed,
+providing 160 measurement rows, on the V100 32 GB / dual Xeon host with CUDA 12.8,
+32 CPU workers, eager execution, and the accepted precision settings.
+
+The full derived capacity was again **165 slots per layer**, 20.395 GiB of
+compressed weights and 3.809 GiB observed free after allocation. The 128-slot
+control used 15.822 GiB and left 8.383 GiB free. Phase 14 already used the full
+safe capacity; Phase 15 did not exceed its reserve or operating ceiling.
+
+Decode medians (tokens/s): cold has two samples, warmed active has six, and
+frozen overlap has four. The same 128-token prefix is used in every configuration.
+
+| Slots/layer | Admission cap | Cold active | Warmed active | Frozen overlap |
+|---|---|---|---|---|
+| Cache off | — | 6.701 | 6.690 | 6.705 |
+| 128 | 1 | 8.766 | 10.392 | 10.758 |
+| 128 | 2 | 9.262 | 10.066 | 10.553 |
+| 165 | 1 | 8.823 | **10.815** | **10.872** |
+| 165 | 2 | **9.425** | 10.733 | 10.835 |
+
+Using 165 rather than 128 slots at cap one improved warmed active decode by
+4.1%, with lower upload/replacement demand. At 165 slots, cap two improved cold
+ramp-up by 6.8%, but did not improve sustained decode: the warmed median was
+0.75% lower and the frozen median essentially unchanged. At 128 slots, cap two
+also did not improve sustained decode. Keep **full derived capacity, cap one,
+and overlap scheduling** as the preferred sustained-decode configuration for
+this workload. Cap two remains an explicit experiment, not the default.
+
+Median warmed-active decode fill costs:
+
+| Slots | Cap | H2D MiB/token | Fill-worker wall ms/token | Packing ms/token | Evictions/pass |
+|---|---|---|---|---|---|
+| 128 | 1 | 84.84 | 27.92 | 17.98 | 4,102 |
+| 128 | 2 | 139.41 | 45.96 | 29.96 | 6,754 |
+| 165 | 1 | 58.57 | 17.09 | 10.69 | 2,764 |
+| 165 | 2 | 94.44 | 27.79 | 17.63 | 4,581 |
+
+At 165 slots, cap two increased warmed fill bytes by 61.2% without a sustained
+throughput gain. Packing accounts for much of the background fill work. These
+worker times overlap inference and must not be added to token latency. Admission
+wall time was approximately 0.084 versus 0.110 ms/token for caps one and two.
+Measured H2D service bandwidth was about 9.96–9.98 GiB/s; aggregate warmed fill
+traffic divided by inference wall time was 0.639 versus 0.989 GiB/s. These are
+separate bandwidth measures.
+
+The queue never exceeded three outstanding fills, below its four-fill bound;
+there were zero pool-pressure or no-victim declines. Maximum observed fill wall
+time was 4.704 ms. Every DMA still transferred one 2.637-MiB canonical slot through
+the single pinned buffer. At 165 slots, warmed per-layer-call queued admission
+bursts had P50/P95/P99 of 0/1/1 slots for cap one and 1/2/2 for cap two; queued
+bursts are not combined DMA transfers. Post-pass drain time was at most 7.971 µs,
+so including it did not materially change these rates.
+
+Prefill warmed-active medians and the range of the two process medians:
+
+| Slots | Cap | Median tokens/s | Process-median range |
+|---|---|---|---|
+| Cache off | — | 33.868 | 29.606–38.019 |
+| 128 | 1 | 33.168 | 30.628–36.678 |
+| 128 | 2 | 34.402 | 29.907–38.260 |
+| 165 | 1 | 31.233 | 31.067–31.399 |
+| 165 | 2 | 29.845 | 29.636–30.307 |
+
+Prefill starts from an empty cache independently of decode. Four layer calls
+populate only four or eight experts per layer. Warmed-active coverage was about
+1.10% for cap one and 1.80% for cap two; frozen coverage was 1.78% and 3.00%.
+Consequently these are **prefill admission/startup measurements**, not a
+high-coverage prefill capacity test. Uploads were 0.989 versus 1.978 MiB/token.
+Substantial process-level timing variation prevents a reliable claim about
+capacity improving or degrading prefill. The Phase 14 high-coverage prefill
+slowdown remains an unresolved limitation; no prefill bypass was introduced.
+
+Validation passed: cap-one/cap-two admission and reset, canonical payloads,
+leases and namespaces, CPU/GPU joins, cache/text tests, and memcheck with **zero
+errors**. Worst independent expert-oracle NRMSE was approximately 0.0000230213.
+Frozen-cache serial/overlap logits were exact for every configuration and shape.
+Active cache membership was not required to produce exact logits against a cold
+pass: observed NRMSE versus that same configuration's cold pass reached 0.1202
+for decode and 0.2100 for final prefill logits, with maximum absolute difference
+10.0625 across the runs. These are descriptive comparisons of changing execution
+membership, not an oracle qualification or a diagnosis of the drift. No new
+end-to-end oracle acceptance is claimed, no Phase 11 precision investigation was
+reopened, and the original §7 numerical gate remains unpassed.
