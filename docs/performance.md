@@ -1378,9 +1378,9 @@ unleased Ready slot. Uploading entries and active GPU consumers cannot be evicte
 Fill failure propagates to the inference owner, and teardown joins the worker
 before releasing storage.
 
-Ready GPU hits and AVX2 CPU misses execute serially in Phase 13. Their unweighted
-FP32 expert outputs are merged in the original router-path order. Concurrent
-hit/miss execution and whole-server throughput measurement belong to Phase 14.
+The Phase 13 baseline executed Ready GPU hits and AVX2 CPU misses serially.
+Their unweighted FP32 expert outputs are merged in the original router-path
+order. Phase 14 adds overlapping execution, described below.
 Prefill also observes cap-one admission per layer call, not per routed token.
 
 The cache remains off by default. Its integration checks do not qualify the
@@ -1394,7 +1394,7 @@ and [hosted SM70 build/host contract check](https://github.com/mylordmonkeyman/n
 validated the runtime at `b6f48715`. Evidence is retained in the
 `phase13-compressed-cache` artifact (ID 11246349204).
 
-For this 4,096-context, 128-token-prefill, non-MTP configuration, the measured
+For this 8,192-context, 128-token-prefill, non-MTP configuration, the measured
 budget derived 165 slots per layer, consuming 21,899,243,520 bytes (20.395 GiB) of
 compressed GPU cache. Hit scratch/results reserve 14,745,600 device bytes;
 pinned fill/results storage totals 15,872,256 bytes. Actual cache/hit allocations
@@ -1431,3 +1431,106 @@ those FP32 partials at every prefill size. Resident-GPU prefill at T=128,319,512
 and 2048 matched the decode reference with reported relative L2 error zero;
 full resident-MoE memcheck also reported zero errors. Blackwell retains its
 existing allocation policy.
+
+
+### Phase 14 hybrid scheduling
+
+With the opt-in expert cache enabled, GPU hit kernels and their pinned result
+transfer are queued before CPU miss execution. The inference owner runs the
+persistent CPU pool while the GPU stream progresses, then joins the hit stream
+at the merge. Hit slot leases remain held through transfer completion and result
+copy. CPU workers and GPU readback write separate buffers; only the completed hit
+rows are copied into the ordered private-output array. Router-path accumulation
+and the accepted FP32 MoE output profile are unchanged. Admission remains cap one
+and asynchronous; the current token never waits for a cache fill.
+
+Overlapping execution is the default whenever the cache is enabled. The cache
+itself remains off by default. `NINFER_FLASH_NEXT_EXPERT_CACHE_SERIAL=1` selects
+the previous serial order for diagnostic comparisons.
+`NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING=1` enables reusable CUDA-event timing and
+accumulated CPU/merge measurements; timing is off by default. GPU branch time
+is the stream interval from the first hit through pinned result transfer,
+including submission gaps, not isolated kernel time. CPU branch time is host
+wall time inside the worker-pool call. Merge wait is host wall time in the hit
+stream synchronization, including CUDA API overhead, before result copying.
+
+For each layer, both branches lie inside the measured dispatch-to-join wall
+span. `max(0, CPU branch + GPU branch - wall span)` therefore gives a conservative
+lower bound on concurrent branch time without aligning CPU/GPU clocks. The
+measurement includes branch wall intervals rather than CPU utilization. Serial
+execution should report no appreciable overlap.
+
+The real-model diagnostic `NINFER_PHASE14_BENCHMARK=1` replays up to 64 natural
+teacher-forced oracle input tokens, with eager graphs-disabled execution, logits
+readback and state commit. Two decode warmups populate the cache through normal
+admission; completed fills are then frozen for measured serial/overlap ABBA
+rounds against exactly the same Ready keys. Decode compares every returned BF16
+logit exactly across schedules; prefill compares its returned final logits. A
+separate warmup precedes each execution shape. Cache-off runs allocate no GPU
+expert cache and warm the same CPU/model path. The workflow orders independent
+cache-off/cache-on processes ABBA to reduce drift. These short repeated-prefix
+measurements establish eager execution performance, not full-server or
+long-context throughput, production admission behavior or formal numerical
+qualification. Cache-on measurements include optional timing overhead.
+
+
+#### Phase 14 measured results
+
+The [passing V100 scheduler run](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37054813732)
+validated `78ed4add` on the V100 32 GB / dual Xeon host, CUDA 12.8, 32 CPU
+workers, the accepted FP32 state/MoE profile, and no MTP. The runtime reserves an
+8,192-token context and a 128-token prefill chunk; the measured prefix is 64
+tokens. Both cache-on processes derived 165 slots/layer (20.395 GiB compressed
+cache), leaving 3.81 GiB free. The evidence artifact is
+`phase14-hybrid-scheduler` (ID 11248596872).
+
+The two cache-on processes warmed and froze their own naturally admitted Ready
+sets. Within each process, serial and overlapping schedules had identical hit
+and miss counts and exact BF16 logits. The two processes differed by only two
+decode hits and three prefill hits per measured 30,720 expert pairs. Overall
+hit coverage was 90.01% for decode and 90.00% for prefill; this warmed repeated
+prefix differs from Phase 13's cold 128-position integration trace.
+
+| Mode | Decode median tokens/s (range) | Prefill median tokens/s (range) | Samples per shape |
+|---|---:|---:|---:|
+| Cache off | 6.691 (6.626–6.726) | 31.342 (28.129–33.321) | 8 |
+| Cache on, serial | 9.230 (9.207–9.250) | 16.120 (16.039–16.225) | 4 |
+| Cache on, overlap | 10.815 (10.783–10.860) | 18.046 (18.039–18.055) | 4 |
+
+Overlap improved cached decode by 17.2% and cached prefill by 11.9% relative to
+the serial schedule. Against cache-off execution, cached overlapping decode was
+61.6% faster, but prefill throughput was 42.4% lower. Cache-off execution benefits from larger prefill batches; the current GPU hit
+branch takes
+approximately 3.07 seconds per 64-token prefill, already longer than the entire
+cache-off prefill. The measurements identify the GPU hit branch as the prefill
+bottleneck; they do not isolate individual kernel costs. Cache-off prefill shows
+more drift, but even its slowest sample exceeds the fastest cache-on sample.
+
+These are throughput changes, not percentage changes in latency. The cache
+remains opt-in. This version does not automatically bypass its GPU hit path
+during prefill; callers enabling it receive the measured decode benefit and
+retain this prefill limitation. The results do not justify treating cache-on
+as a universal performance improvement.
+
+| Cached schedule | Shape | CPU branch ms/token | GPU stream ms/token | Merge wait ms/token | Overlap lower bound ms/token |
+|---|---|---:|---:|---:|---:|
+| Serial | Decode | 19.53 | 48.65 | 46.31 | 0.00 |
+| Overlap | Decode | 19.90 | 48.67 | 28.94 | 16.39 |
+| Serial | Prefill | 6.86 | 48.01 | 42.31 | 0.00 |
+| Overlap | Prefill | 6.93 | 48.02 | 35.39 | 5.64 |
+
+Values are medians of per-run accumulated times divided by 64 tokens. The
+remaining merge wait confirms that the GPU branch usually outlasts CPU misses.
+CPU, GPU and wait columns overlap in time and must not be added as a token
+latency estimate. CUDA timing is enabled for these cache-on results and disabled
+in normal execution.
+
+The fresh V100 SM70 build and cache/text-decode checks passed; the separate
+[hosted SM70 build and host contract test](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37054813612)
+also passed. Mixed CPU/GPU joins
+with 0, 1 and 4 hits out of four paths matched the serial expert outputs exactly.
+The independent expert oracle retained worst NRMSE 0.00002303 and cosine
+rounding to 1, and cache memcheck reported zero errors. Real-model decode checked
+all returned logits for 64 positions; prefill checked its final returned logits
+across the fixed-cache schedules. These checks protect the scheduling change;
+they do not pass or replace the still-failed original Phase 11 numerical gate.
