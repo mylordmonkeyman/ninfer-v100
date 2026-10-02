@@ -1,7 +1,6 @@
 #include "targets/qwen3_8_flash_next/impl/expert_cache.h"
 #include "core/device.h"
 #include <algorithm>
-#include <atomic>
 #include <cstdio>
 #include <chrono>
 #include <cstring>
@@ -44,7 +43,6 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
     };
     timing_enabled_ = enabled("NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING");
     serial_schedule_ = enabled("NINFER_FLASH_NEXT_EXPERT_CACHE_SERIAL");
-    fill_write_combined_ = enabled("NINFER_FLASH_NEXT_EXPERT_CACHE_FILL_WRITE_COMBINED");
     CUDA_CHECK(cudaGetDevice(&device_));
     std::size_t free=0,total=0;
     CUDA_CHECK(cudaMemGetInfo(&free,&total));
@@ -57,8 +55,7 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
     outputs_=std::make_unique<DeviceBuffer>(paths*2560*sizeof(float));
     result_buffer_=std::make_unique<PinnedHostBuffer>(outputs_->bytes);
     // One canonical pair pinned at a time; queued jobs retain only keys into the pageable mmap.
-    fill_buffer_=std::make_unique<PinnedHostBuffer>(kExpertSlotBytes,
-        fill_write_combined_ ? PinnedHostAccess::WriteOnly : PinnedHostAccess::ReadWrite);
+    fill_buffer_=std::make_unique<PinnedHostBuffer>(kExpertSlotBytes);
     entries_.resize(std::size_t(budget_.slots_per_layer)*48);
     CUDA_CHECK(cudaStreamCreateWithFlags(&fill_stream_,cudaStreamNonBlocking));
     std::size_t free_after=0,total_after=0;
@@ -235,9 +232,6 @@ void FlashNextExpertCache::fill_loop() noexcept {
             std::memcpy(dst+2'764'800,src.gate_up.weight_scale_divisor,4);
             std::memcpy(dst+2'764'804,src.down.weight_scale_divisor,4);
             std::memset(dst+kExpertPairBytes,0,kExpertSlotBytes-kExpertPairBytes);
-            // Publish CPU stores before the DMA consumer. This buffer is never read
-            // by the CPU; result readback retains ordinary cached pinned memory.
-            if(fill_write_combined_)std::atomic_thread_fence(std::memory_order_seq_cst);
             const double pack_us = std::chrono::duration<double,std::micro>(
                 std::chrono::steady_clock::now()-started).count();
             if(timing_enabled_)CUDA_CHECK(cudaEventRecord(fill_start_,fill_stream_));

@@ -65,7 +65,6 @@ public:
     void freeze_admissions() { drain(); admissions_enabled_ = false; }
     // Diagnostic replay boundary: no GPU consumers may be outstanding.
     void reset();
-    [[nodiscard]] bool fill_write_combined() const { return fill_write_combined_; }
     [[nodiscard]] unsigned admission_cap() const { return admission_cap_; }
     // At most admission_cap new experts per layer call; pool pressure declines admission.
     void admit(unsigned layer, std::span<const std::int32_t> ids);
@@ -85,7 +84,6 @@ private:
     cudaEvent_t hit_start_ = nullptr, hit_stop_ = nullptr;
     cudaEvent_t fill_start_ = nullptr, fill_stop_ = nullptr;
     unsigned admission_cap_ = 1;
-    bool fill_write_combined_ = false;
     bool timing_enabled_ = false, serial_schedule_ = false, admissions_enabled_ = true;
     int device_ = 0;
     std::vector<Entry> entries_;

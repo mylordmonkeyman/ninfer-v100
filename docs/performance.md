@@ -1649,19 +1649,83 @@ reopened, and the original §7 numerical gate remains unpassed.
 
 ### Phase 16 pinned fill staging
 
-`NINFER_FLASH_NEXT_EXPERT_CACHE_FILL_WRITE_COMBINED=1` selects write-combined
-pinned memory for the CPU-written expert upload buffer. CPU-read result buffers
-retain ordinary cached pinned memory. The default remains ordinary pinned memory
-until the comparison supports a change. Canonical payloads, arithmetic, one fill
-buffer, four-outstanding queue, Ready publication, leases, capacity budgeting,
-admission cap one, and the accepted precision settings are unchanged.
+Phase 16 tested write-combined pinned memory for the CPU-written expert upload
+buffer, preserving ordinary cached result buffers. The candidate was evaluated
+at `b4b9f70f` using `NINFER_FLASH_NEXT_EXPERT_CACHE_FILL_WRITE_COMBINED=1`.
+**The experiment did not justify changing staging; the candidate option and its
+core allocation API extension were removed from the active runtime.** Upload
+buffers retain ordinary pinned memory, with the Phase 15 preferred configuration
+of full derived capacity, admission cap one, and overlap scheduling.
 
-The comparison uses full derived capacity and process-level ordinary/write-combined
-ABBA. It reuses the Phase 15 cold/warmed admission-active replay and frozen schedule
-controls on the natural 128-token prefix. Packing time, H2D service time, fill work,
-and actual decode/prefill throughput are measured. An additional frozen-cache
-prefill comparison retains the decode-populated Ready set, addressing the low
-coverage of the independently reset prefill startup test. Correctness checks cover
-both buffer modes, exact canonical bytes, the expert mathematical oracle,
-leases/joins, and candidate-mode memcheck. This is a staging experiment, not a
-Phase 11 precision investigation or a new end-to-end oracle qualification.
+The manual-only Phase 16 workflow pins that candidate revision for reproducible
+comparison. The current real-model benchmark retains the useful additional
+`NINFER_PHASE16_BENCHMARK=1` prefill control, used together with the Phase 15
+benchmark switch: it tests prefill against the Ready set populated by decode,
+before the separate cold-prefill reset. No precision or arithmetic changes were
+made, and no Phase 11 precision investigation was reopened.
+
+#### Phase 16 measured results and decision
+
+The [V100 staging run](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37062432919)
+and [hosted SM70 build/host contract test](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37062433097)
+passed. Evidence is `phase16-pinned-staging`, artifact 11252425491. Four processes
+in ordinary/write-combined/write-combined/ordinary order produced 80 measurement
+rows. The V100 32 GB, dual Xeon host, CUDA 12.8, 32 CPU workers, 8,192-token
+context, 128-token prefill chunk, one lane, no MTP, eager execution, natural
+128-token prefix, accepted precision profile, and 165-slot cache were unchanged.
+
+Median throughput (tokens/s):
+
+| Measurement | Ordinary pinned | Write-combined candidate | Samples per mode |
+|---|---|---|---|
+| Cold active decode | 8.933 | 9.041 | 2 |
+| Warmed active decode | 10.802 | 10.876 | 6 |
+| Frozen overlap decode | 10.807 | 10.911 | 4 |
+| Prefill startup, warmed active | 29.639 | 33.876 | 6 |
+| Decode-populated frozen prefill, overlap | 17.358 | 17.604 | 4 |
+| Decode-populated frozen prefill, serial | 16.333 | 16.651 | 4 |
+
+The apparent warmed decode increase was only 0.68%, while the no-fill frozen
+decode control also increased by 0.97%. Ordinary process warmed-decode medians
+were 10.688 and 10.897; candidate medians were 10.878 and 10.875. The candidate
+therefore did not establish an inference improvement attributable to upload
+staging. Frozen controls have no fill work, so their timing differences are not
+evidence of a faster upload buffer.
+
+Median warmed-active decode background costs (ms/token):
+
+| Cost | Ordinary pinned | Write-combined candidate |
+|---|---|---|
+| Packing | 10.623 | 11.202 |
+| H2D CUDA-event interval | 5.680 | 5.943 |
+| Fill-worker wall | 16.988 | 17.851 |
+
+Both modes admitted a median 2,843 fills per pass, transferred 58.57 MiB/token,
+and had the same aggregate warmed decode coverage of 90.56%. H2D service
+bandwidth was 10.03 versus 9.65 GiB/s. These background intervals overlap
+inference and must not be added as token latency. Candidate warmed decode
+packing and total fill work were slightly worse, rather than explaining a
+sustained speedup.
+
+In prefill startup, candidate packing was lower (0.162 versus 0.274 ms/token),
+but throughput was variable: its two process medians were 30.374 and 37.130,
+versus 29.750 and 29.393 for ordinary staging. The separately frozen low-coverage
+prefill control also varied with no fills. These results do not establish the
+large pooled startup throughput difference as a causal staging benefit.
+
+The new decode-populated prefill control exercised 94.70% GPU-hit coverage,
+compared with only 1.10% in warmed startup prefill. Ordinary overlap prefill
+reached 17.358 tokens/s with an accumulated GPU-stream interval of 51.33 ms/token.
+This supports the continuing high-coverage prefill limitation from Phase 14;
+write-combined upload memory does not resolve it, and no bypass was introduced.
+These measurements are short-prefix eager replay, not HTTP or long-context
+serving rates. No concurrent cache-off control was added in Phase 16, so comparisons
+with earlier cache-off rates retain their separate-run limitations.
+
+Both buffer modes passed exact canonical payload copies, the independent expert
+mathematical oracle (worst NRMSE approximately 0.0000230213), admission/LRU/lease
+and namespace checks, CPU/GPU joins, and cache/text tests. Candidate memcheck
+reported **zero errors**. Fixed-cache serial/overlap logits were exact, including
+the decode-populated prefill control. Active-versus-cold logit diagnostics retain
+the Phase 15 interpretation; they do not constitute a new oracle acceptance.
+The original §7 numerical gate remains unpassed.

@@ -1,13 +1,5 @@
 name: V100 Phase 16 Pinned Fill Staging
 on:
-  push:
-    branches: [forwardport/v100-flash-next]
-    paths:
-      - '.github/workflows/v100-phase16-staging.yml'
-      - 'src/targets/qwen3_8_flash_next/**'
-      - 'src/core/arena.h'
-      - 'src/core/arena.cu'
-      - 'tests/targets/qwen3_8_flash_next/**'
   workflow_dispatch:
 permissions:
   contents: read
@@ -48,6 +40,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          # Replay the measured candidate; active runtime retains ordinary staging.
+          ref: b4b9f70f37bf2bc489f542b92e4426855693c4e0
           submodules: recursive
           persist-credentials: false
       - name: Build hybrid scheduler checks
