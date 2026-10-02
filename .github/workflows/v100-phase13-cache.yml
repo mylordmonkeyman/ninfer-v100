@@ -1,12 +1,5 @@
 name: V100 Phase 13 Compressed Cache
 on:
-  push:
-    branches: [forwardport/v100-flash-next]
-    paths:
-      - '.github/workflows/v100-phase13-cache.yml'
-      - 'src/targets/qwen3_8_flash_next/**'
-      - 'tests/targets/qwen3_8_flash_next/**'
-      - 'tests/CMakeLists.txt'
   workflow_dispatch:
 permissions:
   contents: read

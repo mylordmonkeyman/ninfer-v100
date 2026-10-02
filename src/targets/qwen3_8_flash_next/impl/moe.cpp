@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -345,6 +346,9 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                                cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
+    const bool measure = cache != nullptr && cache->timing_enabled();
+    using Clock = std::chrono::steady_clock;
+    const auto branch_started = measure ? Clock::now() : Clock::time_point{};
     // Independent routed expert pairs are computed concurrently. Each task writes
     // a private FP32 vector. Routing alpha is then accumulated below on this thread
     // in the original token/path order so the reduction contract remains deterministic.
@@ -375,8 +379,29 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         }
     }
 
-    if (cache != nullptr) cache->download(cpu.pair_outputs, stream);
-    host_expert_worker_pool().run(cpu.tasks);
+    if (cache != nullptr) cache->begin_download(cpu.pair_outputs.size()*sizeof(float), stream);
+    double gpu_us = 0, wait_us = 0;
+    const auto finish_hits = [&] {
+        if (cache == nullptr) return;
+        gpu_us = cache->finish_download(cpu.pair_outputs, stream, &wait_us);
+    };
+    // Serial is a diagnostic control. Production starts misses while hit kernels and
+    // the pinned result transfer are already in flight, then joins only at the merge.
+    const bool serial = cache != nullptr && cache->serial_schedule();
+    if (serial) finish_hits();
+    const auto cpu_started = measure ? Clock::now() : Clock::time_point{};
+    try {
+        host_expert_worker_pool().run(cpu.tasks);
+    } catch (...) {
+        if (!serial) finish_hits();
+        throw;
+    }
+    const auto cpu_finished = measure ? Clock::now() : Clock::time_point{};
+    if (!serial) finish_hits();
+    if (measure) cache->record_schedule(
+        std::chrono::duration<double, std::micro>(cpu_finished-cpu_started).count(),
+        gpu_us, wait_us,
+        std::chrono::duration<double, std::micro>(Clock::now()-branch_started).count());
     // Admission is background work and cannot make a miss a current-token GPU dependency.
     if (cache != nullptr && !use_routed_expert_input_fp32 &&
         !resolve_fp32_intermediate_diagnostic()) cache->admit(layer, cpu.ids);

@@ -1,6 +1,7 @@
 #include "targets/qwen3_8_flash_next/impl/expert_cache.h"
 #include "targets/qwen3_8_flash_next/impl/cpu_expert_reference.h"
 #include "core/device.h"
+#include "targets/qwen3_8_flash_next/impl/cpu_expert_pool.h"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -66,6 +67,31 @@ int main(){try{
                 std::span(input.data()+t*2560,2560),std::span(expected.data()+t*2560,2560),scratch);
         }
         cache.download(out,device.stream);compare(out,expected);
+    }
+    HostExpertWorkerPool pool(4, false);
+    for (unsigned hits : {0U, 1U, 4U}) {
+        std::vector<float> serial(4*2560), overlap(4*2560);
+        for (bool concurrent : {false, true}) {
+            auto& output = concurrent ? overlap : serial;
+            std::vector<HostExpertTask> tasks;
+            for (unsigned path = 0; path < 4; ++path) {
+                if (path < hits) {
+                    require(cache.execute(0, path%2,
+                        static_cast<std::uint16_t*>(d_input.p)+path*2560,
+                        path, device.stream), "mixed schedule hit missing");
+                } else {
+                    tasks.push_back({.expert = layer.expert(path%2),
+                        .input = input.data()+path*2560,
+                        .output = output.data()+path*2560});
+                }
+            }
+            cache.begin_download(output.size()*sizeof(float), device.stream);
+            if (!concurrent) cache.finish_download(output, device.stream);
+            pool.run(tasks);
+            if (concurrent) cache.finish_download(output, device.stream);
+        }
+        require(serial == overlap, "CPU/GPU join changed private expert outputs");
+        std::cout << "cache.schedule.exact_parity.hits=" << hits << " paths=4\n";
     }
     // A leased slot cannot be recycled even when it would otherwise be the LRU victim.
     require(cache.execute(0,0,d_input.p,0,device.stream),"lease hit");

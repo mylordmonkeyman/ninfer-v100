@@ -1,0 +1,99 @@
+name: V100 Phase 14 Hybrid Scheduler
+on:
+  push:
+    branches: [forwardport/v100-flash-next]
+    paths:
+      - '.github/workflows/v100-phase14-hybrid.yml'
+      - 'src/targets/qwen3_8_flash_next/**'
+      - 'tests/targets/qwen3_8_flash_next/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: v100-phase14-hybrid
+  cancel-in-progress: false
+jobs:
+  hybrid-scheduler:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 180
+    env:
+      NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+      NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+      NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: '32'
+      NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: auto
+      NINFER_FLASH_NEXT_FP32_HYPER_STATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_CONV: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_READOUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_GATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_MOE_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT_LAYERS_32_47: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_SHARED_INPUT: '0'
+      NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE: '0'
+      NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Build hybrid scheduler checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p phase14-results
+          nvidia-smi > phase14-results/gpu.txt
+          cmake -S . -B build-phase14 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-phase14 -j --target \
+            ninfer_qwen3_8_flash_next_expert_cache_test \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            ninfer_qwen3_8_flash_next_text_decode_test
+      - name: Mixed CPU GPU joins and lease lifetime
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build-phase14 -V \
+            -R '^ninfer_qwen3_8_flash_next_(expert_cache|text_decode)_test$' \
+            | tee phase14-results/cache-tests.log
+          compute-sanitizer --tool memcheck --error-exitcode 1 \
+            build-phase14/tests/ninfer_qwen3_8_flash_next_expert_cache_test \
+            > phase14-results/cache-memcheck.log 2>&1
+      - name: Warmed cache off on comparison and fixed cache serial overlap pairs
+        shell: bash
+        env:
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '64'
+          NINFER_PHASE14_BENCHMARK: '1'
+          NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING: '1'
+        run: |
+          set -euo pipefail
+          # Process-level ABBA; cache-on processes contain serial/overlap ABBA pairs.
+          for mode in off-a on-a on-b off-b; do
+            case "$mode" in off-*) enabled=0 ;; on-*) enabled=1 ;; esac
+            NINFER_FLASH_NEXT_EXPERT_CACHE="$enabled" \
+              build-phase14/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+              > "phase14-results/$mode.log" 2>&1
+            cat "phase14-results/$mode.log"
+            grep -q 'PASS: Phase 14 warmed benchmark and fixed-cache exact schedule parity' \
+              "phase14-results/$mode.log"
+          done
+      - name: Preserve scheduler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase14-hybrid-scheduler
+          path: phase14-results
+          retention-days: 30

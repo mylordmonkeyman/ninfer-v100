@@ -29,6 +29,9 @@ inline constexpr std::size_t kExpertSlotBytes = (kExpertPairBytes + 255) & ~std:
 struct FlashNextExpertCacheStats {
     std::uint64_t hits = 0, misses = 0, admitted = 0, ready = 0, evicted = 0;
     double fill_wall_us = 0, maximum_fill_wall_us = 0;
+    std::uint64_t schedule_calls = 0;
+    double cpu_branch_us = 0, gpu_branch_us = 0, merge_wait_us = 0;
+    double branch_wall_us = 0, overlap_lower_bound_us = 0;
 };
 
 // Program-owned main-text cache. A separate nonblocking stream and a bounded worker queue
@@ -45,6 +48,16 @@ public:
                  unsigned path, cudaStream_t stream);
     // Completes hit consumers and releases their slot leases before any eviction.
     void download(std::span<float> pair_outputs, cudaStream_t stream);
+    // Enqueue pinned result transfer before CPU misses; wait/copy/release only at merge.
+    void begin_download(std::size_t output_bytes, cudaStream_t stream);
+    double finish_download(std::span<float> pair_outputs, cudaStream_t stream,
+                           double* wait_us = nullptr);
+    void record_schedule(double cpu_us, double gpu_us, double wait_us, double wall_us);
+    [[nodiscard]] bool timing_enabled() const { return timing_enabled_; }
+    [[nodiscard]] bool serial_schedule() const { return serial_schedule_; }
+    // Diagnostic controls for paired scheduling comparisons with one fixed Ready set.
+    void set_serial_schedule(bool value) { serial_schedule_ = value; }
+    void freeze_admissions() { drain(); admissions_enabled_ = false; }
     // At most one new expert per layer call; a busy fill pool simply declines admission.
     void admit(unsigned layer, std::span<const std::int32_t> ids);
     void drain(); // test/shutdown boundary, never used by the current-token fill path
@@ -60,6 +73,8 @@ private:
     std::unique_ptr<DeviceBuffer> storage_, activations_, outputs_;
     std::unique_ptr<PinnedHostBuffer> fill_buffer_, result_buffer_;
     cudaStream_t fill_stream_ = nullptr;
+    cudaEvent_t hit_start_ = nullptr, hit_stop_ = nullptr;
+    bool timing_enabled_ = false, serial_schedule_ = false, admissions_enabled_ = true;
     int device_ = 0;
     std::vector<Entry> entries_;
     std::vector<std::pair<unsigned, unsigned>> consumers_;

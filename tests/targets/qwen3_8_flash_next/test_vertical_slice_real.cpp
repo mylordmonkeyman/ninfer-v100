@@ -572,6 +572,102 @@ int run_layer0_gdn_conv_isolation(
 
 } // namespace
 
+// Replays natural teacher-forced inputs without oracle injection. Timing includes
+// eager execution, logits readback, and state commit; it is not serving throughput.
+static int run_phase14_benchmark(FlashNextTextExecutor& executor,
+    FlashNextRuntimeAllocation& allocation, ninfer::DeviceContext& device,
+    const std::vector<OracleRecord>& records) {
+    const std::size_t count = std::min<std::size_t>(64, records.size());
+    auto* cache = allocation.state_view().expert_cache;
+    const auto run = [&](bool prefill) {
+        auto lane = executor.allocate_lane();
+        std::vector<std::uint16_t> all_logits;
+        const auto read_logits = [&](const ninfer::Tensor& logits) {
+            const auto offset = all_logits.size();
+            all_logits.resize(offset + static_cast<std::size_t>(logits.ne[0]));
+            CUDA_CHECK(cudaMemcpyAsync(all_logits.data()+offset, logits.data,
+                static_cast<std::size_t>(logits.ne[0])*sizeof(std::uint16_t),
+                cudaMemcpyDeviceToHost, device.stream));
+            device.synchronize();
+        };
+        const std::array<LaneCommitDecision, 1> decisions{{{.accept = true}}};
+        device.synchronize();
+        const auto started = std::chrono::steady_clock::now();
+        if (prefill) {
+            std::vector<std::int32_t> tokens(count);
+            std::vector<std::array<std::int32_t, 3>> positions(count);
+            for (std::size_t i = 0; i < count; ++i) {
+                tokens[i] = records[i].token_id;
+                const auto pos = static_cast<std::int32_t>(records[i].position);
+                positions[i] = {pos, pos, pos};
+            }
+            auto round = executor.execute_prefill_chunk(lane, tokens, positions, 0);
+            read_logits(round.logits());
+            round.commit(decisions);
+        } else {
+            for (std::size_t i = 0; i < count; ++i) {
+                const auto pos = static_cast<std::int32_t>(records[i].position);
+                LaneStepRequest request{.handle = lane, .token_id = records[i].token_id,
+                    .token_index = pos, .mrope_positions = {pos, pos, pos},
+                    .sampling = {}, .custom_embedding = nullptr};
+                auto round = executor.execute_round(std::span(&request, 1), nullptr);
+                read_logits(round.logits());
+                round.commit(decisions);
+            }
+        }
+        device.synchronize();
+        const double seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now()-started).count();
+        if (executor.committed_frontier(lane) != static_cast<std::int32_t>(count))
+            throw std::runtime_error("Phase 14 benchmark state frontier mismatch");
+        executor.release_lane(lane);
+        device.synchronize();
+        return std::pair{seconds, std::move(all_logits)};
+    };
+    // Warm the model/CPU pool and, when enabled, populate the cache through normal
+    // admission. Freeze after completed fills so serial/overlap see identical keys.
+    run(false);
+    if (cache) cache->drain();
+    run(false);
+    if (cache) cache->freeze_admissions();
+    for (const bool prefill : {false, true}) {
+        run(prefill); // warm this execution shape outside measured rounds
+        std::vector<std::uint16_t> expected;
+        for (unsigned sample = 0; sample < 4; ++sample) {
+            const bool serial = sample == 0 || sample == 3; // ABBA
+            if (cache) cache->set_serial_schedule(serial);
+            const auto before = cache ? cache->stats() : FlashNextExpertCacheStats{};
+            auto [seconds, logits] = run(prefill);
+            const auto after = cache ? cache->stats() : FlashNextExpertCacheStats{};
+            if (sample == 0) expected = logits;
+            else if (logits != expected)
+                throw std::runtime_error("Phase 14 fixed-cache schedule changed logits");
+            const double cpu = after.cpu_branch_us-before.cpu_branch_us;
+            const double gpu = after.gpu_branch_us-before.gpu_branch_us;
+            const double wait = after.merge_wait_us-before.merge_wait_us;
+            const double overlap = after.overlap_lower_bound_us-before.overlap_lower_bound_us;
+            json result{{"phase14", "benchmark"}, {"mode", cache ?
+                (serial ? "cache_serial" : "cache_overlap") : "cache_off"},
+                {"shape", prefill ? "prefill" : "decode"}, {"sample", sample},
+                {"tokens", count}, {"seconds", seconds}, {"tokens_per_s", count/seconds},
+                {"hits", after.hits-before.hits}, {"misses", after.misses-before.misses},
+                {"cpu_branch_us", cpu}, {"gpu_branch_us", gpu}, {"merge_wait_us", wait},
+                {"branch_wall_us", after.branch_wall_us-before.branch_wall_us},
+                {"overlap_lower_bound_us", overlap},
+                {"schedule_calls", after.schedule_calls-before.schedule_calls},
+                {"slots_per_layer", cache ? cache->budget().slots_per_layer : 0}};
+            if (!cache) for (const char* key : {"cpu_branch_us", "gpu_branch_us",
+                "merge_wait_us", "branch_wall_us", "overlap_lower_bound_us", "schedule_calls"})
+                result[key] = nullptr;
+            std::cout << result.dump() << '\n' << std::flush;
+            if (cache && (after.hits == before.hits || after.misses == before.misses))
+                throw std::runtime_error("Phase 14 benchmark did not exercise both branches");
+        }
+    }
+    std::cout << "PASS: Phase 14 warmed benchmark and fixed-cache exact schedule parity\n";
+    return 0;
+}
+
 int main() {
 #if !defined(NINFER_VOLTA_BUILD)
     std::cout << "SKIP: Phase 11 real vertical slice is an SM70 qualification target\n";
@@ -658,6 +754,10 @@ int main() {
         allocation.configure_expert_cache(model.text_view());
 
         reset_flash_next_host_expert_execution_stats();
+        if (const char* benchmark = std::getenv("NINFER_PHASE14_BENCHMARK");
+            benchmark != nullptr && std::string_view(benchmark) == "1") {
+            return run_phase14_benchmark(executor, allocation, device, records);
+        }
 
         if (const char* prefill_probe =
                 std::getenv("NINFER_PHASE11_PREFILL_PROBE_POSITIONS");

@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <chrono>
 #include <cstring>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 
@@ -33,6 +34,12 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
             layer.gate_up.experts != 512 || layer.down.experts != 512)
             throw std::invalid_argument("expert cache requires exact Flash-Next banks");
     }
+    const auto enabled = [](const char* name) {
+        const char* value = std::getenv(name);
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    };
+    timing_enabled_ = enabled("NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING");
+    serial_schedule_ = enabled("NINFER_FLASH_NEXT_EXPERT_CACHE_SERIAL");
     CUDA_CHECK(cudaGetDevice(&device_));
     std::size_t free=0,total=0;
     CUDA_CHECK(cudaMemGetInfo(&free,&total));
@@ -52,6 +59,10 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
     CUDA_CHECK(cudaMemGetInfo(&free_after,&total_after));
     std::fprintf(stderr,"phase13.cache.free_after_bytes=%zu\nphase13.cache.observed_device_bytes=%zu\n",
         free_after,free-free_after);
+    if (timing_enabled_) {
+        CUDA_CHECK(cudaEventCreate(&hit_start_));
+        CUDA_CHECK(cudaEventCreate(&hit_stop_));
+    }
     worker_=std::thread([this]{fill_loop();});
     std::fprintf(stderr,"phase13.cache.slots_per_layer=%u\nphase13.cache.bytes=%zu\n"
         "phase13.cache.transfer_bytes=%zu\nphase13.cache.free_before_bytes=%zu\n"
@@ -64,6 +75,8 @@ FlashNextExpertCache::~FlashNextExpertCache() {
     { std::lock_guard lock(mutex_); stop_=true; work_.notify_one(); }
     if(worker_.joinable())worker_.join();
     if(fill_stream_)cudaStreamDestroy(fill_stream_);
+    if(hit_start_)cudaEventDestroy(hit_start_);
+    if(hit_stop_)cudaEventDestroy(hit_stop_);
 }
 void FlashNextExpertCache::check_failure() const { if(failure_)std::rethrow_exception(failure_); }
 HostNvfp4ExpertPairView FlashNextExpertCache::view(unsigned slot) const {
@@ -94,6 +107,8 @@ bool FlashNextExpertCache::execute(unsigned layer,int expert,const void* input,
         if((std::size_t(path)+1)*2560*sizeof(float)>outputs_->bytes)
             throw std::out_of_range("expert cache hit buffer capacity");
         entries_[slot].epoch=++epoch_;++entries_[slot].leases;
+        if (consumers_.empty() && timing_enabled_)
+            CUDA_CHECK(cudaEventRecord(hit_start_, stream));
         consumers_.emplace_back(slot,path);++stats_.hits;
     }
     flash_next_cached_expert_launch(view(slot),input,
@@ -101,24 +116,55 @@ bool FlashNextExpertCache::execute(unsigned layer,int expert,const void* input,
         static_cast<float*>(outputs_->p)+std::size_t(path)*2560,stream);
     return true;
 }
-void FlashNextExpertCache::download(std::span<float> output,cudaStream_t stream) {
-    if(consumers_.empty())return;
-    if(output.size_bytes()>outputs_->bytes)throw std::out_of_range("expert cache result capacity");
-    CUDA_CHECK(cudaMemcpyAsync(result_buffer_->data(),outputs_->p,output.size_bytes(),
-        cudaMemcpyDeviceToHost,stream));
+void FlashNextExpertCache::begin_download(std::size_t bytes, cudaStream_t stream) {
+    if (consumers_.empty()) return;
+    if (bytes > outputs_->bytes) throw std::out_of_range("expert cache result capacity");
+    CUDA_CHECK(cudaMemcpyAsync(result_buffer_->data(), outputs_->p, bytes,
+                               cudaMemcpyDeviceToHost, stream));
+    if (timing_enabled_) CUDA_CHECK(cudaEventRecord(hit_stop_, stream));
+}
+double FlashNextExpertCache::finish_download(std::span<float> output, cudaStream_t stream,
+    double* wait_us) {
+    if (wait_us) *wait_us = 0;
+    if (consumers_.empty()) return 0;
+    const auto waiting = timing_enabled_ ? std::chrono::steady_clock::now() :
+        std::chrono::steady_clock::time_point{};
     CUDA_CHECK(cudaStreamSynchronize(stream));
-    std::lock_guard lock(mutex_);check_failure();
-    for(auto [slot,path]:consumers_){
-        std::memcpy(output.data()+std::size_t(path)*2560,
-            static_cast<float*>(result_buffer_->data())+std::size_t(path)*2560,2560*sizeof(float));
+    if (wait_us && timing_enabled_) *wait_us = std::chrono::duration<double, std::micro>(
+        std::chrono::steady_clock::now()-waiting).count();
+    float gpu_ms = 0;
+    if (timing_enabled_) CUDA_CHECK(cudaEventElapsedTime(&gpu_ms, hit_start_, hit_stop_));
+    std::lock_guard lock(mutex_); check_failure();
+    for (auto [slot, path] : consumers_) {
+        std::memcpy(output.data() + std::size_t(path)*2560,
+            static_cast<float*>(result_buffer_->data()) + std::size_t(path)*2560,
+            2560*sizeof(float));
         --entries_[slot].leases;
     }
     consumers_.clear();
+    return double(gpu_ms)*1000;
+}
+void FlashNextExpertCache::download(std::span<float> output, cudaStream_t stream) {
+    begin_download(output.size_bytes(), stream);
+    finish_download(output, stream);
+}
+void FlashNextExpertCache::record_schedule(double cpu, double gpu, double wait, double wall) {
+    if (!timing_enabled_) return;
+    std::lock_guard lock(mutex_);
+    ++stats_.schedule_calls;
+    stats_.cpu_branch_us += cpu;
+    stats_.gpu_branch_us += gpu;
+    stats_.merge_wait_us += wait;
+    stats_.branch_wall_us += wall;
+    // Both intervals lie inside the measured host branch span. Their combined length
+    // minus that span is a conservative lower bound on the intersection, without
+    // assuming synchronized CPU/CUDA clocks or counting dispatch gaps as overlap.
+    stats_.overlap_lower_bound_us += std::max(0.0, cpu + gpu - wall);
 }
 void FlashNextExpertCache::admit(unsigned layer,std::span<const std::int32_t> ids) {
     std::lock_guard lock(mutex_);check_failure();
     if(layer>=48)throw std::invalid_argument("invalid cache layer");
-    if(!budget_.slots_per_layer||queue_.size()+unsigned(filling_)>=4)return;
+    if(!admissions_enabled_||!budget_.slots_per_layer||queue_.size()+unsigned(filling_)>=4)return;
     const unsigned begin=layer*budget_.slots_per_layer,end=begin+budget_.slots_per_layer;
     for(int id:ids){
         if(id<0||id>=512)throw std::invalid_argument("invalid cache expert id");
