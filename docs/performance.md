@@ -1372,8 +1372,10 @@ this cache.
 
 A background worker uses one pinned canonical-pair staging buffer and a separate
 nonblocking CUDA stream. Its queue is bounded to four outstanding admissions.
-Each layer call admits at most one missing expert; pool pressure can decline
-admission. Replacement prefers empty slots, then the least recently used
+Each layer call admits at most one missing expert by default. The opt-in
+`NINFER_FLASH_NEXT_EXPERT_CACHE_ADMISSION_CAP=2` permits two; the accepted values
+are 1 and 2. Both retain the four-outstanding queue bound and one pinned fill
+buffer. Pool pressure can decline admission. Replacement prefers empty slots, then the least recently used
 unleased Ready slot. Uploading entries and active GPU consumers cannot be evicted.
 Fill failure propagates to the inference owner, and teardown joins the worker
 before releasing storage.
@@ -1381,7 +1383,7 @@ before releasing storage.
 The Phase 13 baseline executed Ready GPU hits and AVX2 CPU misses serially.
 Their unweighted FP32 expert outputs are merged in the original router-path
 order. Phase 14 adds overlapping execution, described below.
-Prefill also observes cap-one admission per layer call, not per routed token.
+Prefill observes the configured admission cap per layer call, not per routed token.
 
 The cache remains off by default. Its integration checks do not qualify the
 original Phase 11 numerical gate or establish a serving token rate.
@@ -1534,3 +1536,24 @@ rounding to 1, and cache memcheck reported zero errors. Real-model decode checke
 all returned logits for 64 positions; prefill checked its final returned logits
 across the fixed-cache schedules. These checks protect the scheduling change;
 they do not pass or replace the still-failed original Phase 11 numerical gate.
+
+### Phase 15 cache/admission tuning
+
+The tuning workflow compares a 128-slot upper bound with the full capacity derived
+from actual free VRAM, at admission caps 1 and 2. The context remains 8,192 tokens,
+prefill chunk 128, one lane, no MTP, and the accepted Phase 11 precision profile.
+The reserve and operating ceiling are unchanged. Cache and cap-one defaults remain.
+
+Naturally routed 128-token teacher-forced replay measures decode and prefill
+separately. Each shape starts with an empty cache after execution-resource warmup,
+then runs one cold and three warmed admission-active passes. Post-pass fill drains
+are reported separately, including throughput with that tail. Four frozen-cache
+serial/overlap ABBA passes retain the Phase 14 exact schedule comparison. Process
+configurations run forward and reverse around cache-off controls.
+
+Reports include actual capacity, throughput, hit/miss/eviction counts, admitted and
+completed fills, canonical H2D bytes, packing time, CUDA-event H2D interval, admission
+wall time, queue pressure, and CPU/GPU merge timing. CUDA-event H2D bandwidth is
+transfer-stream service rate, not sustainable whole-inference PCIe throughput.
+Active-cache logit drift versus the same shape's cold pass is descriptive; these
+measurements do not reopen or replace the original Phase 11 numerical gate.

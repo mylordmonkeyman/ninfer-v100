@@ -27,7 +27,10 @@ FlashNextExpertCacheBudget flash_next_expert_cache_budget(
 }
 
 FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
-    unsigned max_tokens, bool mtp, unsigned maximum) : host_(host) {
+    unsigned max_tokens, bool mtp, unsigned maximum, unsigned admission_cap)
+    : host_(host), admission_cap_(admission_cap) {
+    if (admission_cap < 1 || admission_cap > 2)
+        throw std::invalid_argument("expert cache admission cap must be 1 or 2");
     if (!max_tokens) throw std::invalid_argument("zero expert cache token capacity");
     for (const auto& layer : host.layers) {
         if (layer.compact_bytes_per_expert_pair() != kExpertPairBytes ||
@@ -62,6 +65,8 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
     if (timing_enabled_) {
         CUDA_CHECK(cudaEventCreate(&hit_start_));
         CUDA_CHECK(cudaEventCreate(&hit_stop_));
+        CUDA_CHECK(cudaEventCreate(&fill_start_));
+        CUDA_CHECK(cudaEventCreate(&fill_stop_));
     }
     worker_=std::thread([this]{fill_loop();});
     std::fprintf(stderr,"phase13.cache.slots_per_layer=%u\nphase13.cache.bytes=%zu\n"
@@ -77,6 +82,8 @@ FlashNextExpertCache::~FlashNextExpertCache() {
     if(fill_stream_)cudaStreamDestroy(fill_stream_);
     if(hit_start_)cudaEventDestroy(hit_start_);
     if(hit_stop_)cudaEventDestroy(hit_stop_);
+    if(fill_start_)cudaEventDestroy(fill_start_);
+    if(fill_stop_)cudaEventDestroy(fill_stop_);
 }
 void FlashNextExpertCache::check_failure() const { if(failure_)std::rethrow_exception(failure_); }
 HostNvfp4ExpertPairView FlashNextExpertCache::view(unsigned slot) const {
@@ -161,16 +168,29 @@ void FlashNextExpertCache::record_schedule(double cpu, double gpu, double wait, 
     // assuming synchronized CPU/CUDA clocks or counting dispatch gaps as overlap.
     stats_.overlap_lower_bound_us += std::max(0.0, cpu + gpu - wall);
 }
+void FlashNextExpertCache::reset() {
+    drain();
+    std::lock_guard lock(mutex_);
+    if (!consumers_.empty()) throw std::logic_error("cache reset with outstanding consumers");
+    std::fill(entries_.begin(), entries_.end(), Entry{});
+    stats_ = {};
+    epoch_ = 0;
+    admissions_enabled_ = true;
+}
 void FlashNextExpertCache::admit(unsigned layer,std::span<const std::int32_t> ids) {
+    const auto started = timing_enabled_ ? std::chrono::steady_clock::now() :
+        std::chrono::steady_clock::time_point{};
     std::lock_guard lock(mutex_);check_failure();
     if(layer>=48)throw std::invalid_argument("invalid cache layer");
-    if(!admissions_enabled_||!budget_.slots_per_layer||queue_.size()+unsigned(filling_)>=4)return;
+    if(!admissions_enabled_||!budget_.slots_per_layer)return;
     const unsigned begin=layer*budget_.slots_per_layer,end=begin+budget_.slots_per_layer;
+    unsigned admitted = 0;
     for(int id:ids){
         if(id<0||id>=512)throw std::invalid_argument("invalid cache expert id");
         bool present=false;
         for(unsigned i=begin;i<end;++i)if(entries_[i].expert==id){present=true;break;}
         if(present)continue;
+        if(queue_.size()+unsigned(filling_)>=4){++stats_.queue_declined_calls;break;}
         unsigned victim=end;
         for(unsigned i=begin;i<end;++i){
             const auto& e=entries_[i];
@@ -178,11 +198,18 @@ void FlashNextExpertCache::admit(unsigned layer,std::span<const std::int32_t> id
             if(victim==end||e.state==State::Empty||e.epoch<entries_[victim].epoch)victim=i;
             if(e.state==State::Empty)break;
         }
-        if(victim==end)return;
+        if(victim==end){++stats_.victim_declined_calls;break;}
         if(entries_[victim].state!=State::Empty)++stats_.evicted;
         entries_[victim]={id,State::Uploading,++epoch_,0};
-        queue_.push_back(victim);++stats_.admitted;work_.notify_one();return;
+        queue_.push_back(victim);++stats_.admitted;++admitted;
+        stats_.maximum_outstanding=std::max(stats_.maximum_outstanding,
+            unsigned(queue_.size())+unsigned(filling_));
+        work_.notify_one();
+        if(admitted==admission_cap_)break;
     }
+    ++stats_.admission_bursts[admitted];
+    if(timing_enabled_)stats_.admission_wall_us+=std::chrono::duration<double,std::micro>(
+        std::chrono::steady_clock::now()-started).count();
 }
 void FlashNextExpertCache::fill_loop() noexcept {
     try {
@@ -205,14 +232,22 @@ void FlashNextExpertCache::fill_loop() noexcept {
             std::memcpy(dst+2'764'800,src.gate_up.weight_scale_divisor,4);
             std::memcpy(dst+2'764'804,src.down.weight_scale_divisor,4);
             std::memset(dst+kExpertPairBytes,0,kExpertSlotBytes-kExpertPairBytes);
+            const double pack_us = std::chrono::duration<double,std::micro>(
+                std::chrono::steady_clock::now()-started).count();
+            if(timing_enabled_)CUDA_CHECK(cudaEventRecord(fill_start_,fill_stream_));
             CUDA_CHECK(cudaMemcpyAsync(static_cast<std::byte*>(storage_->p)+
                 std::size_t(slot)*kExpertSlotBytes,dst,kExpertSlotBytes,cudaMemcpyHostToDevice,fill_stream_));
+            if(timing_enabled_)CUDA_CHECK(cudaEventRecord(fill_stop_,fill_stream_));
             CUDA_CHECK(cudaStreamSynchronize(fill_stream_));
+            float h2d_ms = 0;
+            if(timing_enabled_)CUDA_CHECK(cudaEventElapsedTime(&h2d_ms,fill_start_,fill_stop_));
             {
                 std::lock_guard lock(mutex_);
                 const auto elapsed=std::chrono::duration<double,std::micro>(
                     std::chrono::steady_clock::now()-started).count();
                 stats_.fill_wall_us+=elapsed;
+                stats_.pack_wall_us+=pack_us;stats_.h2d_us+=double(h2d_ms)*1000;
+                stats_.fill_bytes+=kExpertSlotBytes;
                 stats_.maximum_fill_wall_us=std::max(stats_.maximum_fill_wall_us,elapsed);
                 entries_[slot].state=State::Canonical;
                 // This leaf reads the canonical software-NVFP4 layout directly. No prepack

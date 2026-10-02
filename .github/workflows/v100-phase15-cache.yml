@@ -1,13 +1,19 @@
-name: V100 Phase 14 Hybrid Scheduler
+name: V100 Phase 15 Cache Admission Tuning
 on:
+  push:
+    branches: [forwardport/v100-flash-next]
+    paths:
+      - '.github/workflows/v100-phase15-cache.yml'
+      - 'src/targets/qwen3_8_flash_next/**'
+      - 'tests/targets/qwen3_8_flash_next/**'
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: v100-phase14-hybrid
+  group: v100-phase15-hybrid
   cancel-in-progress: false
 jobs:
-  hybrid-scheduler:
+  cache-admission:
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     timeout-minutes: 180
     env:
@@ -46,13 +52,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p phase14-results
-          nvidia-smi > phase14-results/gpu.txt
-          cmake -S . -B build-phase14 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          mkdir -p phase15-results
+          nvidia-smi > phase15-results/gpu.txt
+          cmake -S . -B build-phase15 -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
             -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
             -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-phase14 -j --target \
+          cmake --build build-phase15 -j --target \
             ninfer_qwen3_8_flash_next_expert_cache_test \
             ninfer_qwen3_8_flash_next_vertical_slice_real_test \
             ninfer_qwen3_8_flash_next_text_decode_test
@@ -60,34 +66,45 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ctest --test-dir build-phase14 -V \
+          ctest --test-dir build-phase15 -V \
             -R '^ninfer_qwen3_8_flash_next_(expert_cache|text_decode)_test$' \
-            | tee phase14-results/cache-tests.log
+            | tee phase15-results/cache-tests.log
           compute-sanitizer --tool memcheck --error-exitcode 1 \
-            build-phase14/tests/ninfer_qwen3_8_flash_next_expert_cache_test \
-            > phase14-results/cache-memcheck.log 2>&1
-      - name: Warmed cache off on comparison and fixed cache serial overlap pairs
+            build-phase15/tests/ninfer_qwen3_8_flash_next_expert_cache_test \
+            > phase15-results/cache-memcheck.log 2>&1
+      - name: Capacity admission factorial and cache off controls
         shell: bash
         env:
-          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '64'
-          NINFER_PHASE14_BENCHMARK: '1'
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '128'
+          NINFER_PHASE15_BENCHMARK: '1'
           NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING: '1'
         run: |
           set -euo pipefail
-          # Process-level ABBA; cache-on processes contain serial/overlap ABBA pairs.
-          for mode in off-a on-a on-b off-b; do
-            case "$mode" in off-*) enabled=0 ;; on-*) enabled=1 ;; esac
+          # Forward/reverse process order. Each process measures cold and warmed
+          # active admission, then fixed-cache serial/overlap ABBA for both shapes.
+          configs=(off 128-1 full-1 128-2 full-2 full-2 128-2 full-1 128-1 off)
+          for i in "${!configs[@]}"; do
+            config="${configs[$i]}"
+            enabled=1; slots=512; cap=1
+            case "$config" in
+              off) enabled=0 ;;
+              128-1) slots=128 ;;
+              128-2) slots=128; cap=2 ;;
+              full-2) cap=2 ;;
+            esac
             NINFER_FLASH_NEXT_EXPERT_CACHE="$enabled" \
-              build-phase14/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
-              > "phase14-results/$mode.log" 2>&1
-            cat "phase14-results/$mode.log"
-            grep -q 'PASS: Phase 14 warmed benchmark and fixed-cache exact schedule parity' \
-              "phase14-results/$mode.log"
+            NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS="$slots" \
+            NINFER_FLASH_NEXT_EXPERT_CACHE_ADMISSION_CAP="$cap" \
+              build-phase15/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+              > "phase15-results/$i-$config.log" 2>&1
+            cat "phase15-results/$i-$config.log"
+            grep -q 'PASS: Phase 15 active admission, finite logits, fixed-cache exact schedule parity' \
+              "phase15-results/$i-$config.log"
           done
       - name: Preserve scheduler evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: phase14-hybrid-scheduler
-          path: phase14-results
+          name: phase15-cache-admission
+          path: phase15-results
           retention-days: 30

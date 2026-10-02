@@ -574,10 +574,11 @@ int run_layer0_gdn_conv_isolation(
 
 // Replays natural teacher-forced inputs without oracle injection. Timing includes
 // eager execution, logits readback, and state commit; it is not serving throughput.
-static int run_phase14_benchmark(FlashNextTextExecutor& executor,
+static int run_cache_benchmark(FlashNextTextExecutor& executor,
     FlashNextRuntimeAllocation& allocation, ninfer::DeviceContext& device,
     const std::vector<OracleRecord>& records) {
-    const std::size_t count = std::min<std::size_t>(64, records.size());
+    const bool tuning = std::getenv("NINFER_PHASE15_BENCHMARK") != nullptr;
+    const std::size_t count = std::min<std::size_t>(tuning ? 128 : 64, records.size());
     auto* cache = allocation.state_view().expert_cache;
     const auto run = [&](bool prefill) {
         auto lane = executor.allocate_lane();
@@ -624,6 +625,84 @@ static int run_phase14_benchmark(FlashNextTextExecutor& executor,
         device.synchronize();
         return std::pair{seconds, std::move(all_logits)};
     };
+    if (tuning) {
+        // Warm execution resources, then discard admitted keys before each shape.
+        run(false);
+        for (const bool prefill : {false, true}) {
+            run(prefill);
+            if (cache) { cache->reset(); cache->set_serial_schedule(false); }
+            std::vector<std::uint16_t> cold_logits;
+            std::vector<std::uint16_t> fixed_logits;
+            for (unsigned sample=0; sample<8; ++sample) {
+                const bool active=sample<4;
+                const bool serial=!active && (sample==4 || sample==7);
+                if (cache) {
+                    if(sample==4)cache->freeze_admissions();
+                    cache->set_serial_schedule(serial);
+                }
+                const auto before=cache ? cache->stats() : FlashNextExpertCacheStats{};
+                auto [seconds, logits]=run(prefill);
+                const auto completed=cache ? cache->stats() : FlashNextExpertCacheStats{};
+                // Separate post-run draining from inference time. Completed fill
+                // accounting covers exactly this pass and includes its final tail.
+                const auto draining=std::chrono::steady_clock::now();
+                if(cache)cache->drain();
+                const double drain_seconds=std::chrono::duration<double>(
+                    std::chrono::steady_clock::now()-draining).count();
+                const auto after=cache ? cache->stats() : FlashNextExpertCacheStats{};
+                if(sample==0)cold_logits=logits;
+                if(sample==4)fixed_logits=logits;
+                if(!active && logits!=fixed_logits)
+                    throw std::runtime_error("Phase 15 fixed-cache schedule changed logits");
+                double error=0,norm=0,maximum=0;
+                for(std::size_t i=0;i<logits.size();++i){
+                    const float actual=std::bit_cast<float>(std::uint32_t(logits[i])<<16);
+                    const float expected=std::bit_cast<float>(std::uint32_t(cold_logits[i])<<16);
+                    if(!std::isfinite(actual))throw std::runtime_error("nonfinite Phase 15 logits");
+                    const double delta=double(actual)-expected;
+                    error+=delta*delta;norm+=double(expected)*expected;
+                    maximum=std::max(maximum,std::abs(delta));
+                }
+                const auto bytes=after.fill_bytes-before.fill_bytes;
+                const double h2d=after.h2d_us-before.h2d_us;
+                json result{{"phase15","benchmark"},{"shape",prefill?"prefill":"decode"},
+                    {"mode",cache?(serial?"cache_serial":"cache_overlap"):"cache_off"},
+                    {"stage",active?(sample==0?"cold_active":"warm_active"):"fixed"},
+                    {"sample",sample},{"tokens",count},{"seconds",seconds},
+                    {"tokens_per_s",count/seconds},{"drain_seconds",drain_seconds},
+                    {"tokens_per_s_with_drain",count/(seconds+drain_seconds)},
+                    {"slots_per_layer",cache?cache->budget().slots_per_layer:0},
+                    {"cache_bytes",cache?cache->budget().cache_bytes:0},
+                    {"admission_cap",cache?cache->admission_cap():0},
+                    {"hits",after.hits-before.hits},{"misses",after.misses-before.misses},
+                    {"admitted",after.admitted-before.admitted},{"ready",after.ready-before.ready},
+                    {"ready_at_return",completed.ready-before.ready},
+                    {"evicted",after.evicted-before.evicted},{"fill_bytes",bytes},
+                    {"fill_bytes_per_token",double(bytes)/count},
+                    {"fill_wall_us",after.fill_wall_us-before.fill_wall_us},
+                    {"maximum_fill_wall_us",after.maximum_fill_wall_us},
+                    {"pack_wall_us",after.pack_wall_us-before.pack_wall_us},
+                    {"h2d_us",h2d},{"h2d_gib_per_s",h2d>0?double(bytes)/(1ULL<<30)/(h2d*1e-6):0},
+                    {"admission_wall_us",after.admission_wall_us-before.admission_wall_us},
+                    {"queue_declined_calls",after.queue_declined_calls-before.queue_declined_calls},
+                    {"victim_declined_calls",after.victim_declined_calls-before.victim_declined_calls},
+                    {"maximum_outstanding",after.maximum_outstanding},
+                    {"cpu_branch_us",after.cpu_branch_us-before.cpu_branch_us},
+                    {"gpu_branch_us",after.gpu_branch_us-before.gpu_branch_us},
+                    {"merge_wait_us",after.merge_wait_us-before.merge_wait_us},
+                    {"overlap_lower_bound_us",after.overlap_lower_bound_us-before.overlap_lower_bound_us},
+                    {"logit_nrmse_vs_cold",std::sqrt(error/std::max(norm,1e-30))},
+                    {"maximum_logit_error_vs_cold",maximum}};
+                for(unsigned burst=0;burst<3;++burst)
+                    result["admission_burst_"+std::to_string(burst)]=
+                        after.admission_bursts[burst]-before.admission_bursts[burst];
+                std::cout<<result.dump()<<'\n'<<std::flush;
+                if(after.maximum_outstanding>4)throw std::runtime_error("Phase 15 queue bound violated");
+            }
+        }
+        std::cout<<"PASS: Phase 15 active admission, finite logits, fixed-cache exact schedule parity\n";
+        return 0;
+    }
     // Warm the model/CPU pool and, when enabled, populate the cache through normal
     // admission. Freeze after completed fills so serial/overlap see identical keys.
     run(false);
@@ -756,7 +835,12 @@ int main() {
         reset_flash_next_host_expert_execution_stats();
         if (const char* benchmark = std::getenv("NINFER_PHASE14_BENCHMARK");
             benchmark != nullptr && std::string_view(benchmark) == "1") {
-            return run_phase14_benchmark(executor, allocation, device, records);
+            return run_cache_benchmark(executor, allocation, device, records);
+        }
+
+        if (const char* benchmark = std::getenv("NINFER_PHASE15_BENCHMARK");
+            benchmark != nullptr && std::string_view(benchmark) == "1") {
+            return run_cache_benchmark(executor, allocation, device, records);
         }
 
         if (const char* prefill_probe =

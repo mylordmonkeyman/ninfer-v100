@@ -109,6 +109,17 @@ int main(){try{
     single_slot.download(out,device.stream);
     single_slot.admit(0,std::span(&new_id,1));single_slot.drain();
     require(single_slot.stats().admitted==2,"released slot was not recyclable");
+    FlashNextExpertCache cap_two(host,1,false,2,2);
+    cap_two.admit(0,ids);cap_two.drain();
+    require(cap_two.stats().admitted==2,"admission cap two");
+    cap_two.ready_view(0,0);cap_two.ready_view(0,1);
+    cap_two.admit(0,ids);cap_two.drain();
+    require(cap_two.stats().admitted==3,"duplicate admission consumed cap");
+    require(cap_two.stats().maximum_outstanding<=4,"fill queue exceeded bound");
+    cap_two.reset();
+    require(!cap_two.execute(0,2,d_input.p,0,device.stream),"reset retained Ready entry");
+    cap_two.admit(0,ids);cap_two.drain();
+    require(cap_two.stats().admitted==2,"reset did not restore admissions");
     std::cout<<"PASS: budget, canonical bytes, oracle, admission, LRU, leases, namespaces\n";
     return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

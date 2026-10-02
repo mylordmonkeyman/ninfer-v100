@@ -95,9 +95,15 @@ void FlashNextRuntimeAllocation::configure_expert_cache(const TextModelView& mod
         if(end==env||*end||n>512)throw std::invalid_argument("invalid expert cache maximum slots");
         maximum=static_cast<unsigned>(n);
     }
+    unsigned admission_cap=1;
+    if(const char* env=std::getenv("NINFER_FLASH_NEXT_EXPERT_CACHE_ADMISSION_CAP");env&&*env){
+        if(std::string_view(env)!="1"&&std::string_view(env)!="2")
+            throw std::invalid_argument("expert cache admission cap must be 1 or 2");
+        admission_cap=static_cast<unsigned>(*env-'0');
+    }
     expert_cache_=std::make_unique<FlashNextExpertCache>(*model.host_experts,
         std::max(plan_.config.prefill_chunk,plan_.config.max_concurrency),
-        plan_.config.speculative_draft_tokens>0,maximum);
+        plan_.config.speculative_draft_tokens>0,maximum,admission_cap);
     state_view_.expert_cache=expert_cache_.get();
 }
 

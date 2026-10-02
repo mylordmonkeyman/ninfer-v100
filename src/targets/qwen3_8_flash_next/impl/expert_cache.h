@@ -3,6 +3,7 @@
 #include "core/arena.h"
 #include "targets/qwen3_8_flash_next/impl/expert_bank.h"
 #include <cuda_runtime.h>
+#include <array>
 #include <condition_variable>
 #include <deque>
 #include <exception>
@@ -30,6 +31,10 @@ struct FlashNextExpertCacheStats {
     std::uint64_t hits = 0, misses = 0, admitted = 0, ready = 0, evicted = 0;
     double fill_wall_us = 0, maximum_fill_wall_us = 0;
     std::uint64_t schedule_calls = 0;
+    std::uint64_t fill_bytes = 0, queue_declined_calls = 0, victim_declined_calls = 0;
+    unsigned maximum_outstanding = 0;
+    std::array<std::uint64_t, 3> admission_bursts{};
+    double admission_wall_us = 0, pack_wall_us = 0, h2d_us = 0;
     double cpu_branch_us = 0, gpu_branch_us = 0, merge_wait_us = 0;
     double branch_wall_us = 0, overlap_lower_bound_us = 0;
 };
@@ -40,7 +45,7 @@ struct FlashNextExpertCacheStats {
 class FlashNextExpertCache {
 public:
     FlashNextExpertCache(const HostNvfp4ExpertTableView& host, unsigned max_tokens,
-                         bool mtp, unsigned maximum_slots = 512);
+                         bool mtp, unsigned maximum_slots = 512, unsigned admission_cap = 1);
     ~FlashNextExpertCache();
     FlashNextExpertCache(const FlashNextExpertCache&) = delete;
     FlashNextExpertCache& operator=(const FlashNextExpertCache&) = delete;
@@ -58,7 +63,10 @@ public:
     // Diagnostic controls for paired scheduling comparisons with one fixed Ready set.
     void set_serial_schedule(bool value) { serial_schedule_ = value; }
     void freeze_admissions() { drain(); admissions_enabled_ = false; }
-    // At most one new expert per layer call; a busy fill pool simply declines admission.
+    // Diagnostic replay boundary: no GPU consumers may be outstanding.
+    void reset();
+    [[nodiscard]] unsigned admission_cap() const { return admission_cap_; }
+    // At most admission_cap new experts per layer call; pool pressure declines admission.
     void admit(unsigned layer, std::span<const std::int32_t> ids);
     void drain(); // test/shutdown boundary, never used by the current-token fill path
     [[nodiscard]] FlashNextExpertCacheStats stats() const;
@@ -74,6 +82,8 @@ private:
     std::unique_ptr<PinnedHostBuffer> fill_buffer_, result_buffer_;
     cudaStream_t fill_stream_ = nullptr;
     cudaEvent_t hit_start_ = nullptr, hit_stop_ = nullptr;
+    cudaEvent_t fill_start_ = nullptr, fill_stop_ = nullptr;
+    unsigned admission_cap_ = 1;
     bool timing_enabled_ = false, serial_schedule_ = false, admissions_enabled_ = true;
     int device_ = 0;
     std::vector<Entry> entries_;
