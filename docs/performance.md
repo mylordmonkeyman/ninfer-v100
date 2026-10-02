@@ -1729,3 +1729,7 @@ reported **zero errors**. Fixed-cache serial/overlap logits were exact, includin
 the decode-populated prefill control. Active-versus-cold logit diagnostics retain
 the Phase 15 interpretation; they do not constitute a new oracle acceptance.
 The original §7 numerical gate remains unpassed.
+
+The restored runtime and retained prefill benchmark also passed the
+[final SM70 compile and host contract check](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37064720486)
+at `3b88b9c8`. Runtime staging sources match the tested Phase 15 baseline exactly.
