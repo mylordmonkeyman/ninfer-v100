@@ -28,6 +28,7 @@ inline constexpr std::size_t kExpertSlotBytes = (kExpertPairBytes + 255) & ~std:
 
 struct FlashNextExpertCacheStats {
     std::uint64_t hits = 0, misses = 0, admitted = 0, ready = 0, evicted = 0;
+    double fill_wall_us = 0, maximum_fill_wall_us = 0;
 };
 
 // Program-owned main-text cache. A separate nonblocking stream and a bounded worker queue

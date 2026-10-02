@@ -2,6 +2,7 @@
 #include "core/device.h"
 #include <algorithm>
 #include <cstdio>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -47,6 +48,10 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
     fill_buffer_=std::make_unique<PinnedHostBuffer>(kExpertSlotBytes);
     entries_.resize(std::size_t(budget_.slots_per_layer)*48);
     CUDA_CHECK(cudaStreamCreateWithFlags(&fill_stream_,cudaStreamNonBlocking));
+    std::size_t free_after=0,total_after=0;
+    CUDA_CHECK(cudaMemGetInfo(&free_after,&total_after));
+    std::fprintf(stderr,"phase13.cache.free_after_bytes=%zu\nphase13.cache.observed_device_bytes=%zu\n",
+        free_after,free-free_after);
     worker_=std::thread([this]{fill_loop();});
     std::fprintf(stderr,"phase13.cache.slots_per_layer=%u\nphase13.cache.bytes=%zu\n"
         "phase13.cache.transfer_bytes=%zu\nphase13.cache.free_before_bytes=%zu\n"
@@ -144,6 +149,7 @@ void FlashNextExpertCache::fill_loop() noexcept {
                 if(stop_&&queue_.empty())return;
                 slot=queue_.front();queue_.pop_front();id=entries_[slot].expert;filling_=true;
             }
+            const auto started=std::chrono::steady_clock::now();
             const auto src=host_.expert(slot/budget_.slots_per_layer,id);
             auto* dst=static_cast<std::byte*>(fill_buffer_->data());
             std::memcpy(dst,src.gate_up.codes,1'638'400);
@@ -158,6 +164,10 @@ void FlashNextExpertCache::fill_loop() noexcept {
             CUDA_CHECK(cudaStreamSynchronize(fill_stream_));
             {
                 std::lock_guard lock(mutex_);
+                const auto elapsed=std::chrono::duration<double,std::micro>(
+                    std::chrono::steady_clock::now()-started).count();
+                stats_.fill_wall_us+=elapsed;
+                stats_.maximum_fill_wall_us=std::max(stats_.maximum_fill_wall_us,elapsed);
                 entries_[slot].state=State::Canonical;
                 // This leaf reads the canonical software-NVFP4 layout directly. No prepack
                 // allocation or Prepacking transition is needed before publishing Ready.

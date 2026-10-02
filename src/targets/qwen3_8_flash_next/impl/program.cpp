@@ -3255,12 +3255,11 @@ MemorySummary Program::memory_summary() const noexcept {
         impl_->plan_.capacity_curve.bytes_per_additional_main_page_group;
     const std::size_t weights_bytes =
         impl_->model_data_ != nullptr ? impl_->model_data_->backing.stats().device_capacity_bytes : 0;
-    out.weights = ArenaMemorySummary{weights_bytes + cache_weights, weights_bytes + cache_weights,
-                                    weights_bytes + cache_weights};
+    out.weights = ArenaMemorySummary{weights_bytes, weights_bytes, weights_bytes};
     out.sequence =
-        ArenaMemorySummary{impl_->plan_.total_device_bytes - impl_->plan_.workspace_bytes + cache_transfers,
-                           impl_->plan_.total_device_bytes - impl_->plan_.workspace_bytes + cache_transfers,
-                           impl_->plan_.total_device_bytes - impl_->plan_.workspace_bytes + cache_transfers};
+        ArenaMemorySummary{impl_->plan_.total_device_bytes - impl_->plan_.workspace_bytes + cache_weights + cache_transfers,
+                           impl_->plan_.total_device_bytes - impl_->plan_.workspace_bytes + cache_weights + cache_transfers,
+                           impl_->plan_.total_device_bytes - impl_->plan_.workspace_bytes + cache_weights + cache_transfers};
     out.workspace = ArenaMemorySummary{impl_->plan_.workspace_bytes, 0, 0};
     out.cuda_graph_allowance_bytes = impl_->plan_.cuda_graph_allowance_bytes;
     if (impl_->vision_session_.has_value()) {

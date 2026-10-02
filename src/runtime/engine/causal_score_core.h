@@ -4,6 +4,7 @@
 #include "ninfer/types.h"
 #include "runtime/engine/kv_capacity.h"
 
+#include <algorithm>
 #include <condition_variable>
 #include <cstdint>
 #include <exception>
@@ -87,7 +88,8 @@ public:
         out.kv_capacity_max_page_groups        = resolution.maximum_main_page_groups;
         out.minimum_runtime_reservation_bytes  = resolution.minimum_runtime_reservation_bytes;
         out.kv_capacity_increment_bytes        = resolution.bytes_per_additional_main_page_group;
-        out.runtime_reservation_bytes          = resolution.runtime_reservation_bytes;
+        out.runtime_reservation_bytes =
+            std::max(out.runtime_reservation_bytes, resolution.runtime_reservation_bytes);
         out.available_after_weights_bytes      = resolution.available_after_weights_bytes;
         out.available_after_startup_bytes      = resolution.available_after_startup_bytes;
         out.kv_capacity_headroom_bytes         = resolution.automatic_headroom_bytes;

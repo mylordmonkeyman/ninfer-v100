@@ -75,6 +75,14 @@ int main(){try{
     require(!cache.execute(1,0,d_input.p,0,device.stream),"layer namespace collision");
     cache.admit(1,std::span(ids,1));cache.drain();cache.ready_view(1,0);
     require(cache.stats().evicted==1,"LRU victim not replaced");
+    FlashNextExpertCache single_slot(host,1,false,1);
+    single_slot.admit(0,std::span(ids,1));single_slot.drain();
+    require(single_slot.execute(0,0,d_input.p,0,device.stream),"single-slot lease");
+    single_slot.admit(0,std::span(&new_id,1));single_slot.drain();
+    require(single_slot.stats().admitted==1,"leased slot was recycled");
+    single_slot.download(out,device.stream);
+    single_slot.admit(0,std::span(&new_id,1));single_slot.drain();
+    require(single_slot.stats().admitted==2,"released slot was not recyclable");
     std::cout<<"PASS: budget, canonical bytes, oracle, admission, LRU, leases, namespaces\n";
     return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

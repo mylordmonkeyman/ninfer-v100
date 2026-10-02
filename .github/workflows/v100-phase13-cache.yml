@@ -50,6 +50,7 @@ jobs:
           submodules: recursive
           persist-credentials: false
       - name: Build cache integration
+        id: build
         shell: bash
         run: |
           set -euo pipefail
@@ -95,9 +96,22 @@ jobs:
           grep -Eq 'phase11.host_expert.expert_pairs=61440' phase13-results/integration.log
           grep -Eq 'phase13.cache.hits=[1-9][0-9]*' phase13-results/integration.log
           if test "$status" -eq 1; then
-            grep -q 'Phase 11 numerical oracle gate failed' phase13-results/integration.log
+            grep -q 'FAIL: Phase 11 teacher-forced oracle gate' phase13-results/integration.log
           fi
+      - name: Cached real-model prefill
+        shell: bash
+        env:
+          NINFER_FLASH_NEXT_EXPERT_CACHE: '1'
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '128'
+          NINFER_PHASE11_PREFILL_PROBE_POSITIONS: '128'
+        run: |
+          set -euo pipefail
+          build-phase13/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            > phase13-results/prefill.log 2>&1
+          cat phase13-results/prefill.log
+          grep -Eq 'phase13.prefill.pass=1 hits=[1-9][0-9]*' phase13-results/prefill.log
       - name: Locate resident GPU prefill memory fault
+        if: always() && steps.build.conclusion == 'success'
         continue-on-error: true
         shell: bash
         run: |

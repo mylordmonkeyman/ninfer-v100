@@ -679,6 +679,8 @@ int main() {
                 probe_mrope[i] = {position, position, position};
             }
 
+            const unsigned passes=allocation.state_view().expert_cache ? 2 : 1;
+            for(unsigned pass=0;pass<passes;++pass) {
             auto probe_lane = executor.allocate_lane();
             const auto started = std::chrono::steady_clock::now();
             auto round = executor.execute_prefill_chunk(
@@ -745,6 +747,15 @@ int main() {
             }
             executor.release_lane(probe_lane);
             device.synchronize();
+            if(auto* cache=allocation.state_view().expert_cache) {
+                cache->drain();
+                const auto stats=cache->stats();
+                std::cout << "phase13.prefill.pass=" << pass << " hits=" << stats.hits
+                          << " misses=" << stats.misses << '\n';
+                if(pass==1 && stats.hits==0)
+                    throw std::runtime_error("cached prefill did not execute GPU hits");
+            }
+            }
             return 0;
         }
 
@@ -2007,7 +2018,9 @@ int main() {
                       << "phase13.cache.misses=" << stats.misses << '\n'
                       << "phase13.cache.admitted=" << stats.admitted << '\n'
                       << "phase13.cache.ready=" << stats.ready << '\n'
-                      << "phase13.cache.evicted=" << stats.evicted << '\n';
+                      << "phase13.cache.evicted=" << stats.evicted << '\n'
+                      << "phase13.cache.fill_wall_us=" << stats.fill_wall_us << '\n'
+                      << "phase13.cache.maximum_fill_wall_us=" << stats.maximum_fill_wall_us << '\n';
             if(stats.hits==0 || stats.hits+stats.misses!=expected_pairs ||
                stats.admitted>expected_layer_calls || stats.ready!=stats.admitted)
                 throw std::runtime_error("Phase 13 cache integration did not cover hit/miss/admission");
