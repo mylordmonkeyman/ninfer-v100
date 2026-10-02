@@ -1646,3 +1646,22 @@ for decode and 0.2100 for final prefill logits, with maximum absolute difference
 membership, not an oracle qualification or a diagnosis of the drift. No new
 end-to-end oracle acceptance is claimed, no Phase 11 precision investigation was
 reopened, and the original §7 numerical gate remains unpassed.
+
+### Phase 16 pinned fill staging
+
+`NINFER_FLASH_NEXT_EXPERT_CACHE_FILL_WRITE_COMBINED=1` selects write-combined
+pinned memory for the CPU-written expert upload buffer. CPU-read result buffers
+retain ordinary cached pinned memory. The default remains ordinary pinned memory
+until the comparison supports a change. Canonical payloads, arithmetic, one fill
+buffer, four-outstanding queue, Ready publication, leases, capacity budgeting,
+admission cap one, and the accepted precision settings are unchanged.
+
+The comparison uses full derived capacity and process-level ordinary/write-combined
+ABBA. It reuses the Phase 15 cold/warmed admission-active replay and frozen schedule
+controls on the natural 128-token prefix. Packing time, H2D service time, fill work,
+and actual decode/prefill throughput are measured. An additional frozen-cache
+prefill comparison retains the decode-populated Ready set, addressing the low
+coverage of the independently reset prefill startup test. Correctness checks cover
+both buffer modes, exact canonical bytes, the expert mathematical oracle,
+leases/joins, and candidate-mode memcheck. This is a staging experiment, not a
+Phase 11 precision investigation or a new end-to-end oracle qualification.

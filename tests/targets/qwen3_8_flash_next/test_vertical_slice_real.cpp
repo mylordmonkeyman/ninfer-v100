@@ -674,6 +674,7 @@ static int run_cache_benchmark(FlashNextTextExecutor& executor,
                     {"slots_per_layer",cache?cache->budget().slots_per_layer:0},
                     {"cache_bytes",cache?cache->budget().cache_bytes:0},
                     {"admission_cap",cache?cache->admission_cap():0},
+                    {"fill_write_combined",cache && cache->fill_write_combined()},
                     {"hits",after.hits-before.hits},{"misses",after.misses-before.misses},
                     {"admitted",after.admitted-before.admitted},{"ready",after.ready-before.ready},
                     {"ready_at_return",completed.ready-before.ready},
@@ -698,6 +699,35 @@ static int run_cache_benchmark(FlashNextTextExecutor& executor,
                         after.admission_bursts[burst]-before.admission_bursts[burst];
                 std::cout<<result.dump()<<'\n'<<std::flush;
                 if(after.maximum_outstanding>4)throw std::runtime_error("Phase 15 queue bound violated");
+            }
+            if (!prefill && std::getenv("NINFER_PHASE16_BENCHMARK") != nullptr) {
+                // Keep the decode-populated Ready set for this prefill control;
+                // do not confuse it with the separately reset prefill startup test.
+                if (cache) cache->set_serial_schedule(false);
+                run(true);
+                std::vector<std::uint16_t> expected;
+                for(unsigned sample=0;sample<4;++sample){
+                    const bool serial=sample==0||sample==3;
+                    if(cache)cache->set_serial_schedule(serial);
+                    const auto before=cache?cache->stats():FlashNextExpertCacheStats{};
+                    auto [seconds,logits]=run(true);
+                    const auto after=cache?cache->stats():FlashNextExpertCacheStats{};
+                    if(sample==0)expected=logits;
+                    else if(logits!=expected)
+                        throw std::runtime_error("Phase 16 decode-warmed prefill schedule changed logits");
+                    json result{{"phase16","benchmark"},{"shape","prefill"},
+                        {"stage","decode_warmed_fixed"},{"sample",sample},{"tokens",count},
+                        {"mode",serial?"cache_serial":"cache_overlap"},
+                        {"fill_write_combined",cache && cache->fill_write_combined()},
+                        {"seconds",seconds},{"tokens_per_s",count/seconds},
+                        {"hits",after.hits-before.hits},{"misses",after.misses-before.misses},
+                        {"slots_per_layer",cache?cache->budget().slots_per_layer:0},
+                        {"cpu_branch_us",after.cpu_branch_us-before.cpu_branch_us},
+                        {"gpu_branch_us",after.gpu_branch_us-before.gpu_branch_us},
+                        {"merge_wait_us",after.merge_wait_us-before.merge_wait_us}};
+                    std::cout<<result.dump()<<'\n'<<std::flush;
+                }
+                std::cout<<"PASS: Phase 16 decode-warmed prefill exact schedule parity\n";
             }
         }
         std::cout<<"PASS: Phase 15 active admission, finite logits, fixed-cache exact schedule parity\n";

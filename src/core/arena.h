@@ -90,9 +90,12 @@ private:
     bool owns_        = true;
 };
 
+enum class PinnedHostAccess { ReadWrite, WriteOnly };
+
 class PinnedHostBuffer {
 public:
-    explicit PinnedHostBuffer(std::size_t size_bytes);
+    explicit PinnedHostBuffer(std::size_t size_bytes,
+                              PinnedHostAccess access = PinnedHostAccess::ReadWrite);
     ~PinnedHostBuffer();
 
     PinnedHostBuffer(const PinnedHostBuffer&)            = delete;
