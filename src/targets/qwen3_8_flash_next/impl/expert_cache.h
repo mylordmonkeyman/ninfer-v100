@@ -37,6 +37,8 @@ struct FlashNextExpertCacheStats {
     double admission_wall_us = 0, pack_wall_us = 0, h2d_us = 0;
     double cpu_branch_us = 0, gpu_branch_us = 0, merge_wait_us = 0;
     double branch_wall_us = 0, overlap_lower_bound_us = 0;
+    double hit_submission_us = 0;
+    std::uint64_t hit_kernel_launches = 0;
 };
 
 // Program-owned main-text cache. A separate nonblocking stream and a bounded worker queue
@@ -60,6 +62,8 @@ public:
     void record_schedule(double cpu_us, double gpu_us, double wait_us, double wall_us);
     [[nodiscard]] bool timing_enabled() const { return timing_enabled_; }
     [[nodiscard]] bool serial_schedule() const { return serial_schedule_; }
+    [[nodiscard]] bool prefill_enabled() const { return prefill_enabled_; }
+    void set_prefill_enabled(bool value) { prefill_enabled_ = value; }
     // Diagnostic controls for paired scheduling comparisons with one fixed Ready set.
     void set_serial_schedule(bool value) { serial_schedule_ = value; }
     void freeze_admissions() { drain(); admissions_enabled_ = false; }
@@ -84,6 +88,7 @@ private:
     cudaEvent_t hit_start_ = nullptr, hit_stop_ = nullptr;
     cudaEvent_t fill_start_ = nullptr, fill_stop_ = nullptr;
     unsigned admission_cap_ = 1;
+    bool prefill_enabled_ = true;
     bool timing_enabled_ = false, serial_schedule_ = false, admissions_enabled_ = true;
     int device_ = 0;
     std::vector<Entry> entries_;

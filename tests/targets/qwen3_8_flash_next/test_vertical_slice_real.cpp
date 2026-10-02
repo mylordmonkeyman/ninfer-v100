@@ -574,6 +574,108 @@ int run_layer0_gdn_conv_isolation(
 
 // Replays natural teacher-forced inputs without oracle injection. Timing includes
 // eager execution, logits readback, and state commit; it is not serving throughput.
+static int run_prefill_policy_benchmark(FlashNextTextExecutor& executor,
+    FlashNextRuntimeAllocation& allocation, ninfer::DeviceContext& device,
+    const std::vector<OracleRecord>& records) {
+    auto* cache = allocation.state_view().expert_cache;
+    const std::array<LaneCommitDecision, 1> decisions{{{.accept = true}}};
+    const auto read = [&](const ninfer::Tensor& logits) {
+        std::vector<std::uint16_t> values(static_cast<std::size_t>(logits.ne[0]));
+        CUDA_CHECK(cudaMemcpyAsync(values.data(), logits.data, values.size()*2,
+                                  cudaMemcpyDeviceToHost, device.stream));
+        device.synchronize();
+        for (auto value : values) if (!std::isfinite(bf16_to_float(value)))
+            throw std::runtime_error("prefill policy produced nonfinite logits");
+        return values;
+    };
+    const auto decode = [&](LaneHandle lane, std::size_t begin, std::size_t count) {
+        std::vector<std::uint16_t> logits;
+        for (std::size_t i=begin; i<begin+count; ++i) {
+            const auto pos=static_cast<std::int32_t>(records[i].position);
+            LaneStepRequest request{.handle=lane, .token_id=records[i].token_id,
+                .token_index=pos, .mrope_positions={pos,pos,pos}, .sampling={},
+                .custom_embedding=nullptr};
+            auto round=executor.execute_round(std::span(&request,1),nullptr);
+            auto values=read(round.logits());
+            logits.insert(logits.end(),values.begin(),values.end());
+            round.commit(decisions);
+        }
+        return logits;
+    };
+    // Natural decode routing populates a common cache before policy comparisons.
+    const auto warm = [&] {
+        auto lane=executor.allocate_lane();
+        decode(lane,0,128);
+        executor.release_lane(lane);
+    };
+    warm(); warm();
+    if(cache)cache->freeze_admissions();
+    const std::size_t decode_count=32;
+    std::vector<unsigned> sizes{128,1024};
+    if (std::getenv("NINFER_PREFILL_POLICY_PROFILE")) sizes={128};
+    for (unsigned prompt : sizes) {
+        if (prompt+decode_count>records.size())
+            throw std::runtime_error("insufficient natural tokens for prefill policy benchmark");
+        std::array<std::vector<std::uint16_t>,2> reference;
+        const unsigned rounds=std::getenv("NINFER_PREFILL_POLICY_PROFILE") ? 1 : 4;
+        for (unsigned sample=0;sample<rounds;++sample) {
+            const bool bypass=!std::getenv("NINFER_PREFILL_POLICY_PROFILE") && (sample==0||sample==3);
+            if(cache)cache->set_prefill_enabled(!bypass);
+            const auto before=cache?cache->stats():FlashNextExpertCacheStats{};
+            auto lane=executor.allocate_lane();
+            device.synchronize();
+            const auto started=std::chrono::steady_clock::now();
+            std::vector<std::uint16_t> final_logits;
+            for (unsigned offset=0; offset<prompt; offset+=128) {
+                const auto count=std::min(128U,prompt-offset);
+                std::vector<std::int32_t> tokens(count);
+                std::vector<std::array<std::int32_t,3>> positions(count);
+                for(unsigned j=0;j<count;++j){
+                    tokens[j]=records[offset+j].token_id;
+                    const auto pos=static_cast<std::int32_t>(records[offset+j].position);
+                    positions[j]={pos,pos,pos};
+                }
+                auto round=executor.execute_prefill_chunk(lane,tokens,positions,offset);
+                final_logits=read(round.logits());
+                round.commit(decisions);
+            }
+            device.synchronize();
+            const auto prefilled=std::chrono::steady_clock::now();
+            const auto after=cache?cache->stats():FlashNextExpertCacheStats{};
+            auto following_logits=decode(lane,prompt,decode_count);
+            device.synchronize();
+            const auto decoded=std::chrono::steady_clock::now();
+            if(executor.committed_frontier(lane)!=static_cast<int>(prompt+decode_count))
+                throw std::runtime_error("prefill policy state frontier mismatch");
+            executor.release_lane(lane);
+            const auto index=bypass?0:1;
+            final_logits.insert(final_logits.end(),following_logits.begin(),following_logits.end());
+            if(reference[index].empty())reference[index]=final_logits;
+            else if(reference[index]!=final_logits)
+                throw std::runtime_error("prefill policy replay logits changed with fixed cache");
+            const double prefill_s=std::chrono::duration<double>(prefilled-started).count();
+            const double decode_s=std::chrono::duration<double>(decoded-prefilled).count();
+            json row{{"prefill_policy","benchmark"},{"mode",cache?(bypass?"bypass":"cached"):"off"},
+                {"sample",sample},{"tokens",prompt},{"decode_tokens",decode_count},
+                {"prefill_seconds",prefill_s},{"prefill_tokens_per_s",prompt/prefill_s},
+                {"decode_seconds",decode_s},{"decode_tokens_per_s",decode_count/decode_s},
+                {"hits",after.hits-before.hits},{"misses",after.misses-before.misses},
+                {"admitted",after.admitted-before.admitted},{"evicted",after.evicted-before.evicted},
+                {"kernel_launches",after.hit_kernel_launches-before.hit_kernel_launches},
+                {"submission_ms",(after.hit_submission_us-before.hit_submission_us)/1000},
+                {"gpu_stream_ms",(after.gpu_branch_us-before.gpu_branch_us)/1000},
+                {"cpu_branch_ms",(after.cpu_branch_us-before.cpu_branch_us)/1000},
+                {"merge_wait_ms",(after.merge_wait_us-before.merge_wait_us)/1000}};
+            std::cout<<row.dump()<<'\n';
+            if(cache&&bypass&&(after.hits!=before.hits||after.admitted!=before.admitted||
+                after.evicted!=before.evicted))
+                throw std::runtime_error("prefill bypass touched cache execution or residency");
+        }
+    }
+    std::cout<<"PASS: prefill policy natural routing, finite logits, committed state, fixed-policy exact replay\n";
+    return 0;
+}
+
 static int run_cache_benchmark(FlashNextTextExecutor& executor,
     FlashNextRuntimeAllocation& allocation, ninfer::DeviceContext& device,
     const std::vector<OracleRecord>& records) {
@@ -861,6 +963,8 @@ int main() {
         allocation.configure_expert_cache(model.text_view());
 
         reset_flash_next_host_expert_execution_stats();
+        if (std::getenv("NINFER_PREFILL_POLICY_BENCHMARK"))
+            return run_prefill_policy_benchmark(executor, allocation, device, records);
         if (const char* benchmark = std::getenv("NINFER_PHASE14_BENCHMARK");
             benchmark != nullptr && std::string_view(benchmark) == "1") {
             return run_cache_benchmark(executor, allocation, device, records);

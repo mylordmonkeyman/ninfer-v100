@@ -11,6 +11,7 @@
 #include "targets/qwen3_8_flash_next/impl/gdn.h"
 #include "targets/qwen3_8_flash_next/impl/hyper_connection.h"
 #include "targets/qwen3_8_flash_next/impl/moe.h"
+#include "targets/qwen3_8_flash_next/impl/expert_cache.h"
 #include "targets/qwen3_8_flash_next/impl/ple_decode.h"
 #include "targets/qwen3_8_flash_next/impl/qsa_attention.h"
 #include "targets/qwen3_8_flash_next/impl/qsa_indexer.h"
@@ -854,7 +855,8 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
 #else
                 nullptr
 #endif
-                , state.expert_cache, static_cast<unsigned>(layer)
+                , state.expert_cache && state.expert_cache->prefill_enabled() ?
+                    state.expert_cache : nullptr, static_cast<unsigned>(layer)
             );
         } else {
             flash_next_moe(round_ws.block_input, model.layers[layer].moe,

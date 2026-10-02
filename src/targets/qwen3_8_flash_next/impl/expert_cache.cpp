@@ -43,6 +43,11 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
     };
     timing_enabled_ = enabled("NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING");
     serial_schedule_ = enabled("NINFER_FLASH_NEXT_EXPERT_CACHE_SERIAL");
+    if (const char* value = std::getenv("NINFER_FLASH_NEXT_EXPERT_CACHE_PREFILL"); value && *value) {
+        if (std::strcmp(value, "0") && std::strcmp(value, "1"))
+            throw std::invalid_argument("expert cache prefill must be 0 or 1");
+        prefill_enabled_ = std::strcmp(value, "0") != 0;
+    }
     CUDA_CHECK(cudaGetDevice(&device_));
     std::size_t free=0,total=0;
     CUDA_CHECK(cudaMemGetInfo(&free,&total));
@@ -118,9 +123,17 @@ bool FlashNextExpertCache::execute(unsigned layer,int expert,const void* input,
             CUDA_CHECK(cudaEventRecord(hit_start_, stream));
         consumers_.emplace_back(slot,path);++stats_.hits;
     }
+    const auto submitted = timing_enabled_ ? std::chrono::steady_clock::now() :
+        std::chrono::steady_clock::time_point{};
     flash_next_cached_expert_launch(view(slot),input,
         static_cast<std::uint16_t*>(activations_->p)+std::size_t(path)*640,
         static_cast<float*>(outputs_->p)+std::size_t(path)*2560,stream);
+    if (timing_enabled_) {
+        std::lock_guard lock(mutex_);
+        stats_.hit_submission_us += std::chrono::duration<double, std::micro>(
+            std::chrono::steady_clock::now()-submitted).count();
+        stats_.hit_kernel_launches += 2;
+    }
     return true;
 }
 void FlashNextExpertCache::begin_download(std::size_t bytes, cudaStream_t stream) {
