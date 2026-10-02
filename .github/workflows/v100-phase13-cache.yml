@@ -110,22 +110,17 @@ jobs:
             > phase13-results/prefill.log 2>&1
           cat phase13-results/prefill.log
           grep -Eq 'phase13.prefill.pass=1 hits=[1-9][0-9]*' phase13-results/prefill.log
-      - name: Locate resident GPU prefill memory fault
-        if: always() && steps.build.conclusion == 'success'
-        continue-on-error: true
+      - name: Resident GPU prefill regression
         shell: bash
         run: |
           set -euo pipefail
-          set +e
+          ctest --test-dir build-phase13 -V \
+            -R '^ninfer_qwen3_8_flash_next_moe_test$' \
+            | tee phase13-results/resident-gpu-moe.log
           compute-sanitizer --tool memcheck --error-exitcode 1 \
-            --destroy-on-device-error kernel \
             build-phase13/tests/ninfer_qwen3_8_flash_next_moe_test \
             > phase13-results/resident-gpu-memcheck.log 2>&1
-          status=$?
-          set -e
-          echo "$status" > phase13-results/resident-gpu-exit-code.txt
-          tail -100 phase13-results/resident-gpu-memcheck.log
-          exit "$status"
+          tail -20 phase13-results/resident-gpu-memcheck.log
       - name: Preserve cache evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

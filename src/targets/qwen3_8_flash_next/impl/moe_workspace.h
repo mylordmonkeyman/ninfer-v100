@@ -56,6 +56,7 @@ FlashNextMoeWorkspace allocate_flash_next_moe_workspace(Arena& arena, std::int32
         out.grouped_paths     = arena.alloc(DType::I32, {10 * tokens}, 16);
         out.grouped_experts   = arena.alloc(DType::I32, {10 * tokens}, 16);
         out.token_to_pos      = arena.alloc(DType::I32, {10 * tokens}, 16);
+#if !defined(NINFER_VOLTA_BUILD)
         if (tokens >= kFlashNextMoeMmaPrefillThreshold) {
             // MMA arm: BF16 staged routed outputs [2560, 10 * tokens], reduced in fixed order.
             // The envelope is computed by calling this with the chunk capacity, but a tail chunk
@@ -66,7 +67,12 @@ FlashNextMoeWorkspace allocate_flash_next_moe_workspace(Arena& arena, std::int32
                 10 * (kFlashNextMoeMmaPrefillThreshold - 1) * 2;
             const std::int32_t staged_columns       = std::max(10 * tokens, kSimtTailColumns);
             out.staged_down   = arena.alloc(DType::BF16, {2'560, staged_columns}, 256);
-        } else {
+        } else
+#endif
+        {
+            // SM70 uses software W4A16 at every prefill size, including T >= 256.
+            // Its down kernel always writes FP32 partials; the BF16 MMA staging
+            // allocation is never a valid substitute for that destination.
             out.down_intermediate = arena.alloc(DType::FP32, {2'560, 10, tokens}, 256);
         }
         out.task_counter      = arena.alloc(DType::I32, {4}, 16);

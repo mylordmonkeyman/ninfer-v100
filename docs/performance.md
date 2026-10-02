@@ -1342,3 +1342,96 @@ The separate resident-GPU MoE prefill benchmark still aborts with an illegal
 memory access. Its failure and exit status are retained in the evidence artifact;
 it is not covered by the CPU gate. The original full-model numerical criterion
 also remains unqualified. No Phase 11 precision investigation was restarted.
+
+
+### Phase 13 compressed GPU expert cache
+
+The opt-in main-text cache is enabled with `NINFER_FLASH_NEXT_EXPERT_CACHE=1`.
+It requires host-backed experts and CUDA Graphs disabled. The accepted
+`NINFER_FLASH_NEXT_FP32_MOE_OUTPUT=1` option remains compatible; its FP32 hyper
+state prerequisite still applies. The cache does not change router inputs or
+expert selection. FP32 expert-input/intermediate diagnostic paths continue to
+use CPU execution.
+
+Each Program owns its cache. Capacity is uniform across the 48 host-backed main
+layers and is calculated from `cudaMemGetInfo` after model and runtime allocation.
+The budget subtracts bounded hit-transfer buffers, preserves a 2 GiB free-memory
+reserve, and limits total device use to 28 GiB without MTP or 30 GiB with MTP.
+Larger KV/state allocations therefore reduce available cache capacity. An optional
+`NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS` upper bound can reduce capacity for
+experiments; it cannot override the measured memory budget. Zero feasible slots
+fall back to CPU experts.
+
+One slot contains the exact 2,764,808-byte NVFP4 expert pair plus alignment, for
+2,765,056 bytes of device residency. Codes, swizzled scales and both weight
+scale divisors retain their stored values. Software NVFP4 GPU leaves consume
+these canonical planes directly, so there is no expanded weight allocation or
+prepacking stage in this version. Entries become Ready only after upload
+completion. Main-text keys are `(layer, expert_id)`; MTP experts remain outside
+this cache.
+
+A background worker uses one pinned canonical-pair staging buffer and a separate
+nonblocking CUDA stream. Its queue is bounded to four outstanding admissions.
+Each layer call admits at most one missing expert; pool pressure can decline
+admission. Replacement prefers empty slots, then the least recently used
+unleased Ready slot. Uploading entries and active GPU consumers cannot be evicted.
+Fill failure propagates to the inference owner, and teardown joins the worker
+before releasing storage.
+
+Ready GPU hits and AVX2 CPU misses execute serially in Phase 13. Their unweighted
+FP32 expert outputs are merged in the original router-path order. Concurrent
+hit/miss execution and whole-server throughput measurement belong to Phase 14.
+Prefill also observes cap-one admission per layer call, not per routed token.
+
+The cache remains off by default. Its integration checks do not qualify the
+original Phase 11 numerical gate or establish a serving token rate.
+
+
+#### Phase 13 verification and measured capacity
+
+The [cache integration run](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37034072067)
+built the fresh SM70 runtime and passed cache oracle/ownership tests, cache memory
+sanitization, 128-position natural-routing integration, and cold/cached real-model
+128-token prefill. The [hosted SM70 build and host contract check](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37034072059)
+also passed. The separate resident-GPU MoE benchmark failed memory sanitization: at T >= 256,
+the SM70 software prefill kernel received a null FP32 partial-output pointer.
+The workspace allocator selected the Blackwell BF16 MMA staging allocation at
+that threshold even though SM70 executes the software path at every size.
+
+The [first cache run](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37033319618)
+provides the detailed capacity and routing measurements below. Its model execution
+completed; the workflow failed because its shell check expected the wrong text
+for the known Phase 11 oracle rejection. The subsequent run corrected that check
+without relaxing the numerical criterion.
+
+For this 4,096-context, 128-token-prefill, non-MTP test configuration, the measured
+budget derived 165 slots per layer, consuming 21,899,243,520 bytes (20.395 GiB) of
+compressed GPU cache. Hit scratch/results reserve 14,745,600 device bytes;
+pinned fill/results storage totals 15,872,256 bytes. These capacities are specific
+to this configuration and are recalculated for other context/concurrency settings.
+
+Across 128 naturally routed positions and all 48 layers, 34,488 of 61,440 expert
+pairs used Ready GPU entries (56.13%); 26,952 used CPU execution. There were 5,780
+admissions and completed uploads, with no real-model eviction during this cold
+prefix. Small-capacity component tests separately exercised LRU eviction,
+protection of the sole leased slot, layer namespaces and admission cap one.
+No oracle-forced routing was used.
+
+Canonical payload planes and divisors matched their source bytes exactly. The
+independent signed-weight expert checks covered T=1,2,3,4,6,8 and 128; worst
+NRMSE was 0.00002303 and reported cosine rounded to 1. Cache memcheck reported
+zero errors. These are expert/cache checks, not formal full-model qualification.
+The original Phase 11 numerical gate remains failed. No whole-server speed or
+CPU throughput headroom is inferred from the cache hit rate.
+
+
+The complete cache run observed 21,917,335,552 device bytes added by cache and
+hit buffers, leaving 4,089,708,544 bytes free (3.81 GiB). This includes allocator
+rounding and remains below the 28 GiB non-MTP operating ceiling. The 5,780 fills
+used 4.81 seconds of aggregate worker wall time, averaging 832 us with maximum
+1,266 us. This includes pageable-to-pinned staging and completed H2D transfer;
+it is not token-critical-path wait or a pure PCIe bandwidth measurement.
+Cold prefill had zero cache hits; repeating the 128-token prefill after the first
+48 fills completed exercised 342 GPU hits. Cap-one admission per layer call
+limits early prefill coverage; these checks establish execution correctness,
+not optimized prefill throughput.
