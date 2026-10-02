@@ -121,14 +121,20 @@ int main(int argc, char** argv) {
         };
         // Independent scalar mathematical evaluation at represented BF16 boundaries.
         // Spread checks across the complete routed layer range and trace prefix.
+        HostExpertWorkerPool pool(workers, true);
         CpuNvfp4ExpertReferenceScratch scratch;
-        std::array<float, 2560> reference{}, actual{};
+        std::array<float, 2560> reference{}, actual{}, pooled{};
         double max_nrmse = 0, min_cosine = 1;
         for (std::size_t i = 0; i < 48; ++i) {
             const auto& r = records[(i * (records.size() / 48) / 48) * 48 + i];
             const auto expert = pair(r.layer, r.ids[i % 10]);
             flash_next_cpu_nvfp4_expert_pair_reference(expert, r.input, reference, scratch);
             flash_next_cpu_nvfp4_expert_pair_avx2(expert, r.input, actual, scratch);
+            HostExpertTask task{expert, r.input.data(), nullptr, pooled.data()};
+            pool.run(std::span(&task, 1));
+            if (std::memcmp(actual.data(), pooled.data(), sizeof(actual))) {
+                throw std::runtime_error("Worker sharding changed real routed expert output");
+            }
             double error = 0, rr = 0, aa = 0, dot = 0;
             for (int j = 0; j < 2560; ++j) {
                 if (!std::isfinite(reference[j]) || !std::isfinite(actual[j])) {
@@ -171,7 +177,6 @@ int main(int argc, char** argv) {
         if (working_set.size() * 2764808ULL < 256ULL * 1024 * 1024) {
             throw std::runtime_error("Routed miss working set must exceed 256 MiB");
         }
-        HostExpertWorkerPool pool(workers, true);
         std::array<float, 2560 * 10> output{};
         std::array<float, 2560> merged{};
         std::vector<HostExpertTask> tasks;

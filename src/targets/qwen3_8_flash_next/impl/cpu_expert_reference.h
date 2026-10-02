@@ -55,4 +55,17 @@ void flash_next_cpu_nvfp4_expert_pair_avx2(
     std::span<float> output,
     CpuNvfp4ExpertReferenceScratch& scratch);
 
+// Row-sharded production entry points. Prepare completes before gate/up shards;
+// all gate/up shards complete before down shards. Each row keeps the same FMA
+// reduction and BF16 boundary as the complete-pair kernel.
+void flash_next_cpu_nvfp4_expert_prepare_avx2(
+    const HostNvfp4ExpertPairView& expert, std::span<const std::uint16_t> input,
+    CpuNvfp4ExpertReferenceScratch& scratch);
+void flash_next_cpu_nvfp4_expert_gate_up_rows_avx2(
+    const HostNvfp4ExpertPairView& expert, CpuNvfp4ExpertReferenceScratch& scratch,
+    std::size_t begin, std::size_t end);
+void flash_next_cpu_nvfp4_expert_down_rows_avx2(
+    const HostNvfp4ExpertPairView& expert, const CpuNvfp4ExpertReferenceScratch& scratch,
+    std::span<float> output, std::size_t begin, std::size_t end);
+
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

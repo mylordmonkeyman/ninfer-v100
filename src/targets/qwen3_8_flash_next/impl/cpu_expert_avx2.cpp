@@ -225,46 +225,62 @@ bool flash_next_cpu_nvfp4_avx2_available() noexcept {
 #endif
 }
 
+void flash_next_cpu_nvfp4_expert_prepare_avx2(
+    const HostNvfp4ExpertPairView& expert, std::span<const std::uint16_t> input,
+    CpuNvfp4ExpertReferenceScratch& scratch) {
+    if (!flash_next_cpu_nvfp4_avx2_available()) {
+        throw std::runtime_error("CPU NVFP4 AVX2/FMA backend is unavailable");
+    }
+    if (input.size() != kFlashNextExpertHidden) {
+        throw std::invalid_argument("CPU NVFP4 AVX2: invalid input length");
+    }
+    validate_matrix(expert.gate_up, 1'280, 2'560, "gate/up");
+    validate_matrix(expert.down, 2'560, 640, "down");
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        scratch.input[i] = bf16_to_float(input[i]);
+    }
+}
+
+void flash_next_cpu_nvfp4_expert_gate_up_rows_avx2(
+    const HostNvfp4ExpertPairView& expert, CpuNvfp4ExpertReferenceScratch& scratch,
+    std::size_t begin, std::size_t end) {
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+    for (std::size_t row = begin; row < end; ++row) {
+        const auto [gate, up] =
+            gate_up_rows_avx2(expert.gate_up, static_cast<std::int32_t>(row), scratch.input.data());
+        scratch.intermediate[row] =
+            round_to_bf16_rne(gate / (1.0F + std::exp(-gate)) * up);
+    }
+#else
+    (void)expert; (void)scratch; (void)begin; (void)end;
+    throw std::runtime_error("CPU NVFP4 AVX2/FMA backend is unavailable");
+#endif
+}
+
+void flash_next_cpu_nvfp4_expert_down_rows_avx2(
+    const HostNvfp4ExpertPairView& expert, const CpuNvfp4ExpertReferenceScratch& scratch,
+    std::span<float> output, std::size_t begin, std::size_t end) {
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+    for (std::size_t row = begin; row < end; ++row) {
+        output[row] = down_row_avx2(expert.down, static_cast<std::int32_t>(row), scratch.intermediate.data());
+    }
+#else
+    (void)expert; (void)scratch; (void)output; (void)begin; (void)end;
+    throw std::runtime_error("CPU NVFP4 AVX2/FMA backend is unavailable");
+#endif
+}
+
 void flash_next_cpu_nvfp4_expert_pair_avx2(
     const HostNvfp4ExpertPairView& expert,
     std::span<const std::uint16_t> input_bf16,
     std::span<float> output,
     CpuNvfp4ExpertReferenceScratch& scratch) {
-#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
-    if (!flash_next_cpu_nvfp4_avx2_available()) {
-        throw std::runtime_error("CPU NVFP4 AVX2/FMA backend is unavailable");
+    if (output.size() != kFlashNextExpertHidden) {
+        throw std::invalid_argument("CPU NVFP4 AVX2: invalid output length");
     }
-    if (input_bf16.size() != kFlashNextExpertHidden ||
-        output.size() != kFlashNextExpertHidden) {
-        throw std::invalid_argument("CPU NVFP4 AVX2: invalid activation/output length");
-    }
-    validate_matrix(expert.gate_up, 1'280, 2'560, "gate/up");
-    validate_matrix(expert.down, 2'560, 640, "down");
-
-    for (std::size_t i = 0; i < input_bf16.size(); ++i) {
-        scratch.input[i] = bf16_to_float(input_bf16[i]);
-    }
-
-    for (std::int32_t row = 0;
-         row < static_cast<std::int32_t>(kFlashNextExpertIntermediate); ++row) {
-        const auto [gate, up] =
-            gate_up_rows_avx2(expert.gate_up, row, scratch.input.data());
-        scratch.intermediate[static_cast<std::size_t>(row)] =
-            round_to_bf16_rne(gate / (1.0F + std::exp(-gate)) * up);
-    }
-
-    for (std::int32_t row = 0;
-         row < static_cast<std::int32_t>(kFlashNextExpertHidden); ++row) {
-        output[static_cast<std::size_t>(row)] =
-            down_row_avx2(expert.down, row, scratch.intermediate.data());
-    }
-#else
-    (void)expert;
-    (void)input_bf16;
-    (void)output;
-    (void)scratch;
-    throw std::runtime_error("CPU NVFP4 AVX2/FMA backend is unavailable on this architecture");
-#endif
+    flash_next_cpu_nvfp4_expert_prepare_avx2(expert, input_bf16, scratch);
+    flash_next_cpu_nvfp4_expert_gate_up_rows_avx2(expert, scratch, 0, kFlashNextExpertIntermediate);
+    flash_next_cpu_nvfp4_expert_down_rows_avx2(expert, scratch, output, 0, kFlashNextExpertHidden);
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

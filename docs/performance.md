@@ -1265,7 +1265,10 @@ Set NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND=reference for scalar comparison,
 avx2 to require the vector backend, or auto (the default) for ISA selection.
 The FP32-intermediate diagnostic selects the scalar backend under auto.
 NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS controls the persistent expert worker pool
-(default: up to 32 workers). Compact NVFP4 storage, BF16-rounded SiLU/up output,
+(default: up to 32 workers). Small AVX2 miss batches distribute each expert's
+gate/up and down rows across workers to use cores that expert-only scheduling
+would leave idle. A phase barrier preserves the full SiLU input to down projection.
+Larger batches retain expert-level scheduling. Compact NVFP4 storage, BF16-rounded SiLU/up output,
 FP32 down output and ordered routing-weight reduction remain the execution
 contract. The accepted optional FP32 combined MoE output is compatible with
 AVX2; its opt-in setting and prerequisites remain unchanged.

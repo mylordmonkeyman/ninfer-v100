@@ -47,7 +47,8 @@ int main() {
         HostExpertTask bad{expert,input.data(),nullptr,result.data()};
         bad.expert.gate_up.codes=nullptr;
         bool rejected=false;
-        try { pool.run(std::span(&bad,1)); } catch(const std::invalid_argument&) { rejected=true; }
+        std::array<HostExpertTask,4> failure_batch{bad,bad,bad,bad};
+        try { pool.run(failure_batch); } catch(const std::invalid_argument&) { rejected=true; }
         if (!rejected) { throw std::runtime_error("Worker exception was lost"); }
         pool.run({});
         std::exception_ptr errors[2];
@@ -55,6 +56,30 @@ int main() {
         std::thread b([&]{try { exercise(); } catch(...) { errors[1]=std::current_exception(); }});
         a.join(); b.join();
         for (auto& error : errors) { if (error) { std::rethrow_exception(error); } }
+        if (avx2) {
+            // Dense signed code/scale vectors protect arbitrary shard boundaries.
+            for (std::size_t i=0; i<gate.codes.size(); ++i) {
+                gate.codes[i]=std::byte((i*73U + i/7U) & 255U);
+            }
+            for (std::size_t i=0; i<down.codes.size(); ++i) {
+                down.codes[i]=std::byte((i*37U + i/11U) & 255U);
+            }
+            gate.divisor=32; down.divisor=32;
+            for (std::size_t i=0; i<input.size(); ++i) {
+                input[i]=i%3==0 ? 0xbc80 : 0x3c00;
+            }
+            CpuNvfp4ExpertReferenceScratch scratch;
+            std::array<float,2560> direct{}, pooled{};
+            flash_next_cpu_nvfp4_expert_pair_avx2(expert,input,direct,scratch);
+            HostExpertTask task{expert,input.data(),nullptr,pooled.data()};
+            for (unsigned count : {3U,7U,32U}) {
+                HostExpertWorkerPool row_pool(count,true);
+                row_pool.run(std::span(&task,1));
+                if (std::memcmp(direct.data(),pooled.data(),sizeof(direct))) {
+                    throw std::runtime_error("Row sharding changed floating-point arithmetic");
+                }
+            }
+        }
         std::cout << "PASS: expert values, repeated rendezvous, concurrent callers and error recovery\n";
     } catch(const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

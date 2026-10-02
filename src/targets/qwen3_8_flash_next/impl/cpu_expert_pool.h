@@ -29,6 +29,14 @@ class HostExpertWorkerPool {
   private:
     void worker_loop();
     void stop_workers() noexcept;
+    void execute_jobs(std::size_t count);
+    struct RowJob {
+        std::size_t task, shard, shards;
+    };
+    std::vector<RowJob> row_jobs_;
+    std::vector<CpuNvfp4ExpertReferenceScratch> batch_scratch_;
+    bool row_sharded_ = false;
+    bool down_phase_ = false;
     bool avx2_;
     bool fp32_intermediate_;
     std::vector<std::thread> workers_;
@@ -37,7 +45,7 @@ class HostExpertWorkerPool {
     std::atomic<std::size_t> next_{0};
     std::atomic<std::size_t> remaining_{0};
     const HostExpertTask* tasks_ = nullptr;
-    std::size_t task_count_ = 0;
+    std::size_t work_count_ = 0;
     std::mutex submit_mutex_;
     std::mutex done_mutex_;
     std::condition_variable done_cv_;

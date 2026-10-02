@@ -32,7 +32,10 @@ can lower future hit rates. It creates no GPU cache and commits no VRAM capacity
 Zero-slot replay supplies the conservative no-hit bound.
 
 Each actual layer miss batch executes and reduces before the next layer begins.
-There is no flattening into a large throughput batch. Timings include worker
+There is no flattening into a large throughput batch. Small AVX2 batches share
+gate/up and down rows across the available workers, with a barrier between phases.
+Larger batches keep expert-level parallelism. Row reductions and the BF16 boundary
+are unchanged; direct and sharded outputs are also checked bit-for-bit. Timings include worker
 rendezvous, complete gate/up/SiLU/down computation and ordered CPU reduction;
 they exclude CUDA transfers, GPU hits and GPU/CPU overlap. Required pair rate is
 target tokens/s times the measured misses/token. Minimum and preferred gates are
