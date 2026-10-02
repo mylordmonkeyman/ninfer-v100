@@ -1,0 +1,111 @@
+name: V100 Phase 12 CPU Experts
+on:
+  push:
+    branches: [forwardport/v100-flash-next]
+    paths:
+      - '.github/workflows/v100-phase12-cpu.yml'
+      - 'src/targets/qwen3_8_flash_next/**'
+      - 'tests/targets/qwen3_8_flash_next/**'
+      - 'bench/cpu_nvfp4_routed_replay/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: v100-phase12-cpu
+  cancel-in-progress: false
+jobs:
+  production-cpu:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 180
+    env:
+      NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+      NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+      NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: '32'
+      NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: auto
+      NINFER_FLASH_NEXT_FP32_HYPER_STATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_CONV: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_READOUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_GATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_MOE_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT_LAYERS_32_47: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_SHARED_INPUT: '0'
+      NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE: '0'
+      NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Build production integration and CPU replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p phase12-results
+          nvidia-smi > phase12-results/gpu.txt
+          lscpu > phase12-results/cpu.txt
+          numactl --hardware > phase12-results/numa.txt
+          nvcc --version > phase12-results/cuda.txt
+          cmake -S . -B build-phase12 -G Ninja             -DCMAKE_BUILD_TYPE=Release             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc             -DCMAKE_CUDA_ARCHITECTURES=70             -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=OFF             -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-phase12 -j --target             ninfer_qwen3_8_flash_next_cpu_expert_reference_test             ninfer_qwen3_8_flash_next_vertical_slice_test             ninfer_qwen3_8_flash_next_vertical_slice_real_test             ninfer_qwen3_8_flash_next_moe_test             ninfer_qwen3_8_flash_next_text_decode_test
+          cmake -S bench/cpu_nvfp4_routed_replay -B build-cpu-replay             -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-cpu-replay -j
+          ctest --test-dir build-cpu-replay --output-on-failure
+          ctest --test-dir build-phase12 --output-on-failure             -R '^ninfer_qwen3_8_flash_next_(cpu_expert_reference|vertical_slice|moe|text_decode)_test$'
+      - name: Record actual natural routed workload
+        shell: bash
+        env:
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '128'
+          NINFER_PHASE12_CPU_TRACE: phase12-results/natural-routing.bin
+        run: |
+          set -euo pipefail
+          # Preserve the original oracle gate and exit status; this is workload
+          # capture and integration, not a fresh Phase 11 qualification claim.
+          set +e
+          build-phase12/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test             > phase12-results/integration.log 2>&1
+          status=$?
+          set -e
+          echo "$status" > phase12-results/integration-exit-code.txt
+          cat phase12-results/integration.log
+          test "$status" -le 1
+          test "$(stat -c %s phase12-results/natural-routing.bin)" -eq 31997960
+          grep -Eq 'phase11.host_expert.expert_pairs=61440' phase12-results/integration.log
+          grep -Eq 'PASS: Phase 11 whole-model|FAIL: Phase 11 teacher-forced oracle gate'             phase12-results/integration.log
+      - name: Replay CPU misses with production workers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 bench/cpu_nvfp4_routed_replay/prepare.py             "$NINFER_WEIGHTS" phase12-results/bank-offsets.txt
+          replay=build-cpu-replay/ninfer_cpu_nvfp4_routed_replay
+          # Provisional capacities are scenarios, not a VRAM commitment.
+          for slots in 0 16 32 48 64; do
+            numactl --physcpubind=0-31 --interleave=0,1 "$replay"               "$NINFER_WEIGHTS" phase12-results/bank-offsets.txt               phase12-results/natural-routing.bin 32 "$slots" 48 16.49 3 2>> phase12-results/numa-residency.log               | tee "phase12-results/dual32-slots$slots.json"
+          done
+          numactl --physcpubind=0-15 --membind=0 "$replay"             "$NINFER_WEIGHTS" phase12-results/bank-offsets.txt             phase12-results/natural-routing.bin 16 32 48 16.49 3 2>> phase12-results/numa-residency.log             | tee phase12-results/socket0-bind0.json
+          numactl --physcpubind=16-31 --membind=1 "$replay"             "$NINFER_WEIGHTS" phase12-results/bank-offsets.txt             phase12-results/natural-routing.bin 16 32 48 16.49 3 2>> phase12-results/numa-residency.log             | tee phase12-results/socket1-bind1.json
+          numactl --physcpubind=0-63 --interleave=0,1 "$replay"             "$NINFER_WEIGHTS" phase12-results/bank-offsets.txt             phase12-results/natural-routing.bin 64 32 48 16.49 3 2>> phase12-results/numa-residency.log             | tee phase12-results/dual64-slots32.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          reports = {p.stem: json.loads(p.read_text()) for p in Path("phase12-results").glob("*.json")}
+          print(json.dumps(reports, indent=2))
+          print("Gate decisions are per scenario; failed throughput blocks that scenario.")
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: phase12-production-cpu
+          path: phase12-results
+          retention-days: 30

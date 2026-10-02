@@ -1,9 +1,6 @@
 name: V100 Phase 11 Runtime
 
 on:
-  push:
-    branches:
-      - forwardport/v100-flash-next
   workflow_dispatch:
     inputs:
       full_phase11:
@@ -17,7 +14,7 @@ permissions:
 
 concurrency:
   group: v100-phase11-runtime-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   v100-phase11:

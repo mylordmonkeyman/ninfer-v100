@@ -1,7 +1,7 @@
 #include "targets/qwen3_8_flash_next/impl/moe.h"
 
 #include "core/layout.h"
-#include "targets/qwen3_8_flash_next/impl/cpu_expert_reference.h"
+#include "targets/qwen3_8_flash_next/impl/cpu_expert_pool.h"
 #include "targets/qwen3_8_flash_next/impl/moe_kernels.h"
 #include "targets/qwen3_8_flash_next/impl/moe_route.h"
 #include "targets/qwen3_8_flash_next/impl/moe_workspace.h"
@@ -33,13 +33,6 @@ std::atomic<std::uint64_t> s_host_expert_fp32_output_calls{0};
 std::atomic<std::uint64_t> s_host_expert_routed_tokens{0};
 std::atomic<std::uint64_t> s_host_expert_pairs{0};
 
-struct HostExpertTask {
-    HostNvfp4ExpertPairView expert{};
-    const std::uint16_t* input = nullptr;
-    const float* input_fp32 = nullptr;
-    float* output = nullptr;
-};
-
 unsigned resolve_host_expert_worker_count() {
     constexpr unsigned kDefaultWorkers = 32;
     constexpr unsigned kMaximumWorkers = 256;
@@ -69,9 +62,10 @@ bool resolve_shared_fp32_intermediate_diagnostic() {
 
 bool resolve_avx2_backend() {
     const char* env = std::getenv("NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND");
-    if (env == nullptr || env[0] == '\0' || std::string_view(env) == "reference") {
-        return false;
+    if (env == nullptr || env[0] == '\0' || std::string_view(env) == "auto") {
+        return !resolve_fp32_intermediate_diagnostic() && flash_next_cpu_nvfp4_avx2_available();
     }
+    if (std::string_view(env) == "reference") { return false; }
     if (std::string_view(env) == "avx2") {
         if (!flash_next_cpu_nvfp4_avx2_available()) {
             throw std::runtime_error(
@@ -80,149 +74,12 @@ bool resolve_avx2_backend() {
         return true;
     }
     throw std::invalid_argument(
-        "NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND must be reference or avx2");
+        "NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND must be auto, reference or avx2");
 }
 
-class HostExpertWorkerPool {
-  public:
-    HostExpertWorkerPool()
-        : avx2_(resolve_avx2_backend()),
-          fp32_intermediate_(resolve_fp32_intermediate_diagnostic()),
-          worker_count_(resolve_host_expert_worker_count()) {
-        if (avx2_ && fp32_intermediate_) {
-            throw std::invalid_argument(
-                "FP32 expert-intermediate diagnostic requires reference backend");
-        }
-        workers_.reserve(worker_count_);
-        for (unsigned worker = 0; worker < worker_count_; ++worker) {
-            workers_.emplace_back([this] { worker_loop(); });
-        }
-        std::fprintf(stderr, "flash_next host_expert_backend=%s workers=%u\n",
-                     avx2_ ? "avx2_fma_parallel"
-                           : (fp32_intermediate_
-                                  ? "scalar_reference_fp32_intermediate_parallel"
-                                  : "scalar_reference_parallel"),
-                     worker_count_);
-    }
-
-    HostExpertWorkerPool(const HostExpertWorkerPool&) = delete;
-    HostExpertWorkerPool& operator=(const HostExpertWorkerPool&) = delete;
-
-    ~HostExpertWorkerPool() {
-        stop_.store(true, std::memory_order_release);
-        if (!workers_.empty()) {
-            work_.release(static_cast<std::ptrdiff_t>(workers_.size()));
-        }
-        for (std::thread& worker : workers_) {
-            if (worker.joinable()) { worker.join(); }
-        }
-    }
-
-    void run(std::span<const HostExpertTask> tasks) {
-        if (tasks.empty()) { return; }
-        if (workers_.empty()) {
-            throw std::runtime_error("host expert worker pool has no workers");
-        }
-        if (tasks.size() > 1'048'576ULL) {
-            throw std::invalid_argument("host expert batch exceeds worker semaphore capacity");
-        }
-
-        std::unique_lock<std::mutex> submit_lock(submit_mutex_);
-        tasks_ = tasks.data();
-        task_count_ = tasks.size();
-        next_.store(0, std::memory_order_relaxed);
-        remaining_.store(tasks.size(), std::memory_order_release);
-        {
-            std::lock_guard<std::mutex> error_lock(error_mutex_);
-            error_ = nullptr;
-        }
-
-        work_.release(static_cast<std::ptrdiff_t>(tasks.size()));
-        {
-            std::unique_lock<std::mutex> done_lock(done_mutex_);
-            done_cv_.wait(done_lock, [this] {
-                return remaining_.load(std::memory_order_acquire) == 0;
-            });
-        }
-
-        std::exception_ptr error;
-        {
-            std::lock_guard<std::mutex> error_lock(error_mutex_);
-            error = error_;
-        }
-        tasks_ = nullptr;
-        task_count_ = 0;
-        if (error) { std::rethrow_exception(error); }
-    }
-
-  private:
-    void worker_loop() {
-        CpuNvfp4ExpertReferenceScratch scratch{};
-        for (;;) {
-            work_.acquire();
-            if (stop_.load(std::memory_order_acquire)) { return; }
-
-            const std::size_t index =
-                next_.fetch_add(1, std::memory_order_relaxed);
-            if (index >= task_count_) {
-                // One semaphore permit is released per task, so this is a hard
-                // invariant unless the pool state was corrupted.
-                std::terminate();
-            }
-
-            try {
-                const HostExpertTask& task = tasks_[index];
-                if (task.input_fp32 != nullptr) {
-                    flash_next_cpu_nvfp4_expert_pair_reference_fp32_input(
-                        task.expert,
-                        std::span<const float>(task.input_fp32, kFlashNextExpertHidden),
-                        std::span<float>(task.output, kFlashNextExpertHidden), scratch);
-                } else if (avx2_) {
-                    flash_next_cpu_nvfp4_expert_pair_avx2(
-                        task.expert,
-                        std::span<const std::uint16_t>(task.input, kFlashNextExpertHidden),
-                        std::span<float>(task.output, kFlashNextExpertHidden), scratch);
-                } else if (fp32_intermediate_) {
-                    flash_next_cpu_nvfp4_expert_pair_reference_fp32_intermediate(
-                        task.expert,
-                        std::span<const std::uint16_t>(task.input, kFlashNextExpertHidden),
-                        std::span<float>(task.output, kFlashNextExpertHidden), scratch);
-                } else {
-                    flash_next_cpu_nvfp4_expert_pair_reference(
-                        task.expert,
-                        std::span<const std::uint16_t>(task.input, kFlashNextExpertHidden),
-                        std::span<float>(task.output, kFlashNextExpertHidden), scratch);
-                }
-            } catch (...) {
-                std::lock_guard<std::mutex> error_lock(error_mutex_);
-                if (!error_) { error_ = std::current_exception(); }
-            }
-
-            if (remaining_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                done_cv_.notify_one();
-            }
-        }
-    }
-
-    bool avx2_ = false;
-    bool fp32_intermediate_ = false;
-    unsigned worker_count_ = 0;
-    std::vector<std::thread> workers_;
-    std::counting_semaphore<1'048'576> work_{0};
-    std::atomic<bool> stop_{false};
-    std::atomic<std::size_t> next_{0};
-    std::atomic<std::size_t> remaining_{0};
-    const HostExpertTask* tasks_ = nullptr;
-    std::size_t task_count_ = 0;
-    std::mutex submit_mutex_;
-    std::mutex done_mutex_;
-    std::condition_variable done_cv_;
-    std::mutex error_mutex_;
-    std::exception_ptr error_;
-};
-
 HostExpertWorkerPool& host_expert_worker_pool() {
-    static HostExpertWorkerPool pool;
+    static HostExpertWorkerPool pool(resolve_host_expert_worker_count(),
+        resolve_avx2_backend(), resolve_fp32_intermediate_diagnostic());
     return pool;
 }
 
@@ -435,6 +292,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     }
     stage_ledger_record(stream, FlashNextStageId::MoE_Router);
     if (emit) {
+        emit("moe_expert_input", input);
         emit("moe_router_scores", scratch.scores);
         emit("moe_router_ids", scratch.ids);
         emit("moe_router_alpha", scratch.alpha);

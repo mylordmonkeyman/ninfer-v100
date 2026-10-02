@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: sm70-flash-next-compile-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   compile:

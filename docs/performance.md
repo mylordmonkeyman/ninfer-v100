@@ -1257,3 +1257,24 @@ Warmed 64-token host-backed timings showed throughput ratios 0.99872 for decode
 and 0.99877 for prefill. These measurements do not establish optimized serving
 or long-context performance. The test ran on the precision-reference branch;
 the runtime option is selectively ported here without its diagnostic workflows.
+
+## V100 Flash-Next production CPU experts (Phase 12)
+
+Host-backed Flash-Next experts select AVX2/FMA automatically when available.
+Set NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND=reference for scalar comparison,
+avx2 to require the vector backend, or auto (the default) for ISA selection.
+The FP32-intermediate diagnostic selects the scalar backend under auto.
+NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS controls the persistent expert worker pool
+(default: up to 32 workers). Compact NVFP4 storage, BF16-rounded SiLU/up output,
+FP32 down output and ordered routing-weight reduction remain the execution
+contract. The accepted optional FP32 combined MoE output is compatible with
+AVX2; its opt-in setting and prerequisites remain unchanged.
+
+The Phase 12 routed replay links these same kernel and worker sources. See
+[the replay commands and measurement limits](../bench/cpu_nvfp4_routed_replay/README.md).
+Gate B is evaluated against actual routed miss batches for each provisional
+cache scenario. The Phase 1 large-batch results are not substituted for these
+measurements. Phase 12 target-host qualification is pending until the workflow
+reports sustained pair rate and the corresponding required rate. No GPU cache
+capacity is selected here, and the original Phase 11 numerical gate remains
+unqualified as described above.

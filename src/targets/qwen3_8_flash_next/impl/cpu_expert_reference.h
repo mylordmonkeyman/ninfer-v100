@@ -45,7 +45,7 @@ void flash_next_cpu_nvfp4_expert_pair_reference_fp32_input(
     std::span<float> output,
     CpuNvfp4ExpertReferenceScratch& scratch);
 
-// Production-like AVX2/FMA implementation of the same compact-NVFP4 contract.
+// Production AVX2/FMA implementation of the same compact-NVFP4 contract.
 // It preserves the BF16_RNE activation boundary and returns the unweighted FP32
 // down vector. Callers must retain deterministic routing-alpha accumulation order.
 [[nodiscard]] bool flash_next_cpu_nvfp4_avx2_available() noexcept;

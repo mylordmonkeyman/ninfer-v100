@@ -1030,8 +1030,60 @@ int main() {
                 return reference_scores;
             };
 
+        // Phase 12 records natural routing and represented expert inputs only.
+        // No oracle injection or numerical acceptance criterion is changed.
+        std::ofstream cpu_trace;
+        if (const char* path = std::getenv("NINFER_PHASE12_CPU_TRACE");
+            path != nullptr && path[0] != '\0') {
+            if (stage_trace_enabled) {
+                throw std::invalid_argument("CPU replay trace requires natural routing without stage diagnostics");
+            }
+            cpu_trace.open(path, std::ios::binary);
+            if (!cpu_trace) { throw std::runtime_error("Cannot open Phase 12 CPU trace"); }
+            cpu_trace.write("FNCPU12\0", 8);
+        }
+        std::array<std::uint16_t, 2560> cpu_trace_input{};
+        std::array<std::int32_t, 10> cpu_trace_ids{};
+        std::string cpu_trace_input_prefix;
+        std::string cpu_trace_ids_prefix;
         FlashNextDecodeStateSink stage_sink;
         stage_sink.on_state = [&](std::string_view name, const ninfer::Tensor& tensor) {
+            if (cpu_trace.is_open() && name.size() > 4) {
+                const auto suffix = name.substr(4);
+                if (suffix == "moe_expert_input") {
+                    if (tensor.dtype != ninfer::DType::BF16 || tensor.numel() != 2560) {
+                        throw std::runtime_error("CPU replay requires a T=1 BF16 expert input");
+                    }
+                    CUDA_CHECK(cudaMemcpy(cpu_trace_input.data(), tensor.data,
+                        sizeof(cpu_trace_input), cudaMemcpyDeviceToHost));
+                    cpu_trace_input_prefix = std::string(name.substr(0, 4));
+                } else if (suffix == "moe_router_ids") {
+                    if (tensor.dtype != ninfer::DType::I32 || tensor.numel() != 10) {
+                        throw std::runtime_error("CPU replay requires ten router IDs");
+                    }
+                    CUDA_CHECK(cudaMemcpy(cpu_trace_ids.data(), tensor.data,
+                        sizeof(cpu_trace_ids), cudaMemcpyDeviceToHost));
+                    cpu_trace_ids_prefix = std::string(name.substr(0, 4));
+                } else if (suffix == "moe_router_alpha") {
+                    if (tensor.dtype != ninfer::DType::FP32 || tensor.numel() != 10 ||
+                        cpu_trace_input_prefix != name.substr(0, 4) ||
+                        cpu_trace_ids_prefix != name.substr(0, 4)) {
+                        throw std::runtime_error("CPU replay has incomplete layer data");
+                    }
+                    std::array<float, 10> alpha{};
+                    CUDA_CHECK(cudaMemcpy(alpha.data(), tensor.data,
+                        sizeof(alpha), cudaMemcpyDeviceToHost));
+                    const std::uint32_t layer =
+                        static_cast<unsigned>(name[1] - '0') * 10U +
+                        static_cast<unsigned>(name[2] - '0');
+                    cpu_trace.write(reinterpret_cast<const char*>(&current_stage_trace_position), 4);
+                    cpu_trace.write(reinterpret_cast<const char*>(&layer), 4);
+                    cpu_trace.write(reinterpret_cast<const char*>(cpu_trace_input.data()), sizeof(cpu_trace_input));
+                    cpu_trace.write(reinterpret_cast<const char*>(cpu_trace_ids.data()), sizeof(cpu_trace_ids));
+                    cpu_trace.write(reinterpret_cast<const char*>(alpha.data()), sizeof(alpha));
+                    if (!cpu_trace) { throw std::runtime_error("CPU trace write failed"); }
+                }
+            }
             if (!stage_trace_enabled) {
                 return;
             }
@@ -1799,9 +1851,9 @@ int main() {
 
             current_stage_trace_position = record.position;
             const FlashNextDecodeStateSink* round_sink =
-                stage_trace_enabled &&
+                cpu_trace.is_open() || (stage_trace_enabled &&
                         (stage_trace_all_positions ||
-                         record.position == stage_trace_position)
+                         record.position == stage_trace_position))
                     ? &stage_sink
                     : nullptr;
             auto round = executor.execute_round(
@@ -1954,6 +2006,7 @@ int main() {
                 "Phase 11 did not execute every routed layer through the host expert path");
         }
 
+        if (cpu_trace.is_open()) { cpu_trace.close(); }
         const Phase11OracleMetrics metrics =
             metrics_accumulator.finalize();
         print_metrics(metrics);
