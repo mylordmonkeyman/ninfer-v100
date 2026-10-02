@@ -1234,3 +1234,26 @@ checks cover 17 independent reference cases; BF16 Linear and LinearTopK pass the
 numerical oracles, including the existing FP8 top-k regression. These establish integration,
 not long-horizon coding quality. The launcher defaults this derivative to ordinary decoding and
 exposes both speculative backends for deliberate testing.
+
+## V100 Flash-Next FP32 MoE output
+
+For the SM70 host-backed expert path, set
+`NINFER_FLASH_NEXT_FP32_MOE_OUTPUT=1` together with
+`NINFER_FLASH_NEXT_FP32_HYPER_STATE=1`. The MoE output option is off by default
+and requires host-backed experts. It preserves the combined routed/shared FP32
+sum through master-state injection in decode and prefill. Router/expert input
+precision and natural expert selection are unchanged.
+
+The 4096-position natural-routing experiment in
+[run 36897047312](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36897047312)
+measured V100 mean oracle KL 0.08707196 (baseline 0.12363465), nearest-rank
+P99 1.80373073 (baseline 2.44581897), and top-token agreement 3847/4096
+(baseline 3730/4096). The matching CPU profile mean KL was 0.12815687.
+The original 32-thread full FP32 reference reproduced the frozen oracle exactly.
+The unchanged Phase 11 numerical gate still failed; the supplementary CPU
+comparison passed.
+
+Warmed 64-token host-backed timings showed throughput ratios 0.99872 for decode
+and 0.99877 for prefill. These measurements do not establish optimized serving
+or long-context performance. The test ran on the precision-reference branch;
+the runtime option is selectively ported here without its diagnostic workflows.
