@@ -9,10 +9,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: sm70-flash-next-compile-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   compile:
     name: SM70 Flash-Next Compile

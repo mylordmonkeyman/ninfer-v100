@@ -105,13 +105,17 @@ jobs:
           set -euo pipefail
           python3 bench/cpu_nvfp4_routed_replay/prepare.py             "$NINFER_WEIGHTS" phase12-results/bank-offsets.txt
           replay=build-cpu-replay/ninfer_cpu_nvfp4_routed_replay
+          # Container policy rejects set_mempolicy. CPU affinity is supported;
+          # record mapping residency rather than claiming local page placement.
+          echo "NUMA memory binding unavailable in this runner container; CPU affinity only" \
+            > phase12-results/placement-limits.txt
           # Provisional capacities are scenarios, not a VRAM commitment.
           for slots in 0 16 32 48 64; do
-            numactl --physcpubind=0-31 --interleave=0,1 "$replay"               "$NINFER_WEIGHTS" phase12-results/bank-offsets.txt               phase12-results/natural-routing.bin 32 "$slots" 48 16.49 3 2>> phase12-results/numa-residency.log               | tee "phase12-results/dual32-slots$slots.json"
+            numactl --physcpubind=0-31 "$replay"               "$NINFER_WEIGHTS" phase12-results/bank-offsets.txt               phase12-results/natural-routing.bin 32 "$slots" 48 16.49 3 2>> phase12-results/numa-residency.log               | tee "phase12-results/dual32-slots$slots.json"
           done
-          numactl --physcpubind=0-15 --membind=0 "$replay"             "$NINFER_WEIGHTS" phase12-results/bank-offsets.txt             phase12-results/natural-routing.bin 16 32 48 16.49 3 2>> phase12-results/numa-residency.log             | tee phase12-results/socket0-bind0.json
-          numactl --physcpubind=16-31 --membind=1 "$replay"             "$NINFER_WEIGHTS" phase12-results/bank-offsets.txt             phase12-results/natural-routing.bin 16 32 48 16.49 3 2>> phase12-results/numa-residency.log             | tee phase12-results/socket1-bind1.json
-          numactl --physcpubind=0-63 --interleave=0,1 "$replay"             "$NINFER_WEIGHTS" phase12-results/bank-offsets.txt             phase12-results/natural-routing.bin 64 32 48 16.49 3 2>> phase12-results/numa-residency.log             | tee phase12-results/dual64-slots32.json
+          numactl --physcpubind=0-15 "$replay"             "$NINFER_WEIGHTS" phase12-results/bank-offsets.txt             phase12-results/natural-routing.bin 16 32 48 16.49 3 2>> phase12-results/numa-residency.log             | tee phase12-results/socket0-affinity.json
+          numactl --physcpubind=16-31 "$replay"             "$NINFER_WEIGHTS" phase12-results/bank-offsets.txt             phase12-results/natural-routing.bin 16 32 48 16.49 3 2>> phase12-results/numa-residency.log             | tee phase12-results/socket1-affinity.json
+          numactl --physcpubind=0-63 "$replay"             "$NINFER_WEIGHTS" phase12-results/bank-offsets.txt             phase12-results/natural-routing.bin 64 32 48 16.49 3 2>> phase12-results/numa-residency.log             | tee phase12-results/dual64-slots32.json
           python3 - <<'PY'
           import json
           from pathlib import Path
