@@ -619,14 +619,17 @@ static int run_prefill_policy_benchmark(FlashNextTextExecutor& executor,
     for (unsigned prompt : sizes) {
         if (prompt+decode_count>records.size())
             throw std::runtime_error("insufficient natural tokens for prefill policy benchmark");
-        std::array<std::vector<std::uint16_t>,3> reference;
+        std::array<std::vector<std::uint16_t>,4> reference;
         const unsigned rounds=std::getenv("NINFER_PREFILL_POLICY_PROFILE") ? 1 : (active?4:6);
         for (unsigned sample=0;sample<rounds;++sample) {
             const bool profiling=std::getenv("NINFER_PREFILL_POLICY_PROFILE") != nullptr;
             const bool bypass=!profiling && (sample==0||sample==(active?3:5));
-            const bool batched=!profiling && (active?!bypass:(sample==2||sample==3));
+            const bool group_candidate=std::getenv("NINFER_PREFILL_POLICY_GROUPED") != nullptr;
+            const bool grouped=!profiling&&group_candidate&&(active?!bypass:(sample==2||sample==3));
+            const bool batched=!profiling && !bypass && (group_candidate?!grouped:
+                (active?true:(sample==2||sample==3)));
             if(active&&cache) {cache->reset();warm();warm();cache->drain();}
-            if(cache) { cache->set_prefill_enabled(!bypass);cache->set_batched_prefill(batched); }
+            if(cache) { cache->set_prefill_enabled(!bypass);cache->set_batched_prefill(batched);cache->set_grouped_prefill(grouped); }
             const auto before=cache?cache->stats():FlashNextExpertCacheStats{};
             auto lane=executor.allocate_lane();
             device.synchronize();
@@ -657,17 +660,18 @@ static int run_prefill_policy_benchmark(FlashNextTextExecutor& executor,
             if(executor.committed_frontier(lane)!=static_cast<int>(prompt+decode_count))
                 throw std::runtime_error("prefill policy state frontier mismatch");
             executor.release_lane(lane);
-            const auto index=bypass?0:(batched?2:1);
+            const auto index=bypass?0:(grouped?3:(batched?2:1));
+            const auto other=group_candidate?(grouped?2:3):(batched?1:2);
             final_logits.insert(final_logits.end(),following_logits.begin(),following_logits.end());
             if(reference[index].empty())reference[index]=final_logits;
             else if(!active&&reference[index]!=final_logits)
                 throw std::runtime_error("prefill policy replay logits changed with fixed cache");
-            if(!active && !bypass && !reference[batched?1:2].empty() &&
-                reference[batched?1:2]!=final_logits)
+            if(!active && !bypass && !reference[other].empty() &&
+                reference[other]!=final_logits)
                 throw std::runtime_error("batched prefill changed scalar logits or following decode");
             const double prefill_s=std::chrono::duration<double>(prefilled-started).count();
             const double decode_s=std::chrono::duration<double>(decoded-prefilled).count();
-            json row{{"prefill_policy","benchmark"},{"mode",cache?(bypass?"bypass":(batched?"batched":"cached")):"off"},
+            json row{{"prefill_policy","benchmark"},{"mode",cache?(bypass?"bypass":(grouped?"grouped":(batched?"batched":"cached"))):"off"},
                 {"sample",sample},{"tokens",prompt},{"admission_active",active},{"decode_tokens",decode_count},
                 {"prefill_seconds",prefill_s},{"prefill_tokens_per_s",prompt/prefill_s},
                 {"decode_seconds",decode_s},{"decode_tokens_per_s",decode_count/decode_s},
@@ -679,6 +683,8 @@ static int run_prefill_policy_benchmark(FlashNextTextExecutor& executor,
                 {"fill_bytes",following.fill_bytes-before.fill_bytes},
                 {"fill_wall_ms",(following.fill_wall_us-before.fill_wall_us)/1000},
                 {"kernel_launches",after.hit_kernel_launches-before.hit_kernel_launches},
+                {"grouped_tasks",after.grouped_tasks-before.grouped_tasks},
+                {"grouped_groups",after.grouped_groups-before.grouped_groups},
                 {"submission_ms",(after.hit_submission_us-before.hit_submission_us)/1000},
                 {"gpu_stream_ms",(after.gpu_branch_us-before.gpu_branch_us)/1000},
                 {"cpu_branch_ms",(after.cpu_branch_us-before.cpu_branch_us)/1000},

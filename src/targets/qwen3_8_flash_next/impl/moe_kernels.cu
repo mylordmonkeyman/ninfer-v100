@@ -279,6 +279,108 @@ __global__ void cached_down_kernel(HostNvfp4ExpertPairView expert,
     if(lane==0)output[row]=value;
 }
 
+// Reuse each decoded weight for up to four independently accumulated routed inputs.
+// Each input retains the scalar leaf's chain association and BF16 activation boundary.
+__global__ void cached_grouped_gate_up_kernel(const FlashNextCachedExpertGroup* groups) {
+    const auto& group=groups[blockIdx.y];
+    const auto expert=group.tasks[0].expert;
+    const auto* codes=reinterpret_cast<const std::uint8_t*>(expert.gate_up.codes);
+    const auto* scales=reinterpret_cast<const std::uint8_t*>(expert.gate_up.scales);
+    const float inverse=1.0F / *expert.gate_up.weight_scale_divisor;
+    const int warp=threadIdx.x>>5,lane=threadIdx.x&31;
+    const int row=blockIdx.x*GateSchedule::kWarpsPerCta+warp;
+    const int rows[2]={row,row+kIntermediate};
+    __shared__ ops::detail::Nvfp4GemvSharedStorage<GateGeometry,GateSchedule> shared;
+    float sums[4][2][GateSchedule::kAccumulatorChains]={};
+    constexpr int values_per_phase=32*GateSchedule::kValuesPerLane;
+#pragma unroll
+    for(int phase=0;phase<kHidden/values_per_phase;++phase) {
+        float coefficients[2][1];
+        ops::detail::Nvfp4CodePack<GateSchedule::kValuesPerLane> row_codes[2];
+#pragma unroll
+        for(int r=0;r<2;++r) {
+            ops::detail::load_nvfp4_coefficients<GateGeometry,GateSchedule>(
+                scales,shared,rows[r],warp*2+r,phase,lane,inverse,coefficients[r]);
+            const auto offset=std::int64_t(rows[r])*GateGeometry::kCodeBytesPerRow+
+                phase*(values_per_phase/2)+lane*(GateSchedule::kValuesPerLane/2);
+            row_codes[r]=ops::detail::load_nvfp4_codes<GateSchedule::kCodeCache,
+                GateSchedule::kValuesPerLane>(codes+offset);
+        }
+#pragma unroll
+        for(int pair=0;pair<GateSchedule::kPairsPerLane;++pair) {
+            const int input_index=phase*(values_per_phase/2)+lane*GateSchedule::kPairsPerLane+pair;
+#pragma unroll
+            for(int r=0;r<2;++r) {
+                const auto word=row_codes[r].words[pair/4];
+                const auto packed=static_cast<std::uint8_t>(word>>(8*(pair&3)));
+                const float2 code=ops::detail::decode_nvfp4_e2m1x2(packed);
+                const float wx=code.x*coefficients[r][0],wy=code.y*coefficients[r][0];
+#pragma unroll
+                for(unsigned t=0;t<4;++t) if(t<group.count) {
+                    const auto* input=static_cast<const std::uint32_t*>(group.tasks[t].input);
+                    const float2 activation=ops::bf16x2_bits_to_float2(input[input_index]);
+                    constexpr int mask=GateSchedule::kAccumulatorChains-1;
+                    sums[t][r][(2*pair)&mask]=fmaf(wx,activation.x,sums[t][r][(2*pair)&mask]);
+                    sums[t][r][(2*pair+1)&mask]=fmaf(wy,activation.y,sums[t][r][(2*pair+1)&mask]);
+                }
+            }
+        }
+    }
+#pragma unroll
+    for(unsigned t=0;t<4;++t) if(t<group.count) {
+        float gate=0,up=0;
+#pragma unroll
+        for(int chain=0;chain<GateSchedule::kAccumulatorChains;++chain) {
+            gate+=sums[t][0][chain];up+=sums[t][1][chain];
+        }
+        gate=ops::warp_reduce_sum(gate);up=ops::warp_reduce_sum(up);
+        if(lane==0)static_cast<__nv_bfloat16*>(group.tasks[t].activation)[row]=
+            __float2bfloat16_rn(ops::silu(gate)*up);
+    }
+}
+
+__global__ void cached_grouped_down_kernel(const FlashNextCachedExpertGroup* groups) {
+    const auto& group=groups[blockIdx.y];
+    const auto expert=group.tasks[0].expert;
+    const auto* codes=reinterpret_cast<const std::uint8_t*>(expert.down.codes);
+    const auto* scales=reinterpret_cast<const std::uint8_t*>(expert.down.scales);
+    const float inverse=1.0F / *expert.down.weight_scale_divisor;
+    const int row=blockIdx.x*8+(threadIdx.x>>5),lane=threadIdx.x&31;
+    std::uint32_t my_tile=0;
+    if(lane<10)my_tile=*reinterpret_cast<const std::uint32_t*>(
+        scales+down_scale_row_base(row)+std::int64_t(lane)*512);
+    const auto tile0=__shfl_sync(0xffffffffU,my_tile,lane>>2);
+    const auto tile1=__shfl_sync(0xffffffffU,my_tile,8+(lane>>2));
+    const float coef[2]={
+        ops::detail::decode_nvfp4_e4m3(static_cast<std::uint8_t>(tile0>>((lane&3)*8)))*inverse,
+        ops::detail::decode_nvfp4_e4m3(static_cast<std::uint8_t>(tile1>>((lane&3)*8)))*inverse};
+    float sum0[4]={},sum1[4]={};
+#pragma unroll
+    for(int phase=0;phase<2;++phase) if(phase==0||lane<8) {
+        const int kgroup=lane+phase*32;
+        const uint2 words=*reinterpret_cast<const uint2*>(codes+std::int64_t(row)*320+kgroup*8);
+#pragma unroll
+        for(int pair=0;pair<8;++pair) {
+            const auto word=pair<4?words.x:words.y;
+            const auto packed=static_cast<std::uint8_t>(word>>(8*(pair&3)));
+            const float2 code=ops::detail::decode_nvfp4_e2m1x2(packed);
+            const float wx=code.x*coef[phase],wy=code.y*coef[phase];
+#pragma unroll
+            for(unsigned t=0;t<4;++t) if(t<group.count) {
+                const auto* input=static_cast<const std::uint32_t*>(group.tasks[t].activation);
+                const float2 activation=ops::bf16x2_bits_to_float2(input[kgroup*8+pair]);
+                sum0[t]=fmaf(wx,activation.x,sum0[t]);
+                sum1[t]=fmaf(wy,activation.y,sum1[t]);
+            }
+        }
+    }
+#pragma unroll
+    for(unsigned t=0;t<4;++t) if(t<group.count) {
+        const float value=ops::warp_reduce_sum(sum0[t]+sum1[t]);
+        if(lane==0)group.tasks[t].output[row]=value;
+    }
+}
+
 // Eight BF16 weight/activation pairs into the single shared-expert chain, in the fixed
 // .x/.y order of the packed words.
 __device__ __forceinline__ void accumulate_shared_uint4(uint4 w, uint4 a, float& shared_sum) {
@@ -2615,6 +2717,16 @@ void flash_next_cached_expert_batch_launch(const FlashNextCachedExpertTask* task
     CUDA_CHECK(cudaGetLastError());
     cached_down_kernel<true><<<dim3(kHidden/8,count),256,0,stream>>>(
         {},nullptr,nullptr,tasks);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void flash_next_cached_expert_group_launch(const FlashNextCachedExpertGroup* groups,
+    unsigned count, cudaStream_t stream) {
+    if(!count)return;
+    cached_grouped_gate_up_kernel<<<dim3(kIntermediate/GateSchedule::kWarpsPerCta,count),
+        GateSchedule::kThreads,0,stream>>>(groups);
+    CUDA_CHECK(cudaGetLastError());
+    cached_grouped_down_kernel<<<dim3(kHidden/8,count),256,0,stream>>>(groups);
     CUDA_CHECK(cudaGetLastError());
 }
 

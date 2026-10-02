@@ -73,11 +73,11 @@ jobs:
         env:
           NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '1056'
           NINFER_PREFILL_POLICY_BENCHMARK: '1'
-          NINFER_PREFILL_POLICY_SMALL: '1'
+          NINFER_PREFILL_POLICY_GROUPED: '1'
           NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING: '1'
         run: |
           set -euo pipefail
-          configs=(0 1 1 0)
+          configs=(1 1)
           for i in "${!configs[@]}"; do
             NINFER_FLASH_NEXT_EXPERT_CACHE="${configs[$i]}" \
               build-prefill/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
@@ -91,6 +91,7 @@ jobs:
           NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '1056'
           NINFER_PREFILL_POLICY_BENCHMARK: '1'
           NINFER_PREFILL_POLICY_ACTIVE: '1'
+          NINFER_PREFILL_POLICY_GROUPED: '1'
           NINFER_FLASH_NEXT_EXPERT_CACHE: '1'
           NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING: '1'
         run: |

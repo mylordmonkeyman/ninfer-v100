@@ -49,19 +49,21 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
         prefill_enabled_ = std::strcmp(value, "0") != 0;
     }
     batched_prefill_ = enabled("NINFER_FLASH_NEXT_EXPERT_CACHE_BATCHED_PREFILL");
+    grouped_prefill_ = enabled("NINFER_FLASH_NEXT_EXPERT_CACHE_GROUPED_PREFILL");
     CUDA_CHECK(cudaGetDevice(&device_));
     std::size_t free=0,total=0;
     CUDA_CHECK(cudaMemGetInfo(&free,&total));
     const std::size_t paths=std::size_t(max_tokens)*10;
-    const auto transfer=paths*(640*sizeof(std::uint16_t)+2560*sizeof(float)+sizeof(FlashNextCachedExpertTask));
+    const auto transfer=paths*(640*sizeof(std::uint16_t)+2560*sizeof(float)+sizeof(FlashNextCachedExpertGroup));
     budget_=flash_next_expert_cache_budget(free,total,transfer,mtp,maximum);
     if (!budget_.slots_per_layer) return;
     storage_=std::make_unique<DeviceBuffer>(budget_.cache_bytes);
     activations_=std::make_unique<DeviceBuffer>(paths*640*sizeof(std::uint16_t));
     outputs_=std::make_unique<DeviceBuffer>(paths*2560*sizeof(float));
     result_buffer_=std::make_unique<PinnedHostBuffer>(outputs_->bytes);
-    batch_tasks_=std::make_unique<DeviceBuffer>(paths*sizeof(FlashNextCachedExpertTask));
-    batch_descriptors_=std::make_unique<PinnedHostBuffer>(batch_tasks_->bytes);
+    batch_tasks_=std::make_unique<DeviceBuffer>(paths*sizeof(FlashNextCachedExpertGroup));
+    batch_descriptors_=std::make_unique<PinnedHostBuffer>(paths*sizeof(FlashNextCachedExpertTask));
+    group_descriptors_=std::make_unique<PinnedHostBuffer>(batch_tasks_->bytes);
     // One canonical pair pinned at a time; queued jobs retain only keys into the pageable mmap.
     fill_buffer_=std::make_unique<PinnedHostBuffer>(kExpertSlotBytes);
     entries_.resize(std::size_t(budget_.slots_per_layer)*48);
@@ -82,7 +84,7 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
         "phase13.cache.total_bytes=%zu\nphase13.cache.reserve_bytes=%zu\n"
         "phase13.cache.used_limit_bytes=%zu\nphase13.cache.pinned_bytes=%zu\n",
         budget_.slots_per_layer,budget_.cache_bytes,transfer,free,total,budget_.reserve_bytes,
-        budget_.used_limit_bytes,result_buffer_->size()+fill_buffer_->size());
+        budget_.used_limit_bytes,result_buffer_->size()+fill_buffer_->size()+batch_descriptors_->size()+group_descriptors_->size());
 }
 FlashNextExpertCache::~FlashNextExpertCache() {
     { std::lock_guard lock(mutex_); stop_=true; work_.notify_one(); }
@@ -111,7 +113,8 @@ HostNvfp4ExpertPairView FlashNextExpertCache::ready_view(unsigned layer,int expe
 }
 void FlashNextExpertCache::begin_layer(bool prefill) {
     if (!consumers_.empty()) throw std::logic_error("cache layer has outstanding consumers");
-    batching_layer_ = prefill && batched_prefill_;
+    grouping_layer_ = prefill && grouped_prefill_;
+    batching_layer_ = prefill && (batched_prefill_ || grouped_prefill_);
 }
 bool FlashNextExpertCache::execute(unsigned layer,int expert,const void* input,
     unsigned path,cudaStream_t stream) {
@@ -157,15 +160,58 @@ void FlashNextExpertCache::begin_download(std::size_t bytes, cudaStream_t stream
         const auto submitted = timing_enabled_ ? std::chrono::steady_clock::now() :
             std::chrono::steady_clock::time_point{};
         const auto count=static_cast<unsigned>(consumers_.size());
-        CUDA_CHECK(cudaMemcpyAsync(batch_tasks_->p, batch_descriptors_->data(),
-            count*sizeof(FlashNextCachedExpertTask), cudaMemcpyHostToDevice, stream));
-        flash_next_cached_expert_batch_launch(
-            static_cast<const FlashNextCachedExpertTask*>(batch_tasks_->p), count, stream);
+        unsigned groups=0;
+        if(grouping_layer_) {
+            auto* tasks=static_cast<FlashNextCachedExpertTask*>(batch_descriptors_->data());
+            std::sort(tasks,tasks+count,[](const auto& a,const auto& b) {
+                return reinterpret_cast<std::uintptr_t>(a.expert.gate_up.codes)<
+                    reinterpret_cast<std::uintptr_t>(b.expert.gate_up.codes);
+            });
+            auto* descriptors=static_cast<FlashNextCachedExpertGroup*>(group_descriptors_->data());
+            unsigned singles=0;
+            for(unsigned i=0;i<count;) {
+                unsigned end=i+1;
+                while(end<count&&tasks[end].expert.gate_up.codes==tasks[i].expert.gate_up.codes)++end;
+                while(i<end) {
+                    const unsigned n=std::min(4U,end-i);
+                    if(n==1)tasks[singles++]=tasks[i++];
+                    else {
+                        auto& group=descriptors[groups++];group={};group.count=n;
+                        for(unsigned t=0;t<n;++t)group.tasks[t]=tasks[i++];
+                    }
+                }
+            }
+            const auto group_bytes=groups*sizeof(FlashNextCachedExpertGroup);
+            if(groups) {
+                CUDA_CHECK(cudaMemcpyAsync(batch_tasks_->p,group_descriptors_->data(),
+                    group_bytes,cudaMemcpyHostToDevice,stream));
+                flash_next_cached_expert_group_launch(
+                    static_cast<const FlashNextCachedExpertGroup*>(batch_tasks_->p),groups,stream);
+            }
+            if(singles) {
+                auto* singleton_tasks=reinterpret_cast<FlashNextCachedExpertTask*>(
+                    static_cast<std::byte*>(batch_tasks_->p)+group_bytes);
+                CUDA_CHECK(cudaMemcpyAsync(singleton_tasks,tasks,
+                    singles*sizeof(FlashNextCachedExpertTask),cudaMemcpyHostToDevice,stream));
+                flash_next_cached_expert_batch_launch(singleton_tasks,singles,stream);
+            }
+            if(timing_enabled_) {
+                std::lock_guard lock(mutex_);
+                stats_.grouped_tasks += count-singles;
+                stats_.hit_kernel_launches += 2*unsigned(groups>0)+2*unsigned(singles>0);
+            }
+        } else {
+            CUDA_CHECK(cudaMemcpyAsync(batch_tasks_->p, batch_descriptors_->data(),
+                count*sizeof(FlashNextCachedExpertTask), cudaMemcpyHostToDevice, stream));
+            flash_next_cached_expert_batch_launch(
+                static_cast<const FlashNextCachedExpertTask*>(batch_tasks_->p), count, stream);
+        }
         if(timing_enabled_) {
             std::lock_guard lock(mutex_);
             stats_.hit_submission_us += std::chrono::duration<double,std::micro>(
                 std::chrono::steady_clock::now()-submitted).count();
-            stats_.hit_kernel_launches += 2;
+            if(!grouping_layer_)stats_.hit_kernel_launches += 2;
+            stats_.grouped_groups += groups;
         }
     }
     CUDA_CHECK(cudaMemcpyAsync(result_buffer_->data(), outputs_->p, bytes,
