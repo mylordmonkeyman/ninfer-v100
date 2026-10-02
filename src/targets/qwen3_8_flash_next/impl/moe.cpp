@@ -221,7 +221,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                                 const Tensor* router_input_fp32,
                                 const Tensor* routed_expert_input_fp32,
                                 const Tensor* shared_expert_input_fp32,
-                                Tensor* output_fp32, FlashNextExpertCache* cache, unsigned layer) {
+                                Tensor* output_fp32, FlashNextExpertCache* cache, unsigned layer, bool prefill) {
     const std::int32_t tokens = input.ne[1];
     if (input.dtype != DType::BF16 || output.dtype != DType::BF16 || input.ne[0] != 2'560 ||
         output.ne[0] != 2'560 || tokens < 1 || output.ne[1] != tokens ||
@@ -346,6 +346,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                                cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
+    if (cache) cache->begin_layer(prefill);
     const bool measure = cache != nullptr && cache->timing_enabled();
     using Clock = std::chrono::steady_clock;
     const auto branch_started = measure ? Clock::now() : Clock::time_point{};

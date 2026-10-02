@@ -238,8 +238,15 @@ __device__ __forceinline__ float down_routed_path_value(
     return ops::warp_reduce_sum(sum0 + sum1);
 }
 
+template<bool Batched>
 __global__ void cached_gate_up_kernel(HostNvfp4ExpertPairView expert,
-    const __nv_bfloat16* input, __nv_bfloat16* activation) {
+    const __nv_bfloat16* input, __nv_bfloat16* activation,
+    const FlashNextCachedExpertTask* tasks) {
+    if constexpr (Batched) {
+        const auto task=tasks[blockIdx.y];
+        expert=task.expert;input=static_cast<const __nv_bfloat16*>(task.input);
+        activation=static_cast<__nv_bfloat16*>(task.activation);
+    }
     __shared__ ops::detail::Nvfp4GemvSharedStorage<GateGeometry, GateSchedule> shared;
     const int warp=threadIdx.x>>5, lane=threadIdx.x&31;
     const int row=blockIdx.x*GateSchedule::kWarpsPerCta+warp;
@@ -255,8 +262,15 @@ __global__ void cached_gate_up_kernel(HostNvfp4ExpertPairView expert,
     gate=ops::warp_reduce_sum(gate);up=ops::warp_reduce_sum(up);
     if(lane==0)activation[row]=__float2bfloat16_rn(ops::silu(gate)*up);
 }
+template<bool Batched>
 __global__ void cached_down_kernel(HostNvfp4ExpertPairView expert,
-    const __nv_bfloat16* activation,float* output) {
+    const __nv_bfloat16* activation,float* output,
+    const FlashNextCachedExpertTask* tasks) {
+    if constexpr (Batched) {
+        const auto task=tasks[blockIdx.y];
+        expert=task.expert;activation=static_cast<const __nv_bfloat16*>(task.activation);
+        output=task.output;
+    }
     const int row=blockIdx.x*8+(threadIdx.x>>5),lane=threadIdx.x&31;
     const float value=down_routed_path_value(0,
         reinterpret_cast<const std::uint8_t*>(expert.down.codes),
@@ -2585,11 +2599,22 @@ void flash_next_moe_bf16_kernels_launch(const Tensor& input, const MoeBf16Weight
 
 void flash_next_cached_expert_launch(const HostNvfp4ExpertPairView& expert,
     const void* input,void* intermediate,float* output,cudaStream_t stream) {
-    cached_gate_up_kernel<<<kIntermediate/GateSchedule::kWarpsPerCta,GateSchedule::kThreads,0,stream>>>(
-        expert,static_cast<const __nv_bfloat16*>(input),static_cast<__nv_bfloat16*>(intermediate));
+    cached_gate_up_kernel<false><<<kIntermediate/GateSchedule::kWarpsPerCta,GateSchedule::kThreads,0,stream>>>(
+        expert,static_cast<const __nv_bfloat16*>(input),static_cast<__nv_bfloat16*>(intermediate),nullptr);
     CUDA_CHECK(cudaGetLastError());
-    cached_down_kernel<<<kHidden/8,256,0,stream>>>(expert,
-        static_cast<const __nv_bfloat16*>(intermediate),output);
+    cached_down_kernel<false><<<kHidden/8,256,0,stream>>>(expert,
+        static_cast<const __nv_bfloat16*>(intermediate),output,nullptr);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void flash_next_cached_expert_batch_launch(const FlashNextCachedExpertTask* tasks,
+    unsigned count, cudaStream_t stream) {
+    if(!count)return;
+    cached_gate_up_kernel<true><<<dim3(kIntermediate/GateSchedule::kWarpsPerCta,count),
+        GateSchedule::kThreads,0,stream>>>({},nullptr,nullptr,tasks);
+    CUDA_CHECK(cudaGetLastError());
+    cached_down_kernel<true><<<dim3(kHidden/8,count),256,0,stream>>>(
+        {},nullptr,nullptr,tasks);
     CUDA_CHECK(cudaGetLastError());
 }
 

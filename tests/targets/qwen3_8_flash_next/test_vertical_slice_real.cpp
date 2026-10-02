@@ -14,6 +14,7 @@
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <cuda_profiler_api.h>
 
 #include <algorithm>
 #include <array>
@@ -616,14 +617,17 @@ static int run_prefill_policy_benchmark(FlashNextTextExecutor& executor,
     for (unsigned prompt : sizes) {
         if (prompt+decode_count>records.size())
             throw std::runtime_error("insufficient natural tokens for prefill policy benchmark");
-        std::array<std::vector<std::uint16_t>,2> reference;
-        const unsigned rounds=std::getenv("NINFER_PREFILL_POLICY_PROFILE") ? 1 : 4;
+        std::array<std::vector<std::uint16_t>,3> reference;
+        const unsigned rounds=std::getenv("NINFER_PREFILL_POLICY_PROFILE") ? 1 : 6;
         for (unsigned sample=0;sample<rounds;++sample) {
-            const bool bypass=!std::getenv("NINFER_PREFILL_POLICY_PROFILE") && (sample==0||sample==3);
-            if(cache)cache->set_prefill_enabled(!bypass);
+            const bool profiling=std::getenv("NINFER_PREFILL_POLICY_PROFILE") != nullptr;
+            const bool bypass=!profiling && (sample==0||sample==5);
+            const bool batched=!profiling && (sample==2||sample==3);
+            if(cache) { cache->set_prefill_enabled(!bypass);cache->set_batched_prefill(batched); }
             const auto before=cache?cache->stats():FlashNextExpertCacheStats{};
             auto lane=executor.allocate_lane();
             device.synchronize();
+            if(profiling)CUDA_CHECK(cudaProfilerStart());
             const auto started=std::chrono::steady_clock::now();
             std::vector<std::uint16_t> final_logits;
             for (unsigned offset=0; offset<prompt; offset+=128) {
@@ -641,6 +645,7 @@ static int run_prefill_policy_benchmark(FlashNextTextExecutor& executor,
             }
             device.synchronize();
             const auto prefilled=std::chrono::steady_clock::now();
+            if(profiling)CUDA_CHECK(cudaProfilerStop());
             const auto after=cache?cache->stats():FlashNextExpertCacheStats{};
             auto following_logits=decode(lane,prompt,decode_count);
             device.synchronize();
@@ -648,14 +653,17 @@ static int run_prefill_policy_benchmark(FlashNextTextExecutor& executor,
             if(executor.committed_frontier(lane)!=static_cast<int>(prompt+decode_count))
                 throw std::runtime_error("prefill policy state frontier mismatch");
             executor.release_lane(lane);
-            const auto index=bypass?0:1;
+            const auto index=bypass?0:(batched?2:1);
             final_logits.insert(final_logits.end(),following_logits.begin(),following_logits.end());
             if(reference[index].empty())reference[index]=final_logits;
             else if(reference[index]!=final_logits)
                 throw std::runtime_error("prefill policy replay logits changed with fixed cache");
+            if(!bypass && !reference[batched?1:2].empty() &&
+                reference[batched?1:2]!=final_logits)
+                throw std::runtime_error("batched prefill changed scalar logits or following decode");
             const double prefill_s=std::chrono::duration<double>(prefilled-started).count();
             const double decode_s=std::chrono::duration<double>(decoded-prefilled).count();
-            json row{{"prefill_policy","benchmark"},{"mode",cache?(bypass?"bypass":"cached"):"off"},
+            json row{{"prefill_policy","benchmark"},{"mode",cache?(bypass?"bypass":(batched?"batched":"cached")):"off"},
                 {"sample",sample},{"tokens",prompt},{"decode_tokens",decode_count},
                 {"prefill_seconds",prefill_s},{"prefill_tokens_per_s",prompt/prefill_s},
                 {"decode_seconds",decode_s},{"decode_tokens_per_s",decode_count/decode_s},

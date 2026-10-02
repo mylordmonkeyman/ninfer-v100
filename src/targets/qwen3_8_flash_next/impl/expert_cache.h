@@ -41,6 +41,13 @@ struct FlashNextExpertCacheStats {
     std::uint64_t hit_kernel_launches = 0;
 };
 
+struct FlashNextCachedExpertTask {
+    HostNvfp4ExpertPairView expert;
+    const void* input;
+    void* activation;
+    float* output;
+};
+
 // Program-owned main-text cache. A separate nonblocking stream and a bounded worker queue
 // populate canonical slots; only completed fills are eligible for execution. MTP is not cached.
 // Single inference owner calls execute/download/admit; the fill worker never evicts a lease.
@@ -51,6 +58,10 @@ public:
     ~FlashNextExpertCache();
     FlashNextExpertCache(const FlashNextExpertCache&) = delete;
     FlashNextExpertCache& operator=(const FlashNextExpertCache&) = delete;
+    // Layer owner selects batched submission only for explicit prefill execution.
+    void begin_layer(bool prefill);
+    [[nodiscard]] bool batched_prefill() const { return batched_prefill_; }
+    void set_batched_prefill(bool value) { batched_prefill_ = value; }
     bool execute(unsigned layer, int expert, const void* device_input,
                  unsigned path, cudaStream_t stream);
     // Completes hit consumers and releases their slot leases before any eviction.
@@ -82,13 +93,13 @@ private:
                    std::uint64_t epoch = 0; unsigned leases = 0; };
     HostNvfp4ExpertTableView host_;
     FlashNextExpertCacheBudget budget_;
-    std::unique_ptr<DeviceBuffer> storage_, activations_, outputs_;
-    std::unique_ptr<PinnedHostBuffer> fill_buffer_, result_buffer_;
+    std::unique_ptr<DeviceBuffer> storage_, activations_, outputs_, batch_tasks_;
+    std::unique_ptr<PinnedHostBuffer> fill_buffer_, result_buffer_, batch_descriptors_;
     cudaStream_t fill_stream_ = nullptr;
     cudaEvent_t hit_start_ = nullptr, hit_stop_ = nullptr;
     cudaEvent_t fill_start_ = nullptr, fill_stop_ = nullptr;
     unsigned admission_cap_ = 1;
-    bool prefill_enabled_ = true;
+    bool prefill_enabled_ = true, batched_prefill_ = false, batching_layer_ = false;
     bool timing_enabled_ = false, serial_schedule_ = false, admissions_enabled_ = true;
     int device_ = 0;
     std::vector<Entry> entries_;
@@ -108,4 +119,6 @@ private:
 
 void flash_next_cached_expert_launch(const HostNvfp4ExpertPairView& device_expert,
     const void* input_bf16, void* intermediate_bf16, float* output_fp32, cudaStream_t stream);
+void flash_next_cached_expert_batch_launch(const FlashNextCachedExpertTask* tasks,
+    unsigned count, cudaStream_t stream);
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

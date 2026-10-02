@@ -48,17 +48,20 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
             throw std::invalid_argument("expert cache prefill must be 0 or 1");
         prefill_enabled_ = std::strcmp(value, "0") != 0;
     }
+    batched_prefill_ = enabled("NINFER_FLASH_NEXT_EXPERT_CACHE_BATCHED_PREFILL");
     CUDA_CHECK(cudaGetDevice(&device_));
     std::size_t free=0,total=0;
     CUDA_CHECK(cudaMemGetInfo(&free,&total));
     const std::size_t paths=std::size_t(max_tokens)*10;
-    const auto transfer=paths*(640*sizeof(std::uint16_t)+2560*sizeof(float));
+    const auto transfer=paths*(640*sizeof(std::uint16_t)+2560*sizeof(float)+sizeof(FlashNextCachedExpertTask));
     budget_=flash_next_expert_cache_budget(free,total,transfer,mtp,maximum);
     if (!budget_.slots_per_layer) return;
     storage_=std::make_unique<DeviceBuffer>(budget_.cache_bytes);
     activations_=std::make_unique<DeviceBuffer>(paths*640*sizeof(std::uint16_t));
     outputs_=std::make_unique<DeviceBuffer>(paths*2560*sizeof(float));
     result_buffer_=std::make_unique<PinnedHostBuffer>(outputs_->bytes);
+    batch_tasks_=std::make_unique<DeviceBuffer>(paths*sizeof(FlashNextCachedExpertTask));
+    batch_descriptors_=std::make_unique<PinnedHostBuffer>(batch_tasks_->bytes);
     // One canonical pair pinned at a time; queued jobs retain only keys into the pageable mmap.
     fill_buffer_=std::make_unique<PinnedHostBuffer>(kExpertSlotBytes);
     entries_.resize(std::size_t(budget_.slots_per_layer)*48);
@@ -106,6 +109,10 @@ HostNvfp4ExpertPairView FlashNextExpertCache::ready_view(unsigned layer,int expe
         if(entries_[i].expert==expert&&entries_[i].state==State::Ready)return view(i);
     throw std::runtime_error("expert cache key is not Ready");
 }
+void FlashNextExpertCache::begin_layer(bool prefill) {
+    if (!consumers_.empty()) throw std::logic_error("cache layer has outstanding consumers");
+    batching_layer_ = prefill && batched_prefill_;
+}
 bool FlashNextExpertCache::execute(unsigned layer,int expert,const void* input,
     unsigned path,cudaStream_t stream) {
     unsigned slot=0;
@@ -123,6 +130,13 @@ bool FlashNextExpertCache::execute(unsigned layer,int expert,const void* input,
             CUDA_CHECK(cudaEventRecord(hit_start_, stream));
         consumers_.emplace_back(slot,path);++stats_.hits;
     }
+    if (batching_layer_) {
+        auto* descriptors=static_cast<FlashNextCachedExpertTask*>(batch_descriptors_->data());
+        descriptors[consumers_.size()-1] = {view(slot), input,
+            static_cast<std::uint16_t*>(activations_->p)+std::size_t(path)*640,
+            static_cast<float*>(outputs_->p)+std::size_t(path)*2560};
+        return true;
+    }
     const auto submitted = timing_enabled_ ? std::chrono::steady_clock::now() :
         std::chrono::steady_clock::time_point{};
     flash_next_cached_expert_launch(view(slot),input,
@@ -139,6 +153,21 @@ bool FlashNextExpertCache::execute(unsigned layer,int expert,const void* input,
 void FlashNextExpertCache::begin_download(std::size_t bytes, cudaStream_t stream) {
     if (consumers_.empty()) return;
     if (bytes > outputs_->bytes) throw std::out_of_range("expert cache result capacity");
+    if (batching_layer_) {
+        const auto submitted = timing_enabled_ ? std::chrono::steady_clock::now() :
+            std::chrono::steady_clock::time_point{};
+        const auto count=static_cast<unsigned>(consumers_.size());
+        CUDA_CHECK(cudaMemcpyAsync(batch_tasks_->p, batch_descriptors_->data(),
+            count*sizeof(FlashNextCachedExpertTask), cudaMemcpyHostToDevice, stream));
+        flash_next_cached_expert_batch_launch(
+            static_cast<const FlashNextCachedExpertTask*>(batch_tasks_->p), count, stream);
+        if(timing_enabled_) {
+            std::lock_guard lock(mutex_);
+            stats_.hit_submission_us += std::chrono::duration<double,std::micro>(
+                std::chrono::steady_clock::now()-submitted).count();
+            stats_.hit_kernel_launches += 2;
+        }
+    }
     CUDA_CHECK(cudaMemcpyAsync(result_buffer_->data(), outputs_->p, bytes,
                                cudaMemcpyDeviceToHost, stream));
     if (timing_enabled_) CUDA_CHECK(cudaEventRecord(hit_stop_, stream));

@@ -65,6 +65,9 @@ jobs:
           ctest --test-dir build-prefill -V \
             -R '^ninfer_qwen3_8_flash_next_(expert_cache|text_decode)_test$' \
             > prefill-results/unit-tests.log 2>&1
+          compute-sanitizer --tool memcheck --error-exitcode 1 \
+            build-prefill/tests/ninfer_qwen3_8_flash_next_expert_cache_test \
+            > prefill-results/cache-memcheck.log 2>&1
       - name: Natural short and longer prompts with following generation
         shell: bash
         env:
@@ -73,7 +76,7 @@ jobs:
           NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING: '1'
         run: |
           set -euo pipefail
-          configs=(0 1 1 0)
+          configs=(1 1)
           for i in "${!configs[@]}"; do
             NINFER_FLASH_NEXT_EXPERT_CACHE="${configs[$i]}" \
               build-prefill/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
@@ -93,6 +96,7 @@ jobs:
           set -euo pipefail
           if command -v nsys >/dev/null 2>&1; then
             nsys profile --trace=cuda --sample=none --cpuctxsw=none \
+              --capture-range=cudaProfilerApi --capture-range-end=stop \
               --force-overwrite=true -o prefill-results/eager \
               build-prefill/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
               > prefill-results/profile.log 2>&1

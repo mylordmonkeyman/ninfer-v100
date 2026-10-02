@@ -68,10 +68,25 @@ int main(){try{
         }
         cache.download(out,device.stream);compare(out,expected);
     }
+    for(unsigned tokens:{1U,3U,8U,128U}) {
+        std::vector<float> scalar(tokens*2560),batched(tokens*2560);
+        for(bool batch:{false,true}) {
+            cache.set_batched_prefill(batch);cache.begin_layer(true);
+            for(unsigned t=0;t<tokens;++t)
+                require(cache.execute(0,t%2,static_cast<std::uint16_t*>(d_input.p)+t*2560,
+                    t,device.stream),"batch Ready hit missing");
+            cache.download(batch?batched:scalar,device.stream);
+        }
+        require(scalar==batched,"batched expert outputs changed scalar arithmetic");
+        std::cout<<"cache.batch.exact_parity.tokens="<<tokens<<'\n';
+    }
+    cache.set_batched_prefill(false);cache.begin_layer(false);
     HostExpertWorkerPool pool(4, false);
     for (unsigned hits : {0U, 1U, 4U}) {
         std::vector<float> serial(4*2560), overlap(4*2560);
+        cache.set_batched_prefill(true);
         for (bool concurrent : {false, true}) {
+            cache.begin_layer(true);
             auto& output = concurrent ? overlap : serial;
             std::vector<HostExpertTask> tasks;
             for (unsigned path = 0; path < 4; ++path) {
@@ -93,6 +108,7 @@ int main(){try{
         require(serial == overlap, "CPU/GPU join changed private expert outputs");
         std::cout << "cache.schedule.exact_parity.hits=" << hits << " paths=4\n";
     }
+    cache.set_batched_prefill(false);cache.begin_layer(false);
     // A leased slot cannot be recycled even when it would otherwise be the LRU victim.
     require(cache.execute(0,0,d_input.p,0,device.stream),"lease hit");
     std::int32_t new_id=2;cache.admit(0,std::span(&new_id,1));cache.drain();
