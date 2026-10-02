@@ -73,10 +73,11 @@ jobs:
         env:
           NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '1056'
           NINFER_PREFILL_POLICY_BENCHMARK: '1'
+          NINFER_PREFILL_POLICY_SMALL: '1'
           NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING: '1'
         run: |
           set -euo pipefail
-          configs=(1 1)
+          configs=(0 1 1 0)
           for i in "${!configs[@]}"; do
             NINFER_FLASH_NEXT_EXPERT_CACHE="${configs[$i]}" \
               build-prefill/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
@@ -84,6 +85,20 @@ jobs:
             cat "prefill-results/$i-cache${configs[$i]}.log"
             grep -q 'PASS: prefill policy natural routing' "prefill-results/$i-cache${configs[$i]}.log"
           done
+      - name: Admission active prefill and following generation
+        shell: bash
+        env:
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '1056'
+          NINFER_PREFILL_POLICY_BENCHMARK: '1'
+          NINFER_PREFILL_POLICY_ACTIVE: '1'
+          NINFER_FLASH_NEXT_EXPERT_CACHE: '1'
+          NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING: '1'
+        run: |
+          set -euo pipefail
+          build-prefill/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            > prefill-results/active.log 2>&1
+          cat prefill-results/active.log
+          grep -q 'PASS: prefill policy natural routing' prefill-results/active.log
       - name: Separate eager launch and kernel profile when Nsight is available
         shell: bash
         env:
@@ -94,6 +109,11 @@ jobs:
           NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING: '1'
         run: |
           set -euo pipefail
+          if ! command -v nsys >/dev/null 2>&1; then
+            for binary in /opt/nvidia/nsight-systems/*/bin/nsys /usr/local/cuda-12.8/bin/nsys; do
+              if [[ -x "$binary" ]]; then export PATH="$(dirname "$binary"):$PATH"; break; fi
+            done
+          fi
           if command -v nsys >/dev/null 2>&1; then
             nsys profile --trace=cuda --sample=none --cpuctxsw=none \
               --capture-range=cudaProfilerApi --capture-range-end=stop \

@@ -609,20 +609,23 @@ static int run_prefill_policy_benchmark(FlashNextTextExecutor& executor,
         decode(lane,0,128);
         executor.release_lane(lane);
     };
-    warm(); warm();
-    if(cache)cache->freeze_admissions();
+    const bool active=std::getenv("NINFER_PREFILL_POLICY_ACTIVE") != nullptr;
+    if(!active) { warm();warm();if(cache)cache->freeze_admissions(); }
     const std::size_t decode_count=32;
-    std::vector<unsigned> sizes{128,1024};
+    std::vector<unsigned> sizes=active?std::vector<unsigned>{128,1024}:
+        std::vector<unsigned>{1,8,32,128,1024};
+    if (std::getenv("NINFER_PREFILL_POLICY_SMALL")) sizes={1,8,32};
     if (std::getenv("NINFER_PREFILL_POLICY_PROFILE")) sizes={128};
     for (unsigned prompt : sizes) {
         if (prompt+decode_count>records.size())
             throw std::runtime_error("insufficient natural tokens for prefill policy benchmark");
         std::array<std::vector<std::uint16_t>,3> reference;
-        const unsigned rounds=std::getenv("NINFER_PREFILL_POLICY_PROFILE") ? 1 : 6;
+        const unsigned rounds=std::getenv("NINFER_PREFILL_POLICY_PROFILE") ? 1 : (active?4:6);
         for (unsigned sample=0;sample<rounds;++sample) {
             const bool profiling=std::getenv("NINFER_PREFILL_POLICY_PROFILE") != nullptr;
-            const bool bypass=!profiling && (sample==0||sample==5);
-            const bool batched=!profiling && (sample==2||sample==3);
+            const bool bypass=!profiling && (sample==0||sample==(active?3:5));
+            const bool batched=!profiling && (active?!bypass:(sample==2||sample==3));
+            if(active&&cache) {cache->reset();warm();warm();cache->drain();}
             if(cache) { cache->set_prefill_enabled(!bypass);cache->set_batched_prefill(batched); }
             const auto before=cache?cache->stats():FlashNextExpertCacheStats{};
             auto lane=executor.allocate_lane();
@@ -650,25 +653,31 @@ static int run_prefill_policy_benchmark(FlashNextTextExecutor& executor,
             auto following_logits=decode(lane,prompt,decode_count);
             device.synchronize();
             const auto decoded=std::chrono::steady_clock::now();
+            const auto following=cache?cache->stats():FlashNextExpertCacheStats{};
             if(executor.committed_frontier(lane)!=static_cast<int>(prompt+decode_count))
                 throw std::runtime_error("prefill policy state frontier mismatch");
             executor.release_lane(lane);
             const auto index=bypass?0:(batched?2:1);
             final_logits.insert(final_logits.end(),following_logits.begin(),following_logits.end());
             if(reference[index].empty())reference[index]=final_logits;
-            else if(reference[index]!=final_logits)
+            else if(!active&&reference[index]!=final_logits)
                 throw std::runtime_error("prefill policy replay logits changed with fixed cache");
-            if(!bypass && !reference[batched?1:2].empty() &&
+            if(!active && !bypass && !reference[batched?1:2].empty() &&
                 reference[batched?1:2]!=final_logits)
                 throw std::runtime_error("batched prefill changed scalar logits or following decode");
             const double prefill_s=std::chrono::duration<double>(prefilled-started).count();
             const double decode_s=std::chrono::duration<double>(decoded-prefilled).count();
             json row{{"prefill_policy","benchmark"},{"mode",cache?(bypass?"bypass":(batched?"batched":"cached")):"off"},
-                {"sample",sample},{"tokens",prompt},{"decode_tokens",decode_count},
+                {"sample",sample},{"tokens",prompt},{"admission_active",active},{"decode_tokens",decode_count},
                 {"prefill_seconds",prefill_s},{"prefill_tokens_per_s",prompt/prefill_s},
                 {"decode_seconds",decode_s},{"decode_tokens_per_s",decode_count/decode_s},
                 {"hits",after.hits-before.hits},{"misses",after.misses-before.misses},
                 {"admitted",after.admitted-before.admitted},{"evicted",after.evicted-before.evicted},
+                {"following_hits",following.hits-after.hits},
+                {"following_misses",following.misses-after.misses},
+                {"following_admitted",following.admitted-after.admitted},
+                {"fill_bytes",following.fill_bytes-before.fill_bytes},
+                {"fill_wall_ms",(following.fill_wall_us-before.fill_wall_us)/1000},
                 {"kernel_launches",after.hit_kernel_launches-before.hit_kernel_launches},
                 {"submission_ms",(after.hit_submission_us-before.hit_submission_us)/1000},
                 {"gpu_stream_ms",(after.gpu_branch_us-before.gpu_branch_us)/1000},
@@ -680,7 +689,8 @@ static int run_prefill_policy_benchmark(FlashNextTextExecutor& executor,
                 throw std::runtime_error("prefill bypass touched cache execution or residency");
         }
     }
-    std::cout<<"PASS: prefill policy natural routing, finite logits, committed state, fixed-policy exact replay\n";
+    std::cout<<"PASS: prefill policy natural routing, finite logits, committed state"
+        <<(active?", active admissions\n":", fixed-policy exact replay\n");
     return 0;
 }
 
