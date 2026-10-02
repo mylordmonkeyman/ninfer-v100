@@ -1277,7 +1277,68 @@ The Phase 12 routed replay links these same kernel and worker sources. See
 [the replay commands and measurement limits](../bench/cpu_nvfp4_routed_replay/README.md).
 Gate B is evaluated against actual routed miss batches for each provisional
 cache scenario. The Phase 1 large-batch results are not substituted for these
-measurements. Phase 12 target-host qualification is pending until the workflow
-reports sustained pair rate and the corresponding required rate. No GPU cache
+measurements. The minimum CPU gate passes for the measured provisional cache
+scenarios below. The preferred 1.3x headroom gate does not pass. No GPU cache
 capacity is selected here, and the original Phase 11 numerical gate remains
 unqualified as described above.
+
+### Phase 12 routed gate measurements
+
+[Production CPU evidence](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37027437659)
+was measured on the dual Xeon E5-2697A v4 host with CUDA 12.8 and the accepted
+FP32 MoE output profile. The fresh model execution completed 128 teacher-forced
+positions, 6,144 host-backed layer calls and 61,440 expert pairs. The captured
+BF16 inputs, ordered router IDs and alpha values were byte-identical to the
+earlier expert-only capture over this prefix.
+
+The replay used all 48 host-backed layers, a 25.69 GiB unique compact miss working
+set, cap-one admission, one whole-workload warm pass and three timed passes.
+Gate requirements use 16.49 target committed tokens/s and the actual misses/token.
+Capacities are provisional uniform-LRU scenarios with next-token admission assumed
+complete; no GPU cache or background-upload timing is included.
+
+| Slots/layer | Trace hit rate | 32-worker pairs/s | Required pairs/s | Margin | Minimum | Preferred |
+|---:|---:|---:|---:|---:|:---:|:---:|
+| 0 | 0.00% | 5,918 | 7,915 | 0.748x | FAIL | FAIL |
+| 16 | 28.72% | 5,736 | 5,642 | 1.017x | PASS | FAIL |
+| 32 | 39.17% | 5,105 | 4,815 | 1.060x | PASS | FAIL |
+| 48 | 45.84% | 5,301 | 4,287 | 1.237x | PASS | FAIL |
+| 64 | 50.05% | 4,800 | 3,953 | 1.214x | PASS | FAIL |
+
+For the same 32-slot workload:
+
+| CPU placement | Workers | Pairs/s | Required-rate margin | P99 layer-batch latency |
+|---|---:|---:|---:|---:|
+| Socket 0 physical cores | 16 | 3,252 | 0.675x | 4,007 us |
+| Socket 1 physical cores | 16 | 3,215 | 0.668x | 3,999 us |
+| Both sockets, physical cores | 32 | 5,105 | 1.060x | 2,002 us |
+| Both sockets, SMT | 64 | 5,779 | 1.200x | 1,466 us |
+
+The best measured CPU-only configuration uses
+NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS=64 with affinity spanning CPUs 0-63.
+This is a CPU gate result, not a measured whole-server optimum. The default
+remains up to 32 workers, whose 32-slot margin is only 6.0%.
+
+The earlier expert-only scheduler delivered 1,955 pairs/s in the 32-slot,
+32-worker scenario. Cooperative rows deliver 2.61x that rate. Smaller miss
+batches can now use the remaining workers instead of leaving most cores idle.
+Both the real expert numerical checks and exact direct/sharded comparisons
+passed: worst sampled NRMSE 0.00012436; minimum cosine 0.9999999923. The output
+checksums also matched the earlier expert-only replay in every scenario.
+
+The container rejects NUMA memory policies. These runs used CPU affinity only;
+actual model pages were mixed across nodes (approximately 46% node 0 / 54%
+node 1). The socket runs are affinity comparisons, not proven local-page
+measurements. NUMA-local page optimization and its benefit remain unmeasured.
+
+Decision: the CPU-miss architecture remains viable at the minimum gate for the
+tested cache scenarios on this routed prefix. Zero-cache execution at the
+16.49-token/s target fails; single-socket execution fails the 32-slot scenario.
+The narrow margins and absent preferred headroom must carry into Phase 13:
+derive feasible capacity from the actual VRAM ledger, then validate the real
+cache hit rate and upload timing before making a serving-throughput claim.
+
+The separate resident-GPU MoE prefill benchmark still aborts with an illegal
+memory access. Its failure and exit status are retained in the evidence artifact;
+it is not covered by the CPU gate. The original full-model numerical criterion
+also remains unqualified. No Phase 11 precision investigation was restarted.
