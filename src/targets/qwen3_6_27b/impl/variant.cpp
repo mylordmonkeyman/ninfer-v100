@@ -152,7 +152,17 @@ std::vector<GraphExecutionProfile> Variant::mtp_graph_profiles(std::uint32_t cap
     }
     std::sort(ends.begin(), ends.end());
     ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
-    return graph_profiles_through(capacity - 1, ends);
+    auto profiles = graph_profiles_through(capacity - 1, ends);
+#ifdef NINFER_VOLTA_BUILD
+    // Wide verification changes Volta kernel topology across attention tiers. Each tier
+    // needs its own resident executable rather than cudaGraphExecUpdate across kernels.
+    if (draft_window > 5) {
+        for (std::size_t i = 0; i < profiles.size(); ++i) {
+            profiles[i].topology_class = static_cast<std::uint32_t>(i);
+        }
+    }
+#endif
+    return profiles;
 }
 
 std::vector<GraphExecutionProfile>
