@@ -43,7 +43,7 @@ void launch_fp8_decode(const Tensor& x, const Weight& weight, Tensor& out, cudaS
         return;
     case Fp8Problem::Vocabulary:
 #ifdef NINFER_VOLTA_BUILD
-        launch_exact<Fp8VocabularyGeometry>(x, weight, out, stream);
+        launch_exact<Fp8VocabularyGeometry, __nv_bfloat16>(x, weight, out, stream);
         return;
 #else
         break;

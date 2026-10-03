@@ -56,6 +56,7 @@ jobs:
             -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
           cmake --build build-27b -j --target ninfer ninfer-serve ninfer_bench \
             ninfer_qwen3_6_27b_score_real_test ninfer_qwen3_6_27b_prefix_real_test \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test \
             ninfer_qwen3_8_flash_next_expert_cache_test \
             ninfer_qwen3_8_flash_next_text_decode_test 2>&1 | tee regression-results/build.log
           ctest --test-dir build-27b -V \
@@ -92,6 +93,45 @@ jobs:
               build-27b/tests/ninfer_qwen3_6_27b_prefix_real_test \
               2>&1 | tee "regression-results/$scenario.log"
           done
+      - name: Preserve real Flash-Next grouped prefill behavior
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        env:
+          NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+          NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+          NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: '32'
+          NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: auto
+          NINFER_FLASH_NEXT_FP32_HYPER_STATE: '1'
+          NINFER_FLASH_NEXT_FP32_GDN_CONV: '1'
+          NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: '1'
+          NINFER_FLASH_NEXT_FP32_GDN_READOUT: '1'
+          NINFER_FLASH_NEXT_FP32_GDN_GATE: '1'
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: '1'
+          NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: '1'
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: '1'
+          NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: '1'
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: '1'
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: '1'
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: '1'
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: '1'
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: '1'
+          NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: '1'
+          NINFER_FLASH_NEXT_FP32_MOE_OUTPUT: '1'
+          NINFER_FLASH_NEXT_FP32_ROUTER_INPUT: '0'
+          NINFER_FLASH_NEXT_FP32_ROUTER_INPUT_LAYERS_32_47: '0'
+          NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT: '0'
+          NINFER_FLASH_NEXT_FP32_MOE_SHARED_INPUT: '0'
+          NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE: '0'
+          NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE: '0'
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '1056'
+          NINFER_PREFILL_POLICY_BENCHMARK: '1'
+          NINFER_PREFILL_POLICY_DEFAULT: '1'
+          NINFER_FLASH_NEXT_EXPERT_CACHE: '1'
+        run: |
+          set -euo pipefail
+          build-27b/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            2>&1 | tee regression-results/flash-next-real.log
+          grep -q 'PASS: prefill policy natural routing' regression-results/flash-next-real.log
       - name: Checkout working V100 fork for comparison
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
