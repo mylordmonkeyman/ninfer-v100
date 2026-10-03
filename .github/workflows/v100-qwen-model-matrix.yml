@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/v100-qwen-model-matrix.yml'
       - 'tools/validation/download_qwen_qualification.py'
+      - 'tools/validation/compare_v100_qwen_parity.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -86,7 +87,10 @@ jobs:
                 2>&1 | tee "model-results/$label-$mode.log"
             done
           done
-          python3 tools/validation/compare_v100_qwen_parity.py model-results "${extras[@]}" | tee model-results/summary.log
+          ../build-27b-baseline/ninfer_v100_qwen_parity_probe "../v100-qualification-models/v2/$MODEL_FILENAME" \
+            bench/fixtures/bench_corpus.ids eager model-results/baseline-eager-repeat.txt \
+            2>&1 | tee model-results/baseline-eager-repeat.log
+          python3 tools/validation/compare_v100_qwen_parity.py model-results "${extras[@]}" --eager-reference | tee model-results/summary.log
       - name: Preserve direct accuracy evidence before benchmarking
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
