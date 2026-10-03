@@ -7,18 +7,25 @@ import subprocess
 import sys
 import urllib.request
 
-repo, filename, destination, evidence = sys.argv[1:]
+repo, filename, destination, evidence, revision = sys.argv[1:]
 destination, evidence = pathlib.Path(destination), pathlib.Path(evidence)
 destination.mkdir(parents=True, exist_ok=True)
 evidence.mkdir(parents=True, exist_ok=True)
 def fetch(url):
     with urllib.request.urlopen(url, timeout=60) as response:
         return json.load(response)
-info = fetch(f'https://huggingface.co/api/models/{repo}')
-revision = info['sha']
+if len(revision) != 40 or any(c not in '0123456789abcdef' for c in revision):
+    raise SystemExit('Qualification requires a pinned publication commit')
 base = f'https://huggingface.co/{repo}/resolve/{revision}'
 manifest = fetch(base + '/artifact-manifest.json')
 artifact = manifest['artifact']
+if artifact['container_version'] != 2:
+    raise SystemExit('Qualification requires a published NInfer v2 artifact')
+request = urllib.request.Request(base + '/' + filename, headers={'Range': 'bytes=0-7'})
+with urllib.request.urlopen(request, timeout=60) as response:
+    magic = response.read(8)
+if magic != b'NINFER\x00\x02':
+    raise SystemExit(f'Published artifact prefix differs from NInfer v2: {magic!r}')
 if artifact['filename'] != filename:
     raise SystemExit('Published artifact filename differs from the declared test artifact')
 size, expected = artifact['bytes'], artifact['sha256']

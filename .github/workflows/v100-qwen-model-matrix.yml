@@ -23,15 +23,20 @@ jobs:
         include:
           - repo: neroued/Qwen3.6-27B-NInfer
             filename: qwen3_6_27b.ninfer
+            revision: faaa0c140d0a92743872256a8b78a954b3984018
           - repo: neroued/Qwen3.6-27B-nvfp4-NInfer
             filename: qwen3_6_27b_nvfp4.ninfer
+            revision: 300373c46a7911a6483111b0c8c6c8972f459937
           - repo: neroued/Qwen3.6-35B-A3B-NInfer
             filename: qwen3_6_35b_a3b.ninfer
+            revision: 560f227e5a7104756d1a108201a8aa75654ea688
           - repo: neroued/Qwen3.8-27B-NInfer
             filename: qwen3_8_27b.ninfer
+            revision: dc370fb6295ae8b786e1af4f90d7142a16255c35
     env:
       MODEL_REPOSITORY: ${{ matrix.repo }}
       MODEL_FILENAME: ${{ matrix.filename }}
+      MODEL_REVISION: ${{ matrix.revision }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -57,6 +62,7 @@ jobs:
           test -x ../build-27b-baseline/ninfer_v100_qwen_parity_probe
           test -x ../build-27b/bench/ninfer_bench
           test -x ../build-27b-baseline/bench/ninfer_bench
+          rm -rf -- model-results
           mkdir -p model-results
           nvidia-smi > model-results/gpu.txt
           df -h .. | tee model-results/disk.txt
@@ -64,7 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/validation/download_qwen_qualification.py "$MODEL_REPOSITORY" "$MODEL_FILENAME" \
-            ../v100-qualification-models model-results
+            ../v100-qualification-models/v2 model-results "$MODEL_REVISION"
       - name: Compare real scoring and eager graph MTP generation with original V100 fork
         run: |
           set -euo pipefail
@@ -75,7 +81,7 @@ jobs:
             build=../build-27b
             if [[ "$label" == baseline ]]; then build=../build-27b-baseline; fi
             for mode in score eager graph mtp "${extras[@]}"; do
-              "$build/ninfer_v100_qwen_parity_probe" "../v100-qualification-models/$MODEL_FILENAME" \
+              "$build/ninfer_v100_qwen_parity_probe" "../v100-qualification-models/v2/$MODEL_FILENAME" \
                 bench/fixtures/bench_corpus.ids "$mode" "model-results/$label-$mode.txt" \
                 2>&1 | tee "model-results/$label-$mode.log"
             done
@@ -90,7 +96,7 @@ jobs:
       - name: Compare actual graph and MTP throughput with original V100 fork
         run: |
           set -euo pipefail
-          args=(--weights "../v100-qualification-models/$MODEL_FILENAME" --corpus bench/fixtures/bench_corpus.ids --kv-dtype int8 -pg 1024,64 -r 2 --warmup 1 -o json)
+          args=(--weights "../v100-qualification-models/v2/$MODEL_FILENAME" --corpus bench/fixtures/bench_corpus.ids --kv-dtype int8 -pg 1024,64 -r 2 --warmup 1 -o json)
           for label in baseline candidate; do
             build=../build-27b
             if [[ "$label" == baseline ]]; then build=../build-27b-baseline; fi
