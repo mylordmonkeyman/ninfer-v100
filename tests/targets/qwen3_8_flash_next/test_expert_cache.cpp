@@ -60,6 +60,7 @@ int main(){try{
     DeviceBuffer d_input(input.size()*2);d_input.copy_from_host(input.data(),input.size()*2);
     CpuNvfp4ExpertReferenceScratch scratch;
     for(unsigned tokens:{1U,2U,3U,4U,6U,8U,128U}){
+        cache.begin_layer(true);
         std::vector<float> out(tokens*2560),expected(tokens*2560);
         for(unsigned t=0;t<tokens;++t){
             require(cache.execute(0,t%2,static_cast<std::uint16_t*>(d_input.p)+t*2560,t,device.stream),"Ready hit missing");
@@ -68,6 +69,7 @@ int main(){try{
         }
         cache.download(out,device.stream);compare(out,expected);
     }
+    cache.set_grouped_prefill(false);
     for(unsigned tokens:{1U,3U,5U,8U,128U}) {
         std::vector<float> scalar(tokens*2560),batched(tokens*2560);
         for(bool batch:{false,true}) {
