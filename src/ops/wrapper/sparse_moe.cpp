@@ -300,7 +300,7 @@ void sparse_moe(const Tensor& x, const SparseMoeWeights& weights, SparseMoeEpilo
                     weights.routed_gate_up.qtype, weights.routed_down.qtype);
                 const detail::SparseMoeDecodeWorkspace views =
                     detail::allocate_sparse_moe_decode_workspace(workspace);
-                detail::sparse_moe_decode_launch(x_chunk, weights, destination_chunk, views, stream);
+                detail::sparse_moe_decode_launch(x_chunk, weights, destination_chunk, plan, views, stream);
             }
         }
         return;
@@ -332,15 +332,6 @@ void sparse_moe(const Tensor& x, const SparseMoeWeights& weights, SparseMoeEpilo
         detail::sparse_moe_decode_launch(x_column, weights, destination_column, plan, views,
                                          stream);
     }
-}
-
-// SparseMoeHints are pure L2-prefetch hints with no numeric effect (see the contract header); the
-// sm_70 kernels do not consume them, so forward to the plain overload.
-void sparse_moe(const Tensor& x, const SparseMoeWeights& weights, SparseMoeEpilogue epilogue,
-                Tensor& destination, const SparseMoeHints& hints, WorkspaceArena& workspace,
-                cudaStream_t stream) {
-    (void)hints;
-    sparse_moe(x, weights, epilogue, destination, workspace, stream);
 }
 
 } // namespace ninfer::ops

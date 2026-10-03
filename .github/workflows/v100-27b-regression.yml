@@ -58,7 +58,7 @@ jobs:
             ninfer_qwen3_6_27b_score_real_test ninfer_qwen3_6_27b_prefix_real_test \
             ninfer_qwen3_8_flash_next_vertical_slice_real_test \
             ninfer_qwen3_8_flash_next_expert_cache_test \
-            ninfer_qwen3_8_flash_next_text_decode_test 2>&1 | tee regression-results/build.log
+            ninfer_qwen3_8_flash_next_text_decode_test -- -k 0 2>&1 | tee regression-results/build.log
           ctest --test-dir ../build-27b -V \
             -R '^ninfer_qwen3_8_flash_next_(expert_cache|text_decode)_test$' \
             > regression-results/flash-next-unit.log 2>&1
