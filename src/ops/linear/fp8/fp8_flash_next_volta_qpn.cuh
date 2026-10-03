@@ -43,7 +43,7 @@
 // mapping to +-480, which weights never contain.
 
 #include "core/device.h"
-#include "ops/common/volta_mma.cuh"
+#include "ops/common/volta_mma884.cuh"
 #include "ops/linear/fp8/fp8_output.cuh"
 
 #include <cuda_bf16.h>

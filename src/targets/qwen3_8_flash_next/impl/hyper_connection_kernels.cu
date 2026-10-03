@@ -5,7 +5,7 @@
 #include "ops/common/warp.cuh"
 #if defined(NINFER_VOLTA_BUILD)
 #include "ops/common/volta_memory.cuh"
-#include "ops/common/volta_mma.cuh"
+#include "ops/common/volta_mma884.cuh"
 #else
 #include "ops/linear/bf16/bf16_config.h"
 #include "ops/linear/bf16/bf16_gemm_mma.cuh"

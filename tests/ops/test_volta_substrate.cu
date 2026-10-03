@@ -1,5 +1,5 @@
 #include "ops/common/volta_memory.cuh"
-#include "ops/common/volta_mma.cuh"
+#include "ops/common/volta_mma884.cuh"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
