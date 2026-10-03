@@ -7,6 +7,13 @@
 #include <string>
 #include <vector>
 
+// Public options added after the baseline fork; set their neutral values when present.
+template<class T> void neutral_reserve(T& options) {
+    if constexpr (requires { options.desktop_reserve_bytes; }) options.desktop_reserve_bytes = 0;
+}
+template<class T> void neutral_repetition(T& sampling) {
+    if constexpr (requires { sampling.repetition_penalty; }) sampling.repetition_penalty = 1.0F;
+}
 // Built unchanged against both public Engine APIs. No model math is replaced.
 int main(int argc, char** argv) {
     try {
@@ -22,7 +29,7 @@ int main(int argc, char** argv) {
         options.artifact_path = argv[1];
         options.max_context = 8192;
         options.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(8192);
-        options.desktop_reserve_bytes = 0;
+        neutral_reserve(options);
         options.context_cache.enabled = false;
         options.prefill_chunk = 1024;
         options.use_cuda_graph = mode != "eager";
@@ -55,7 +62,7 @@ int main(int argc, char** argv) {
                 request.execution.sampling.temperature = 0.0F;
                 request.execution.sampling.presence_penalty = 0.0F;
                 request.execution.sampling.frequency_penalty = 0.0F;
-                request.execution.sampling.repetition_penalty = 1.0F;
+                neutral_repetition(request.execution.sampling);
                 request.stop.include_model_defaults = false;
                 auto result = engine.generate(engine.prepare_tokens({ids.begin(), ids.begin()+length}), request);
                 if (result.generated_token_ids.size() != 64) throw std::runtime_error("short generation");
