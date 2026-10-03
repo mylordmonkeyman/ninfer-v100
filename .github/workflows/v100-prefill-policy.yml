@@ -49,6 +49,7 @@ jobs:
           submodules: recursive
           persist-credentials: false
       - name: Build and focused correctness checks
+        id: focused
         shell: bash
         run: |
           set -euo pipefail
@@ -88,9 +89,11 @@ jobs:
             grep -q 'PASS: prefill policy natural routing' "prefill-results/$i-cache${configs[$i]}.log"
           done
       - name: Long prompt with production default and following generation
+        if: ${{ !cancelled() && steps.focused.outcome == 'success' }}
         shell: bash
         env:
-          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '4096'
+          # Empty selects the full 4096-record manifest; smoke mode accepts <4096.
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: ''
           NINFER_PREFILL_POLICY_BENCHMARK: '1'
           NINFER_PREFILL_POLICY_DEFAULT: '1'
           NINFER_PREFILL_POLICY_LONG: '1'
@@ -99,10 +102,10 @@ jobs:
         run: |
           set -euo pipefail
           build-prefill/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
-            > prefill-results/long-default.log 2>&1
-          cat prefill-results/long-default.log
+            2>&1 | tee prefill-results/long-default.log
           grep -q 'PASS: prefill policy natural routing' prefill-results/long-default.log
       - name: Cold cache with admissions and following generation
+        if: ${{ !cancelled() && steps.focused.outcome == 'success' }}
         shell: bash
         env:
           NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '1056'
@@ -114,10 +117,10 @@ jobs:
         run: |
           set -euo pipefail
           build-prefill/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
-            > prefill-results/cold-default.log 2>&1
-          cat prefill-results/cold-default.log
+            2>&1 | tee prefill-results/cold-default.log
           grep -q 'PASS: prefill policy natural routing' prefill-results/cold-default.log
       - name: Shared 27B-shape linear regression
+        if: ${{ !cancelled() && steps.focused.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
