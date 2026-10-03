@@ -41,8 +41,18 @@ jobs:
       - name: Require qualifying runtime and unchanged-probe accuracy results
         run: |
           set -euo pipefail
-          test "$(gh run view 37127552576 --repo "$GITHUB_REPOSITORY" --json conclusion --jq .conclusion)" = success
-          test "$(gh run view 37127268924 --repo "$GITHUB_REPOSITORY" --json conclusion --jq .conclusion)" = success
+          python3 - <<'PYGATE'
+          import json, os, urllib.request
+          for run in (37127552576, 37127268924):
+              request = urllib.request.Request(
+                  f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{run}",
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  result = json.load(response)
+              if result['conclusion'] != 'success':
+                  raise SystemExit(f"Required qualification run {run}: {result['conclusion']}")
+          PYGATE
           test -x ../build-27b/ninfer_v100_qwen_parity_probe
           test -x ../build-27b-baseline/ninfer_v100_qwen_parity_probe
           test -x ../build-27b/bench/ninfer_bench
