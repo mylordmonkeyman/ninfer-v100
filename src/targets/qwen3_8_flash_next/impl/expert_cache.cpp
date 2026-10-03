@@ -49,7 +49,13 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
         prefill_enabled_ = std::strcmp(value, "0") != 0;
     }
     batched_prefill_ = enabled("NINFER_FLASH_NEXT_EXPERT_CACHE_BATCHED_PREFILL");
-    grouped_prefill_ = enabled("NINFER_FLASH_NEXT_EXPERT_CACHE_GROUPED_PREFILL");
+    // Reuse canonical weights across routed inputs during prefill by default.
+    // The scalar and batched paths remain available as qualification controls.
+    if (const char* value = std::getenv("NINFER_FLASH_NEXT_EXPERT_CACHE_GROUPED_PREFILL"); value && *value) {
+        if (std::strcmp(value, "0") && std::strcmp(value, "1"))
+            throw std::invalid_argument("grouped expert cache prefill must be 0 or 1");
+        grouped_prefill_ = std::strcmp(value, "0") != 0;
+    }
     CUDA_CHECK(cudaGetDevice(&device_));
     std::size_t free=0,total=0;
     CUDA_CHECK(cudaMemGetInfo(&free,&total));
