@@ -1,0 +1,19 @@
+name: V100 GPU Diagnostics
+on:
+  push:
+    branches: [forwardport/v100-flash-next]
+    paths: ['.github/workflows/v100-gpu-diagnostics.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 5
+    steps:
+      - name: Inspect GPU ownership without changing processes
+        run: |
+          set -euo pipefail
+          nvidia-smi -i 0
+          nvidia-smi --query-gpu=index,name,uuid,memory.total,memory.used,memory.free,utilization.gpu --format=csv
+          nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory --format=csv
