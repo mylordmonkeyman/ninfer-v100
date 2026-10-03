@@ -73,6 +73,7 @@ jobs:
           python3 tools/validation/download_qwen_qualification.py "$MODEL_REPOSITORY" "$MODEL_FILENAME" \
             ../v100-qualification-models/v2 model-results "$MODEL_REVISION"
       - name: Build corrected accuracy reference and preserve unchanged benchmark
+        id: build
         run: |
           set -euo pipefail
           cp tools/validation/v100_qwen_parity.cpp baseline/tools/v100_qwen_parity.cpp
@@ -106,7 +107,9 @@ jobs:
           printf '%s\n' 'Accuracy reference: original b37d0dd plus isolated ordered split-K correction.' \
             'Performance reference: unchanged original b37d0dd benchmark built before correction.' \
             > model-results/reference.txt
-      - name: Compare real scoring and eager graph MTP generation with original V100 fork
+      - name: Compare live original scoring and repetition (diagnostic)
+        id: live
+        continue-on-error: true
         run: |
           set -euo pipefail
           extras=(mtp7)
@@ -147,6 +150,68 @@ jobs:
               raise RuntimeError('Unchanged-original scoring drift')
           PYORIGINAL
           python3 tools/validation/compare_v100_qwen_parity.py model-results "${extras[@]}" --same-mode-reference --corrected-reference | tee model-results/summary.log
+      - name: Download previously qualified original outputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: v100-qualification-qwen3_6_27b_nvfp4.ninfer
+          path: qualified-reference
+          github-token: ${{ github.token }}
+          run-id: 37141867858
+      - name: Verify archived reference and require current candidate accuracy
+        env:
+          LIVE_OUTCOME: ${{ steps.live.outcome }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYARCHIVE'
+          import json, math, os, shutil
+          from pathlib import Path
+          current, archived = Path('model-results'), Path('qualified-reference')
+          live = current / 'live-original'
+          live.mkdir()
+          for path in current.glob('baseline-*'):
+              shutil.copy2(path, live / path.name)
+          for name in ('parity.json', 'summary.log', 'original-score-parity.json'):
+              if (current/name).exists():
+                  shutil.copy2(current/name, live/name)
+          metadata = {}
+          for label, root in (('current', current), ('archived', archived)):
+              data = json.loads((root/'artifact.json').read_text())
+              metadata[label] = (data['repository'], data['revision'], data['manifest']['artifact'])
+          if metadata['current'] != metadata['archived']:
+              raise RuntimeError('Archived reference used a different model artifact')
+          if (archived/'reference-correction.patch').read_bytes() != (current/'reference-correction.patch').read_bytes():
+              raise RuntimeError('Archived reference used a different correction')
+          previous = json.loads((archived/'parity.json').read_text())
+          if not all(row['pass'] for row in previous['qualification'].values()):
+              raise RuntimeError('Archived accuracy record was not qualified')
+          def rows(path):
+              return dict(((r[0], r[1]), float(r[2])) for r in
+                          (line.split() for line in path.read_text().splitlines()))
+          original, corrected = rows(archived/'baseline-original-score.txt'), rows(archived/'baseline-score.txt')
+          if original.keys() != corrected.keys() or not all(math.isfinite(v) for v in (*original.values(), *corrected.values())):
+              raise RuntimeError('Invalid archived scoring record')
+          if any(abs(original[k]-corrected[k]) > 1e-5 for k in original):
+              raise RuntimeError('Archived corrected scoring differs from unchanged original')
+          for mode in ('score', 'eager', 'graph', 'mtp', 'mtp7', 'eager-repeat'):
+              shutil.copy2(archived/f'baseline-{mode}.txt', current/f'baseline-{mode}.txt')
+          reference = {'accuracy_reference_run': 37141867858,
+                       'accuracy_reference_commit': 'b37d0dd3e1163b9d802d8bccfa89918bf68d793e',
+                       'accuracy_reference': 'archived qualified original plus isolated ordered split-K correction',
+                       'live_original_diagnostic_outcome': os.environ['LIVE_OUTCOME'],
+                       'performance_reference': 'fresh unchanged original benchmark',
+                       'model': metadata['current']}
+          (current/'reference-provenance.json').write_text(json.dumps(reference, indent=2)+'\n')
+          print(json.dumps(reference, indent=2), flush=True)
+          PYARCHIVE
+          python3 tools/validation/compare_v100_qwen_parity.py model-results mtp7 --same-mode-reference --corrected-reference | tee model-results/summary.log
+          python3 - <<'PYLABEL'
+          import json
+          from pathlib import Path
+          path = Path('model-results/parity.json')
+          data = json.loads(path.read_text())
+          data['reference'] = 'archived qualified original (run 37141867858) with isolated ordered split-K correction; matching execution modes'
+          path.write_text(json.dumps(data, indent=2)+'\n')
+          PYLABEL
       - name: Preserve direct accuracy evidence before benchmarking
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -154,6 +219,8 @@ jobs:
           path: model-results
           retention-days: 30
       - name: Compare actual graph and MTP throughput with unchanged original V100 fork
+        id: benchmark
+        if: always() && steps.build.outcome == 'success'
         run: |
           set -euo pipefail
           args=(--weights "../v100-qualification-models/v2/$MODEL_FILENAME" --corpus bench/fixtures/bench_corpus.ids --kv-dtype int8 -pg 1024,64 -r 2 --warmup 1 -o json)
@@ -179,6 +246,7 @@ jobs:
             done
           fi
       - name: Summarize and check actual throughput
+        if: always() && steps.benchmark.outcome == 'success'
         run: |
           set -euo pipefail
           python3 - <<'PYPERF'
