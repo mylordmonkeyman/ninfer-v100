@@ -55,7 +55,15 @@ int main(int argc, char** argv) {
                 out << "score " << i+1 << ' ' << scores[i] << '\n';
             }
         } else {
-            for (size_t length : {size_t(31), size_t(1024), size_t(4096)}) {
+            std::vector<std::vector<ninfer::TokenId>> prompts;
+            for (size_t length : {size_t(31), size_t(1024), size_t(4096)})
+                prompts.emplace_back(ids.begin(), ids.begin()+length);
+            std::string repetition;
+            for (int i = 0; i < 32; ++i) repetition += " alpha beta gamma delta epsilon zeta eta theta";
+            prompts.push_back(engine.tokenize_text(repetition));
+            for (size_t i = 0; i < prompts.back().size(); ++i)
+                out << "repeat_input " << i << ' ' << prompts.back()[i] << '\n';
+            for (size_t scenario = 0; scenario < prompts.size(); ++scenario) {
                 ninfer::RequestOptions request;
                 request.execution.requested_output_tokens = 64;
                 request.execution.allow_prefix_reuse = false;
@@ -64,10 +72,14 @@ int main(int argc, char** argv) {
                 request.execution.sampling.frequency_penalty = 0.0F;
                 neutral_repetition(request.execution.sampling);
                 request.stop.include_model_defaults = false;
-                auto result = engine.generate(engine.prepare_tokens({ids.begin(), ids.begin()+length}), request);
+                auto result = engine.generate(engine.prepare_tokens(prompts[scenario]), request);
                 if (result.generated_token_ids.size() != 64) throw std::runtime_error("short generation");
                 for (size_t i = 0; i < result.generated_token_ids.size(); ++i)
-                    out << "generation " << length << ':' << i << ' ' << result.generated_token_ids[i] << '\n';
+                    out << "generation " << scenario << ':' << i << ' ' << result.generated_token_ids[i] << '\n';
+                std::uint64_t lookup_accepted = 0;
+                for (size_t i = 3; i < result.speculative.accepted_per_position.size(); ++i)
+                    lookup_accepted += result.speculative.accepted_per_position[i];
+                std::cout << "LOOKUP_ACCEPTED scenario=" << scenario << " count=" << lookup_accepted << '\n';
             }
         }
         if (!out) throw std::runtime_error("output write failed");

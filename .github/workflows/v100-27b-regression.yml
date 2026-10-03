@@ -6,6 +6,8 @@ on:
       - '.github/workflows/v100-27b-regression.yml'
       - 'src/ops/**'
       - 'src/targets/qwen3_6_27b/**'
+      - 'src/targets/qwen3_6/**'
+      - 'src/targets/qwen3_6_35b_a3b/**'
       - 'src/CMakeLists.txt'
       - 'CMakeLists.txt'
   workflow_dispatch:

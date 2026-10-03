@@ -97,7 +97,11 @@ struct DFlashConfig {
 inline constexpr float kAttentionScale                   = 0.0625F;
 inline constexpr float kGdnScale                         = 0.08838834764831845F;
 inline constexpr std::uint32_t kPrefillChunkAlignment    = 128;
+#ifdef NINFER_VOLTA_BUILD
+inline constexpr std::uint32_t kMaximumMtpDraftTokens    = 7;
+#else
 inline constexpr std::uint32_t kMaximumMtpDraftTokens    = 5;
+#endif
 inline constexpr std::uint32_t kMaximumDFlashDraftTokens = 15;
 inline constexpr std::uint32_t kNativeContext            = 262144;
 

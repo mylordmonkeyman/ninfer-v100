@@ -107,7 +107,15 @@ std::vector<GraphExecutionProfile> Variant::mtp_graph_profiles(std::uint32_t cap
     }
     std::sort(ends.begin(), ends.end());
     ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
-    return graph_profiles_through(capacity - 1, ends);
+    std::vector<GraphExecutionProfile> profiles = graph_profiles_through(capacity - 1, ends);
+#ifdef NINFER_VOLTA_BUILD
+    if (draft_window > 5) {
+        for (std::size_t i = 0; i < profiles.size(); ++i) {
+            profiles[i].topology_class = static_cast<std::uint32_t>(i);
+        }
+    }
+#endif
+    return profiles;
 }
 
 std::vector<GraphExecutionProfile> Variant::dflash_graph_profiles(std::uint32_t capacity,
@@ -167,10 +175,11 @@ void Variant::mtp_q_gate_projection(const Tensor& hidden,
 
 void Variant::gdn_input_projection(const Tensor& hidden, const GdnProjectionWeights& weights,
                                    Tensor& qkv, Tensor& output_gate, qwen3_6::TextPhase,
-                                   WorkspaceArena&, cudaStream_t stream) {
+                                   WorkspaceArena& workspace, cudaStream_t stream) {
     Tensor output_gate_flat =
         output_gate.view({TextConfig::value_dim, static_cast<int>(hidden.ne[1] * hidden.ne[2])});
-    ops::gdn_input_proj(hidden, weights.query_key_value_z, qkv, output_gate_flat, stream);
+    ops::gdn_input_proj(hidden, weights.query_key_value_z, qkv, output_gate_flat,
+                        ops::LinearPolicy::A16Only, workspace, stream);
 }
 
 void Variant::gdn_input_projection_snapshot(

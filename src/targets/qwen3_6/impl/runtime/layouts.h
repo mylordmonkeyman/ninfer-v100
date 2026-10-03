@@ -38,6 +38,7 @@ struct PersistentLayout {
     qwen3_6::DecoderStateLayout decoder;
     qwen3_6::StateImageDeviceLayout state_images;
     std::optional<GdnReplayRecordLayout> replay_records;
+    std::optional<GdnReplayRecordLayout> mtp_lookup_replay_records;
     std::optional<DFlashPersistentLayout> dflash;
     qwen3_6::RoundStateLayout round;
     TensorLayout prefill_hidden;

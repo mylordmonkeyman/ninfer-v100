@@ -6,6 +6,8 @@ on:
       - '.github/workflows/v100-qwen-accuracy.yml'
       - 'tools/validation/v100_qwen_parity.cpp'
       - 'tools/validation/compare_v100_qwen_parity.py'
+      - 'src/targets/qwen3_6/**'
+      - 'src/targets/qwen3_6_35b_a3b/**'
   workflow_dispatch:
 permissions:
   contents: read
@@ -43,7 +45,8 @@ jobs:
             source=.
             build=../build-27b
             probe=tools/validation/v100_qwen_parity.cpp
-            if [[ "$label" == baseline ]]; then source=baseline; build=../build-27b-baseline; probe=tools/v100_qwen_parity.cpp; fi
+            media=ON
+            if [[ "$label" == baseline ]]; then source=baseline; build=../build-27b-baseline; probe=tools/v100_qwen_parity.cpp; media=OFF; fi
             cat >> "$source/CMakeLists.txt" <<CMAKE
           add_executable(ninfer_v100_qwen_parity_probe $probe)
           target_include_directories(ninfer_v100_qwen_parity_probe PRIVATE \${PROJECT_SOURCE_DIR}/include)
@@ -51,7 +54,7 @@ jobs:
           CMAKE
             cmake -S "$source" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70 \
-              -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
+              -DNINFER_BUILD_MEDIA="$media" -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
             cmake --build "$build" -j --target ninfer_v100_qwen_parity_probe 2>&1 | tee "accuracy-results/$label-build.log"
           done
       - name: Compare scoring and generated tokens on identical 27B inputs

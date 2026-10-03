@@ -355,6 +355,7 @@ struct PendingCandidate {
     std::uint32_t base_S        = 0;
     std::uint32_t prompt_tokens = 0;
     std::uint32_t produced      = 0;
+    std::uint32_t row_stride    = 1;
 };
 
 enum class Lifecycle : std::uint8_t {
@@ -676,6 +677,8 @@ public:
     std::unique_ptr<StateImageStore> state_store;
     std::optional<GdnReplayRecords> replay_records;
     std::optional<ops::GdnReplayFoldPlan> replay_fold;
+    std::optional<GdnReplayRecords> mtp_lookup_replay_records;
+    std::optional<ops::GdnReplayFoldPlan> mtp_lookup_replay_fold;
     std::optional<DFlashPersistentState> dflash;
     qwen3_6::RoundState io;
     Tensor prefill_hidden;
@@ -695,6 +698,7 @@ public:
 
     DecodeGraphFamily ordinary_graphs;
     DecodeGraphFamily mtp_graphs;
+    DecodeGraphFamily mtp_lookup_graphs;
     DecodeGraphFamily dflash_graphs;
 
     PinnedHostBuffer round_host;
