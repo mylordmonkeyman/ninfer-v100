@@ -34,13 +34,14 @@ template<class T> void print_logprobs(const T& result) {
 // Same public Engine workload in both forks; isolate the failing 31-token prompt.
 int main(int argc, char** argv) {
     try {
-        if (argc != 5 && argc != 6) throw std::runtime_error("usage: short-probe ARTIFACT CORPUS KV OUTPUT_TOKENS [fresh-engine]");
+        if (argc != 5 && argc != 6) throw std::runtime_error("usage: short-probe ARTIFACT CORPUS KV OUTPUT_TOKENS [fresh-engine|PREFIX_TOKENS]");
         const bool fresh_engine = argc == 6 && std::string(argv[5]) == "fresh-engine";
+        const std::size_t prefix_tokens = argc == 6 && !fresh_engine ? std::stoul(argv[5]) : 31;
         std::ifstream corpus(argv[2]);
         std::vector<ninfer::TokenId> ids;
         ninfer::TokenId token;
-        while (ids.size() < 31 && corpus >> token) ids.push_back(token);
-        if (ids.size() != 31) throw std::runtime_error("short corpus");
+        while (ids.size() < prefix_tokens && corpus >> token) ids.push_back(token);
+        if (prefix_tokens == 0 || ids.size() != prefix_tokens) throw std::runtime_error("short corpus");
         ninfer::EngineOptions options;
         options.artifact_path = argv[1];
         options.max_context = 8192;

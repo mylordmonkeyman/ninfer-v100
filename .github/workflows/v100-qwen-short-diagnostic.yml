@@ -30,6 +30,20 @@ jobs:
           submodules: recursive
           persist-credentials: false
           clean: false
+      - name: Disable atomic split-K only in diagnostic builds
+        run: |
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          for root in (Path('.'), Path('baseline')):
+              path = root / 'src/ops/common/volta_mma_splits.h'
+              source = path.read_text()
+              needle = '    const int row_ctas = (n + kVoltaMmaRowsPerCta - 1) / kVoltaMmaRowsPerCta;'
+              if source.count(needle) != 1:
+                  raise RuntimeError(f'Unexpected split selector: {path}')
+              source = source.replace(needle, '    if (t <= 64) { return 1; } // Diagnostic only: eliminate unordered atomics.\n' + needle)
+              path.write_text(source)
+          PYTHON
+          git diff -- src/ops/common/volta_mma_splits.h > short-split-diagnostic.patch
       - name: Build identical short-prompt probes
         run: |
           set -euo pipefail
@@ -52,34 +66,22 @@ jobs:
               -DNINFER_BUILD_MEDIA="$media" -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
             cmake --build "$build" -j --target ninfer_v100_qwen_short_probe 2>&1 | tee "short-results/$label-build.log"
           done
-      - name: Separate request reuse from GPU scheduling
+      - name: Test repeated generation without unordered split-K
         run: |
           set -euo pipefail
-          for filename in qwen3_6_27b.ninfer qwen3_6_27b_nvfp4.ninfer; do
-            for scheduling in normal blocking; do
-              blocking=0
-              if [[ "$scheduling" == blocking ]]; then blocking=1; fi
-              CUDA_LAUNCH_BLOCKING="$blocking" ../build-27b/ninfer_v100_qwen_short_probe \
-                "../v100-qualification-models/v2/$filename" bench/fixtures/bench_corpus.ids int8-logprobs 8 \
-                2>&1 | tee "short-results/$filename-$scheduling.log"
+          cp short-split-diagnostic.patch short-results/
+          for label in candidate baseline; do
+            build=../build-27b
+            if [[ "$label" == baseline ]]; then build=../build-27b-baseline; fi
+            for filename in qwen3_6_27b.ninfer qwen3_6_27b_nvfp4.ninfer; do
+              "$build/ninfer_v100_qwen_short_probe" \
+                "../v100-qualification-models/v2/$filename" bench/fixtures/bench_corpus.ids int8-logprobs 64 \
+                2>&1 | tee "short-results/$label-$filename-no-atomic.log"
             done
+            "$build/ninfer_v100_qwen_short_probe" \
+              ../v100-qualification-models/v2/qwen3_6_27b_nvfp4.ninfer bench/fixtures/bench_corpus.ids int8-logprobs 64 4096 \
+              2>&1 | tee "short-results/$label-nvfp4-long-prefix.log"
           done
-          ../build-27b/ninfer_v100_qwen_short_probe \
-            ../v100-qualification-models/v2/qwen3_6_27b.ninfer bench/fixtures/bench_corpus.ids int8-logprobs 8 fresh-engine \
-            2>&1 | tee short-results/groupwise-fresh-engine.log
-      - name: Identify kernels used by the unstable NVFP4 short prompt
-        run: |
-          set -euo pipefail
-          if command -v nsys >/dev/null; then
-            nsys profile --sample=none --trace=cuda --force-overwrite=true -o short-results/nvfp4-kernels \
-              ../build-27b/ninfer_v100_qwen_short_probe \
-              ../v100-qualification-models/v2/qwen3_6_27b_nvfp4.ninfer bench/fixtures/bench_corpus.ids int8 8 \
-              > short-results/nvfp4-profile.log 2>&1
-            nsys stats --report cuda_gpu_kern_sum --format csv short-results/nvfp4-kernels.nsys-rep \
-              | tee short-results/nvfp4-kernel-summary.csv
-          else
-            echo "Nsight Systems is unavailable; repeatability evidence is still retained."
-          fi
       - name: Preserve diagnostic evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
