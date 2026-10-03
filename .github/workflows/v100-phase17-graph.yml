@@ -79,7 +79,10 @@ jobs:
                 prefix=(sudo)
               fi
             fi
-            pkg="$(apt-cache search '^nsight-systems-[0-9]' | awk '{print $1}' | sort -V | tail -n 1)"
+            pkg="$(apt-cache search '^nsight-systems-2025\.1\.3 ' | awk '{print $1}' | head -n 1)"
+            if [[ -z "$pkg" ]]; then
+              pkg="$(apt-cache search '^nsight-systems-[0-9]' | awk '{print $1}' | sort -V | head -n 1)"
+            fi
             if [[ -n "$pkg" && ( "$(id -u)" == 0 || ${#prefix[@]} -gt 0 ) ]]; then
               "${prefix[@]}" apt-get update
               echo "Installing $pkg" | tee -a phase17-results/profiler.txt
@@ -90,7 +93,10 @@ jobs:
             # The self-hosted runner normally has no passwordless sudo. NVIDIA's
             # repository package can still be downloaded and unpacked locally.
             if [[ -z "$NSYS" ]]; then
-              pkg="$(apt-cache search '^nsight-systems-[0-9]' | awk '{print $1}' | sort -V | tail -n 1)"
+              pkg="$(apt-cache search '^nsight-systems-2025\.1\.3 ' | awk '{print $1}' | head -n 1)"
+            if [[ -z "$pkg" ]]; then
+              pkg="$(apt-cache search '^nsight-systems-[0-9]' | awk '{print $1}' | sort -V | head -n 1)"
+            fi
               if [[ -n "$pkg" ]] && command -v dpkg-deb >/dev/null 2>&1; then
                 mkdir -p phase17-tools/deb phase17-tools/root
                 (
