@@ -365,6 +365,18 @@ jobs:
           print(json.dumps(decision,sort_keys=True))
           PY
 
+      - name: Evaluate stable hit Graph and decode launch fusion
+        shell: bash
+        env:
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '128'
+        run: |
+          set -euo pipefail
+          NINFER_PHASE17_HIT_GRAPH_BENCHMARK=1             build-phase17/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test             | tee phase17-results/hit-graph-benchmark.log
+          grep -q 'PASS: Phase 17 stable cached-expert graph pair'             phase17-results/hit-graph-benchmark.log
+
+          NINFER_PHASE17_FUSION_BENCHMARK=1             build-phase17/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test             | tee phase17-results/decode-fusion-benchmark.log
+          grep -q 'PASS: Phase 17 decode-hit launch fusion exact replay'             phase17-results/decode-fusion-benchmark.log
+
       - name: Preserve Phase 17 evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
