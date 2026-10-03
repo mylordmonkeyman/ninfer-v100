@@ -3,8 +3,6 @@ on:
   push:
     branches: [forwardport/v100-flash-next]
     paths:
-      - 'src/targets/qwen3_8_flash_next/impl/**'
-      - 'tests/targets/qwen3_8_flash_next/**'
       - '.github/workflows/v100-prefill-policy.yml'
   workflow_dispatch:
 permissions:
@@ -13,7 +11,14 @@ concurrency:
   group: v100-prefill-policy
   cancel-in-progress: true
 jobs:
+  workflow-update:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record full-sweep policy
+        run: echo 'Full GPU sweeps use workflow_dispatch; real Flash-Next smoke remains in V100 27B Regression.'
   prefill-policy:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     timeout-minutes: 180
     env:
