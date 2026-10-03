@@ -1,6 +1,19 @@
 # V100 forward-port Phase 11: whole-model vertical slice
 
-Status: implementation/compile qualification in progress; physical V100 execution deferred.
+Status: accepted project milestone under the user's supplementary precision-matched
+reference criterion; original Section 7 numerical thresholds remain unpassed.
+
+The physical 4,096-position comparison completed in
+[run 36897047312](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/36897047312).
+With the accepted FP32 MoE-output profile, V100 mean oracle KL was 0.08707196
+versus 0.12815687 for the matching CPU profile; V100 top-1 agreement was
+3,847/4,096. The user accepted this milestone and authorized Phase 12 onward.
+This is not formal qualification against the original thresholds below.
+The Phase 11 backup branch remains `forwardport/v100-flash-next-phase11`.
+Current cache/scheduler and prefill evidence is maintained in `docs/performance.md`.
+
+The following describes the original Phase 11 harness and numerical contract;
+its historical bring-up settings are not the current optimized runtime defaults.
 
 Phase 11 is the first whole-model numerical acceptance gate. It is deliberately a
 correctness path, not a performance path.
@@ -131,8 +144,8 @@ container on a GitHub-hosted runner. It:
 The real whole-model test intentionally skips unless both oracle/artifact environment
 variables and a usable CUDA device are present.
 
-No physical V100 run is part of compile CI. That gate remains deferred until the
-forward port is far enough along to justify target-hardware qualification.
+Compile CI still has no physical V100. The separate physical comparison cited
+above supplies the accepted project-milestone evidence.
 
 ## Boundary
 
@@ -140,5 +153,5 @@ Passing compile CI does **not** close Phase 11. Phase 11 closes only after a phy
 V100 run passes the teacher-forced whole-model oracle and the observed non-expert
 VRAM ledger is reconciled closely enough with the static plan.
 
-Phase 12 (MTP correctness) and Phase 13 (expert cache) must not be inferred from a
-Phase-11 compile pass.
+Phase 12 (production CPU expert optimization) and Phase 13 (expert cache) must
+not be inferred from a Phase-11 compile pass. MTP is Phase 18 in the specification.
