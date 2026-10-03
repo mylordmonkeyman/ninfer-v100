@@ -37,8 +37,13 @@ int main(int argc, char** argv) {
         if (mode == "score") {
             options.purpose = ninfer::EnginePurpose::CausalScoring;
             options.kv_cache = ninfer::KvCacheStorage::Fp8E4M3Row256;
-        } else if (mode == "mtp") {
+        } else if (mode == "mtp" || mode == "mtp7") {
             options.speculative.backend = ninfer::SpeculativeBackend::Mtp;
+            options.speculative.draft_tokens = mode == "mtp7" ? 7 : 3;
+            options.speculative.proposal_head = ninfer::ProposalHead::Optimized;
+        } else if (mode == "dflash" || mode == "dflash2") {
+            options.speculative.backend = mode == "dflash" ? ninfer::SpeculativeBackend::DFlash
+                                                            : ninfer::SpeculativeBackend::DFlash2;
             options.speculative.draft_tokens = 3;
             options.speculative.proposal_head = ninfer::ProposalHead::Optimized;
         } else if (mode != "graph" && mode != "eager") throw std::runtime_error("unknown mode");

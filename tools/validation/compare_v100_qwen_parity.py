@@ -6,7 +6,7 @@ import sys
 
 root = pathlib.Path(sys.argv[1])
 report = {}
-for mode in ('score', 'eager', 'graph', 'mtp'):
+for mode in ('score', 'eager', 'graph', 'mtp') + tuple(sys.argv[2:]):
     def read(label):
         rows = [line.split() for line in (root / f'{label}-{mode}.txt').read_text().splitlines()]
         return {(r[0], r[1]): float(r[2]) for r in rows}
