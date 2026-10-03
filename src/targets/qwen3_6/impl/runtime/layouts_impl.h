@@ -713,9 +713,19 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
         }
         break;
     }
+#ifdef NINFER_VOLTA_BUILD
+    if (options.kv_cache == KvCacheStorage::Nvfp4Group16 ||
+        options.kv_cache == KvCacheStorage::Fp8KeyNvfp4Value) {
+        throw std::invalid_argument("NVFP4 KV-cache storage is unavailable on Volta");
+    }
+    if (device.compute_capability() != 70) {
+        throw std::invalid_argument("Qwen3.6 family Volta runtime requires compute capability 7.0");
+    }
+#else
     if (device.compute_capability() != 120) {
         throw std::invalid_argument("Qwen3.6 family runtime requires compute capability 12.0");
     }
+#endif
 }
 
 std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlanningInputs& inputs,

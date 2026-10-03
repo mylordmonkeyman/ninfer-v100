@@ -56,6 +56,7 @@ jobs:
             -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
           cmake --build ../build-27b -j --target ninfer ninfer-serve ninfer_bench \
             ninfer_qwen3_6_27b_score_real_test ninfer_qwen3_6_27b_prefix_real_test \
+            ninfer_qwen3_6_27b_mtp_round_bench \
             ninfer_qwen3_8_flash_next_vertical_slice_real_test \
             ninfer_qwen3_8_flash_next_expert_cache_test \
             ninfer_qwen3_8_flash_next_text_decode_test -- -k 0 2>&1 | tee regression-results/build.log
@@ -70,7 +71,15 @@ jobs:
         run: |
           set -euo pipefail
           ../build-27b/tests/ninfer_qwen3_6_27b_score_real_test 2>&1 | tee regression-results/candidate.log
+      - name: Preserve scoring evidence immediately
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-27b-scoring
+          path: regression-results/candidate.log
+          retention-days: 7
       - name: Real generation with graphs and MTP
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         id: generation
         shell: bash
         run: |
@@ -83,6 +92,7 @@ jobs:
               --output-file "regression-results/mtp-$drafts.json" > "regression-results/mtp-$drafts.log" 2>&1
           done
       - name: Real speculative state and vision regression
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         env:
           NINFER_QWEN3_8_27B_NVFP4_WEIGHTS: /models/qwen3_8_27b_nvfp4.ninfer
@@ -153,11 +163,13 @@ jobs:
             -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
             -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
           cmake --build ../build-27b-baseline -j --target ninfer_qwen3_6_27b_score_real_test ninfer_bench
-          ../build-27b-baseline/tests/ninfer_qwen3_6_27b_score_real_test 2>&1 | tee regression-results/baseline.log
+          baseline_score_status=0
+          ../build-27b-baseline/tests/ninfer_qwen3_6_27b_score_real_test 2>&1 | tee regression-results/baseline.log || baseline_score_status=$?
           args=(--weights /models/qwen3_8_27b_nvfp4.ninfer --corpus bench/fixtures/bench_corpus.ids --kv-dtype int8 -pg 1024,64 -r 2 --warmup 1 -o json)
           ../build-27b-baseline/bench/ninfer_bench "${args[@]}" --output-file regression-results/baseline-graph.json > regression-results/baseline-graph.log 2>&1
           ../build-27b-baseline/bench/ninfer_bench "${args[@]}" --spec mtp --draft-tokens 3 --lm-head-draft \
             --output-file regression-results/baseline-mtp-3.json > regression-results/baseline-mtp-3.log 2>&1
+          exit "$baseline_score_status"
       - name: Preserve evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
