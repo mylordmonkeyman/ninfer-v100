@@ -9,6 +9,11 @@ on:
       - 'src/targets/qwen3_6/**'
       - 'src/targets/qwen3_6_35b_a3b/**'
   workflow_dispatch:
+    inputs:
+      artifact_path:
+        description: Exact mounted .ninfer artifact to compare against the original fork
+        type: string
+        default: /models/qwen3_8_27b_nvfp4.ninfer
 permissions:
   contents: read
 concurrency:
@@ -18,11 +23,14 @@ jobs:
   accuracy:
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     timeout-minutes: 90
+    env:
+      MODEL_PATH: ${{ inputs.artifact_path || '/models/qwen3_8_27b_nvfp4.ninfer' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           submodules: recursive
           persist-credentials: false
+          clean: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: geoffwatts/ninfer-v100
@@ -30,13 +38,15 @@ jobs:
           path: baseline
           submodules: recursive
           persist-credentials: false
+          clean: false
       - name: Record hardware and available model artifacts
         run: |
           set -euo pipefail
           mkdir -p accuracy-results
           nvidia-smi > accuracy-results/gpu.txt
           find /models -maxdepth 2 -type f -name '*.ninfer' -printf '%p %s bytes\n' | sort | tee accuracy-results/models.txt
-          test -f /models/qwen3_8_27b_nvfp4.ninfer
+          test -f "$MODEL_PATH"
+          stat --format='%n %s bytes' "$MODEL_PATH" > accuracy-results/artifact.txt
       - name: Build unchanged probe against both Engines
         run: |
           set -euo pipefail
@@ -64,7 +74,7 @@ jobs:
             build=../build-27b
             if [[ "$label" == baseline ]]; then build=../build-27b-baseline; fi
             for mode in score eager graph mtp; do
-              "$build/ninfer_v100_qwen_parity_probe" /models/qwen3_8_27b_nvfp4.ninfer \
+              "$build/ninfer_v100_qwen_parity_probe" "$MODEL_PATH" \
                 bench/fixtures/bench_corpus.ids "$mode" "accuracy-results/$label-$mode.txt" \
                 2>&1 | tee "accuracy-results/$label-$mode.log"
             done
