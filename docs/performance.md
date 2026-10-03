@@ -1733,3 +1733,45 @@ The original §7 numerical gate remains unpassed.
 The restored runtime and retained prefill benchmark also passed the
 [final SM70 compile and host contract check](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37064720486)
 at `3b88b9c8`. Runtime staging sources match the tested Phase 15 baseline exactly.
+
+
+### Grouped cached prefill
+
+Canonical cached weights are decoded once for up to four independently accumulated
+inputs routed to the same expert. Singleton inputs use the batched leaf. Each
+input retains the existing arithmetic association and BF16 activation boundary;
+this changes weight reuse, not the accepted Phase 11 precision profile.
+
+The [V100 comparison](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37072523007)
+at `6f5dd837` passed cache mathematical-oracle and exact scalar/grouped-output
+checks, cache memcheck, fixed-policy replay logits including following decode,
+finite logits and committed-frontier checks. Target: V100 32 GB, dual Xeon,
+CUDA 12.8, 32 CPU workers, eager execution, one lane, 128-token prefill chunks,
+no MTP, accepted FP32 profile. Natural oracle-prefix tokens were used as inputs.
+
+For frozen decode-populated caches, four observations per policy gave:
+
+| Prompt tokens | Prefill cache-compute bypass | Batched cached experts | Grouped cached experts |
+|---:|---:|---:|---:|
+| 1 | 7.02 | 8.87 | 8.91 |
+| 8 | 15.70 | 19.78 | 24.08 |
+| 32 | 25.19 | 19.16 | 35.95 |
+| 128 | 34.91 | 18.87 | 46.77 |
+| 1024 | 36.88 | 25.23 | 49.44 |
+
+Rates are prompt tokens/s. Bypass preserves the cache for subsequent decode;
+it is not a cache-off configuration. At 1,024 tokens grouped prefill is 96.0%
+faster than batched and 34.1% faster than bypass. Following 32-token decode rates
+were 8.48, 8.50 and 8.48 tokens/s respectively. With admissions active after
+warming, grouped prefill measured 46.66 tokens/s at 128 tokens and 49.56 at 1,024.
+These are harness measurements, not full server or long-context qualification.
+
+Grouped cached prefill is now the runtime default when the expert cache is
+explicitly enabled. `NINFER_FLASH_NEXT_EXPERT_CACHE_GROUPED_PREFILL=0` selects the
+scalar control; combine it with `NINFER_FLASH_NEXT_EXPERT_CACHE_BATCHED_PREFILL=1`
+for the batched control. Decode retains its existing expert execution path.
+The cache itself remains opt-in. The prefill-policy workflow now exercises the
+constructor-selected default, a 4,064-token prompt plus 32-token decode, and
+fresh-cache requests with active admissions. Results of those added cases are
+pending. No new Section 7 qualification is claimed, and Phase 17 Graph adoption
+has not been decided.
