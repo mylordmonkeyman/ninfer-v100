@@ -9,11 +9,16 @@ on:
       - 'src/CMakeLists.txt'
       - 'CMakeLists.txt'
   workflow_dispatch:
+    inputs:
+      compare_baseline:
+        description: Rebuild and compare the pinned original V100 fork
+        type: boolean
+        default: true
 permissions:
   contents: read
 concurrency:
   group: v100-27b-regression
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   real-27b:
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
@@ -150,7 +155,7 @@ jobs:
             2>&1 | tee regression-results/flash-next-real.log
           grep -q 'PASS: prefill policy natural routing' regression-results/flash-next-real.log
       - name: Checkout working V100 fork for comparison
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && github.event_name == 'workflow_dispatch' && inputs.compare_baseline }}
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: geoffwatts/ninfer-v100
@@ -159,7 +164,7 @@ jobs:
           submodules: recursive
           persist-credentials: false
       - name: Compare original V100 fork on the same artifact and corpus
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && github.event_name == 'workflow_dispatch' && inputs.compare_baseline }}
         shell: bash
         env:
           NINFER_QWEN3_6_27B_WEIGHTS: /models/qwen3_8_27b_nvfp4.ninfer
