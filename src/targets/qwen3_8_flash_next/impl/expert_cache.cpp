@@ -49,6 +49,8 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
         prefill_enabled_ = std::strcmp(value, "0") != 0;
     }
     batched_prefill_ = enabled("NINFER_FLASH_NEXT_EXPERT_CACHE_BATCHED_PREFILL");
+    // Experimental only: Phase 17 compares launch fusion against the scalar decode baseline.
+    batched_decode_ = enabled("NINFER_FLASH_NEXT_EXPERT_CACHE_BATCHED_DECODE");
     // Reuse canonical weights across routed inputs during prefill by default.
     // The scalar and batched paths remain available as qualification controls.
     if (const char* value = std::getenv("NINFER_FLASH_NEXT_EXPERT_CACHE_GROUPED_PREFILL"); value && *value) {
@@ -120,7 +122,8 @@ HostNvfp4ExpertPairView FlashNextExpertCache::ready_view(unsigned layer,int expe
 void FlashNextExpertCache::begin_layer(bool prefill) {
     if (!consumers_.empty()) throw std::logic_error("cache layer has outstanding consumers");
     grouping_layer_ = prefill && grouped_prefill_;
-    batching_layer_ = prefill && (batched_prefill_ || grouped_prefill_);
+    batching_layer_ =
+        (prefill && (batched_prefill_ || grouped_prefill_)) || (!prefill && batched_decode_);
 }
 bool FlashNextExpertCache::execute(unsigned layer,int expert,const void* input,
     unsigned path,cudaStream_t stream) {
