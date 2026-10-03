@@ -4,8 +4,6 @@
 
 #include <cuda_bf16.h>
 
-#include <cstdlib>
-
 namespace ninfer::ops::detail {
 
 #ifdef NINFER_VOLTA_BUILD
@@ -14,7 +12,21 @@ namespace {
 using S = Fp8VoltaQpnSchedule;
 static_assert(kFp8VoltaQpnRowsPerTile == S::kRowsPerTile,
               "dispatch mirrors the tile height for host code");
+
+__global__ void fp8_stage_bf16_activation_kernel(const __nv_bfloat16* __restrict__ input,
+                                                 half* __restrict__ output,
+                                                 std::int64_t count) {
+    const std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < count) { output[i] = __float2half(__bfloat162float(input[i])); }
+}
 } // namespace
+
+void fp8_stage_bf16_activation_sm70(const Tensor& x, void* fp16_out, cudaStream_t stream) {
+    const std::int64_t count = x.numel();
+    fp8_stage_bf16_activation_kernel<<<static_cast<int>((count + 255) / 256), 256, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data), static_cast<half*>(fp16_out), count);
+    CUDA_CHECK(cudaGetLastError());
+}
 
 bool fp8_volta_qpn_supported(std::int32_t n, std::int32_t k, std::int32_t t) noexcept {
     if (n <= 0 || t <= 0) { return false; }
@@ -27,13 +39,10 @@ bool fp8_volta_qpn_supported(std::int32_t n, std::int32_t k, std::int32_t t) noe
     // 32x8 route, so here the alternative is chunking -- reading the whole weight twice -- and the
     // second tile wins easily.
     //
-    // Historical V100 builds also routed T=1 through QPN. Keep the current SIMT
-    // default while the Flash-Next forward-port numerically qualifies that path.
-    static const bool qpn_t1 = [] {
-        const char* env = std::getenv("NINFER_VOLTA_FP8_QPN_T1");
-        return env != nullptr && env[0] != '\0' && env[0] != '0';
-    }();
-    return (t >= 2 || (t == 1 && qpn_t1)) && t <= 4 * S::kRowsPerTile;
+    // The portable layout historically kept T=1 on the slightly faster SIMT decoder. Volta
+    // artifacts are now prepacked for QPN, so the row-major decoder is no longer a legal consumer;
+    // QPN owns that width as well as verification.
+    return t <= 4 * S::kRowsPerTile;
 }
 
 void launch_fp8_volta_qpn(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
@@ -41,6 +50,14 @@ void launch_fp8_volta_qpn(const Tensor& x, const Weight& w, Tensor& out, cudaStr
     launch_fp8_volta_qpn_with_output(x, w, Fp8ContiguousOutput{static_cast<__nv_bfloat16*>(out.data),
                                                                n},
                                      n, stream);
+}
+
+void launch_fp8_volta_qpn_fp16(const Tensor& x, const Weight& w, const void* x_fp16, Tensor& out,
+                               cudaStream_t stream) {
+    const std::int32_t n = out.ne[0];
+    launch_fp8_volta_qpn_with_fp16_activation(
+        x, w, static_cast<const half*>(x_fp16),
+        Fp8ContiguousOutput{static_cast<__nv_bfloat16*>(out.data), n}, n, stream);
 }
 
 #endif // NINFER_VOLTA_BUILD

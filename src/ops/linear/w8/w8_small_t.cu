@@ -81,6 +81,13 @@ constexpr auto kDFlash2AttentionLaunchers = make_launchers<W8DFlash2AttentionPro
 } // namespace
 
 void launch_w8_small_t(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+#ifdef NINFER_VOLTA_BUILD
+    // The tensor-core small-T table (ldmatrix + mma.m16n8k16, see w8_small_t_mma.cuh) has no
+    // Volta body. Route through the already-validated warp-per-row SIMT kernel; it handles
+    // any T, it just isn't the fastest choice for this T range on sm_120a.
+    launch_w8_simt_r8_c8(x, weight, out, stream);
+    return;
+#endif
     if (weight.n == W8VocabularyProjectionGeometry::kOutputRows &&
         weight.k == W8VocabularyProjectionGeometry::kInputRows &&
         weight.padded_shape[1] == W8VocabularyProjectionGeometry::kInputRows &&

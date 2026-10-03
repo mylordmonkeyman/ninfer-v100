@@ -27,3 +27,7 @@ void launch_bf16_volta_simt(const Tensor& x, const Weight& weight, Tensor& out,
 #endif
 
 } // namespace ninfer::ops::detail
+
+namespace ninfer::ops::detail {
+void launch_bf16_cutlass_sm70(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream);
+}

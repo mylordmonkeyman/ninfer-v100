@@ -47,14 +47,13 @@ void require_rowsplit(const Weight& weight, QType qtype, std::int32_t rows, cons
 }
 
 void require_w8_rowsplit(const Weight& weight, std::int32_t rows, std::int32_t hidden,
-                         const char* label) {
+                        const char* label) {
     if (weight.qtype != QType::W8G32_F16S || weight.layout != QuantLayout::RowSplit ||
         weight.scale_dtype != DType::FP16 || weight.group_size != 32 || weight.group != 32 ||
         weight.ndim != 2 || weight.n != rows || weight.k != hidden || weight.shape[0] != rows ||
         weight.shape[1] != hidden || weight.padded_shape[0] != rows ||
-        weight.padded_shape[1] != hidden || weight.qhigh != nullptr ||
-        weight.high_plane_bytes != 0 || !aligned_to(weight.qdata, 16) ||
-        !aligned_to(weight.scales, 16)) {
+        weight.padded_shape[1] != hidden || weight.qhigh != nullptr || weight.high_plane_bytes != 0 ||
+        !aligned_to(weight.qdata, 16) || !aligned_to(weight.scales, 16)) {
         throw std::invalid_argument(std::string("attn_input_proj: invalid ") + label);
     }
 }
@@ -153,10 +152,6 @@ void dispatch_single_parent(const Tensor& x, const Weight& weight, Tensor& q, Te
         return;
     }
 
-#if defined(NINFER_VOLTA_BUILD)
-    throw std::invalid_argument(
-        "W8 attention input projection is not part of the Volta Flash-Next path");
-#else
     constexpr std::int32_t kHidden = 2048;
     constexpr std::int32_t kQRows  = 4096;
     constexpr std::int32_t kKvRows = 512;
@@ -171,9 +166,8 @@ void dispatch_single_parent(const Tensor& x, const Weight& weight, Tensor& q, Te
     require_matrix(gate, kQRows, cols, "gate");
     require_matrix(k, kKvRows, cols, "k");
     require_matrix(v, kKvRows, cols, "v");
-    require_w8_rowsplit(weight, kRows, kHidden, "query/key/gate/value weight");
+    require_w8_rowsplit(weight, kRows, 2048, "query/key/gate/value weight");
     detail::w8_attn_input_dispatch(x, weight, q, gate, k, v, stream);
-#endif
 }
 
 } // namespace
@@ -227,19 +221,7 @@ std::size_t attn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::in
 
 void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
                      const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
-                     cudaStream_t stream) {
-#if defined(NINFER_VOLTA_BUILD)
-    (void)x;
-    (void)query_key_weight;
-    (void)gate_value_weight;
-    (void)q;
-    (void)gate;
-    (void)k;
-    (void)v;
-    (void)stream;
-    throw std::invalid_argument(
-        "Q4/Q5 attention input projection is not part of the Volta Flash-Next path");
-#else
+                     WorkspaceArena& workspace, cudaStream_t stream) {
     constexpr std::int32_t kHidden = 5120;
     constexpr std::int32_t kQRows  = 6144;
     constexpr std::int32_t kKvRows = 1024;
@@ -253,8 +235,12 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
     require_rowsplit(gate_value_weight, QType::Q5G64_F16S, kQRows + kKvRows, "gate/value weight");
 
     detail::q4_q5_attn_input_dispatch(x, query_key_weight, gate_value_weight, q, gate, k, v,
-                                      stream);
-#endif
+                                      workspace, stream);
+}
+
+std::size_t q4_q5_attn_input_proj_workspace_capacity_bytes(std::int32_t min_tokens,
+                                                            std::int32_t max_tokens) {
+    return detail::q4_q5_attn_input_capacity_workspace_bytes(min_tokens, max_tokens);
 }
 
 void attn_input_proj(const Tensor& x, const Weight& query_key_gate_value_weight, Tensor& q,
@@ -272,16 +258,6 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_gate_value_weight,
 
 void attn_input_proj(const Tensor& x, const Weight& query_key_value_weight, Tensor& q, Tensor& k,
                      Tensor& v, cudaStream_t stream) {
-#if defined(NINFER_VOLTA_BUILD)
-    (void)x;
-    (void)query_key_value_weight;
-    (void)q;
-    (void)k;
-    (void)v;
-    (void)stream;
-    throw std::invalid_argument(
-        "W8 three-output attention input projection is unavailable on Volta");
-#else
     constexpr std::int32_t kQRows  = 4096;
     constexpr std::int32_t kKvRows = 1024;
     constexpr std::int32_t kRows   = 6144;
@@ -298,7 +274,6 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_value_weight, Tens
     require_w8_rowsplit(query_key_value_weight, kRows, hidden, "query/key/value weight");
 
     detail::w8_attn_input_dispatch(x, query_key_value_weight, q, k, v, stream);
-#endif
 }
 
 } // namespace ninfer::ops

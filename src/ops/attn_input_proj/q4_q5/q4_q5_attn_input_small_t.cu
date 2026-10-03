@@ -78,13 +78,27 @@ void launch_q4(const Tensor& x, const Weight& weight, Tensor& q, Tensor& key, cu
     case 10:
     case 11:
     case 12:
+    case 13:
+    case 14:
+    case 15:
         launch_q4_simt_route<Q4AttnSimtR8C4Schedule>(x, weight, q, key, stream);
         return;
     case 8:
+    case 16:
         launch_q4_simt_route<Q4AttnSimtR8C8Schedule>(x, weight, q, key, stream);
         return;
     default:
-        throw std::invalid_argument("attention Q4 split-output requires T in [1,12]");
+#ifdef NINFER_VOLTA_BUILD
+        // GroupedHomogeneousPairMma* (T>16) need Ampere+ mma/ldmatrix, trap-stubbed on sm_70.
+        // launch_q4_simt_route already takes cols as a runtime grid parameter (the switch above
+        // is only picking a tile-size schedule for tuning, not a kernel limit), so it
+        // generalizes to any T unchanged. See docs/v100.md.
+        if (x.ne[1] > 16) {
+            launch_q4_simt_route<Q4AttnSimtR8C8Schedule>(x, weight, q, key, stream);
+            return;
+        }
+#endif
+        throw std::invalid_argument("attention Q4 split-output requires T in [1,16]");
     }
 }
 
@@ -171,11 +185,18 @@ void launch_q5(const Tensor& x, const Weight& weight, Tensor& gate, Tensor& valu
         launch_q5_split4_exact(x, weight, gate, value, stream);
         return;
     }
-    if (x.ne[1] <= 12) {
+    if (x.ne[1] <= 16) {
         launch_q5_simt<4>(x, weight, gate, value, stream);
         return;
     }
-    throw std::invalid_argument("attention Q5 split-output requires T in [1,12]");
+#ifdef NINFER_VOLTA_BUILD
+    // Same reasoning as launch_q4 above: launch_q5_simt<4> already takes cols as a runtime grid
+    // parameter, so it generalizes past T=16 once GroupedHomogeneousPairMma* is unavailable.
+    launch_q5_simt<4>(x, weight, gate, value, stream);
+    return;
+#else
+    throw std::invalid_argument("attention Q5 split-output requires T in [1,16]");
+#endif
 }
 
 } // namespace

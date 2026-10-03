@@ -37,4 +37,10 @@ void fp8_attn_input_dispatch(const Tensor& x, const Weight& weight, Tensor& q, T
                              Tensor& k, Tensor& v, LinearPolicy policy, WorkspaceArena* workspace,
                              cudaStream_t stream);
 
+#ifdef NINFER_VOLTA_BUILD
+void launch_fp8_attn_input_volta_qpn(const Tensor& x, const Weight& weight, Tensor& query,
+                                     const void* x_fp16, Tensor& gate, Tensor& key, Tensor& value,
+                                     cudaStream_t stream);
+#endif
+
 } // namespace ninfer::ops::detail

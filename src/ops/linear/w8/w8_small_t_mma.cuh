@@ -81,6 +81,10 @@ w8_small_t_mma(const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restri
                const std::uint8_t* __restrict__ scales, Output output, Epilogue epilogue = {},
                RowPolicy row_policy = {}, std::int32_t columns = ActiveCols,
                ColumnPolicy column_policy = {}) {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
+    // ldmatrix (sm_75+) + mma.m16n8k16 (sm_80+) have no Volta hardware. launch_w8_small_t
+    // (w8_small_t.cu) routes Volta through the SIMT kernel; this body is compiled but
+    // unreachable below sm_80, guarded only so ptxas accepts the PTX.
     const int column_offset = TiledColumns ? static_cast<int>(blockIdx.y) * ActiveCols : 0;
     const int live_columns  = TiledColumns ? min(ActiveCols, columns - column_offset) : ActiveCols;
     constexpr int kHidden   = Geometry::kInputRows;
@@ -373,6 +377,7 @@ w8_small_t_mma(const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restri
             }
         }
     }
+#endif
 }
 
 // Standard projection entry. Multi-layer fused Ops call the same contraction after selecting

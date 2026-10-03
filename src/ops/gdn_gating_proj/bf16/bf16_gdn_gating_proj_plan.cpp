@@ -26,6 +26,17 @@ struct RouteSpec {
     Bf16GdnGatingScheduleId schedule;
 };
 
+#ifdef NINFER_VOLTA_BUILD
+// Volta build: the MmaCooperative*/MmaUnsplit schedules below route through
+// bf16_gdn_gating_proj_gemm_mma_kernel, which is trap-stubbed on sm_70 (Ampere+ mma/ldmatrix).
+// SmallTSplit10 (ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_kernels.cu) is a plain SIMT
+// dot-product kernel that tiles over blockIdx.z in groups of 8 tokens, so it already handles
+// arbitrary T with no new kernel needed -- see docs/v100.md.
+constexpr std::array<RouteSpec, 2> k27Routes{{
+    {{1, 1}, Bf16GdnGatingScheduleId::GemvPairedRows},
+    {{2, kAnyCols}, Bf16GdnGatingScheduleId::SmallTSplit10},
+}};
+#else
 constexpr std::array<RouteSpec, 6> k27Routes{{
     {{1, 1}, Bf16GdnGatingScheduleId::GemvPairedRows},
     {{2, 8}, Bf16GdnGatingScheduleId::SmallTSplit10},
@@ -36,7 +47,19 @@ constexpr std::array<RouteSpec, 6> k27Routes{{
     {{2049, 4096}, Bf16GdnGatingScheduleId::MmaCooperativeSplit2},
     {{4097, kAnyCols}, Bf16GdnGatingScheduleId::MmaUnsplit},
 }};
+#endif
 
+#ifdef NINFER_VOLTA_BUILD
+// Same story as k27Routes above, for the 35B-A3B geometry: every Mma* schedule
+// routes through the trap-stubbed bf16_gdn_gating_proj_gemm_mma_kernel. Unlike
+// the 27B geometry, GemvPairedRows and SmallTSplit10 are not legal here (see
+// candidate_is_legal), so the SIMT sibling is SimtWarpRowC8 -- a warp-per-row
+// dot product, legal to 8*65535 columns, which is far beyond any context this
+// engine serves. Without this, a3b traps on its first GDN layer.
+constexpr std::array<RouteSpec, 1> k35Routes{{
+    {{1, kAnyCols}, Bf16GdnGatingScheduleId::SimtWarpRowC8},
+}};
+#else
 constexpr std::array<RouteSpec, 5> k35Routes{{
     // RTX 5090/170-SM performance policy: this progression keeps the preferred full grid near
     // 256 CTAs. The launcher independently enforces actual-device residency.
@@ -46,6 +69,7 @@ constexpr std::array<RouteSpec, 5> k35Routes{{
     {{2049, 4096}, Bf16GdnGatingScheduleId::MmaCooperativeSplit2},
     {{4097, kAnyCols}, Bf16GdnGatingScheduleId::MmaUnsplit},
 }};
+#endif // NINFER_VOLTA_BUILD
 
 template <std::size_t N>
 constexpr bool catalog_is_closed(const std::array<RouteSpec, N>& routes,
@@ -122,7 +146,11 @@ bool candidate_is_legal(Bf16GdnGatingScheduleId schedule,
         case Bf16GdnGatingScheduleId::GemvPairedRows:
             return problem.cols == 1;
         case Bf16GdnGatingScheduleId::SmallTSplit10:
+#ifdef NINFER_VOLTA_BUILD
+            return problem.cols >= 2;
+#else
             return problem.cols >= 2 && problem.cols <= 8;
+#endif
         case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
         case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
         case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
@@ -304,8 +332,6 @@ const char* bf16_gdn_gating_schedule_name(Bf16GdnGatingScheduleId schedule) noex
 
 const char* bf16_gdn_norm_gating_schedule_name(Bf16GdnNormGatingScheduleId schedule) noexcept {
     switch (schedule) {
-    case Bf16GdnNormGatingScheduleId::FusedSimt27:
-        return "gdn_norm_gating_proj.bf16.fused_simt_27";
     case Bf16GdnNormGatingScheduleId::Composed:
         return "gdn_norm_gating_proj.bf16.composed";
     case Bf16GdnNormGatingScheduleId::MmaCooperativeSplit32:
@@ -372,9 +398,17 @@ Bf16GdnNormGatingPlan bf16_gdn_norm_gating_resolve_plan(const Bf16GdnGatingProbl
     Bf16GdnGatingPlan control            = bf16_gdn_gating_resolve_plan(problem);
     Bf16GdnNormGatingScheduleId schedule = Bf16GdnNormGatingScheduleId::Composed;
     std::int32_t norm_splits             = 0;
-    if (is_27(problem) && problem.cols <= 42)
-        return {Bf16GdnNormGatingScheduleId::FusedSimt27, control, 0};
-    if (is_35(problem) && problem.cols <= 16) {
+    // The fused norm+gating schedule launches
+    // bf16_gdn_norm_gating_proj_35_mma_split32_launch directly, bypassing the
+    // route table above, so the Volta k35Routes entry does not protect it. Its
+    // Composed alternative is the same computation as rmsnorm + the routed gating
+    // projection, which does go through the table.
+#ifdef NINFER_VOLTA_BUILD
+    constexpr bool fused_norm_gating_available = false;
+#else
+    constexpr bool fused_norm_gating_available = true;
+#endif // NINFER_VOLTA_BUILD
+    if (fused_norm_gating_available && is_35(problem) && problem.cols <= 16) {
         control  = bf16_gdn_gating_resolve_candidate(Bf16GdnGatingScheduleId::MmaCooperativeSplit32,
                                                      problem);
         schedule = Bf16GdnNormGatingScheduleId::MmaCooperativeSplit32;
@@ -391,11 +425,6 @@ std::size_t bf16_gdn_norm_gating_capacity_workspace_bytes(std::int32_t heads,
                                                           std::int32_t max_cols) {
     std::size_t maximum =
         bf16_gdn_gating_capacity_workspace_bytes(heads, input_rows, min_cols, max_cols);
-    if (heads == 48 && input_rows == 5120) {
-        if (max_cols <= 42) return 0;
-        return bf16_gdn_gating_capacity_workspace_bytes(heads, input_rows, std::max(min_cols, 43),
-                                                        max_cols);
-    }
     if (heads == 32 && input_rows == 2048 && min_cols <= 16) {
         const std::int32_t fused_cols = std::min<std::int32_t>(max_cols, 16);
         maximum                       = std::max(
@@ -442,11 +471,6 @@ void bf16_gdn_norm_gating_dispatch(const Tensor& x, const Tensor& norm_weight, f
                                    Tensor& g, Tensor& beta, DeviceExecutionView execution) {
     const Bf16GdnGatingProblem problem{g.ne[0], x.ne[0], x.ne[1]};
     const Bf16GdnNormGatingPlan plan = bf16_gdn_norm_gating_resolve_plan(problem);
-    if (plan.schedule == Bf16GdnNormGatingScheduleId::FusedSimt27) {
-        bf16_gdn_norm_gating_proj_27_launch(x, norm_weight, eps, h, a_weight, b_weight, A_log,
-                                            dt_bias, g, beta, execution.stream);
-        return;
-    }
     if (plan.schedule == Bf16GdnNormGatingScheduleId::Composed) {
         rmsnorm(x, norm_weight, eps, true, h, execution.stream);
         execute_resolved(plan.control, problem, h, a_weight, b_weight, A_log, dt_bias, ws, g, beta,

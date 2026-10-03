@@ -26,6 +26,20 @@ if(NINFER_VOLTA_BUILD)
   add_compile_definitions(NINFER_VOLTA_BUILD=1)
 endif()
 
+if(NINFER_VOLTA_BUILD)
+  include(FetchContent)
+  set(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
+  set(CUTLASS_ENABLE_TESTS OFF CACHE BOOL "Disable CUTLASS tests")
+  set(CUTLASS_ENABLE_EXAMPLES OFF CACHE BOOL "Disable CUTLASS examples")
+  FetchContent_Declare(
+    cutlass
+    GIT_REPOSITORY https://github.com/nvidia/cutlass.git
+    GIT_TAG v4.4.2
+    GIT_SHALLOW TRUE
+    GIT_PROGRESS TRUE)
+  FetchContent_MakeAvailable(cutlass)
+endif()
+
 # --- Global settings ---------------------------------------------------------
 option(NINFER_BUILD_APPS "Build the NInfer CLI and server" ON)
 option(BUILD_TESTING "Build NInfer tests" OFF)

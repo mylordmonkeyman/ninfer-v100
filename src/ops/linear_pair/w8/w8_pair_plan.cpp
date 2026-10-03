@@ -21,6 +21,22 @@ struct W8PairRouteSpec {
     W8PairScheduleId schedule;
 };
 
+#ifdef NINFER_VOLTA_BUILD
+// sm_70 has no Ampere mma/ldmatrix: every Dual*/Concat* MMA schedule is a hard launch failure
+// here (the kernels compile to __CUDA_ARCH__-guarded stubs). launch_tiled wraps TwoSimtR8C4 in
+// for_each_token_slice so it covers any T; DualDecodeR4 keeps the tuned T=1 decode step. This
+// restores the fork's Volta route tables dropped by the post-DFlash2-merge build-fix
+// (140d354d) -- MTP's W8 query_key_gate_value / gate_up pair projections route through here at
+// prompt widths above ~85 and crashed. See docs/v100.md.
+constexpr std::array<W8PairRouteSpec, 1> kK5120Routes{{
+    {1, kAnyCols, W8PairScheduleId::TwoSimtR8C4},
+}};
+
+constexpr std::array<W8PairRouteSpec, 2> kK2048Routes{{
+    {1, 1, W8PairScheduleId::DualDecodeR4},
+    {2, kAnyCols, W8PairScheduleId::TwoSimtR8C4},
+}};
+#else
 constexpr std::array<W8PairRouteSpec, 3> kK5120Routes{{
     {1, 85, W8PairScheduleId::TwoSimtR8C4},
     {86, 960, W8PairScheduleId::DualMmaR32C64},
@@ -66,6 +82,7 @@ constexpr std::array<W8PairRouteSpec, 37> kK2048Routes{{
     {2209, 2270, W8PairScheduleId::ExactConcatMmaR96C96},
     {2271, kAnyCols, W8PairScheduleId::ConcatMmaR64C128},
 }};
+#endif
 
 template <std::size_t N>
 constexpr bool routes_are_closed(const std::array<W8PairRouteSpec, N>& routes) noexcept {

@@ -2,7 +2,12 @@ name: V100 27B Regression
 on:
   push:
     branches: [forwardport/v100-flash-next]
-    paths: ['.github/workflows/v100-27b-regression.yml']
+    paths:
+      - '.github/workflows/v100-27b-regression.yml'
+      - 'src/ops/**'
+      - 'src/targets/qwen3_6_27b/**'
+      - 'src/CMakeLists.txt'
+      - 'CMakeLists.txt'
   workflow_dispatch:
 permissions:
   contents: read
@@ -39,7 +44,12 @@ jobs:
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
             -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
             -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-27b -j --target ninfer_qwen3_6_27b_score_real_test
+          cmake --build build-27b -j --target ninfer_qwen3_6_27b_score_real_test \
+            ninfer_qwen3_8_flash_next_expert_cache_test \
+            ninfer_qwen3_8_flash_next_text_decode_test 2>&1 | tee regression-results/build.log
+          ctest --test-dir build-27b -V \
+            -R '^ninfer_qwen3_8_flash_next_(expert_cache|text_decode)_test$' \
+            > regression-results/flash-next-unit.log 2>&1
       - name: Score real 27B and check fresh-state repeatability
         id: candidate
         shell: bash

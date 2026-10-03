@@ -2,12 +2,15 @@
 
 #include "ops/linear_swiglu/w8/w8_linear_swiglu_kernels.h"
 
+#include "core/layout.h"
+#include "ninfer/ops/linear.h"
+#include "ninfer/ops/silu_mul.h"
+
 #include <array>
 #include <limits>
 #include <stdexcept>
 
 namespace ninfer::ops::detail {
-
 namespace {
 
 constexpr std::int32_t kAnyCols = std::numeric_limits<std::int32_t>::max();
@@ -18,7 +21,16 @@ struct RouteSpec {
     W8LinearSwiGluScheduleId schedule;
 };
 
-constexpr std::array<RouteSpec, 18> kCompanionRoutes{{
+#ifdef NINFER_VOLTA_BUILD
+// The DFlash MLP is W8-only and its tuned routes all use Ampere+ MMA past
+// decode. The paired SIMT kernel streams gate/up rows together and tiles any T.
+constexpr std::array<RouteSpec, 3> kRoutes{{
+    {1, 1, W8LinearSwiGluScheduleId::DecodePairR16},
+    {2, 4, W8LinearSwiGluScheduleId::SimtPairC4},
+    {5, kAnyCols, W8LinearSwiGluScheduleId::SimtPairC8},
+}};
+#else
+constexpr std::array<RouteSpec, 18> kRoutes{{
     {1, 1, W8LinearSwiGluScheduleId::DecodePairR16},
     {2, 48, W8LinearSwiGluScheduleId::SplitKMmaExactT},
     {49, 64, W8LinearSwiGluScheduleId::MmaR32C64},
@@ -38,52 +50,59 @@ constexpr std::array<RouteSpec, 18> kCompanionRoutes{{
     {513, 560, W8LinearSwiGluScheduleId::MmaR128C80},
     {561, kAnyCols, W8LinearSwiGluScheduleId::MmaR64C128},
 }};
+#endif
 
-// Small-T K-split followed by row-tiled MMA; live columns do not select exact-T kernels.
-constexpr std::array<RouteSpec, 6> kDFlash2Routes{{
-    {1, 40, W8LinearSwiGluScheduleId::DFlash2SmallT},
-    {41, 63, W8LinearSwiGluScheduleId::DFlash2MmaR32C64K128},
-    {64, 64, W8LinearSwiGluScheduleId::DFlash2MmaR64C64K128},
-    {65, 80, W8LinearSwiGluScheduleId::DFlash2MmaR64C80K128},
-    {81, 96, W8LinearSwiGluScheduleId::DFlash2MmaR64C96K128},
-    {97, kAnyCols, W8LinearSwiGluScheduleId::DFlash2MmaR64C128},
-}};
-
-template <std::size_t N>
-constexpr bool catalog_is_closed(const std::array<RouteSpec, N>& routes) {
+constexpr bool catalog_is_closed() {
     std::int64_t expected = 1;
-    for (const RouteSpec& route : routes) {
+    for (const RouteSpec& route : kRoutes) {
         if (route.first != expected || route.first > route.last) { return false; }
         expected = static_cast<std::int64_t>(route.last) + 1;
     }
     return expected == static_cast<std::int64_t>(kAnyCols) + 1;
 }
 
-static_assert(catalog_is_closed(kCompanionRoutes),
-              "W8 companion LinearSwiGLU routes must be exact and closed");
-static_assert(catalog_is_closed(kDFlash2Routes),
-              "W8 DFlash2 LinearSwiGLU routes must be exact and closed");
+static_assert(catalog_is_closed(), "W8 LinearSwiGLU routes must be exact and closed");
 
-bool is_companion_shape(const W8LinearSwiGluProblem& problem) noexcept {
-    return problem.gate_up_rows == 12288 && problem.output_rows == 6144 && problem.k == 2048 &&
-           problem.padded_k == 2048;
+constexpr bool is_dflash1_shape(const W8LinearSwiGluProblem& p) noexcept {
+    return p.gate_up_rows == 12288 && p.output_rows == 6144 && p.k == 2048 && p.padded_k == 2048;
 }
 
-bool is_dflash2_shape(const W8LinearSwiGluProblem& problem) noexcept {
-    return problem.gate_up_rows == 34816 && problem.output_rows == 17408 && problem.k == 5120 &&
-           problem.padded_k == 5120;
+constexpr bool is_dflash2_shape(const W8LinearSwiGluProblem& p) noexcept {
+    return p.gate_up_rows == 34816 && p.output_rows == 17408 && p.k == 5120 &&
+           p.padded_k == 5120;
 }
 
 bool supported_shape(const W8LinearSwiGluProblem& problem) noexcept {
-    return is_companion_shape(problem) || is_dflash2_shape(problem);
+    return is_dflash1_shape(problem) || is_dflash2_shape(problem);
+}
+
+template <class Allocator>
+Tensor allocate_materialized_workspace(Allocator& allocator, std::int32_t rows,
+                                       std::int32_t cols) {
+    return allocator.alloc(DType::BF16, {rows, cols});
+}
+
+std::size_t materialized_workspace_bytes(std::int32_t rows, std::int32_t cols) {
+    WorkspaceLayoutBuilder layout;
+    (void)allocate_materialized_workspace(layout, rows, cols);
+    return layout.peak_bytes(1);
 }
 
 } // namespace
 
 const char* w8_linear_swiglu_schedule_name(W8LinearSwiGluScheduleId schedule) noexcept {
+    if (schedule == W8LinearSwiGluScheduleId::Materialized) {
+        return "linear_swiglu.w8.materialized";
+    }
     switch (schedule) {
     case W8LinearSwiGluScheduleId::DecodePairR16:
         return "linear_swiglu.w8.decode.pair.r16";
+    case W8LinearSwiGluScheduleId::SimtPairC4:
+        return "linear_swiglu.w8.simt.pair.c4";
+    case W8LinearSwiGluScheduleId::SimtPairC8:
+        return "linear_swiglu.w8.simt.pair.c8";
+    case W8LinearSwiGluScheduleId::VoltaQpnSplit:
+        return "linear_swiglu.w8.sm70.qpn.split";
     case W8LinearSwiGluScheduleId::SplitKMmaExactT:
         return "linear_swiglu.w8.splitk.mma.pair.exact_t";
     case W8LinearSwiGluScheduleId::MmaR32C64:
@@ -104,24 +123,31 @@ const char* w8_linear_swiglu_schedule_name(W8LinearSwiGluScheduleId schedule) no
         return "linear_swiglu.w8.mma.pair.r64.c64";
     case W8LinearSwiGluScheduleId::MmaR128C80:
         return "linear_swiglu.w8.mma.pair.r64.c80";
-    case W8LinearSwiGluScheduleId::DFlash2SmallT:
-        return "linear_swiglu.w8.dflash2.small_t";
-    case W8LinearSwiGluScheduleId::DFlash2MmaR32C64K128:
-        return "linear_swiglu.w8.dflash2.mma.r32.c64.k128";
-    case W8LinearSwiGluScheduleId::DFlash2MmaR64C64K128:
-        return "linear_swiglu.w8.dflash2.mma.r64.c64.k128";
-    case W8LinearSwiGluScheduleId::DFlash2MmaR64C80K128:
-        return "linear_swiglu.w8.dflash2.mma.r64.c80.k128";
-    case W8LinearSwiGluScheduleId::DFlash2MmaR64C96K128:
-        return "linear_swiglu.w8.dflash2.mma.r64.c96.k128";
-    case W8LinearSwiGluScheduleId::DFlash2MmaR64C128:
-        return "linear_swiglu.w8.dflash2.mma.pair.r32.c128";
     }
     return "linear_swiglu.w8.unknown";
 }
 
 bool w8_linear_swiglu_schedule_uses_mma(W8LinearSwiGluScheduleId schedule) noexcept {
-    return schedule != W8LinearSwiGluScheduleId::DecodePairR16;
+    return schedule != W8LinearSwiGluScheduleId::DecodePairR16 &&
+           schedule != W8LinearSwiGluScheduleId::SimtPairC4 &&
+           schedule != W8LinearSwiGluScheduleId::SimtPairC8 &&
+           schedule != W8LinearSwiGluScheduleId::Materialized;
+}
+
+std::size_t w8_linear_swiglu_capacity_workspace_bytes(std::int32_t gate_up_rows,
+                                                      std::int32_t output_rows, std::int32_t k,
+                                                      std::int32_t padded_k,
+                                                      std::int32_t min_tokens,
+                                                      std::int32_t max_tokens) {
+    const W8LinearSwiGluProblem lo{gate_up_rows, output_rows, k, padded_k, min_tokens};
+    const W8LinearSwiGluProblem hi{gate_up_rows, output_rows, k, padded_k, max_tokens};
+    (void)w8_linear_swiglu_resolve_plan(lo);
+    (void)w8_linear_swiglu_resolve_plan(hi);
+    if (!is_dflash2_shape(hi)) { return 0; }
+#ifdef NINFER_VOLTA_BUILD
+    if (min_tokens >= 5 && max_tokens <= 8) { return 256; }
+#endif
+    return materialized_workspace_bytes(gate_up_rows, max_tokens);
 }
 
 bool w8_linear_swiglu_admits(const W8LinearSwiGluProblem& problem) noexcept {
@@ -133,29 +159,53 @@ W8LinearSwiGluPlan w8_linear_swiglu_resolve_plan(const W8LinearSwiGluProblem& pr
         throw std::invalid_argument(
             "W8 LinearSwiGLU: exact problem or column count is not admitted");
     }
-    const auto resolve_from = [&](const auto& routes) -> W8LinearSwiGluPlan {
-        for (const RouteSpec& route : routes) {
-            if (problem.cols >= route.first && problem.cols <= route.last) {
-                return {route.schedule};
-            }
+    if (is_dflash2_shape(problem)) {
+#ifdef NINFER_VOLTA_BUILD
+        if (problem.cols >= 5 && problem.cols <= 8) {
+            return {W8LinearSwiGluScheduleId::VoltaQpnSplit};
         }
-        throw std::logic_error("W8 LinearSwiGLU: admitted problem has no route");
-    };
-    if (is_dflash2_shape(problem)) { return resolve_from(kDFlash2Routes); }
-    return resolve_from(kCompanionRoutes);
+#endif
+        return {W8LinearSwiGluScheduleId::Materialized};
+    }
+    for (const RouteSpec& route : kRoutes) {
+        if (problem.cols >= route.first && problem.cols <= route.last) { return {route.schedule}; }
+    }
+    throw std::logic_error("W8 LinearSwiGLU: admitted problem has no route");
 }
 
 void w8_linear_swiglu_execute_plan(const W8LinearSwiGluPlan& plan, const Tensor& x, const Weight& w,
-                                   Tensor& out, cudaStream_t stream) {
+                                   Tensor& out, WorkspaceArena& ws, cudaStream_t stream) {
     const W8LinearSwiGluProblem problem{w.n, out.ne[0], x.ne[0], w.padded_shape[1], x.ne[1]};
     const W8LinearSwiGluPlan resolved = w8_linear_swiglu_resolve_plan(problem);
     if (resolved.schedule != plan.schedule) {
         throw std::invalid_argument("W8 LinearSwiGLU: plan does not match exact problem");
     }
+    if (plan.schedule == W8LinearSwiGluScheduleId::Materialized) {
+        auto scope = ws.scope();
+        Tensor gate_up = allocate_materialized_workspace(ws, problem.gate_up_rows, problem.cols);
+        linear(x, w, gate_up, stream);
+        silu_mul(gate_up.slice(0, 0, problem.output_rows),
+                 gate_up.slice(0, problem.output_rows, problem.output_rows), out, stream);
+        return;
+    }
+    if (plan.schedule == W8LinearSwiGluScheduleId::VoltaQpnSplit) {
+        auto scope = ws.scope();
+        (void)ws.alloc_bytes(256);
+        w8_linear_swiglu_volta_qpn_split_launch(x, w, out, stream);
+        return;
+    }
     switch (plan.schedule) {
     case W8LinearSwiGluScheduleId::DecodePairR16:
         w8_linear_swiglu_decode_pair_r16_launch(x, w, out, stream);
         return;
+    case W8LinearSwiGluScheduleId::SimtPairC4:
+        w8_linear_swiglu_simt_pair_c4_launch(x, w, out, stream);
+        return;
+    case W8LinearSwiGluScheduleId::SimtPairC8:
+        w8_linear_swiglu_simt_pair_c8_launch(x, w, out, stream);
+        return;
+    case W8LinearSwiGluScheduleId::VoltaQpnSplit:
+        break; // handled above
     case W8LinearSwiGluScheduleId::SplitKMmaExactT:
         w8_linear_swiglu_splitk_exact_t_launch(x, w, out, stream);
         return;
@@ -186,31 +236,16 @@ void w8_linear_swiglu_execute_plan(const W8LinearSwiGluPlan& plan, const Tensor&
     case W8LinearSwiGluScheduleId::MmaR128C80:
         w8_linear_swiglu_mma_r128_c80_launch(x, w, out, stream);
         return;
-    case W8LinearSwiGluScheduleId::DFlash2SmallT:
-        w8_dflash2_linear_swiglu_small_t_launch(x, w, out, stream);
-        return;
-    case W8LinearSwiGluScheduleId::DFlash2MmaR32C64K128:
-        w8_dflash2_linear_swiglu_mma_r32_c64_k128_launch(x, w, out, stream);
-        return;
-    case W8LinearSwiGluScheduleId::DFlash2MmaR64C64K128:
-        w8_dflash2_linear_swiglu_mma_r64_c64_k128_launch(x, w, out, stream);
-        return;
-    case W8LinearSwiGluScheduleId::DFlash2MmaR64C80K128:
-        w8_dflash2_linear_swiglu_mma_r64_c80_k128_launch(x, w, out, stream);
-        return;
-    case W8LinearSwiGluScheduleId::DFlash2MmaR64C96K128:
-        w8_dflash2_linear_swiglu_mma_r64_c96_k128_launch(x, w, out, stream);
-        return;
-    case W8LinearSwiGluScheduleId::DFlash2MmaR64C128:
-        w8_linear_swiglu_mma_r64_c128_launch(x, w, out, stream);
-        return;
+    case W8LinearSwiGluScheduleId::Materialized:
+        break; // handled above
     }
     throw std::logic_error("W8 LinearSwiGLU: unknown schedule");
 }
 
-void w8_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
+void w8_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out, WorkspaceArena& ws,
+                               cudaStream_t stream) {
     const W8LinearSwiGluProblem problem{w.n, out.ne[0], x.ne[0], w.padded_shape[1], x.ne[1]};
-    w8_linear_swiglu_execute_plan(w8_linear_swiglu_resolve_plan(problem), x, w, out, stream);
+    w8_linear_swiglu_execute_plan(w8_linear_swiglu_resolve_plan(problem), x, w, out, ws, stream);
 }
 
 } // namespace ninfer::ops::detail

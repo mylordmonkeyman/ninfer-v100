@@ -488,3 +488,11 @@ struct Fp8LinearSmallTProductionSchedule<Fp8FlashNextVocabularyGeometry, ActiveT
 };
 
 } // namespace ninfer::ops::detail
+
+#ifdef NINFER_VOLTA_BUILD
+namespace ninfer::ops::detail {
+template <> struct Fp8LinearDecodeProductionSchedule<Fp8VocabularyGeometry> {
+    using Type = Fp8GemvSchedule<8, 2, 8, 4, Fp8CodeCache::Default, 2, 2>;
+};
+}
+#endif

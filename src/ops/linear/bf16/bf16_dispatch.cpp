@@ -38,7 +38,12 @@ Bf16Launch select_bf16_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t
 #if defined(NINFER_VOLTA_BUILD)
     // Volta has no BF16 tensor-core instruction. Keep the complete registered
     // BF16 shape set reachable through the correctness-first CUDA-core path.
-    return launch_bf16_volta_simt;
+    if (flash_next_text || flash_next_vision || orcarouter_head) { return launch_bf16_volta_simt; }
+    if (n256_k5120) { return launch_bf16_n256_k5120; }
+    if (t == 1) { return launch_bf16_decode; }
+    const std::int32_t small_t_end =
+        n == 5120 ? kBf16SmallTMaxTokens : kBf16LinearSmallTDispatchEnd;
+    return t <= small_t_end ? launch_bf16_small_t : launch_bf16_cutlass_sm70;
 #else
     if (output_head && t > 8) {
         throw std::invalid_argument("bf16 linear: Flash-Next target requires T in [1,8]");

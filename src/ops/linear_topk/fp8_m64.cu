@@ -29,13 +29,13 @@ struct M64Schedule {
     static constexpr int kBlockColumns = TileColumns;
 };
 
-template <int TileColumns, int kBlockK = 128, bool Bf16 = false>
+template <int TileColumns, int kBlockK = 128>
 struct alignas(16) Fp8M64MainloopStorage {
     static constexpr int kBlockRows    = 64;
     static constexpr int kBlockColumns = M64Schedule<TileColumns, kBlockK>::kBlockColumns;
     __nv_bfloat16 weights[kBlockRows][kBlockK];
     __nv_bfloat16 activations[kBlockColumns][kBlockK];
-    std::uint8_t codes[kBlockRows][kBlockK * (Bf16 ? 2 : 1)];
+    std::uint8_t codes[kBlockRows][kBlockK];
 };
 
 template <int TileColumns, int kBlockK = 128>
@@ -45,9 +45,9 @@ struct Fp8M64ReductionStorage {
     typename M64WarpSort::TempStorage sort[M64Schedule<TileColumns, kBlockK>::kWarps];
 };
 
-template <int TileColumns, int kBlockK = 128, bool Bf16 = false>
+template <int TileColumns, int kBlockK = 128>
 union alignas(16) Fp8M64ReusableStorage {
-    Fp8M64MainloopStorage<TileColumns, kBlockK, Bf16> mainloop;
+    Fp8M64MainloopStorage<TileColumns, kBlockK> mainloop;
     Fp8M64ReductionStorage<TileColumns, kBlockK> reduction;
 };
 
@@ -55,7 +55,7 @@ __device__ __forceinline__ int swizzle_128(int row, int column) {
     return (((column >> 3) ^ (row & 7)) << 3) | (column & 7);
 }
 
-template <int TileColumns, int kBlockK = 128, bool Bf16 = false>
+template <int TileColumns, int kBlockK = 128>
 __global__
 __launch_bounds__(M64Schedule<TileColumns, kBlockK>::kThreads, 2) void fp8_m64_linear_topk_kernel(
     const __nv_bfloat16* __restrict__ hidden, const std::uint8_t* __restrict__ weight_codes,
@@ -72,7 +72,7 @@ __launch_bounds__(M64Schedule<TileColumns, kBlockK>::kThreads, 2) void fp8_m64_l
     constexpr int kTokenMmas    = kWarpColumns / 8;
     static_assert(TileColumns % 8 == 0 && TileColumns <= 128);
     extern __shared__ __align__(16) unsigned char shared_bytes[];
-    auto& reusable = *reinterpret_cast<Fp8M64ReusableStorage<TileColumns, kBlockK, Bf16>*>(shared_bytes);
+    auto& reusable = *reinterpret_cast<Fp8M64ReusableStorage<TileColumns, kBlockK>*>(shared_bytes);
     const int column_begin = static_cast<int>(blockIdx.y) * TileColumns;
     const int live_columns = min(TileColumns, columns - column_begin);
     hidden += static_cast<std::int64_t>(column_begin) * kLinearTopKHidden;
@@ -118,16 +118,15 @@ __launch_bounds__(M64Schedule<TileColumns, kBlockK>::kThreads, 2) void fp8_m64_l
 
         const auto stage_codes = [&](int k_tile) {
             const int k_begin     = k_tile * kBlockK;
-            constexpr int kValues = Bf16 ? 8 : 16;
-            constexpr int kChunks = kBlockRows * (kBlockK / kValues);
+            constexpr int kChunks = kBlockRows * (kBlockK / 16);
             for (int item = tid; item < kChunks; item += kThreads) {
-                const int local_row = item / (kBlockK / kValues);
-                const int chunk     = item - local_row * (kBlockK / kValues);
+                const int local_row = item / (kBlockK / 16);
+                const int chunk     = item - local_row * (kBlockK / 16);
                 cp_async<16, Cache::cg>(&mainloop.codes[local_row][chunk * 16],
                                         weight_codes +
-                                            (static_cast<std::int64_t>(row_begin + local_row) *
+                                            static_cast<std::int64_t>(row_begin + local_row) *
                                                 kLinearTopKHidden +
-                                            k_begin + chunk * kValues) * (Bf16 ? 2 : 1));
+                                            k_begin + chunk * 16);
             }
         };
 
@@ -137,16 +136,12 @@ __launch_bounds__(M64Schedule<TileColumns, kBlockK>::kThreads, 2) void fp8_m64_l
                 const int row      = item / kChunksPerRow;
                 const int chunk    = item - row * kChunksPerRow;
                 const int col      = chunk * 8;
+                const uint2 packed = *reinterpret_cast<const uint2*>(&mainloop.codes[row][col]);
                 uint4 decoded;
-                if constexpr (Bf16) {
-                    decoded = load_vec<uint4>(&mainloop.codes[row][col * 2]);
-                } else {
-                    const uint2 packed = load_vec<uint2>(&mainloop.codes[row][col]);
-                    decoded.x = fp8_e4m3x2_to_bf16x2_bits(packed.x & 0xffffu);
-                    decoded.y = fp8_e4m3x2_to_bf16x2_bits(packed.x >> 16);
-                    decoded.z = fp8_e4m3x2_to_bf16x2_bits(packed.y & 0xffffu);
-                    decoded.w = fp8_e4m3x2_to_bf16x2_bits(packed.y >> 16);
-                }
+                decoded.x = fp8_e4m3x2_to_bf16x2_bits(packed.x & 0xffffu);
+                decoded.y = fp8_e4m3x2_to_bf16x2_bits(packed.x >> 16);
+                decoded.z = fp8_e4m3x2_to_bf16x2_bits(packed.y & 0xffffu);
+                decoded.w = fp8_e4m3x2_to_bf16x2_bits(packed.y >> 16);
                 store_vec(&mainloop.weights[row][swizzle_128(row, col)], decoded);
             }
         };
@@ -215,8 +210,8 @@ __launch_bounds__(M64Schedule<TileColumns, kBlockK>::kThreads, 2) void fp8_m64_l
         auto& scores         = reusable.reduction.scores;
         const int local_row0 = warp_row * 16 + gid;
         const int local_row1 = local_row0 + 8;
-        const float scale0   = Bf16 ? 1.0F : __bfloat162float(row_scales[row_begin + local_row0]);
-        const float scale1   = Bf16 ? 1.0F : __bfloat162float(row_scales[row_begin + local_row1]);
+        const float scale0   = __bfloat162float(row_scales[row_begin + local_row0]);
+        const float scale1   = __bfloat162float(row_scales[row_begin + local_row1]);
 #pragma unroll
         for (int token_mma = 0; token_mma < kTokenMmas; ++token_mma) {
             const int column0 = warp_col * kWarpColumns + token_mma * 8 + 2 * lid;
@@ -263,15 +258,15 @@ __launch_bounds__(M64Schedule<TileColumns, kBlockK>::kThreads, 2) void fp8_m64_l
     __syncthreads();
 }
 
-template <int TileColumns, int kBlockK = 128, bool Bf16 = false>
+template <int TileColumns, int kBlockK = 128>
 void launch_tile(const Tensor& hidden, const Weight& head, std::int32_t valid_rows,
                  const LinearTopKWorkspace& workspace, cudaStream_t stream) {
-    constexpr int shared_bytes = sizeof(Fp8M64ReusableStorage<TileColumns, kBlockK, Bf16>);
+    constexpr int shared_bytes = sizeof(Fp8M64ReusableStorage<TileColumns, kBlockK>);
     if constexpr (shared_bytes > 48 * 1024) {
-        CUDA_CHECK(cudaFuncSetAttribute(fp8_m64_linear_topk_kernel<TileColumns, kBlockK, Bf16>,
+        CUDA_CHECK(cudaFuncSetAttribute(fp8_m64_linear_topk_kernel<TileColumns, kBlockK>,
                                         cudaFuncAttributeMaxDynamicSharedMemorySize, shared_bytes));
     }
-    fp8_m64_linear_topk_kernel<TileColumns, kBlockK, Bf16>
+    fp8_m64_linear_topk_kernel<TileColumns, kBlockK>
         <<<dim3(workspace.producer_groups, div_up(hidden.ne[1], TileColumns)),
            M64Schedule<TileColumns, kBlockK>::kThreads, shared_bytes, stream>>>(
             static_cast<const __nv_bfloat16*>(hidden.data),
@@ -283,16 +278,6 @@ void launch_tile(const Tensor& hidden, const Weight& head, std::int32_t valid_ro
 }
 
 } // namespace
-
-void linear_topk_bf16_launch(const Tensor& hidden, const Weight& head, std::int32_t valid_rows,
-                             const LinearTopKWorkspace& workspace, cudaStream_t stream) {
-    switch (workspace.tile_columns) {
-    case 32: return launch_tile<32, 128, true>(hidden, head, valid_rows, workspace, stream);
-    case 64: return launch_tile<64, 128, true>(hidden, head, valid_rows, workspace, stream);
-    case 128: return launch_tile<128, 64, true>(hidden, head, valid_rows, workspace, stream);
-    }
-    throw std::invalid_argument("invalid BF16 linear_topk MMA tile");
-}
 
 void linear_topk_fp8_m64_launch(const Tensor& hidden, const Weight& head, std::int32_t valid_rows,
                                 const LinearTopKWorkspace& workspace, cudaStream_t stream) {

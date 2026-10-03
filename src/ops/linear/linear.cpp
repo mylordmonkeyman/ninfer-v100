@@ -2,7 +2,6 @@
 
 #include "ops/linear/bf16/bf16_config.h"
 #include "ops/linear/bf16/bf16_dispatch.h"
-#include "ops/linear/fp8/fp8_config.h"
 #include "ops/linear/fp8/fp8_dispatch.h"
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_dispatch.h"
@@ -13,6 +12,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 
@@ -80,33 +80,17 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
                      WorkspaceArena* workspace, cudaStream_t stream) {
     switch (w.qtype) {
     case QType::Q4G64_F16S:
-#if defined(NINFER_VOLTA_BUILD)
-        throw std::invalid_argument("linear: Q4 backend unavailable on Volta");
-#else
-        detail::q4_dispatch(x, w, out, policy, stream);
+        detail::q4_dispatch(x, w, out, policy, workspace, stream);
         return;
-#endif
     case QType::Q5G64_F16S:
-#if defined(NINFER_VOLTA_BUILD)
-        throw std::invalid_argument("linear: Q5 backend unavailable on Volta");
-#else
-        detail::q5_dispatch(x, w, out, policy, stream);
+        detail::q5_dispatch(x, w, out, policy, workspace, stream);
         return;
-#endif
     case QType::Q6G64_F16S:
-#if defined(NINFER_VOLTA_BUILD)
-        throw std::invalid_argument("linear: Q6 backend unavailable on Volta");
-#else
         detail::q6_dispatch(x, w, out, policy, stream);
         return;
-#endif
     case QType::W8G32_F16S:
-#if defined(NINFER_VOLTA_BUILD)
-        throw std::invalid_argument("linear: W8 backend unavailable on Volta");
-#else
         detail::w8_dispatch(x, w, out, policy, stream);
         return;
-#endif
     case QType::BF16_CTRL:
         detail::bf16_dispatch(x, w, out, policy, stream);
         return;
@@ -135,38 +119,32 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
     }
 
     switch (qtype) {
-    case QType::Q4G64_F16S:
-#if defined(NINFER_VOLTA_BUILD)
-        throw std::invalid_argument("linear workspace: Q4 backend unavailable on Volta");
-#else
+    case QType::Q4G64_F16S: {
         (void)detail::select_q4_launch(output_rows, input_rows, min_tokens, policy);
         (void)detail::select_q4_launch(output_rows, input_rows, max_tokens, policy);
-        return 0;
+#ifdef NINFER_VOLTA_BUILD
+        // The fused tensor-core route needs an fp32 split-K accumulator. Size for the widest
+        // token count in the band it is routed for; q4_dispatch falls back to SIMT when the
+        // arena cannot supply it, so this is an opportunity, not a requirement.
+        const std::int32_t banded = std::min<std::int32_t>(max_tokens, 64);
+        if (banded >= 16 && detail::q4_volta_mma_supported(output_rows, input_rows, banded)) {
+            return detail::q4_volta_mma_workspace_bytes(output_rows, input_rows, banded);
+        }
 #endif
+        return 0;
+    }
     case QType::Q5G64_F16S:
-#if defined(NINFER_VOLTA_BUILD)
-        throw std::invalid_argument("linear workspace: Q5 backend unavailable on Volta");
-#else
         (void)detail::select_q5_launch(output_rows, input_rows, min_tokens, policy);
         (void)detail::select_q5_launch(output_rows, input_rows, max_tokens, policy);
         return 0;
-#endif
     case QType::Q6G64_F16S:
-#if defined(NINFER_VOLTA_BUILD)
-        throw std::invalid_argument("linear workspace: Q6 backend unavailable on Volta");
-#else
         (void)detail::select_q6_launch(output_rows, input_rows, min_tokens, policy);
         (void)detail::select_q6_launch(output_rows, input_rows, max_tokens, policy);
         return 0;
-#endif
     case QType::W8G32_F16S:
-#if defined(NINFER_VOLTA_BUILD)
-        throw std::invalid_argument("linear workspace: W8 backend unavailable on Volta");
-#else
         (void)detail::select_w8_launch(output_rows, input_rows, min_tokens, policy);
         (void)detail::select_w8_launch(output_rows, input_rows, max_tokens, policy);
         return 0;
-#endif
     case QType::BF16_CTRL:
         (void)detail::select_bf16_launch(output_rows, input_rows, min_tokens, policy);
         (void)detail::select_bf16_launch(output_rows, input_rows, max_tokens, policy);

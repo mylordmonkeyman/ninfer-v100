@@ -54,7 +54,8 @@ Fp8WeightGeometry validate_fp8_weight(const Weight& weight, const char* operatio
         static_cast<std::int64_t>(weight.n) * static_cast<std::int64_t>(scale_word_bytes);
     if ((weight.qtype != QType::FP8_E4M3FN_ROW_BF16S &&
          weight.qtype != QType::FP8_E4M3FN_ROW_F32S) ||
-        weight.layout != QuantLayout::RowScale ||
+        (weight.layout != QuantLayout::RowScale &&
+         (f32_scales || weight.layout != QuantLayout::VoltaQpnPrepacked)) ||
         weight.scale_dtype != (f32_scales ? DType::FP32 : DType::BF16) ||
         weight.group_size != static_cast<std::uint32_t>(weight.k) || weight.group != weight.k ||
         weight.ndim != 2 || weight.shape[0] != weight.n || weight.shape[1] != weight.k ||

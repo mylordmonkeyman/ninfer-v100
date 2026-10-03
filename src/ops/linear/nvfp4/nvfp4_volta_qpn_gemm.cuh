@@ -57,7 +57,7 @@
 
 namespace ninfer::ops::detail {
 
-#if defined(NINFER_VOLTA_BUILD) && (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ == 700)
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ == 700
 
 struct Nvfp4VoltaQpnSchedule {
     static constexpr int kColsPerCta  = 32; // output rows per CTA (mma's N axis)
@@ -239,10 +239,10 @@ __global__ __launch_bounds__(
                     for (int j = 0; j < 8; ++j) { a[j] = __half2half2(__ushort_as_half(0)); }
                 }
                 const unsigned* A = reinterpret_cast<const unsigned*>(a);
-                ::ninfer::ops::volta_mma884_f16_f32_raw(c[tile][0 % NACC], A[0], A[1], B[0], B[1]);
-                ::ninfer::ops::volta_mma884_f16_f32_raw(c[tile][1 % NACC], A[2], A[3], B[2], B[3]);
-                ::ninfer::ops::volta_mma884_f16_f32_raw(c[tile][2 % NACC], A[4], A[5], B[4], B[5]);
-                ::ninfer::ops::volta_mma884_f16_f32_raw(c[tile][3 % NACC], A[6], A[7], B[6], B[7]);
+                volta_mma_qp_n(c[tile][0 % NACC], A[0], A[1], B[0], B[1]);
+                volta_mma_qp_n(c[tile][1 % NACC], A[2], A[3], B[2], B[3]);
+                volta_mma_qp_n(c[tile][2 % NACC], A[4], A[5], B[4], B[5]);
+                volta_mma_qp_n(c[tile][3 % NACC], A[6], A[7], B[6], B[7]);
             }
         }
     }
@@ -286,6 +286,127 @@ __global__ __launch_bounds__(
     }
 }
 
+// Load-time-prepacked companion. Codes are [N/32 tile][K/16 group][lane32][8B], with
+// the nibble order chosen so the shift decoder's structural (i,i+4) pairs become adjacent K.
+// This is v100-skinny's QPN2 main loop: no activation PRMTs and one scale byte per group.
+template <int kTiles, int SPLITK, int NACC, class OutputPolicy, class Activation>
+__global__ __launch_bounds__(
+    SPLITK * 32, (kTiles == 1 ? 32 : kTiles == 2 ? 16 : 4) / SPLITK < 1
+        ? 1
+        : (kTiles == 1 ? 32 : kTiles == 2 ? 16 : 4) / SPLITK)
+void nvfp4_volta_qpn_prepacked_kernel(const std::uint8_t* __restrict__ codes,
+                                      const std::uint8_t* __restrict__ scales,
+                                      const Activation* __restrict__ x, int n, int k, int t,
+                                      float inverse_weight_divisor, OutputPolicy output) {
+    using S = Nvfp4VoltaQpnSchedule;
+    __shared__ float cs[SPLITK][kTiles * S::kRowsPerTile * S::kColsPerCta];
+
+    const int lane = static_cast<int>(threadIdx.x) & 31;
+    const int warp = static_cast<int>(threadIdx.x) >> 5;
+    const int qp   = (lane >> 2) & 3;
+    const int r    = (lane & 3) + ((lane & 16) ? 4 : 0);
+    const int groups = k / S::kGroupK;
+    const int quotient = groups / SPLITK;
+    const int g0       = warp * quotient;
+    const int gend     = warp == SPLITK - 1 ? groups : g0 + quotient;
+    const std::int64_t tile_base =
+        static_cast<std::int64_t>(blockIdx.x) * groups * 32 + lane;
+    const half2 rebias   = __float2half2_rn(16384.0f);
+    const half2 divisor2 = __float2half2_rn(inverse_weight_divisor * 256.0f);
+
+    float c[kTiles][NACC][8];
+#pragma unroll
+    for (int tile = 0; tile < kTiles; ++tile) {
+#pragma unroll
+        for (int a = 0; a < NACC; ++a) {
+#pragma unroll
+            for (int i = 0; i < 8; ++i) { c[tile][a][i] = 0.0f; }
+        }
+    }
+
+    for (int group = g0; group < gend; ++group) {
+        const std::int64_t packed_index = tile_base + static_cast<std::int64_t>(group) * 32;
+        const uint2 q2 = __ldg(reinterpret_cast<const uint2*>(codes + packed_index * 8));
+        const half2 sc2 = __hmul2(nvfp4_decode_e4m3_scale(scales[packed_index]), divisor2);
+        half2 b[8];
+        nvfp4_decode_e2m1_quad(q2.x, rebias, *reinterpret_cast<half2(*)[4]>(&b[0]));
+        nvfp4_decode_e2m1_quad(q2.y, rebias, *reinterpret_cast<half2(*)[4]>(&b[4]));
+#pragma unroll
+        for (int j = 0; j < 8; ++j) { b[j] = __hmul2(b[j], sc2); }
+        const unsigned* B = reinterpret_cast<const unsigned*>(b);
+        const int kbase   = group * S::kGroupK;
+
+#pragma unroll
+        for (int tile = 0; tile < kTiles; ++tile) {
+            const int row = tile * S::kRowsPerTile + r;
+            half values[16];
+            if (row < t) {
+                const Activation* source = x + static_cast<std::int64_t>(row) * k + kbase;
+                const uint4 raw0 = *reinterpret_cast<const uint4*>(source);
+                const uint4 raw1 = *reinterpret_cast<const uint4*>(source + 8);
+                const auto* src0 = reinterpret_cast<const Activation*>(&raw0);
+                const auto* src1 = reinterpret_cast<const Activation*>(&raw1);
+                if constexpr (std::is_same_v<Activation, half>) {
+#pragma unroll
+                    for (int j = 0; j < 8; ++j) { values[j] = src0[j]; }
+#pragma unroll
+                    for (int j = 0; j < 8; ++j) { values[j + 8] = src1[j]; }
+                } else {
+#pragma unroll
+                    for (int j = 0; j < 8; ++j) {
+                        values[j] = __float2half(__bfloat162float(src0[j]));
+                    }
+#pragma unroll
+                    for (int j = 0; j < 8; ++j) {
+                        values[j + 8] = __float2half(__bfloat162float(src1[j]));
+                    }
+                }
+            } else {
+#pragma unroll
+                for (int j = 0; j < 16; ++j) { values[j] = __ushort_as_half(0); }
+            }
+            const unsigned* A = reinterpret_cast<const unsigned*>(values);
+            volta_mma_qp_n(c[tile][0 % NACC], A[0], A[1], B[0], B[1]);
+            volta_mma_qp_n(c[tile][1 % NACC], A[2], A[3], B[2], B[3]);
+            volta_mma_qp_n(c[tile][2 % NACC], A[4], A[5], B[4], B[5]);
+            volta_mma_qp_n(c[tile][3 % NACC], A[6], A[7], B[6], B[7]);
+        }
+    }
+
+#pragma unroll
+    for (int tile = 0; tile < kTiles; ++tile) {
+#pragma unroll
+        for (int a = 1; a < NACC; ++a) {
+#pragma unroll
+            for (int i = 0; i < 8; ++i) { c[tile][0][i] += c[tile][a][i]; }
+        }
+    }
+#pragma unroll
+    for (int tile = 0; tile < kTiles; ++tile) {
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int row = (i & 2) | ((lane & 16) ? 4 : 0) | (lane & 1);
+            const int col = (i & 1) | (((lane >> 1) & 1) << 1) | ((i >> 2) << 2);
+            cs[warp][(tile * S::kRowsPerTile + row) * S::kColsPerCta + qp * 8 + col] =
+                c[tile][0][i];
+        }
+    }
+    __syncthreads();
+
+    constexpr int kOut = kTiles * S::kRowsPerTile * S::kColsPerCta;
+    for (int e = static_cast<int>(threadIdx.x); e < kOut; e += SPLITK * 32) {
+        const int row  = e / S::kColsPerCta;
+        const int col  = e % S::kColsPerCta;
+        const int ocol = static_cast<int>(blockIdx.x) * S::kColsPerCta + col;
+        if (row < t && ocol < n) {
+            float value = 0.0f;
+#pragma unroll
+            for (int w = 0; w < SPLITK; ++w) { value += cs[w][e]; }
+            output.store(ocol, row, value);
+        }
+    }
+}
+
 // Shared launcher. Every NVFP4 consumer that wants the plain contiguous output takes this
 // directly; a fused consumer supplies its own OutputPolicy.
 //
@@ -304,13 +425,19 @@ __global__ __launch_bounds__(
 // aren't reached by the mixed artifact's routing and fall to the SPLITK=8 default, which was never
 // worse than production's SPLITK=4 baseline on any measured shape.
 template <int kTiles, int SPLITK, int NACC, class Activation, class OutputPolicy>
-void launch_nvfp4_qpn_schedule(dim3 grid, const std::uint8_t* codes,
+void launch_nvfp4_qpn_schedule(bool prepacked, dim3 grid, const std::uint8_t* codes,
                                const std::uint8_t* scales, const Activation* x, int n, int k,
                                int t, float inverse_weight_divisor, OutputPolicy output,
                                cudaStream_t stream) {
-    nvfp4_volta_qpn_gemm_kernel<kTiles, SPLITK, NACC>
-        <<<grid, SPLITK * 32, 0, stream>>>(codes, scales, x, n, k, t,
-                                           inverse_weight_divisor, output);
+    if (prepacked) {
+        nvfp4_volta_qpn_prepacked_kernel<kTiles, SPLITK, NACC>
+            <<<grid, SPLITK * 32, 0, stream>>>(codes, scales, x, n, k, t,
+                                               inverse_weight_divisor, output);
+    } else {
+        nvfp4_volta_qpn_gemm_kernel<kTiles, SPLITK, NACC>
+            <<<grid, SPLITK * 32, 0, stream>>>(codes, scales, x, n, k, t,
+                                               inverse_weight_divisor, output);
+    }
 }
 
 template <class Activation, class OutputPolicy>
@@ -325,26 +452,29 @@ void launch_nvfp4_volta_qpn_with_activation(const Tensor& x, const Weight& w,
     const dim3 grid(static_cast<unsigned>((n + S::kColsPerCta - 1) / S::kColsPerCta));
     const auto* codes  = static_cast<const std::uint8_t*>(w.qdata);
     const auto* scales = static_cast<const std::uint8_t*>(w.scales);
+    const bool prepacked  = w.layout == QuantLayout::VoltaQpnPrepacked;
     const bool gate_up    = (n == 34816 && k == 5120);
     const bool split_half = (n == 17408 && k == 5120);
     if (t <= S::kRowsPerTile) {
         if (gate_up || split_half) {
-            launch_nvfp4_qpn_schedule<1, 16, 2>(grid, codes, scales, xd, n, k, t,
+            launch_nvfp4_qpn_schedule<1, 16, 2>(prepacked, grid, codes, scales, xd, n, k, t,
                                                 inverse_weight_divisor, output, stream);
         } else {
-            launch_nvfp4_qpn_schedule<1, 8, 2>(grid, codes, scales, xd, n, k, t,
+            launch_nvfp4_qpn_schedule<1, 8, 2>(prepacked, grid, codes, scales, xd, n, k, t,
                                                inverse_weight_divisor, output, stream);
         }
     } else if (t <= 2 * S::kRowsPerTile) {
         if (split_half) {
-            launch_nvfp4_qpn_schedule<2, 16, 1>(grid, codes, scales, xd, n, k, t,
+            // NACC1 and NACC2 tied exactly at T=16 (233.8us both); NACC1 for the smaller register
+            // footprint.
+            launch_nvfp4_qpn_schedule<2, 16, 1>(prepacked, grid, codes, scales, xd, n, k, t,
                                                 inverse_weight_divisor, output, stream);
         } else {
-            launch_nvfp4_qpn_schedule<2, 8, 1>(grid, codes, scales, xd, n, k, t,
+            launch_nvfp4_qpn_schedule<2, 8, 1>(prepacked, grid, codes, scales, xd, n, k, t,
                                                inverse_weight_divisor, output, stream);
         }
     } else {
-        launch_nvfp4_qpn_schedule<4, 8, 1>(grid, codes, scales, xd, n, k, t,
+        launch_nvfp4_qpn_schedule<4, 8, 1>(prepacked, grid, codes, scales, xd, n, k, t,
                                            inverse_weight_divisor, output, stream);
     }
     CUDA_CHECK(cudaGetLastError());
@@ -368,6 +498,6 @@ void launch_nvfp4_volta_qpn_with_fp16_activation(const Tensor& x, const Weight& 
                                            stream);
 }
 
-#endif // NINFER_VOLTA_BUILD && sm_70
+#endif // sm_70
 
 } // namespace ninfer::ops::detail

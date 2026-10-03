@@ -123,6 +123,9 @@ void packed_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
  * through the inert tail; an empty row uses zero positions. Other tail values are safe dummies.
  * Tail columns do not mutate cache and produce exact BF16 zero.
  *
+ * The registered prompt route consumes the paged cache directly and requires zero transient
+ * workspace. Small-T routes may use the split state returned by the capacity query below.
+ *
  * The caller guarantees that the maximum p+1 over live rows lies within envelope. The envelope is
  * a host launch/workspace resource promise over that batch maximum, not a mask and not persistent
  * state. A masked physical width may exceed max_visible_keys when its live prefix is shorter.
@@ -154,7 +157,7 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
 /**
  * Return transient capacity for every W in the inclusive interval at one exact batch size. The
  * head geometry, cache dtype, and execution envelope are fixed implementation-profile inputs.
- * Invalid profiles or intervals throw; a legal prompt route may return zero.
+ * Invalid profiles or intervals throw; an interval containing only prompt routes returns zero.
  */
 [[nodiscard]] std::size_t causal_softmax_attention_workspace_capacity_bytes(
     AttentionHeadGeometry geometry, KvCacheStorage cache_storage,

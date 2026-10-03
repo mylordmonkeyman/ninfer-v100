@@ -1,7 +1,13 @@
 #include "ops/linear_add/fp8/fp8_linear_add_plan.h"
 
+#include "core/layout.h"
+#include "ninfer/ops/linear.h"
+#include "ninfer/ops/residual_add.h"
 #include "ops/linear/fp8/fp8_a8_plan.h"
 #include "ops/linear/fp8/fp8_config.h"
+#ifdef NINFER_VOLTA_BUILD
+#include "ops/linear/fp8/fp8_cutlass_sm70.h"
+#endif
 
 #include <algorithm>
 #include <cstddef>
@@ -13,6 +19,9 @@ namespace {
 
 enum class Fp8LinearAddRoute : std::uint8_t {
     A16,
+#ifdef NINFER_VOLTA_BUILD
+    QpnResidual,
+#endif
     A8,
 };
 
@@ -23,12 +32,23 @@ Fp8LinearAddRoute resolve_route(std::int32_t output_rows, std::int32_t input_row
          input_rows != Fp8Residual17408Geometry::kInputRows)) {
         throw std::invalid_argument("fp8 linear_add: unsupported shape");
     }
-    if (policy == LinearPolicy::A16Only) { return Fp8LinearAddRoute::A16; }
+    if (policy == LinearPolicy::A16Only) {
+#ifdef NINFER_VOLTA_BUILD
+        return Fp8LinearAddRoute::QpnResidual;
+#else
+        return Fp8LinearAddRoute::A16;
+#endif
+    }
     if (policy != LinearPolicy::AllowA8) {
         throw std::invalid_argument("fp8 linear_add: unsupported policy");
     }
     const std::int32_t first_a8 = input_rows == Fp8Residual6144Geometry::kInputRows ? 22 : 25;
-    return tokens >= first_a8 ? Fp8LinearAddRoute::A8 : Fp8LinearAddRoute::A16;
+    if (tokens >= first_a8) { return Fp8LinearAddRoute::A8; }
+#ifdef NINFER_VOLTA_BUILD
+    return Fp8LinearAddRoute::QpnResidual;
+#else
+    return Fp8LinearAddRoute::A16;
+#endif
 }
 
 void launch_a16(const Tensor& x, const Weight& weight, Tensor& residual, cudaStream_t stream) {
@@ -48,6 +68,36 @@ void launch_a16(const Tensor& x, const Weight& weight, Tensor& residual, cudaStr
     }
 }
 
+#ifdef NINFER_VOLTA_BUILD
+template <class Allocator>
+Tensor allocate_projected(Allocator& allocator, std::int32_t output_rows, std::int32_t tokens) {
+    return allocator.alloc(DType::BF16, {output_rows, tokens}, 256);
+}
+
+void launch_qpn_residual(const Tensor& x, const Weight& weight, Tensor& residual,
+                         WorkspaceArena& workspace, cudaStream_t stream) {
+    if (x.ne[1] <= 32) {
+        fp8_linear_add_qpn_launch(x, weight, residual, stream);
+        return;
+    }
+    auto scope       = workspace.scope();
+    Tensor projected = allocate_projected(workspace, weight.n, x.ne[1]);
+    fp8_cutlass_sm70_launch(x, weight, projected, workspace, stream);
+    residual_add(projected, residual, stream);
+}
+
+std::size_t qpn_residual_workspace_bytes(std::int32_t output_rows, std::int32_t input_rows,
+                                         std::int32_t tokens) {
+    WorkspaceLayoutBuilder layout;
+    if (tokens <= 32) { return 0; }
+    (void)allocate_projected(layout, output_rows, tokens);
+    const std::size_t linear_bytes =
+        fp8_cutlass_sm70_workspace_bytes(output_rows, input_rows, tokens);
+    (void)layout.alloc_bytes(linear_bytes, 256);
+    return layout.peak_bytes(1);
+}
+#endif
+
 } // namespace
 
 std::size_t fp8_linear_add_workspace_capacity_bytes(std::int32_t output_rows,
@@ -58,9 +108,16 @@ std::size_t fp8_linear_add_workspace_capacity_bytes(std::int32_t output_rows,
         throw std::invalid_argument("fp8 linear_add workspace: invalid token interval");
     }
     (void)resolve_route(output_rows, input_rows, policy, min_tokens);
-    return resolve_route(output_rows, input_rows, policy, max_tokens) == Fp8LinearAddRoute::A8
-               ? fp8_a8_workspace_capacity_bytes(max_tokens, input_rows)
-               : 0;
+    const Fp8LinearAddRoute route = resolve_route(output_rows, input_rows, policy, max_tokens);
+    if (route == Fp8LinearAddRoute::A8) {
+        return fp8_a8_workspace_capacity_bytes(max_tokens, input_rows);
+    }
+#ifdef NINFER_VOLTA_BUILD
+    if (route == Fp8LinearAddRoute::QpnResidual) {
+        return qpn_residual_workspace_bytes(output_rows, input_rows, max_tokens);
+    }
+#endif
+    return 0;
 }
 
 void fp8_linear_add_dispatch(const Tensor& x, const Weight& weight, Tensor& residual,
@@ -70,6 +127,12 @@ void fp8_linear_add_dispatch(const Tensor& x, const Weight& weight, Tensor& resi
         launch_a16(x, weight, residual, stream);
         return;
     }
+#ifdef NINFER_VOLTA_BUILD
+    if (route == Fp8LinearAddRoute::QpnResidual) {
+        launch_qpn_residual(x, weight, residual, workspace, stream);
+        return;
+    }
+#endif
     fp8_linear_add_a8_launch(x, weight, residual, workspace, stream);
 }
 
