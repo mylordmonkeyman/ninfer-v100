@@ -352,6 +352,11 @@ inline constexpr std::int32_t kFp8LinearSmallTMax<Fp8FlashNextResidualGeometry> 
 template <>
 inline constexpr std::int32_t kFp8LinearSmallTMax<Fp8FlashNextVocabularyGeometry> = 8;
 
+#ifdef NINFER_VOLTA_BUILD
+template <>
+inline constexpr std::int32_t kFp8LinearSmallTMax<Fp8VocabularyGeometry> = kFp8LastSmallT;
+#endif
+
 inline std::int32_t fp8_linear_small_t_max(Fp8Problem problem) {
     switch (problem) {
     case Fp8Problem::AttnInput:
@@ -361,7 +366,11 @@ inline std::int32_t fp8_linear_small_t_max(Fp8Problem problem) {
     case Fp8Problem::MlpGateUp:
         return kFp8LinearSmallTMax<Fp8MlpGateUpGeometry>;
     case Fp8Problem::Vocabulary:
+#ifdef NINFER_VOLTA_BUILD
+        return kFp8LinearSmallTMax<Fp8VocabularyGeometry>;
+#else
         break;
+#endif
     case Fp8Problem::Residual6144:
         return kFp8LinearSmallTMax<Fp8Residual6144Geometry>;
     case Fp8Problem::Residual17408:
