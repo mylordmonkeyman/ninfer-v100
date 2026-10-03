@@ -108,7 +108,7 @@ private:
     cudaEvent_t fill_start_ = nullptr, fill_stop_ = nullptr;
     unsigned admission_cap_ = 1;
     bool prefill_enabled_ = true, batched_prefill_ = false, batching_layer_ = false;
-    bool grouped_prefill_ = false, grouping_layer_ = false;
+    bool grouped_prefill_ = true, grouping_layer_ = false;
     bool timing_enabled_ = false, serial_schedule_ = false, admissions_enabled_ = true;
     int device_ = 0;
     std::vector<Entry> entries_;
