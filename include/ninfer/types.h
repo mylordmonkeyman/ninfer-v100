@@ -51,7 +51,12 @@ enum class KvCapacityMode : std::uint8_t {
 
 inline constexpr std::size_t kDefaultKvCapacityHeadroomBytes   = 1024ULL * 1024ULL * 1024ULL;
 inline constexpr std::size_t kDefaultKvCapacitySlackFloorBytes = 1024ULL * 1024ULL * 1024ULL;
+#if defined(NINFER_VOLTA_BUILD)
+// Tesla V100 is a compute-only device; reserve can still be requested explicitly.
+inline constexpr std::size_t kDefaultDesktopReserveBytes = 0;
+#else
 inline constexpr std::size_t kDefaultDesktopReserveBytes       = 8ULL * 1024ULL * 1024ULL * 1024ULL;
+#endif
 
 struct KvCapacityPolicy {
     KvCapacityMode mode                  = KvCapacityMode::Explicit;

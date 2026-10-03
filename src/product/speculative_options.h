@@ -43,8 +43,12 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options,
         const std::uint32_t conc = std::max(1u, max_concurrency);
         // State-slot budget ceiling: (draft_tokens + 1) * conc <= 64 slots.
         const std::uint32_t ceiling = (conc <= 64u) ? (64u / conc) - 1u : 0u;
-        // The artifact's runtime applies its exact limit (five for dense, four for Flash-Next).
+        // The artifact's runtime applies its exact target limit.
+#if defined(NINFER_VOLTA_BUILD)
+        const std::uint32_t max_mtp = std::min(7u, ceiling);
+#else
         const std::uint32_t max_mtp = std::min(5u, ceiling);
+#endif
         if (options.draft_tokens == 0 || options.draft_tokens > max_mtp) {
             throw std::invalid_argument(
                 "--spec mtp requires --draft-tokens in [1, " + std::to_string(max_mtp) +

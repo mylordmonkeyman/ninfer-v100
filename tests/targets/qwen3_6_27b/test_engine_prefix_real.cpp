@@ -1889,6 +1889,16 @@ int main() {
                      "NINFER_QWEN3_6_27B_NVFP4_WEIGHTS nor a Qwen3.8 equivalent is set\n";
         return 77;
     }
+    if (scenario != nullptr && std::string_view(scenario) == "vision") {
+        if (qwen38_nvfp4 == nullptr || *qwen38_nvfp4 == '\0') {
+            std::cerr << "vision requires NINFER_QWEN3_8_27B_NVFP4_WEIGHTS\n";
+            return 1;
+        }
+        ninfer::Engine engine(engine_options(qwen38_nvfp4));
+        const int result = exercise_vision(engine);
+        if (result == 0) { std::cout << "ok vision\n"; }
+        return result;
+    }
     if (scenario != nullptr && std::string_view(scenario) == "speculative-page-boundary") {
         const char* artifact = qwen38_nvfp4 != nullptr && *qwen38_nvfp4 != '\0'
                                    ? qwen38_nvfp4

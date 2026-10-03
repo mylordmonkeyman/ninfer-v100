@@ -12,7 +12,11 @@
 
 namespace ninfer::targets::qwen3_6 {
 
+#if defined(NINFER_VOLTA_BUILD)
+inline constexpr std::uint32_t kMtpDecodeMaximumDrafts = 7;
+#else
 inline constexpr std::uint32_t kMtpDecodeMaximumDrafts    = 5;
+#endif
 inline constexpr std::uint32_t kMtpDecodeMaximumWidth     = kMtpDecodeMaximumDrafts + 1;
 inline constexpr std::uint32_t kDFlashDecodeMaximumDrafts = 15;
 inline constexpr std::uint32_t kDFlashDecodeMaximumWidth  = kDFlashDecodeMaximumDrafts + 1;

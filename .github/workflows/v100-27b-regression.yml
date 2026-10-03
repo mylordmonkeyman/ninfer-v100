@@ -35,6 +35,16 @@ jobs:
             exit 1
           fi
           stat --format='%n %s bytes' /models/qwen3_8_27b_nvfp4.ninfer > regression-results/prerequisite.txt
+      - name: Install media build prerequisites when missing
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! pkg-config --exists libavformat libavcodec libavutil libswscale libcurl; then
+            if [[ $(id -u) -eq 0 ]]; then elevate=(); else elevate=(sudo); fi
+            "${elevate[@]}" apt-get update
+            "${elevate[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              pkg-config libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libcurl4-openssl-dev
+          fi
       - name: Build existing whole-model scoring regression
         id: build
         shell: bash
@@ -42,9 +52,10 @@ jobs:
           set -euo pipefail
           cmake -S . -B build-27b -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
-            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
-            -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-27b -j --target ninfer_qwen3_6_27b_score_real_test \
+            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=ON \
+            -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
+          cmake --build build-27b -j --target ninfer ninfer-serve ninfer_bench \
+            ninfer_qwen3_6_27b_score_real_test ninfer_qwen3_6_27b_prefix_real_test \
             ninfer_qwen3_8_flash_next_expert_cache_test \
             ninfer_qwen3_8_flash_next_text_decode_test 2>&1 | tee regression-results/build.log
           ctest --test-dir build-27b -V \
@@ -58,16 +69,40 @@ jobs:
         run: |
           set -euo pipefail
           build-27b/tests/ninfer_qwen3_6_27b_score_real_test 2>&1 | tee regression-results/candidate.log
-      - name: Checkout pre-integration comparison on candidate failure
-        if: ${{ !cancelled() && steps.candidate.outcome == 'failure' }}
+      - name: Real generation with graphs and MTP
+        id: generation
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--weights /models/qwen3_8_27b_nvfp4.ninfer --desktop-reserve-gib 0 --kv-dtype int8 -pg 1024,64 -r 2 --warmup 1 -o json)
+          build-27b/bench/ninfer_bench "${args[@]}" --no-cuda-graph --output-file regression-results/eager.json > regression-results/eager.log 2>&1
+          build-27b/bench/ninfer_bench "${args[@]}" --output-file regression-results/graph.json > regression-results/graph.log 2>&1
+          for drafts in 1 3 7; do
+            build-27b/bench/ninfer_bench "${args[@]}" --spec mtp --draft-tokens "$drafts" --lm-head-draft \
+              --output-file "regression-results/mtp-$drafts.json" > "regression-results/mtp-$drafts.log" 2>&1
+          done
+      - name: Real speculative state and vision regression
+        shell: bash
+        env:
+          NINFER_QWEN3_8_27B_NVFP4_WEIGHTS: /models/qwen3_8_27b_nvfp4.ninfer
+        run: |
+          set -euo pipefail
+          for scenario in speculative-page-boundary rewrite-checkpoint vision; do
+            NINFER_PREFIX_REAL_SCENARIO="$scenario" \
+              build-27b/tests/ninfer_qwen3_6_27b_prefix_real_test \
+              2>&1 | tee "regression-results/$scenario.log"
+          done
+      - name: Checkout working V100 fork for comparison
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 6f5dd83791aaddc6dd4e378799858644814d681a
+          repository: geoffwatts/ninfer-v100
+          ref: b37d0dd3e1163b9d802d8bccfa89918bf68d793e
           path: baseline
           submodules: recursive
           persist-credentials: false
-      - name: Distinguish existing failure from a new 27B regression
-        if: ${{ !cancelled() && steps.candidate.outcome == 'failure' }}
+      - name: Compare original V100 fork on the same artifact and corpus
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         env:
           NINFER_QWEN3_6_27B_WEIGHTS: /models/qwen3_8_27b_nvfp4.ninfer
@@ -76,9 +111,13 @@ jobs:
           cmake -S baseline -B build-27b-baseline -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
             -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
-            -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-27b-baseline -j --target ninfer_qwen3_6_27b_score_real_test
+            -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
+          cmake --build build-27b-baseline -j --target ninfer_qwen3_6_27b_score_real_test ninfer_bench
           build-27b-baseline/tests/ninfer_qwen3_6_27b_score_real_test 2>&1 | tee regression-results/baseline.log
+          args=(--weights /models/qwen3_8_27b_nvfp4.ninfer --corpus bench/fixtures/bench_corpus.ids --kv-dtype int8 -pg 1024,64 -r 2 --warmup 1 -o json)
+          build-27b-baseline/bench/ninfer_bench "${args[@]}" --output-file regression-results/baseline-graph.json > regression-results/baseline-graph.log 2>&1
+          build-27b-baseline/bench/ninfer_bench "${args[@]}" --spec mtp --draft-tokens 3 --lm-head-draft \
+            --output-file regression-results/baseline-mtp-3.json > regression-results/baseline-mtp-3.log 2>&1
       - name: Preserve evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
