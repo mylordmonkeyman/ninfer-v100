@@ -1,0 +1,78 @@
+name: V100 27B Regression
+on:
+  push:
+    branches: [forwardport/v100-flash-next]
+    paths: ['.github/workflows/v100-27b-regression.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: v100-27b-regression
+  cancel-in-progress: false
+jobs:
+  real-27b:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Check recorded 27B artifact
+        id: artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p regression-results
+          nvidia-smi > regression-results/gpu.txt
+          if [[ ! -f /models/qwen3_8_27b_nvfp4.ninfer ]]; then
+            echo 'Recorded 27B artifact is not mounted at /models/qwen3_8_27b_nvfp4.ninfer' | tee regression-results/prerequisite.txt
+            exit 1
+          fi
+          stat --format='%n %s bytes' /models/qwen3_8_27b_nvfp4.ninfer > regression-results/prerequisite.txt
+      - name: Build existing whole-model scoring regression
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-27b -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-27b -j --target ninfer_qwen3_6_27b_score_real_test
+      - name: Score real 27B and check fresh-state repeatability
+        id: candidate
+        shell: bash
+        env:
+          NINFER_QWEN3_6_27B_WEIGHTS: /models/qwen3_8_27b_nvfp4.ninfer
+        run: |
+          set -euo pipefail
+          build-27b/tests/ninfer_qwen3_6_27b_score_real_test 2>&1 | tee regression-results/candidate.log
+      - name: Checkout pre-integration comparison on candidate failure
+        if: ${{ !cancelled() && steps.candidate.outcome == 'failure' }}
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 6f5dd83791aaddc6dd4e378799858644814d681a
+          path: baseline
+          submodules: recursive
+          persist-credentials: false
+      - name: Distinguish existing failure from a new 27B regression
+        if: ${{ !cancelled() && steps.candidate.outcome == 'failure' }}
+        shell: bash
+        env:
+          NINFER_QWEN3_6_27B_WEIGHTS: /models/qwen3_8_27b_nvfp4.ninfer
+        run: |
+          set -euo pipefail
+          cmake -S baseline -B build-27b-baseline -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-27b-baseline -j --target ninfer_qwen3_6_27b_score_real_test
+          build-27b-baseline/tests/ninfer_qwen3_6_27b_score_real_test 2>&1 | tee regression-results/baseline.log
+      - name: Preserve evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-27b-regression
+          path: regression-results
+          retention-days: 30
