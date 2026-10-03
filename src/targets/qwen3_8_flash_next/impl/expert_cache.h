@@ -68,6 +68,9 @@ public:
     void begin_layer(bool prefill);
     [[nodiscard]] bool batched_prefill() const { return batched_prefill_; }
     void set_batched_prefill(bool value) { batched_prefill_ = value; }
+    // Phase-17 launch-fusion experiment. Decode remains scalar by default.
+    [[nodiscard]] bool batched_decode() const { return batched_decode_; }
+    void set_batched_decode(bool value) { batched_decode_ = value; }
     [[nodiscard]] bool grouped_prefill() const { return grouped_prefill_; }
     void set_grouped_prefill(bool value) { grouped_prefill_ = value; }
     bool execute(unsigned layer, int expert, const void* device_input,
@@ -107,7 +110,8 @@ private:
     cudaEvent_t hit_start_ = nullptr, hit_stop_ = nullptr;
     cudaEvent_t fill_start_ = nullptr, fill_stop_ = nullptr;
     unsigned admission_cap_ = 1;
-    bool prefill_enabled_ = true, batched_prefill_ = false, batching_layer_ = false;
+    bool prefill_enabled_ = true, batched_prefill_ = false, batched_decode_ = false;
+    bool batching_layer_ = false;
     bool grouped_prefill_ = true, grouping_layer_ = false;
     bool timing_enabled_ = false, serial_schedule_ = false, admissions_enabled_ = true;
     int device_ = 0;
