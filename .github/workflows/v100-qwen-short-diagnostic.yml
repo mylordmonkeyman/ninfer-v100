@@ -1,0 +1,82 @@
+name: V100 Qwen Short Prompt Diagnostic
+on:
+  push:
+    branches: [forwardport/v100-flash-next]
+    paths:
+      - '.github/workflows/v100-qwen-short-diagnostic.yml'
+      - 'tools/validation/v100_qwen_short_probe.cpp'
+  workflow_dispatch:
+permissions:
+  contents: read
+# Prioritize the accuracy blocker over further peer-model qualification.
+concurrency:
+  group: v100-qwen-model-matrix
+  cancel-in-progress: true
+jobs:
+  diagnose:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          persist-credentials: false
+          clean: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: geoffwatts/ninfer-v100
+          ref: b37d0dd3e1163b9d802d8bccfa89918bf68d793e
+          path: baseline
+          submodules: recursive
+          persist-credentials: false
+          clean: false
+      - name: Build identical short-prompt probes
+        run: |
+          set -euo pipefail
+          rm -rf -- short-results
+          mkdir -p short-results
+          cp tools/validation/v100_qwen_short_probe.cpp baseline/tools/v100_qwen_short_probe.cpp
+          for label in candidate baseline; do
+            source=.
+            build=../build-27b
+            probe=tools/validation/v100_qwen_short_probe.cpp
+            media=ON
+            if [[ "$label" == baseline ]]; then source=baseline; build=../build-27b-baseline; probe=tools/v100_qwen_short_probe.cpp; media=OFF; fi
+            cat >> "$source/CMakeLists.txt" <<CMAKE
+          add_executable(ninfer_v100_qwen_short_probe $probe)
+          target_include_directories(ninfer_v100_qwen_short_probe PRIVATE \${PROJECT_SOURCE_DIR}/include)
+          target_link_libraries(ninfer_v100_qwen_short_probe PRIVATE ninfer_engine)
+          CMAKE
+            cmake -S "$source" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70 \
+              -DNINFER_BUILD_MEDIA="$media" -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
+            cmake --build "$build" -j --target ninfer_v100_qwen_short_probe 2>&1 | tee "short-results/$label-build.log"
+          done
+      - name: Isolate short-prompt repeatability by KV format
+        run: |
+          set -euo pipefail
+          model=../v100-qualification-models/v2/qwen3_6_27b.ninfer
+          for label in baseline candidate; do
+            build=../build-27b
+            if [[ "$label" == baseline ]]; then build=../build-27b-baseline; fi
+            for kv in int8 fp8 bf16; do
+              "$build/ninfer_v100_qwen_short_probe" "$model" bench/fixtures/bench_corpus.ids "$kv" 64 \
+                2>&1 | tee "short-results/$label-$kv.log"
+            done
+          done
+      - name: Check actual short-prompt device reads for uninitialized memory
+        run: |
+          set -euo pipefail
+          sanitizer=/usr/local/cuda-12.8/bin/compute-sanitizer
+          if [[ ! -x "$sanitizer" ]]; then sanitizer=$(command -v compute-sanitizer); fi
+          "$sanitizer" --tool initcheck --error-exitcode 86 \
+            ../build-27b/ninfer_v100_qwen_short_probe \
+            ../v100-qualification-models/v2/qwen3_6_27b.ninfer bench/fixtures/bench_corpus.ids int8 8 \
+            2>&1 | tee short-results/candidate-initcheck.log
+      - name: Preserve diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-qwen-short-diagnostic
+          path: short-results
+          retention-days: 30
