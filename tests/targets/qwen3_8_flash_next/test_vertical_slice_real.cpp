@@ -711,6 +711,223 @@ static int run_prefill_policy_benchmark(FlashNextTextExecutor& executor,
     return 0;
 }
 
+
+static int run_phase17_hit_graph_benchmark(const TextModelView& model,
+    ninfer::DeviceContext& device) {
+    if (!model.host_experts) {
+        throw std::runtime_error("Phase 17 graph benchmark requires host-backed experts");
+    }
+    constexpr std::size_t kInputBytes = 2'560 * sizeof(std::uint16_t);
+    constexpr std::size_t kActivationBytes = 640 * sizeof(std::uint16_t);
+    constexpr std::size_t kOutputCount = 2'560;
+    constexpr unsigned kIterations = 512;
+
+    const auto source = model.host_experts->expert(0, 0);
+    PinnedHostBuffer packed(kExpertSlotBytes);
+    auto* packed_bytes = static_cast<std::byte*>(packed.data());
+    std::memcpy(packed_bytes, source.gate_up.codes, 1'638'400);
+    std::memcpy(packed_bytes + 1'638'400, source.gate_up.scales, 204'800);
+    std::memcpy(packed_bytes + 1'843'200, source.down.codes, 819'200);
+    std::memcpy(packed_bytes + 2'662'400, source.down.scales, 102'400);
+    std::memcpy(packed_bytes + 2'764'800, source.gate_up.weight_scale_divisor, 4);
+    std::memcpy(packed_bytes + 2'764'804, source.down.weight_scale_divisor, 4);
+    std::memset(packed_bytes + kExpertPairBytes, 0, kExpertSlotBytes-kExpertPairBytes);
+
+    DeviceBuffer weights(kExpertSlotBytes);
+    DeviceBuffer input(kInputBytes);
+    DeviceBuffer activation(kActivationBytes);
+    DeviceBuffer output(kOutputCount*sizeof(float));
+    std::vector<std::uint16_t> host_input(2'560, 0x3f80U); // BF16 1.0
+    CUDA_CHECK(cudaMemcpyAsync(weights.p, packed.data(), kExpertSlotBytes,
+                               cudaMemcpyHostToDevice, device.stream));
+    CUDA_CHECK(cudaMemcpyAsync(input.p, host_input.data(), kInputBytes,
+                               cudaMemcpyHostToDevice, device.stream));
+    device.synchronize();
+
+    const auto* base = static_cast<const std::byte*>(weights.p);
+    HostNvfp4ExpertPairView expert{
+        {base, base+1'638'400, reinterpret_cast<const float*>(base+2'764'800),
+         1, 1280, 2560},
+        {base+1'843'200, base+2'662'400,
+         reinterpret_cast<const float*>(base+2'764'804), 1, 2560, 640}};
+
+    cudaStream_t stream = nullptr;
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t graph_exec = nullptr;
+    cudaEvent_t gpu_start = nullptr, gpu_stop = nullptr;
+    CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+    CUDA_CHECK(cudaEventCreate(&gpu_start));
+    CUDA_CHECK(cudaEventCreate(&gpu_stop));
+
+    const auto cleanup = [&] {
+        if (graph_exec) cudaGraphExecDestroy(graph_exec);
+        if (graph) cudaGraphDestroy(graph);
+        if (gpu_start) cudaEventDestroy(gpu_start);
+        if (gpu_stop) cudaEventDestroy(gpu_stop);
+        if (stream) cudaStreamDestroy(stream);
+    };
+
+    try {
+        // Warm the exact real cached-expert kernels before measuring either submission path.
+        flash_next_cached_expert_launch(expert, input.p, activation.p,
+                                        static_cast<float*>(output.p), stream);
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+
+        std::vector<float> eager_output(kOutputCount), graph_output(kOutputCount);
+        flash_next_cached_expert_launch(expert, input.p, activation.p,
+                                        static_cast<float*>(output.p), stream);
+        CUDA_CHECK(cudaMemcpyAsync(eager_output.data(), output.p, output.bytes,
+                                   cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+
+        CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
+        flash_next_cached_expert_launch(expert, input.p, activation.p,
+                                        static_cast<float*>(output.p), stream);
+        CUDA_CHECK(cudaStreamEndCapture(stream, &graph));
+        CUDA_CHECK(cudaGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0));
+
+        CUDA_CHECK(cudaGraphLaunch(graph_exec, stream));
+        CUDA_CHECK(cudaMemcpyAsync(graph_output.data(), output.p, output.bytes,
+                                   cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (std::memcmp(eager_output.data(), graph_output.data(), output.bytes) != 0) {
+            throw std::runtime_error(
+                "Phase 17 cached-expert graph changed exact output");
+        }
+
+        struct Timing { double submit_us = 0; double gpu_us = 0; };
+        const auto measure = [&](bool use_graph) {
+            CUDA_CHECK(cudaEventRecord(gpu_start, stream));
+            const auto submitted = std::chrono::steady_clock::now();
+            for (unsigned i=0; i<kIterations; ++i) {
+                if (use_graph) CUDA_CHECK(cudaGraphLaunch(graph_exec, stream));
+                else flash_next_cached_expert_launch(
+                    expert, input.p, activation.p, static_cast<float*>(output.p), stream);
+            }
+            const double submit_us = std::chrono::duration<double,std::micro>(
+                std::chrono::steady_clock::now()-submitted).count();
+            CUDA_CHECK(cudaEventRecord(gpu_stop, stream));
+            CUDA_CHECK(cudaEventSynchronize(gpu_stop));
+            float gpu_ms = 0;
+            CUDA_CHECK(cudaEventElapsedTime(&gpu_ms, gpu_start, gpu_stop));
+            return Timing{submit_us, double(gpu_ms)*1000.0};
+        };
+
+        // Alternate order once to avoid assigning all warm-state drift to one path.
+        const auto eager_a = measure(false);
+        const auto graph_a = measure(true);
+        const auto graph_b = measure(true);
+        const auto eager_b = measure(false);
+        const double eager_submit = (eager_a.submit_us+eager_b.submit_us)/2;
+        const double graph_submit = (graph_a.submit_us+graph_b.submit_us)/2;
+        const double eager_gpu = (eager_a.gpu_us+eager_b.gpu_us)/2;
+        const double graph_gpu = (graph_a.gpu_us+graph_b.gpu_us)/2;
+
+        json row{{"phase17","cached_expert_graph_pair"},
+            {"iterations",kIterations},{"exact_output_match",true},
+            {"eager_submit_us_per_pair",eager_submit/kIterations},
+            {"graph_submit_us_per_pair",graph_submit/kIterations},
+            {"submit_savings_us_per_pair",(eager_submit-graph_submit)/kIterations},
+            {"eager_gpu_us_per_pair",eager_gpu/kIterations},
+            {"graph_gpu_us_per_pair",graph_gpu/kIterations},
+            {"gpu_delta_us_per_pair",(graph_gpu-eager_gpu)/kIterations}};
+        std::cout << row.dump() << '\n';
+        std::cout << "PASS: Phase 17 stable cached-expert graph pair\n";
+        cleanup();
+        return 0;
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+}
+
+static int run_phase17_decode_fusion_benchmark(FlashNextTextExecutor& executor,
+    FlashNextRuntimeAllocation& allocation, ninfer::DeviceContext& device,
+    const std::vector<OracleRecord>& records) {
+    auto* cache = allocation.state_view().expert_cache;
+    if (!cache) throw std::runtime_error("Phase 17 fusion benchmark requires expert cache");
+    if (!cache->timing_enabled()) {
+        throw std::runtime_error("Phase 17 fusion benchmark requires cache timing");
+    }
+    const std::size_t count=std::min<std::size_t>(64,records.size());
+    const std::array<LaneCommitDecision,1> decisions{{{.accept=true}}};
+
+    struct Replay {
+        double seconds=0;
+        std::vector<std::uint16_t> logits;
+        FlashNextExpertCacheStats before{}, after{};
+    };
+    const auto run = [&](bool batched, bool read_logits) {
+        cache->set_batched_decode(batched);
+        Replay replay;
+        replay.before=cache->stats();
+        auto lane=executor.allocate_lane();
+        device.synchronize();
+        const auto started=std::chrono::steady_clock::now();
+        for(std::size_t i=0;i<count;++i) {
+            const auto pos=static_cast<std::int32_t>(records[i].position);
+            LaneStepRequest request{.handle=lane,.token_id=records[i].token_id,
+                .token_index=pos,.mrope_positions={pos,pos,pos},.sampling={},
+                .custom_embedding=nullptr};
+            auto round=executor.execute_round(std::span(&request,1),nullptr);
+            if(read_logits) {
+                const auto logits=round.logits();
+                const auto offset=replay.logits.size();
+                replay.logits.resize(offset+static_cast<std::size_t>(logits.ne[0]));
+                CUDA_CHECK(cudaMemcpyAsync(replay.logits.data()+offset,logits.data,
+                    static_cast<std::size_t>(logits.ne[0])*sizeof(std::uint16_t),
+                    cudaMemcpyDeviceToHost,device.stream));
+                device.synchronize();
+            }
+            round.commit(decisions);
+        }
+        device.synchronize();
+        replay.seconds=std::chrono::duration<double>(
+            std::chrono::steady_clock::now()-started).count();
+        replay.after=cache->stats();
+        if(executor.committed_frontier(lane)!=static_cast<std::int32_t>(count))
+            throw std::runtime_error("Phase 17 fusion frontier mismatch");
+        executor.release_lane(lane);
+        device.synchronize();
+        return replay;
+    };
+
+    // Populate one common Ready set with the production scalar path, then freeze it.
+    run(false,false);
+    cache->drain();
+    run(false,false);
+    cache->drain();
+    cache->freeze_admissions();
+
+    const auto scalar_check=run(false,true);
+    const auto batch_check=run(true,true);
+    if(scalar_check.logits!=batch_check.logits) {
+        throw std::runtime_error(
+            "Phase 17 batched decode cache hits changed exact teacher-forced logits");
+    }
+
+    for(unsigned sample=0;sample<4;++sample) {
+        for(bool batched : {false,true}) {
+            const auto replay=run(batched,false);
+            const auto& b=replay.before;
+            const auto& a=replay.after;
+            json row{{"phase17","decode_hit_fusion"},{"mode",batched?"batched":"scalar"},
+                {"sample",sample},{"tokens",count},{"seconds",replay.seconds},
+                {"tokens_per_s",count/replay.seconds},{"exact_logits_match",true},
+                {"hits",a.hits-b.hits},{"misses",a.misses-b.misses},
+                {"hit_kernel_launches",a.hit_kernel_launches-b.hit_kernel_launches},
+                {"hit_submission_us",a.hit_submission_us-b.hit_submission_us},
+                {"gpu_branch_us",a.gpu_branch_us-b.gpu_branch_us},
+                {"cpu_branch_us",a.cpu_branch_us-b.cpu_branch_us},
+                {"merge_wait_us",a.merge_wait_us-b.merge_wait_us}};
+            std::cout<<row.dump()<<'\n';
+        }
+    }
+    cache->set_batched_decode(false);
+    std::cout<<"PASS: Phase 17 decode-hit launch fusion exact replay\n";
+    return 0;
+}
+
 static int run_phase17_profile(FlashNextTextExecutor& executor,
     FlashNextRuntimeAllocation& allocation, ninfer::DeviceContext& device,
     const std::vector<OracleRecord>& records) {
@@ -1092,6 +1309,15 @@ int main() {
         allocation.configure_expert_cache(model.text_view());
 
         reset_flash_next_host_expert_execution_stats();
+        if (const char* graph_pair = std::getenv("NINFER_PHASE17_HIT_GRAPH_BENCHMARK");
+            graph_pair != nullptr && std::string_view(graph_pair) == "1") {
+            return run_phase17_hit_graph_benchmark(model.text_view(), device);
+        }
+        if (const char* fusion = std::getenv("NINFER_PHASE17_FUSION_BENCHMARK");
+            fusion != nullptr && std::string_view(fusion) == "1") {
+            return run_phase17_decode_fusion_benchmark(
+                executor, allocation, device, records);
+        }
         if (const char* phase17 = std::getenv("NINFER_PHASE17_PROFILE");
             phase17 != nullptr && std::string_view(phase17) == "1") {
             return run_phase17_profile(executor, allocation, device, records);
