@@ -1,0 +1,111 @@
+name: V100 Qwen Model Matrix
+on:
+  push:
+    branches: [forwardport/v100-flash-next]
+    paths:
+      - '.github/workflows/v100-qwen-model-matrix.yml'
+      - 'tools/validation/download_qwen_qualification.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: v100-qwen-model-matrix
+  cancel-in-progress: true
+jobs:
+  real-model:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - repo: neroued/Qwen3.6-27B-NInfer
+            filename: qwen3_6_27b.ninfer
+          - repo: neroued/Qwen3.6-27B-nvfp4-NInfer
+            filename: qwen3_6_27b_nvfp4.ninfer
+          - repo: neroued/Qwen3.6-35B-A3B-NInfer
+            filename: qwen3_6_35b_a3b.ninfer
+          - repo: neroued/Qwen3.8-27B-NInfer
+            filename: qwen3_8_27b.ninfer
+    env:
+      MODEL_REPOSITORY: ${{ matrix.repo }}
+      MODEL_FILENAME: ${{ matrix.filename }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          clean: false
+      - name: Require qualifying runtime and unchanged-probe accuracy results
+        run: |
+          set -euo pipefail
+          test "$(gh run view 37127552576 --repo "$GITHUB_REPOSITORY" --json conclusion --jq .conclusion)" = success
+          test "$(gh run view 37127268924 --repo "$GITHUB_REPOSITORY" --json conclusion --jq .conclusion)" = success
+          test -x ../build-27b/ninfer_v100_qwen_parity_probe
+          test -x ../build-27b-baseline/ninfer_v100_qwen_parity_probe
+          test -x ../build-27b/bench/ninfer_bench
+          test -x ../build-27b-baseline/bench/ninfer_bench
+          mkdir -p model-results
+          nvidia-smi > model-results/gpu.txt
+          df -h /models | tee model-results/disk.txt
+      - name: Download published artifact and verify size and hash
+        run: |
+          set -euo pipefail
+          python3 tools/validation/download_qwen_qualification.py "$MODEL_REPOSITORY" "$MODEL_FILENAME" \
+            /models/v100-qualification model-results
+      - name: Compare real scoring and eager graph MTP generation with original V100 fork
+        run: |
+          set -euo pipefail
+          extras=(mtp7)
+          if [[ "$MODEL_FILENAME" == qwen3_6_35b_a3b.ninfer ]]; then extras+=(dflash); fi
+          if [[ "$MODEL_FILENAME" == qwen3_8_27b.ninfer ]]; then extras+=(dflash2); fi
+          for label in baseline candidate; do
+            build=../build-27b
+            if [[ "$label" == baseline ]]; then build=../build-27b-baseline; fi
+            for mode in score eager graph mtp "${extras[@]}"; do
+              "$build/ninfer_v100_qwen_parity_probe" "/models/v100-qualification/$MODEL_FILENAME" \
+                bench/fixtures/bench_corpus.ids "$mode" "model-results/$label-$mode.txt" \
+                2>&1 | tee "model-results/$label-$mode.log"
+            done
+          done
+          python3 tools/validation/compare_v100_qwen_parity.py model-results "${extras[@]}" | tee model-results/summary.log
+      - name: Preserve direct accuracy evidence before benchmarking
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-accuracy-${{ matrix.filename }}
+          path: model-results
+          retention-days: 30
+      - name: Compare actual graph and MTP throughput with original V100 fork
+        run: |
+          set -euo pipefail
+          args=(--weights "/models/v100-qualification/$MODEL_FILENAME" --corpus bench/fixtures/bench_corpus.ids --kv-dtype int8 -pg 1024,64 -r 2 --warmup 1 -o json)
+          for label in baseline candidate; do
+            build=../build-27b
+            if [[ "$label" == baseline ]]; then build=../build-27b-baseline; fi
+            "$build/bench/ninfer_bench" "${args[@]}" \
+              --output-file "model-results/$label-graph.json" > "model-results/$label-graph-bench.log" 2>&1
+            for drafts in 3 7; do
+              "$build/bench/ninfer_bench" "${args[@]}" --spec mtp --draft-tokens "$drafts" --lm-head-draft \
+                --output-file "model-results/$label-mtp-$drafts.json" > "model-results/$label-mtp-$drafts-bench.log" 2>&1
+            done
+          done
+          backend=
+          if [[ "$MODEL_FILENAME" == qwen3_6_35b_a3b.ninfer ]]; then backend=dflash; fi
+          if [[ "$MODEL_FILENAME" == qwen3_8_27b.ninfer ]]; then backend=dflash2; fi
+          if [[ -n "$backend" ]]; then
+            for label in baseline candidate; do
+              build=../build-27b
+              if [[ "$label" == baseline ]]; then build=../build-27b-baseline; fi
+              "$build/bench/ninfer_bench" "${args[@]}" --spec "$backend" --draft-tokens 3 --lm-head-draft \
+                --output-file "model-results/$label-$backend.json" > "model-results/$label-$backend-bench.log" 2>&1
+            done
+          fi
+      - name: Preserve qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-qualification-${{ matrix.filename }}
+          path: model-results
+          retention-days: 30
