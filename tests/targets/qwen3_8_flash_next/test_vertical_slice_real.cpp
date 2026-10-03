@@ -609,27 +609,37 @@ static int run_prefill_policy_benchmark(FlashNextTextExecutor& executor,
         decode(lane,0,128);
         executor.release_lane(lane);
     };
-    const bool active=std::getenv("NINFER_PREFILL_POLICY_ACTIVE") != nullptr;
+    const bool cold=std::getenv("NINFER_PREFILL_POLICY_COLD") != nullptr;
+    const bool default_policy=std::getenv("NINFER_PREFILL_POLICY_DEFAULT") != nullptr;
+    const bool active=cold || std::getenv("NINFER_PREFILL_POLICY_ACTIVE") != nullptr;
+    if(default_policy && (!cache || !cache->grouped_prefill()))
+        throw std::runtime_error("default prefill qualification requires the grouped production policy");
     if(!active) { warm();warm();if(cache)cache->freeze_admissions(); }
     const std::size_t decode_count=32;
     std::vector<unsigned> sizes=active?std::vector<unsigned>{128,1024}:
         std::vector<unsigned>{1,8,32,128,1024};
     if (std::getenv("NINFER_PREFILL_POLICY_SMALL")) sizes={1,8,32};
+    if (std::getenv("NINFER_PREFILL_POLICY_LONG")) sizes={4064};
     if (std::getenv("NINFER_PREFILL_POLICY_PROFILE")) sizes={128};
     for (unsigned prompt : sizes) {
         if (prompt+decode_count>records.size())
             throw std::runtime_error("insufficient natural tokens for prefill policy benchmark");
         std::array<std::vector<std::uint16_t>,4> reference;
-        const unsigned rounds=std::getenv("NINFER_PREFILL_POLICY_PROFILE") ? 1 : (active?4:6);
+        const unsigned rounds=std::getenv("NINFER_PREFILL_POLICY_PROFILE") ? 1 : ((active||default_policy)?4:6);
         for (unsigned sample=0;sample<rounds;++sample) {
             const bool profiling=std::getenv("NINFER_PREFILL_POLICY_PROFILE") != nullptr;
-            const bool bypass=!profiling && (sample==0||sample==(active?3:5));
-            const bool group_candidate=std::getenv("NINFER_PREFILL_POLICY_GROUPED") != nullptr;
-            const bool grouped=!profiling&&group_candidate&&(active?!bypass:(sample==2||sample==3));
+            const bool bypass=!profiling && (sample==0||sample==((active||default_policy)?3:5));
+            const bool group_candidate=default_policy || std::getenv("NINFER_PREFILL_POLICY_GROUPED") != nullptr;
+            const bool grouped=default_policy ? !bypass :
+                (!profiling&&group_candidate&&(active?!bypass:(sample==2||sample==3)));
             const bool batched=!profiling && !bypass && (group_candidate?!grouped:
                 (active?true:(sample==2||sample==3)));
-            if(active&&cache) {cache->reset();warm();warm();cache->drain();}
-            if(cache) { cache->set_prefill_enabled(!bypass);cache->set_batched_prefill(batched);cache->set_grouped_prefill(grouped); }
+            if(active&&cache) {cache->reset();if(!cold){warm();warm();}cache->drain();}
+            if(cache) {
+                cache->set_prefill_enabled(!bypass);
+                // Default-policy qualification exercises constructor-selected settings.
+                if(!default_policy) {cache->set_batched_prefill(batched);cache->set_grouped_prefill(grouped);}
+            }
             const auto before=cache?cache->stats():FlashNextExpertCacheStats{};
             auto lane=executor.allocate_lane();
             device.synchronize();
@@ -672,7 +682,8 @@ static int run_prefill_policy_benchmark(FlashNextTextExecutor& executor,
             const double prefill_s=std::chrono::duration<double>(prefilled-started).count();
             const double decode_s=std::chrono::duration<double>(decoded-prefilled).count();
             json row{{"prefill_policy","benchmark"},{"mode",cache?(bypass?"bypass":(grouped?"grouped":(batched?"batched":"cached"))):"off"},
-                {"sample",sample},{"tokens",prompt},{"admission_active",active},{"decode_tokens",decode_count},
+                {"sample",sample},{"tokens",prompt},{"admission_active",active},{"cold_cache",cold},
+                {"production_default",default_policy},{"decode_tokens",decode_count},
                 {"prefill_seconds",prefill_s},{"prefill_tokens_per_s",prompt/prefill_s},
                 {"decode_seconds",decode_s},{"decode_tokens_per_s",decode_count/decode_s},
                 {"hits",after.hits-before.hits},{"misses",after.misses-before.misses},
