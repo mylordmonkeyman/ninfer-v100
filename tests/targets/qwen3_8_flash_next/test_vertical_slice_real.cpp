@@ -711,6 +711,100 @@ static int run_prefill_policy_benchmark(FlashNextTextExecutor& executor,
     return 0;
 }
 
+static int run_phase17_profile(FlashNextTextExecutor& executor,
+    FlashNextRuntimeAllocation& allocation, ninfer::DeviceContext& device,
+    const std::vector<OracleRecord>& records) {
+    auto* cache = allocation.state_view().expert_cache;
+    if (cache == nullptr) {
+        throw std::runtime_error("Phase 17 profile requires the expert cache");
+    }
+    if (!cache->timing_enabled()) {
+        throw std::runtime_error(
+            "Phase 17 profile requires NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING=1");
+    }
+    const char* stage_env = std::getenv("NINFER_PHASE17_STAGE");
+    if (stage_env == nullptr ||
+        (std::string_view(stage_env) != "cold" && std::string_view(stage_env) != "warm")) {
+        throw std::invalid_argument("NINFER_PHASE17_STAGE must be cold or warm");
+    }
+    const bool warm = std::string_view(stage_env) == "warm";
+    const std::size_t count = std::min<std::size_t>(64, records.size());
+    if (count == 0) throw std::runtime_error("Phase 17 profile has no decode records");
+    const std::array<LaneCommitDecision, 1> decisions{{{.accept = true}}};
+
+    const auto run_decode = [&](bool capture) {
+        auto lane = executor.allocate_lane();
+        device.synchronize();
+        if (capture) CUDA_CHECK(cudaProfilerStart());
+        const auto started = std::chrono::steady_clock::now();
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto pos = static_cast<std::int32_t>(records[i].position);
+            LaneStepRequest request{.handle = lane, .token_id = records[i].token_id,
+                .token_index = pos, .mrope_positions = {pos, pos, pos},
+                .sampling = {}, .custom_embedding = nullptr};
+            auto round = executor.execute_round(std::span(&request, 1), nullptr);
+            round.commit(decisions);
+        }
+        device.synchronize();
+        const double seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started).count();
+        if (capture) CUDA_CHECK(cudaProfilerStop());
+        if (executor.committed_frontier(lane) != static_cast<std::int32_t>(count)) {
+            throw std::runtime_error("Phase 17 profile state frontier mismatch");
+        }
+        executor.release_lane(lane);
+        device.synchronize();
+        return seconds;
+    };
+
+    // Warm CUDA modules, worker threads and fixed runtime resources without retaining
+    // cache state. This keeps the cold profile about cache state rather than first-use setup.
+    run_decode(false);
+    cache->drain();
+    cache->reset();
+    cache->set_serial_schedule(false);
+
+    if (warm) {
+        // Populate through the production admission policy, finish fills, then freeze
+        // residency. The final unmeasured pass warms the stable Ready/miss execution shape.
+        run_decode(false);
+        cache->drain();
+        run_decode(false);
+        cache->drain();
+        cache->freeze_admissions();
+        run_decode(false);
+    }
+
+    const auto before = cache->stats();
+    const double seconds = run_decode(true);
+    const auto completed = cache->stats();
+    cache->drain();
+    const auto after = cache->stats();
+
+    json result{{"phase17", "profile"}, {"stage", warm ? "warm" : "cold"},
+        {"tokens", count}, {"seconds", seconds}, {"tokens_per_s", count/seconds},
+        {"slots_per_layer", cache->budget().slots_per_layer},
+        {"hits", completed.hits-before.hits}, {"misses", completed.misses-before.misses},
+        {"admitted", completed.admitted-before.admitted},
+        {"ready_at_return", completed.ready-before.ready},
+        {"ready_after_drain", after.ready-before.ready},
+        {"fill_bytes_after_drain", after.fill_bytes-before.fill_bytes},
+        {"schedule_calls", completed.schedule_calls-before.schedule_calls},
+        // Submission wall can contain driver backpressure; Phase 17 never treats it
+        // as isolated kernel-launch overhead. Nsight/CUPTI supplies the API timeline.
+        {"hit_submission_wall_us", completed.hit_submission_us-before.hit_submission_us},
+        {"hit_kernel_launches", completed.hit_kernel_launches-before.hit_kernel_launches},
+        {"cpu_branch_us", completed.cpu_branch_us-before.cpu_branch_us},
+        {"gpu_branch_us", completed.gpu_branch_us-before.gpu_branch_us},
+        {"merge_wait_us", completed.merge_wait_us-before.merge_wait_us},
+        {"branch_wall_us", completed.branch_wall_us-before.branch_wall_us},
+        {"overlap_lower_bound_us",
+         completed.overlap_lower_bound_us-before.overlap_lower_bound_us}};
+    std::cout << result.dump() << '\n' << std::flush;
+    std::cout << "PASS: Phase 17 eager hybrid profile completed\n";
+    return 0;
+}
+
 static int run_cache_benchmark(FlashNextTextExecutor& executor,
     FlashNextRuntimeAllocation& allocation, ninfer::DeviceContext& device,
     const std::vector<OracleRecord>& records) {
@@ -998,6 +1092,10 @@ int main() {
         allocation.configure_expert_cache(model.text_view());
 
         reset_flash_next_host_expert_execution_stats();
+        if (const char* phase17 = std::getenv("NINFER_PHASE17_PROFILE");
+            phase17 != nullptr && std::string_view(phase17) == "1") {
+            return run_phase17_profile(executor, allocation, device, records);
+        }
         if (std::getenv("NINFER_PREFILL_POLICY_BENCHMARK"))
             return run_prefill_policy_benchmark(executor, allocation, device, records);
         if (const char* benchmark = std::getenv("NINFER_PHASE14_BENCHMARK");
