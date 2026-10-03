@@ -59,12 +59,12 @@ jobs:
           test -x ../build-27b-baseline/bench/ninfer_bench
           mkdir -p model-results
           nvidia-smi > model-results/gpu.txt
-          df -h /models | tee model-results/disk.txt
+          df -h .. | tee model-results/disk.txt
       - name: Download published artifact and verify size and hash
         run: |
           set -euo pipefail
           python3 tools/validation/download_qwen_qualification.py "$MODEL_REPOSITORY" "$MODEL_FILENAME" \
-            /models/v100-qualification model-results
+            ../v100-qualification-models model-results
       - name: Compare real scoring and eager graph MTP generation with original V100 fork
         run: |
           set -euo pipefail
@@ -75,7 +75,7 @@ jobs:
             build=../build-27b
             if [[ "$label" == baseline ]]; then build=../build-27b-baseline; fi
             for mode in score eager graph mtp "${extras[@]}"; do
-              "$build/ninfer_v100_qwen_parity_probe" "/models/v100-qualification/$MODEL_FILENAME" \
+              "$build/ninfer_v100_qwen_parity_probe" "../v100-qualification-models/$MODEL_FILENAME" \
                 bench/fixtures/bench_corpus.ids "$mode" "model-results/$label-$mode.txt" \
                 2>&1 | tee "model-results/$label-$mode.log"
             done
@@ -90,7 +90,7 @@ jobs:
       - name: Compare actual graph and MTP throughput with original V100 fork
         run: |
           set -euo pipefail
-          args=(--weights "/models/v100-qualification/$MODEL_FILENAME" --corpus bench/fixtures/bench_corpus.ids --kv-dtype int8 -pg 1024,64 -r 2 --warmup 1 -o json)
+          args=(--weights "../v100-qualification-models/$MODEL_FILENAME" --corpus bench/fixtures/bench_corpus.ids --kv-dtype int8 -pg 1024,64 -r 2 --warmup 1 -o json)
           for label in baseline candidate; do
             build=../build-27b
             if [[ "$label" == baseline ]]; then build=../build-27b-baseline; fi
