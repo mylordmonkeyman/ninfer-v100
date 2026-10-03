@@ -61,12 +61,12 @@ struct Q4VoltaMmaSchedule {
     static constexpr int kThreads    = kWarps * 32;
 };
 
-// Partials accumulate in fp32 and are narrowed afterwards, so split-K contributions from
-// different blockIdx.y values can be combined without losing the low bits of the sum.
+// Each split writes its own FP32 plane. A later kernel reduces the planes in split order,
+// avoiding scheduling-dependent rounding at the observable BF16 boundary.
 //
 // `kDirect` is the one-split case, which after the split-K retune is what the widest and most
 // frequent shape (gate/up, n=34816) actually runs. With a single split each CTA owns its output
-// tile outright, so the whole fp32 apparatus -- workspace, zeroing memset, atomicAdd, narrowing
+// tile outright, so the whole fp32 apparatus -- partial planes, reduction and narrowing
 // pass -- is pure overhead against a plain BF16 store. Same structure the W8 kernel is built on.
 template <bool kDirect>
 __global__ __launch_bounds__(Q4VoltaMmaSchedule::kThreads, 8) void q4_volta_mma_gemm_kernel(
@@ -209,7 +209,7 @@ __global__ __launch_bounds__(Q4VoltaMmaSchedule::kThreads, 8) void q4_volta_mma_
                 out[static_cast<std::int64_t>(t0 + row_t) * out_ld + col_n] =
                     __float2bfloat16(d[l]);
             } else {
-                atomicAdd(&partial[static_cast<std::int64_t>(t0 + row_t) * n + col_n], d[l]);
+                partial[(static_cast<std::int64_t>(blockIdx.y) * t + t0 + row_t) * n + col_n] = d[l];
             }
         }
     }

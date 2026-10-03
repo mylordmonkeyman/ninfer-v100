@@ -123,13 +123,16 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
         (void)detail::select_q4_launch(output_rows, input_rows, min_tokens, policy);
         (void)detail::select_q4_launch(output_rows, input_rows, max_tokens, policy);
 #ifdef NINFER_VOLTA_BUILD
-        // The fused tensor-core route needs an fp32 split-K accumulator. Size for the widest
-        // token count in the band it is routed for; q4_dispatch falls back to SIMT when the
-        // arena cannot supply it, so this is an opportunity, not a requirement.
+        // Split count changes at token-tile boundaries, so capacity is not monotonic in T.
         const std::int32_t banded = std::min<std::int32_t>(max_tokens, 64);
-        if (banded >= 16 && detail::q4_volta_mma_supported(output_rows, input_rows, banded)) {
-            return detail::q4_volta_mma_workspace_bytes(output_rows, input_rows, banded);
+        std::size_t maximum = 0;
+        for (std::int32_t tokens = std::max<std::int32_t>(min_tokens, 9); tokens <= banded; ++tokens) {
+            if (detail::q4_volta_mma_supported(output_rows, input_rows, tokens)) {
+                maximum = std::max(
+                    maximum, detail::q4_volta_mma_workspace_bytes(output_rows, input_rows, tokens));
+            }
         }
+        return maximum;
 #endif
         return 0;
     }

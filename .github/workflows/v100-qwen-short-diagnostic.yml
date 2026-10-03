@@ -5,6 +5,8 @@ on:
     paths:
       - '.github/workflows/v100-qwen-short-diagnostic.yml'
       - 'tools/validation/v100_qwen_short_probe.cpp'
+      - 'tools/validation/v100_real_splitk_oracle.h'
+      - 'tools/validation/v100_ordered_splitk_reference.patch'
   workflow_dispatch:
 permissions:
   contents: read
@@ -30,20 +32,33 @@ jobs:
           submodules: recursive
           persist-credentials: false
           clean: false
-      - name: Disable atomic split-K only in diagnostic builds
+      - name: Apply the isolated split-K correction to the original reference
+        run: |
+          set -euo pipefail
+          git -C baseline apply --check "$PWD/tools/validation/v100_ordered_splitk_reference.patch"
+          git -C baseline apply "$PWD/tools/validation/v100_ordered_splitk_reference.patch"
+      - name: Instrument actual model contractions with an independent FP64 oracle
         run: |
           python3 - <<'PYTHON'
           from pathlib import Path
+          header = Path('tools/validation/v100_real_splitk_oracle.h').resolve()
           for root in (Path('.'), Path('baseline')):
-              path = root / 'src/ops/common/volta_mma_splits.h'
-              source = path.read_text()
-              needle = '    const int row_ctas = (n + kVoltaMmaRowsPerCta - 1) / kVoltaMmaRowsPerCta;'
-              if source.count(needle) != 1:
-                  raise RuntimeError(f'Unexpected split selector: {path}')
-              source = source.replace(needle, '    if (t <= 64) { return 1; } // Diagnostic only: eliminate unordered atomics.\n' + needle)
-              path.write_text(source)
+              for quant in ('q4', 'q5'):
+                  path = root / f'src/ops/linear/{quant}/{quant}_volta_mma_gemm.cu'
+                  source = path.read_text()
+                  source = f'#include "{header}"\n' + source
+                  anchor = '    auto scope           = ws.scope();'
+                  args = 'false, false' if quant == 'q4' else 'true, add_residual'
+                  capture = f'    ninfer::validation::RealSplitKOracle oracle(x, w, out, {args}, weight_row_offset, stream);\n'
+                  if source.count(anchor) != 1:
+                      raise RuntimeError(f'Unexpected launch body: {path}')
+                  source = source.replace(anchor, capture + anchor)
+                  anchor = '    CUDA_CHECK(cudaGetLastError());\n}\n'
+                  if source.count(anchor) != 1:
+                      raise RuntimeError(f'Unexpected launch end: {path}')
+                  source = source.replace(anchor, '    CUDA_CHECK(cudaGetLastError());\n    oracle.finish();\n}\n')
+                  path.write_text(source)
           PYTHON
-          git diff -- src/ops/common/volta_mma_splits.h > short-split-diagnostic.patch
       - name: Build identical short-prompt probes
         run: |
           set -euo pipefail
@@ -66,22 +81,41 @@ jobs:
               -DNINFER_BUILD_MEDIA="$media" -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
             cmake --build "$build" -j --target ninfer_v100_qwen_short_probe 2>&1 | tee "short-results/$label-build.log"
           done
-      - name: Test repeated generation without unordered split-K
+      - name: Verify model accuracy and repeated request sequences
         run: |
           set -euo pipefail
-          cp short-split-diagnostic.patch short-results/
+          cp tools/validation/v100_ordered_splitk_reference.patch short-results/reference-correction.patch
           for label in candidate baseline; do
             build=../build-27b
             if [[ "$label" == baseline ]]; then build=../build-27b-baseline; fi
             for filename in qwen3_6_27b.ninfer qwen3_6_27b_nvfp4.ninfer; do
               "$build/ninfer_v100_qwen_short_probe" \
-                "../v100-qualification-models/v2/$filename" bench/fixtures/bench_corpus.ids int8-logprobs 64 \
-                2>&1 | tee "short-results/$label-$filename-no-atomic.log"
+                "../v100-qualification-models/v2/$filename" bench/fixtures/bench_corpus.ids int8 64 qualification-sequence \
+                2>&1 | tee "short-results/$label-$filename-sequence.log"
             done
-            "$build/ninfer_v100_qwen_short_probe" \
-              ../v100-qualification-models/v2/qwen3_6_27b_nvfp4.ninfer bench/fixtures/bench_corpus.ids int8-logprobs 64 4096 \
-              2>&1 | tee "short-results/$label-nvfp4-long-prefix.log"
           done
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          for filename in ('qwen3_6_27b.ninfer', 'qwen3_6_27b_nvfp4.ninfer'):
+              exports = {}
+              for label in ('candidate', 'baseline'):
+                  rows = {}
+                  for line in Path(f'short-results/{label}-{filename}-sequence.log').read_text().splitlines():
+                      if line.startswith('ROUND '):
+                          fields = line.split()
+                          rows[int(fields[1]), int(fields[3])] = fields[4:]
+                  if len(rows) != 12 or any(len(tokens) != 64 for tokens in rows.values()):
+                      raise RuntimeError(f'{label} {filename}: incomplete output')
+                  for scenario in range(4):
+                      stable = all(rows[round, scenario] == rows[0, scenario] for round in (1, 2))
+                      print(f'{label} {filename} scenario={scenario} repeatable={stable}')
+                      if not stable:
+                          raise RuntimeError('Repeated request sequence is unstable')
+                  exports[label] = rows
+              if exports['candidate'] != exports['baseline']:
+                  raise RuntimeError(f'{filename}: corrected-reference token disagreement')
+              print(f'PASS {filename}: exact corrected-reference sequence parity')
+          PYTHON
       - name: Preserve diagnostic evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

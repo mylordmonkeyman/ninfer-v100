@@ -221,11 +221,10 @@ std::size_t q4_q5_attn_input_capacity_workspace_bytes(std::int32_t min_cols,
         maximum = std::max(maximum, at(std::min(route.cols.last, max_cols)));
     }
 #ifdef NINFER_VOLTA_BUILD
-    // The fused route displaces the table inside [kVoltaMmaMinCols, kVoltaMmaMaxCols], which cuts
-    // across kRoutes' second span. Probing only the table's own endpoints therefore misses the
-    // fused band's right edge whenever the interval runs past it into CutlassSm70TensorCore.
-    if (min_cols <= kVoltaMmaMaxCols && max_cols >= kVoltaMmaMinCols) {
-        maximum = std::max(maximum, at(std::min(kVoltaMmaMaxCols, max_cols)));
+    // Split count changes at tile boundaries; inspect the bounded fused band explicitly.
+    for (std::int32_t cols = std::max(min_cols, kVoltaMmaMinCols);
+         cols <= std::min(max_cols, kVoltaMmaMaxCols); ++cols) {
+        maximum = std::max(maximum, at(cols));
     }
 #endif
     return maximum;

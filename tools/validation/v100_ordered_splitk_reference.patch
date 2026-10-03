@@ -1,0 +1,285 @@
+diff --git a/src/ops/attn_input_proj/q4_q5/q4_q5_attn_input_plan.cpp b/src/ops/attn_input_proj/q4_q5/q4_q5_attn_input_plan.cpp
+index 3440347b..70735b6d 100644
+--- a/src/ops/attn_input_proj/q4_q5/q4_q5_attn_input_plan.cpp
++++ b/src/ops/attn_input_proj/q4_q5/q4_q5_attn_input_plan.cpp
+@@ -221,11 +221,10 @@ std::size_t q4_q5_attn_input_capacity_workspace_bytes(std::int32_t min_cols,
+         maximum = std::max(maximum, at(std::min(route.cols.last, max_cols)));
+     }
+ #ifdef NINFER_VOLTA_BUILD
+-    // The fused route displaces the table inside [kVoltaMmaMinCols, kVoltaMmaMaxCols], which cuts
+-    // across kRoutes' second span. Probing only the table's own endpoints therefore misses the
+-    // fused band's right edge whenever the interval runs past it into CutlassSm70TensorCore.
+-    if (min_cols <= kVoltaMmaMaxCols && max_cols >= kVoltaMmaMinCols) {
+-        maximum = std::max(maximum, at(std::min(kVoltaMmaMaxCols, max_cols)));
++    // Split count changes at tile boundaries; inspect the bounded fused band explicitly.
++    for (std::int32_t cols = std::max(min_cols, kVoltaMmaMinCols);
++         cols <= std::min(max_cols, kVoltaMmaMaxCols); ++cols) {
++        maximum = std::max(maximum, at(cols));
+     }
+ #endif
+     return maximum;
+diff --git a/src/ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_plan.cpp b/src/ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_plan.cpp
+index eacdaba7..46b79274 100644
+--- a/src/ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_plan.cpp
++++ b/src/ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_plan.cpp
+@@ -191,6 +191,15 @@ std::size_t q4_q5_gdn_input_capacity_workspace_bytes(std::int32_t min_cols,
+                                                          kQkvRows, kZRows, kInputRows, endpoint})
+                                .workspace_bytes);
+     }
++#ifdef NINFER_VOLTA_BUILD
++    for (std::int32_t cols = std::max(min_cols, kVoltaMmaMinCols);
++         cols <= std::min(max_cols, kVoltaMmaMaxCols); ++cols) {
++        maximum = std::max(maximum,
++                           q4_q5_gdn_input_resolve_plan({kInputRows, kQkRows, kValueZRows,
++                                                         kQkvRows, kZRows, kInputRows, cols})
++                               .workspace_bytes);
++    }
++#endif
+     return maximum;
+ }
+ 
+diff --git a/src/ops/linear/linear.cpp b/src/ops/linear/linear.cpp
+index e4a7a9bb..c533d399 100644
+--- a/src/ops/linear/linear.cpp
++++ b/src/ops/linear/linear.cpp
+@@ -123,13 +123,16 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
+         (void)detail::select_q4_launch(output_rows, input_rows, min_tokens, policy);
+         (void)detail::select_q4_launch(output_rows, input_rows, max_tokens, policy);
+ #ifdef NINFER_VOLTA_BUILD
+-        // The fused tensor-core route needs an fp32 split-K accumulator. Size for the widest
+-        // token count in the band it is routed for; q4_dispatch falls back to SIMT when the
+-        // arena cannot supply it, so this is an opportunity, not a requirement.
++        // Split count changes at token-tile boundaries, so capacity is not monotonic in T.
+         const std::int32_t banded = std::min<std::int32_t>(max_tokens, 64);
+-        if (banded >= 16 && detail::q4_volta_mma_supported(output_rows, input_rows, banded)) {
+-            return detail::q4_volta_mma_workspace_bytes(output_rows, input_rows, banded);
++        std::size_t maximum = 0;
++        for (std::int32_t tokens = std::max<std::int32_t>(min_tokens, 9); tokens <= banded; ++tokens) {
++            if (detail::q4_volta_mma_supported(output_rows, input_rows, tokens)) {
++                maximum = std::max(
++                    maximum, detail::q4_volta_mma_workspace_bytes(output_rows, input_rows, tokens));
++            }
+         }
++        return maximum;
+ #endif
+         return 0;
+     }
+diff --git a/src/ops/linear/q4/q4_volta_mma_gemm.cu b/src/ops/linear/q4/q4_volta_mma_gemm.cu
+index 3add4ae8..5b3a3db0 100644
+--- a/src/ops/linear/q4/q4_volta_mma_gemm.cu
++++ b/src/ops/linear/q4/q4_volta_mma_gemm.cu
+@@ -19,12 +19,16 @@ using S = Q4VoltaMmaSchedule;
+ // Narrowing writes through out's real column stride, which need not equal n.
+ __global__ void q4_volta_mma_narrow_strided_kernel(const float* __restrict__ partial,
+                                                    __nv_bfloat16* __restrict__ out, int n, int t,
+-                                                   int out_ld) {
++                                                   int out_ld, int splits) {
+     const std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+     if (i >= static_cast<std::int64_t>(n) * t) { return; }
+     const int col = static_cast<int>(i / n);
+     const int row = static_cast<int>(i % n);
+-    out[static_cast<std::int64_t>(col) * out_ld + row] = __float2bfloat16(partial[i]);
++    float total = partial[i];
++    for (int split = 1; split < splits; ++split) {
++        total += partial[static_cast<std::int64_t>(split) * n * t + i];
++    }
++    out[static_cast<std::int64_t>(col) * out_ld + row] = __float2bfloat16(total);
+ }
+ 
+ } // namespace
+@@ -38,7 +42,8 @@ int q4_volta_mma_splits(std::int32_t n, std::int32_t k, std::int32_t t) noexcept
+ std::size_t q4_volta_mma_workspace_bytes(std::int32_t n, std::int32_t k,
+                                          std::int32_t t) noexcept {
+     if (q4_volta_mma_splits(n, k, t) == 1) { return 0; }
+-    return static_cast<std::size_t>(n) * static_cast<std::size_t>(t) * sizeof(float);
++    return static_cast<std::size_t>(n) * static_cast<std::size_t>(t) *
++           static_cast<std::size_t>(q4_volta_mma_splits(n, k, t)) * sizeof(float);
+ }
+ 
+ bool q4_volta_mma_supported(std::int32_t n, std::int32_t k, std::int32_t t) noexcept {
+@@ -76,8 +81,7 @@ void launch_q4_volta_mma(const Tensor& x, const Weight& w, Tensor& out, Workspac
+         static_cast<const std::uint8_t*>(w.scales) + roff * Q4RowSplitStorage::kScaleBytesPerGroup;
+     auto* out_data = static_cast<__nv_bfloat16*>(out.data);
+ 
+-    // One split means each CTA owns its output tile outright, so it can store BF16 straight out
+-    // and the fp32 workspace, its memset, the atomics and the narrowing pass all disappear.
++    // One split owns its output tile outright and needs no partial planes or reduction.
+     if (splits == 1) {
+         q4_volta_mma_gemm_kernel<true><<<grid, S::kThreads, 0, stream>>>(
+             codes, scales, static_cast<const __nv_bfloat16*>(x.data), nullptr, out_data, out_ld, n,
+@@ -87,11 +91,10 @@ void launch_q4_volta_mma(const Tensor& x, const Weight& w, Tensor& out, Workspac
+     }
+ 
+     auto scope           = ws.scope();
+-    const DeviceSpan buf = ws.alloc_bytes(q4_volta_mma_workspace_bytes(n, k, t));
++    const DeviceSpan buf = ws.alloc_bytes(static_cast<std::size_t>(n) * t * splits * sizeof(float));
+     auto* partial        = static_cast<float*>(buf.data);
+ 
+-    // Partials are accumulated with atomicAdd, so the buffer has to start at zero.
+-    CUDA_CHECK(cudaMemsetAsync(partial, 0, q4_volta_mma_workspace_bytes(n, k, t), stream));
++    // Every active element of every split plane is written exactly once.
+ 
+     q4_volta_mma_gemm_kernel<false><<<grid, S::kThreads, 0, stream>>>(
+         codes, scales, static_cast<const __nv_bfloat16*>(x.data), partial, out_data, out_ld, n, k,
+@@ -102,7 +105,7 @@ void launch_q4_volta_mma(const Tensor& x, const Weight& w, Tensor& out, Workspac
+     constexpr int kNarrowThreads = 256;
+     q4_volta_mma_narrow_strided_kernel<<<
+         static_cast<unsigned>((count + kNarrowThreads - 1) / kNarrowThreads), kNarrowThreads, 0,
+-        stream>>>(partial, out_data, n, t, out_ld);
++        stream>>>(partial, out_data, n, t, out_ld, splits);
+     CUDA_CHECK(cudaGetLastError());
+ }
+ 
+diff --git a/src/ops/linear/q4/q4_volta_mma_gemm.cuh b/src/ops/linear/q4/q4_volta_mma_gemm.cuh
+index 8960746c..57b073f4 100644
+--- a/src/ops/linear/q4/q4_volta_mma_gemm.cuh
++++ b/src/ops/linear/q4/q4_volta_mma_gemm.cuh
+@@ -61,12 +61,12 @@ struct Q4VoltaMmaSchedule {
+     static constexpr int kThreads    = kWarps * 32;
+ };
+ 
+-// Partials accumulate in fp32 and are narrowed afterwards, so split-K contributions from
+-// different blockIdx.y values can be combined without losing the low bits of the sum.
++// Each split writes its own FP32 plane. A later kernel reduces the planes in split order,
++// avoiding scheduling-dependent rounding at the observable BF16 boundary.
+ //
+ // `kDirect` is the one-split case, which after the split-K retune is what the widest and most
+ // frequent shape (gate/up, n=34816) actually runs. With a single split each CTA owns its output
+-// tile outright, so the whole fp32 apparatus -- workspace, zeroing memset, atomicAdd, narrowing
++// tile outright, so the whole fp32 apparatus -- partial planes, reduction and narrowing
+ // pass -- is pure overhead against a plain BF16 store. Same structure the W8 kernel is built on.
+ template <bool kDirect>
+ __global__ __launch_bounds__(Q4VoltaMmaSchedule::kThreads, 8) void q4_volta_mma_gemm_kernel(
+@@ -209,7 +209,7 @@ __global__ __launch_bounds__(Q4VoltaMmaSchedule::kThreads, 8) void q4_volta_mma_
+                 out[static_cast<std::int64_t>(t0 + row_t) * out_ld + col_n] =
+                     __float2bfloat16(d[l]);
+             } else {
+-                atomicAdd(&partial[static_cast<std::int64_t>(t0 + row_t) * n + col_n], d[l]);
++                partial[(static_cast<std::int64_t>(blockIdx.y) * t + t0 + row_t) * n + col_n] = d[l];
+             }
+         }
+     }
+diff --git a/src/ops/linear/q5/q5_volta_mma_gemm.cu b/src/ops/linear/q5/q5_volta_mma_gemm.cu
+index deae748c..9cb8c8f2 100644
+--- a/src/ops/linear/q5/q5_volta_mma_gemm.cu
++++ b/src/ops/linear/q5/q5_volta_mma_gemm.cu
+@@ -24,7 +24,8 @@ int q5_volta_mma_splits(std::int32_t n, std::int32_t k, std::int32_t t) noexcept
+ std::size_t q5_volta_mma_workspace_bytes(std::int32_t n, std::int32_t k,
+                                          std::int32_t t) noexcept {
+     if (q5_volta_mma_splits(n, k, t) == 1) { return 0; }
+-    return static_cast<std::size_t>(n) * static_cast<std::size_t>(t) * sizeof(float);
++    return static_cast<std::size_t>(n) * static_cast<std::size_t>(t) *
++           static_cast<std::size_t>(q5_volta_mma_splits(n, k, t)) * sizeof(float);
+ }
+ 
+ bool q5_volta_mma_supported(std::int32_t n, std::int32_t k, std::int32_t t) noexcept {
+@@ -64,8 +65,7 @@ void launch_q5_volta_mma(const Tensor& x, const Weight& w, Tensor& out, bool add
+     const auto* xd = static_cast<const __nv_bfloat16*>(x.data);
+     auto* out_data = static_cast<__nv_bfloat16*>(out.data);
+ 
+-    // One split: store BF16 straight out, folding the residual into the same store, and skip the
+-    // workspace, its memset, the atomics and the narrowing pass entirely.
++    // One split stores BF16 directly, folding the residual into the same store.
+     if (splits == 1) {
+         if (add_residual) {
+             q5_volta_mma_gemm_kernel<true, true><<<grid, S::kThreads, 0, stream>>>(
+@@ -81,9 +81,9 @@ void launch_q5_volta_mma(const Tensor& x, const Weight& w, Tensor& out, bool add
+     }
+ 
+     auto scope           = ws.scope();
+-    const DeviceSpan buf = ws.alloc_bytes(q5_volta_mma_workspace_bytes(n, k, t));
++    const DeviceSpan buf = ws.alloc_bytes(static_cast<std::size_t>(n) * t * splits * sizeof(float));
+     auto* partial        = static_cast<float*>(buf.data);
+-    CUDA_CHECK(cudaMemsetAsync(partial, 0, q5_volta_mma_workspace_bytes(n, k, t), stream));
++    // Every active element of every split plane is written exactly once.
+ 
+     q5_volta_mma_gemm_kernel<false, false><<<grid, S::kThreads, 0, stream>>>(
+         codes, high, scales, xd, partial, out_data, out_ld, n, k, t, padded_groups, splits);
+@@ -95,10 +95,10 @@ void launch_q5_volta_mma(const Tensor& x, const Weight& w, Tensor& out, bool add
+         static_cast<unsigned>((count + kNarrowThreads - 1) / kNarrowThreads);
+     if (add_residual) {
+         q5_volta_mma_narrow_kernel<true><<<blocks, kNarrowThreads, 0, stream>>>(
+-            partial, out_data, n, t, out_ld);
++            partial, out_data, n, t, out_ld, splits);
+     } else {
+         q5_volta_mma_narrow_kernel<false><<<blocks, kNarrowThreads, 0, stream>>>(
+-            partial, out_data, n, t, out_ld);
++            partial, out_data, n, t, out_ld, splits);
+     }
+     CUDA_CHECK(cudaGetLastError());
+ }
+diff --git a/src/ops/linear/q5/q5_volta_mma_gemm.cuh b/src/ops/linear/q5/q5_volta_mma_gemm.cuh
+index 9b6ce4ba..2913dc8f 100644
+--- a/src/ops/linear/q5/q5_volta_mma_gemm.cuh
++++ b/src/ops/linear/q5/q5_volta_mma_gemm.cuh
+@@ -52,11 +52,11 @@ struct Q5VoltaMmaSchedule {
+     static constexpr int kThreads    = kWarps * 32;
+ };
+ 
+-// Partials accumulate in fp32 and are narrowed afterwards, so split-K contributions from
+-// different blockIdx.y values can be combined without losing the low bits of the sum.
++// Each split writes its own FP32 plane. A later kernel reduces the planes in split order,
++// avoiding scheduling-dependent rounding at the observable BF16 boundary.
+ //
+ // `kDirect` is the one-split case: each CTA then owns its output tile outright, so the fp32
+-// workspace, its memset, the atomics and the narrowing pass are all pure overhead against a plain
++// partial planes, reduction and narrowing pass are all pure overhead against a plain
+ // BF16 store. `kAddResidual` folds linear_add's beta=1 epilogue into that store, reading `out` as
+ // C and writing it back as D exactly as the narrowing kernel would have.
+ template <bool kDirect, bool kAddResidual>
+@@ -204,7 +204,7 @@ __global__ __launch_bounds__(Q5VoltaMmaSchedule::kThreads, 8) void q5_volta_mma_
+                 if constexpr (kAddResidual) { v += __bfloat162float(out[o]); }
+                 out[o] = __float2bfloat16(v);
+             } else {
+-                atomicAdd(&partial[static_cast<std::int64_t>(t0 + row_t) * n + col_n], d[l]);
++                partial[(static_cast<std::int64_t>(blockIdx.y) * t + t0 + row_t) * n + col_n] = d[l];
+             }
+         }
+     }
+@@ -215,13 +215,16 @@ __global__ __launch_bounds__(Q5VoltaMmaSchedule::kThreads, 8) void q5_volta_mma_
+ template <bool kAddResidual>
+ __global__ void q5_volta_mma_narrow_kernel(const float* __restrict__ partial,
+                                            __nv_bfloat16* __restrict__ out, int n, int t,
+-                                           int out_ld) {
++                                           int out_ld, int splits) {
+     const std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+     if (i >= static_cast<std::int64_t>(n) * t) { return; }
+     const int col = static_cast<int>(i / n);
+     const int row = static_cast<int>(i % n);
+     const std::int64_t o = static_cast<std::int64_t>(col) * out_ld + row;
+     float v = partial[i];
++    for (int split = 1; split < splits; ++split) {
++        v += partial[static_cast<std::int64_t>(split) * n * t + i];
++    }
+     if constexpr (kAddResidual) { v += __bfloat162float(out[o]); }
+     out[o] = __float2bfloat16(v);
+ }
+diff --git a/src/ops/linear_add/q5/q5_linear_add_plan.cpp b/src/ops/linear_add/q5/q5_linear_add_plan.cpp
+index 5787bdee..b7c48957 100644
+--- a/src/ops/linear_add/q5/q5_linear_add_plan.cpp
++++ b/src/ops/linear_add/q5/q5_linear_add_plan.cpp
+@@ -205,14 +205,19 @@ std::size_t q5_linear_add_capacity_workspace_bytes(std::int32_t rows, std::int32
+     if (min_cols <= 0 || max_cols < min_cols) {
+         throw std::invalid_argument("q5 linear_add: invalid column interval");
+     }
+-    // CutlassSm70TensorCoreResidual's workspace is monotonic in cols (the FP16 weight-dequant
+-    // buffer is fixed at rows*k, the activation-cast buffer scales with cols), and the fused
+-    // tensor-core route's accumulator is rows*cols*4, also monotonic, so the true maximum over
+-    // [min_cols,max_cols] is always at one of the two endpoints.
++    // CUTLASS capacity is monotonic; split-K planes in the bounded fused band are not.
+     const Q5LinearAddPlan at_min = q5_linear_add_resolve_plan({rows, k, padded_k, min_cols});
+     const Q5LinearAddPlan at_max = q5_linear_add_resolve_plan({rows, k, padded_k, max_cols});
+ 
+-    return std::max(at_min.workspace_bytes, at_max.workspace_bytes);
++    std::size_t maximum = std::max(at_min.workspace_bytes, at_max.workspace_bytes);
++#ifdef NINFER_VOLTA_BUILD
++    for (std::int32_t cols = std::max(min_cols, q5_volta_mma_min_cols(k));
++         cols <= std::min(max_cols, kVoltaMmaMaxCols); ++cols) {
++        maximum = std::max(maximum,
++                           q5_linear_add_resolve_plan({rows, k, padded_k, cols}).workspace_bytes);
++    }
++#endif
++    return maximum;
+ }
+ 
+ void q5_linear_add_execute_plan(const Q5LinearAddPlan& plan, const Tensor& x, const Weight& w,

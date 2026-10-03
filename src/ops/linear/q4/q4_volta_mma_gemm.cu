@@ -19,12 +19,16 @@ using S = Q4VoltaMmaSchedule;
 // Narrowing writes through out's real column stride, which need not equal n.
 __global__ void q4_volta_mma_narrow_strided_kernel(const float* __restrict__ partial,
                                                    __nv_bfloat16* __restrict__ out, int n, int t,
-                                                   int out_ld) {
+                                                   int out_ld, int splits) {
     const std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= static_cast<std::int64_t>(n) * t) { return; }
     const int col = static_cast<int>(i / n);
     const int row = static_cast<int>(i % n);
-    out[static_cast<std::int64_t>(col) * out_ld + row] = __float2bfloat16(partial[i]);
+    float total = partial[i];
+    for (int split = 1; split < splits; ++split) {
+        total += partial[static_cast<std::int64_t>(split) * n * t + i];
+    }
+    out[static_cast<std::int64_t>(col) * out_ld + row] = __float2bfloat16(total);
 }
 
 } // namespace
@@ -38,7 +42,8 @@ int q4_volta_mma_splits(std::int32_t n, std::int32_t k, std::int32_t t) noexcept
 std::size_t q4_volta_mma_workspace_bytes(std::int32_t n, std::int32_t k,
                                          std::int32_t t) noexcept {
     if (q4_volta_mma_splits(n, k, t) == 1) { return 0; }
-    return static_cast<std::size_t>(n) * static_cast<std::size_t>(t) * sizeof(float);
+    return static_cast<std::size_t>(n) * static_cast<std::size_t>(t) *
+           static_cast<std::size_t>(q4_volta_mma_splits(n, k, t)) * sizeof(float);
 }
 
 bool q4_volta_mma_supported(std::int32_t n, std::int32_t k, std::int32_t t) noexcept {
@@ -76,8 +81,7 @@ void launch_q4_volta_mma(const Tensor& x, const Weight& w, Tensor& out, Workspac
         static_cast<const std::uint8_t*>(w.scales) + roff * Q4RowSplitStorage::kScaleBytesPerGroup;
     auto* out_data = static_cast<__nv_bfloat16*>(out.data);
 
-    // One split means each CTA owns its output tile outright, so it can store BF16 straight out
-    // and the fp32 workspace, its memset, the atomics and the narrowing pass all disappear.
+    // One split owns its output tile outright and needs no partial planes or reduction.
     if (splits == 1) {
         q4_volta_mma_gemm_kernel<true><<<grid, S::kThreads, 0, stream>>>(
             codes, scales, static_cast<const __nv_bfloat16*>(x.data), nullptr, out_data, out_ld, n,
@@ -87,11 +91,10 @@ void launch_q4_volta_mma(const Tensor& x, const Weight& w, Tensor& out, Workspac
     }
 
     auto scope           = ws.scope();
-    const DeviceSpan buf = ws.alloc_bytes(q4_volta_mma_workspace_bytes(n, k, t));
+    const DeviceSpan buf = ws.alloc_bytes(static_cast<std::size_t>(n) * t * splits * sizeof(float));
     auto* partial        = static_cast<float*>(buf.data);
 
-    // Partials are accumulated with atomicAdd, so the buffer has to start at zero.
-    CUDA_CHECK(cudaMemsetAsync(partial, 0, q4_volta_mma_workspace_bytes(n, k, t), stream));
+    // Every active element of every split plane is written exactly once.
 
     q4_volta_mma_gemm_kernel<false><<<grid, S::kThreads, 0, stream>>>(
         codes, scales, static_cast<const __nv_bfloat16*>(x.data), partial, out_data, out_ld, n, k,
@@ -102,7 +105,7 @@ void launch_q4_volta_mma(const Tensor& x, const Weight& w, Tensor& out, Workspac
     constexpr int kNarrowThreads = 256;
     q4_volta_mma_narrow_strided_kernel<<<
         static_cast<unsigned>((count + kNarrowThreads - 1) / kNarrowThreads), kNarrowThreads, 0,
-        stream>>>(partial, out_data, n, t, out_ld);
+        stream>>>(partial, out_data, n, t, out_ld, splits);
     CUDA_CHECK(cudaGetLastError());
 }
 

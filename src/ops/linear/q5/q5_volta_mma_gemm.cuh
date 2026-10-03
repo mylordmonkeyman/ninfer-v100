@@ -52,11 +52,11 @@ struct Q5VoltaMmaSchedule {
     static constexpr int kThreads    = kWarps * 32;
 };
 
-// Partials accumulate in fp32 and are narrowed afterwards, so split-K contributions from
-// different blockIdx.y values can be combined without losing the low bits of the sum.
+// Each split writes its own FP32 plane. A later kernel reduces the planes in split order,
+// avoiding scheduling-dependent rounding at the observable BF16 boundary.
 //
 // `kDirect` is the one-split case: each CTA then owns its output tile outright, so the fp32
-// workspace, its memset, the atomics and the narrowing pass are all pure overhead against a plain
+// partial planes, reduction and narrowing pass are all pure overhead against a plain
 // BF16 store. `kAddResidual` folds linear_add's beta=1 epilogue into that store, reading `out` as
 // C and writing it back as D exactly as the narrowing kernel would have.
 template <bool kDirect, bool kAddResidual>
@@ -204,7 +204,7 @@ __global__ __launch_bounds__(Q5VoltaMmaSchedule::kThreads, 8) void q5_volta_mma_
                 if constexpr (kAddResidual) { v += __bfloat162float(out[o]); }
                 out[o] = __float2bfloat16(v);
             } else {
-                atomicAdd(&partial[static_cast<std::int64_t>(t0 + row_t) * n + col_n], d[l]);
+                partial[(static_cast<std::int64_t>(blockIdx.y) * t + t0 + row_t) * n + col_n] = d[l];
             }
         }
     }
@@ -215,13 +215,16 @@ __global__ __launch_bounds__(Q5VoltaMmaSchedule::kThreads, 8) void q5_volta_mma_
 template <bool kAddResidual>
 __global__ void q5_volta_mma_narrow_kernel(const float* __restrict__ partial,
                                            __nv_bfloat16* __restrict__ out, int n, int t,
-                                           int out_ld) {
+                                           int out_ld, int splits) {
     const std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= static_cast<std::int64_t>(n) * t) { return; }
     const int col = static_cast<int>(i / n);
     const int row = static_cast<int>(i % n);
     const std::int64_t o = static_cast<std::int64_t>(col) * out_ld + row;
     float v = partial[i];
+    for (int split = 1; split < splits; ++split) {
+        v += partial[static_cast<std::int64_t>(split) * n * t + i];
+    }
     if constexpr (kAddResidual) { v += __bfloat162float(out[o]); }
     out[o] = __float2bfloat16(v);
 }

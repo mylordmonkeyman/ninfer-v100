@@ -205,14 +205,19 @@ std::size_t q5_linear_add_capacity_workspace_bytes(std::int32_t rows, std::int32
     if (min_cols <= 0 || max_cols < min_cols) {
         throw std::invalid_argument("q5 linear_add: invalid column interval");
     }
-    // CutlassSm70TensorCoreResidual's workspace is monotonic in cols (the FP16 weight-dequant
-    // buffer is fixed at rows*k, the activation-cast buffer scales with cols), and the fused
-    // tensor-core route's accumulator is rows*cols*4, also monotonic, so the true maximum over
-    // [min_cols,max_cols] is always at one of the two endpoints.
+    // CUTLASS capacity is monotonic; split-K planes in the bounded fused band are not.
     const Q5LinearAddPlan at_min = q5_linear_add_resolve_plan({rows, k, padded_k, min_cols});
     const Q5LinearAddPlan at_max = q5_linear_add_resolve_plan({rows, k, padded_k, max_cols});
 
-    return std::max(at_min.workspace_bytes, at_max.workspace_bytes);
+    std::size_t maximum = std::max(at_min.workspace_bytes, at_max.workspace_bytes);
+#ifdef NINFER_VOLTA_BUILD
+    for (std::int32_t cols = std::max(min_cols, q5_volta_mma_min_cols(k));
+         cols <= std::min(max_cols, kVoltaMmaMaxCols); ++cols) {
+        maximum = std::max(maximum,
+                           q5_linear_add_resolve_plan({rows, k, padded_k, cols}).workspace_bytes);
+    }
+#endif
+    return maximum;
 }
 
 void q5_linear_add_execute_plan(const Q5LinearAddPlan& plan, const Tensor& x, const Weight& w,

@@ -191,6 +191,15 @@ std::size_t q4_q5_gdn_input_capacity_workspace_bytes(std::int32_t min_cols,
                                                          kQkvRows, kZRows, kInputRows, endpoint})
                                .workspace_bytes);
     }
+#ifdef NINFER_VOLTA_BUILD
+    for (std::int32_t cols = std::max(min_cols, kVoltaMmaMinCols);
+         cols <= std::min(max_cols, kVoltaMmaMaxCols); ++cols) {
+        maximum = std::max(maximum,
+                           q4_q5_gdn_input_resolve_plan({kInputRows, kQkRows, kValueZRows,
+                                                         kQkvRows, kZRows, kInputRows, cols})
+                               .workspace_bytes);
+    }
+#endif
     return maximum;
 }
 

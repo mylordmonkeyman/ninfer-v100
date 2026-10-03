@@ -86,7 +86,8 @@ auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
         }
         state.execution.work.reset();
         CUDA_CHECK(cudaMemcpyAsync(&state.host_egress, ordinary.egress.data,
-                                   sizeof(qwen3_6::OrdinaryDecodeEgress), cudaMemcpyDeviceToHost,
+                                   static_cast<std::size_t>(batch_size) * sizeof(TokenId),
+                                   cudaMemcpyDeviceToHost,
                                    state.execution.device.stream));
     };
 }

@@ -34,9 +34,10 @@ template<class T> void print_logprobs(const T& result) {
 // Same public Engine workload in both forks; isolate the failing 31-token prompt.
 int main(int argc, char** argv) {
     try {
-        if (argc != 5 && argc != 6) throw std::runtime_error("usage: short-probe ARTIFACT CORPUS KV OUTPUT_TOKENS [fresh-engine|PREFIX_TOKENS]");
+        if (argc != 5 && argc != 6) throw std::runtime_error("usage: short-probe ARTIFACT CORPUS KV OUTPUT_TOKENS [fresh-engine|qualification-sequence|PREFIX_TOKENS]");
         const bool fresh_engine = argc == 6 && std::string(argv[5]) == "fresh-engine";
-        const std::size_t prefix_tokens = argc == 6 && !fresh_engine ? std::stoul(argv[5]) : 31;
+        const bool sequence = argc == 6 && std::string(argv[5]) == "qualification-sequence";
+        const std::size_t prefix_tokens = sequence ? 4096 : argc == 6 && !fresh_engine ? std::stoul(argv[5]) : 31;
         std::ifstream corpus(argv[2]);
         std::vector<ninfer::TokenId> ids;
         ninfer::TokenId token;
@@ -56,25 +57,35 @@ int main(int argc, char** argv) {
         else if (kv == "bf16") options.kv_cache = ninfer::KvCacheStorage::BFloat16;
         else throw std::runtime_error("unknown KV storage");
         auto engine = std::make_unique<ninfer::Engine>(options);
+        std::vector<std::vector<ninfer::TokenId>> prompts;
+        if (sequence) {
+            for (std::size_t length : {std::size_t(31), std::size_t(1024), std::size_t(4096)})
+                prompts.emplace_back(ids.begin(), ids.begin() + length);
+            std::string repetition;
+            for (int i = 0; i < 32; ++i) repetition += " alpha beta gamma delta epsilon zeta eta theta";
+            prompts.push_back(engine->tokenize_text(repetition));
+        } else prompts.push_back(ids);
         for (int round = 0; round < 3; ++round) {
             if (round > 0 && fresh_engine) {
                 engine.reset();
                 engine = std::make_unique<ninfer::Engine>(options);
             }
-            ninfer::RequestOptions request;
-            request.execution.requested_output_tokens = std::stoul(argv[4]);
-            request.execution.allow_prefix_reuse = false;
-            request.execution.sampling.temperature = 0;
-            request.execution.sampling.presence_penalty = 0;
-            request.execution.sampling.frequency_penalty = 0;
-            neutral_repetition(request.execution.sampling);
-            if (kv == "int8-logprobs") enable_logprobs(request.execution);
-            request.stop.include_model_defaults = false;
-            auto result = engine->generate(engine->prepare_tokens(ids, false), request);
-            std::cout << "ROUND " << round;
-            for (auto generated : result.generated_token_ids) std::cout << ' ' << generated;
-            std::cout << std::endl;
-            print_logprobs(result);
+            for (std::size_t scenario = 0; scenario < prompts.size(); ++scenario) {
+                ninfer::RequestOptions request;
+                request.execution.requested_output_tokens = std::stoul(argv[4]);
+                request.execution.allow_prefix_reuse = false;
+                request.execution.sampling.temperature = 0;
+                request.execution.sampling.presence_penalty = 0;
+                request.execution.sampling.frequency_penalty = 0;
+                neutral_repetition(request.execution.sampling);
+                if (kv == "int8-logprobs") enable_logprobs(request.execution);
+                request.stop.include_model_defaults = false;
+                auto result = engine->generate(engine->prepare_tokens(prompts[scenario]), request);
+                std::cout << "ROUND " << round << " SCENARIO " << scenario;
+                for (auto generated : result.generated_token_ids) std::cout << ' ' << generated;
+                std::cout << std::endl;
+                print_logprobs(result);
+            }
         }
     } catch (const std::exception& error) {
         std::cerr << error.what() << std::endl;

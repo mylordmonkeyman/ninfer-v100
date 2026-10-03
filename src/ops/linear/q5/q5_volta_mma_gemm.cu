@@ -24,7 +24,8 @@ int q5_volta_mma_splits(std::int32_t n, std::int32_t k, std::int32_t t) noexcept
 std::size_t q5_volta_mma_workspace_bytes(std::int32_t n, std::int32_t k,
                                          std::int32_t t) noexcept {
     if (q5_volta_mma_splits(n, k, t) == 1) { return 0; }
-    return static_cast<std::size_t>(n) * static_cast<std::size_t>(t) * sizeof(float);
+    return static_cast<std::size_t>(n) * static_cast<std::size_t>(t) *
+           static_cast<std::size_t>(q5_volta_mma_splits(n, k, t)) * sizeof(float);
 }
 
 bool q5_volta_mma_supported(std::int32_t n, std::int32_t k, std::int32_t t) noexcept {
@@ -64,8 +65,7 @@ void launch_q5_volta_mma(const Tensor& x, const Weight& w, Tensor& out, bool add
     const auto* xd = static_cast<const __nv_bfloat16*>(x.data);
     auto* out_data = static_cast<__nv_bfloat16*>(out.data);
 
-    // One split: store BF16 straight out, folding the residual into the same store, and skip the
-    // workspace, its memset, the atomics and the narrowing pass entirely.
+    // One split stores BF16 directly, folding the residual into the same store.
     if (splits == 1) {
         if (add_residual) {
             q5_volta_mma_gemm_kernel<true, true><<<grid, S::kThreads, 0, stream>>>(
@@ -81,9 +81,9 @@ void launch_q5_volta_mma(const Tensor& x, const Weight& w, Tensor& out, bool add
     }
 
     auto scope           = ws.scope();
-    const DeviceSpan buf = ws.alloc_bytes(q5_volta_mma_workspace_bytes(n, k, t));
+    const DeviceSpan buf = ws.alloc_bytes(static_cast<std::size_t>(n) * t * splits * sizeof(float));
     auto* partial        = static_cast<float*>(buf.data);
-    CUDA_CHECK(cudaMemsetAsync(partial, 0, q5_volta_mma_workspace_bytes(n, k, t), stream));
+    // Every active element of every split plane is written exactly once.
 
     q5_volta_mma_gemm_kernel<false, false><<<grid, S::kThreads, 0, stream>>>(
         codes, high, scales, xd, partial, out_data, out_ld, n, k, t, padded_groups, splits);
@@ -95,10 +95,10 @@ void launch_q5_volta_mma(const Tensor& x, const Weight& w, Tensor& out, bool add
         static_cast<unsigned>((count + kNarrowThreads - 1) / kNarrowThreads);
     if (add_residual) {
         q5_volta_mma_narrow_kernel<true><<<blocks, kNarrowThreads, 0, stream>>>(
-            partial, out_data, n, t, out_ld);
+            partial, out_data, n, t, out_ld, splits);
     } else {
         q5_volta_mma_narrow_kernel<false><<<blocks, kNarrowThreads, 0, stream>>>(
-            partial, out_data, n, t, out_ld);
+            partial, out_data, n, t, out_ld, splits);
     }
     CUDA_CHECK(cudaGetLastError());
 }
