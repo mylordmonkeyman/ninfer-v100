@@ -93,7 +93,7 @@ int run_case(int k, const std::vector<std::int32_t>& accepted) {
     Tensor t_valid(d_valid.data(), DType::I32, {batch, steps});
     ops::mtp_prepare_next_round(t_verify, t_anchors, t_accepted, t_frontiers, t_budgets, t_licensed,
                                 t_rope_deltas, t_alignment, t_extents, t_positions,
-                                t_rope_positions, t_valid, max_context, nullptr);
+                                t_rope_positions, t_valid, k, max_context, nullptr);
     cuda_synchronize();
 
     const std::string label =

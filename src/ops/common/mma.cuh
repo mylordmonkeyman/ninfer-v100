@@ -1,6 +1,9 @@
 #pragma once
 
 #include "ops/common/memory.cuh"
+#ifdef NINFER_VOLTA_BUILD
+#include "ops/common/volta_mma.cuh"
+#endif
 
 // Every one of these wraps a raw PTX instruction that is Ampere+/Hopper+ only
 // (ldmatrix: sm_75+; the various mma.sync shapes: sm_80+, mma_nvfp4_e4m3: Blackwell).

@@ -26,7 +26,7 @@ namespace ninfer::ops {
  *   verify_ids/alignment_ids are distinct contiguous I32 [V+1,B]. ar_positions,
  *   ar_rope_positions, and ar_valid_columns are I32 [B,max(K-1,1)] with contiguous rows and one
  *   shared step stride at least B; this permits an exact-B prefix of a fixed-capacity frame. All
- *   other tensors are contiguous I32 [B]. B>=1, 1<=K<=5, K<=V<=15,
+ *   other tensors are contiguous I32 [B]. B>=1, 1<=K<=7, K<=V<=15,
  *   0<=accepted[b]<=V,
  *   licensed_counts[b]=accepted[b]+1, updated_frontiers and remaining_budgets are non-negative,
  *   and max_context is positive. The Op writes every output slot, including safe invalid-tail
