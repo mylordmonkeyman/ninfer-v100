@@ -1,0 +1,76 @@
+name: V100 Qwen Accuracy Parity
+on:
+  push:
+    branches: [forwardport/v100-flash-next]
+    paths:
+      - '.github/workflows/v100-qwen-accuracy.yml'
+      - 'tools/validation/v100_qwen_parity.cpp'
+      - 'tools/validation/compare_v100_qwen_parity.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: v100-qwen-accuracy
+  cancel-in-progress: true
+jobs:
+  accuracy:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: geoffwatts/ninfer-v100
+          ref: b37d0dd3e1163b9d802d8bccfa89918bf68d793e
+          path: baseline
+          submodules: recursive
+          persist-credentials: false
+      - name: Record hardware and available model artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p accuracy-results
+          nvidia-smi > accuracy-results/gpu.txt
+          find /models -maxdepth 2 -type f -name '*.ninfer' -printf '%p %s bytes\n' | sort | tee accuracy-results/models.txt
+          test -f /models/qwen3_8_27b_nvfp4.ninfer
+      - name: Build unchanged probe against both Engines
+        run: |
+          set -euo pipefail
+          cp tools/validation/v100_qwen_parity.cpp baseline/tools/v100_qwen_parity.cpp
+          for label in candidate baseline; do
+            source=.
+            build=../build-27b
+            probe=tools/validation/v100_qwen_parity.cpp
+            if [[ "$label" == baseline ]]; then source=baseline; build=../build-27b-baseline; probe=tools/v100_qwen_parity.cpp; fi
+            cat >> "$source/CMakeLists.txt" <<CMAKE
+          add_executable(ninfer_v100_qwen_parity_probe $probe)
+          target_include_directories(ninfer_v100_qwen_parity_probe PRIVATE \${PROJECT_SOURCE_DIR}/include)
+          target_link_libraries(ninfer_v100_qwen_parity_probe PRIVATE ninfer_engine)
+          CMAKE
+            cmake -S "$source" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70 \
+              -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
+            cmake --build "$build" -j --target ninfer_v100_qwen_parity_probe 2>&1 | tee "accuracy-results/$label-build.log"
+          done
+      - name: Compare scoring and generated tokens on identical 27B inputs
+        run: |
+          set -euo pipefail
+          for label in baseline candidate; do
+            build=../build-27b
+            if [[ "$label" == baseline ]]; then build=../build-27b-baseline; fi
+            for mode in score eager graph mtp; do
+              "$build/ninfer_v100_qwen_parity_probe" /models/qwen3_8_27b_nvfp4.ninfer \
+                bench/fixtures/bench_corpus.ids "$mode" "accuracy-results/$label-$mode.txt" \
+                2>&1 | tee "accuracy-results/$label-$mode.log"
+            done
+          done
+          python3 tools/validation/compare_v100_qwen_parity.py accuracy-results | tee accuracy-results/summary.log
+      - name: Preserve accuracy evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-qwen-accuracy
+          path: accuracy-results
+          retention-days: 30
