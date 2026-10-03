@@ -50,6 +50,7 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
+          clean: false
 
       - name: Verify target and profiler
         id: profiler
@@ -98,7 +99,11 @@ jobs:
                 deb="$(find phase17-tools/deb -maxdepth 1 -type f -name '*.deb' | head -n 1)"
                 if [[ -n "$deb" ]]; then
                   dpkg-deb -x "$deb" phase17-tools/root
-                  NSYS="$(find phase17-tools/root -type f -name nsys -perm -111 | head -n 1)"
+                  NSYS="$(find phase17-tools/root -type f -path '*/host-linux-x64/nsys' -perm -111 | head -n 1)"
+                  if [[ -z "$NSYS" ]]; then
+                    NSYS="$(find phase17-tools/root -type f -name nsys -perm -111 \
+                      ! -path '*/target-linux-x64/*' | head -n 1)"
+                  fi
                 fi
               fi
             fi
