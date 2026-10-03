@@ -1,4 +1,4 @@
-# V100 27B forward port
+# V100 Qwen forward port
 
 The `forwardport/v100-flash-next` branch restores the dense 27B SM70 operation paths from
 `geoffwatts/ninfer-v100` at `b37d0dd3e1163b9d802d8bccfa89918bf68d793e`, while retaining the
@@ -21,13 +21,17 @@ is recorded separately below.
   registered BF16 shapes, portable NVFP4 codec and selected-block attention.
 - Set the V100 default desktop memory reserve to zero. Callers can request another value explicitly.
 - Restore the working fork's SM70 runtime hardware gate and reject unavailable KV storage before loading.
-- Permit 27B MTP windows from one to seven drafts on SM70. Flash-Next retains its own limit.
+- Permit 27B and 35B-A3B MTP windows from one to seven drafts on SM70. Flash-Next retains its own limit.
   CUDA graph control remains available for dense 27B.
 
 NVFP4 and K8V4 **KV cache storage** remain unavailable on Volta. This restriction does not
 prevent loading NVFP4 **model weights**, which use the restored Volta dequantization paths.
-The original fork's later context-lookup MTP shortcut has not been integrated into the current
-runtime. DFlash2 performance is not qualified by this regression.
+The shared dense/35B runtime now includes the original fork's repeated-context MTP optimization:
+copy a continuation after a matching 16-token suffix, require agreement with the learned drafts,
+and verify up to 15 copied tokens using the target model. The larger replay records, workspace,
+graph family, pending-row stride and acceptance counters are planned explicitly. Requests using
+structured output or token log probabilities retain their ordinary decoding path.
+DFlash2 performance is not qualified by this regression.
 
 ## Verification
 
@@ -47,28 +51,75 @@ The [original-fork reference](https://github.com/mylordmonkeyman/ninfer-v100/act
 also passed real scoring with maximum overlap error 0 and generated on the same artifact and
 the same current-branch token corpus. The source fork was pinned to the commit above.
 
+### Direct accuracy comparison
+
+The [direct original-fork comparison](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37100631031)
+passed on the actual Qwen3.8-27B NVFP4 artifact. The expanded
+[comparison after the shared MTP changes](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37127552576)
+also passed:
+
+- 4,096 teacher-forced token log probabilities: maximum and mean difference **0**.
+- 64 greedy generated tokens after each of 31-, 1,024- and 4,096-token prompts plus a
+  repeated-text prompt (256 output tokens per mode), in eager,
+  CUDA graph and MTP K=3 modes: **zero token differences** between implementations.
+- MTP output also matched ordinary graph output in each implementation.
+- Both implementations accepted 47 copied tokens beyond the configured K=3 window in each
+  of two scenarios, establishing that the repeated-context lookup path actually ran.
+
+Both binaries used the unchanged `tools/validation/v100_qwen_parity.cpp` public Engine probe,
+the same explicit token corpus and the same model artifact. Scoring used FP8 KV and a 1024-token
+prefill chunk; generation used INT8 group-64 KV. The criterion is exact input/greedy-token
+agreement and a maximum log-probability error of `1e-5`. This compares actual token probabilities,
+not the full vocabulary distribution. It establishes parity on these workloads, not universal
+accuracy or an independent mathematical-oracle result.
+
+The [updated runtime regression](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37127268924)
+passed after restoring context lookup and separating dense wide-verification graph topology classes.
+It includes real MTP K=1/3/7, state/checkpoint/vision regressions, and Flash-Next preservation.
+
+### Other registered Qwen targets
+
+| Artifact identity | Ported V100 route | Real artifact qualification |
+|---|---|---|
+| Qwen3.6-27B groupwise-int | Original Q4/Q5/W8 leaves and shared runtime | Real-artifact qualification pending |
+| Qwen3.6-27B NVFP4 | Original NVFP4 prepacking and A16 leaves; shared runtime | Real-artifact qualification pending |
+| Qwen3.6-35B-A3B groupwise-int | Original binder, Q4 experts/W8 shared projections, workspace-aware GDN, Volta graph topology and MTP K=1..7 | Real-artifact qualification pending |
+| Qwen3.8-27B groupwise-int | Original groupwise leaves and shared runtime | Real-artifact qualification pending |
+| Qwen3.8-27B NVFP4 | Original prepacked FP8/NVFP4 leaves and shared runtime | Expanded direct accuracy and updated runtime regression passed |
+
+The 35B-A3B binder matches the original fork. Its GDN leaf now explicitly passes A16 policy and
+caller workspace; its Volta MTP limit and wide-verification graph topology match the original
+fork. Qwen3.6-27B uses the already restored 27B variant and its original profile-specific binder.
+All peer variants are compiled into the public Engine. Compilation and source review do not
+substitute for real-artifact accuracy/performance qualification. Published artifacts linked by the
+original fork are available for the pending model matrix; downloads verify the pinned repository
+revision, published size and SHA256 before use.
+
 ### 27B throughput
 
 INT8 group-64 KV, one request, prefill chunk 1024, a 1024-token prompt followed by 64 timed
 generated tokens, one discarded warmup and two measured repetitions. Generation rates count
 committed output tokens. Baseline and candidate were separate runs on the same GPU.
-The original fork's much higher published rates use different prompts and acceptance rates.
+Candidate rates below are from the updated runtime regression; original rates are from the
+earlier unchanged-fork reference on the same artifact and corpus. The original fork's much higher
+published rates use different prompts and acceptance rates.
 
 | Mode | Candidate prefill tok/s | Original prefill tok/s | Candidate generation tok/s | Original generation tok/s |
 |---|---:|---:|---:|---:|
-| Eager, no MTP | 1073.7 | — | 29.39 | — |
-| CUDA graphs, no MTP | 1069.4 | 1087.5 | 29.47 | 29.52 |
-| CUDA graphs, MTP K=1 | 1056.4 | — | 42.75 | — |
-| CUDA graphs, MTP K=3 | 1050.9 | 1067.4 | 46.36 | 46.25 |
-| CUDA graphs, MTP K=7 | 1046.8 | — | 37.22 | — |
+| Eager, no MTP | 1073.4 | — | 29.40 | — |
+| CUDA graphs, no MTP | 1072.7 | 1087.5 | 29.47 | 29.52 |
+| CUDA graphs, MTP K=1 | 1058.4 | — | 42.75 | — |
+| CUDA graphs, MTP K=3 | 1053.2 | 1067.4 | 46.40 | 46.25 |
+| CUDA graphs, MTP K=7 | 1045.0 | — | 37.21 | — |
 
-Graph-mode prefill is about 1.7% lower in this small sample; ordinary and K=3 generation
-differ by less than 0.3%. K=3 was fastest among the tested windows on this prompt.
+Graph-mode prefill is about 1.4% lower in this small sample; ordinary and K=3 generation
+differ by less than 0.4%. K=3 was fastest among the tested windows on this prompt.
 K=1/3/7 draft acceptance was 57.5%/30.6%/13.3%, respectively. These are workload-specific
 measurements, not general generation guarantees.
 
 The [saved-report summary](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37098963575)
-extracts these candidate rates from the completed run's JSON artifacts without rerunning GPU work.
+extracts the earlier candidate rates from completed JSON artifacts without rerunning GPU work.
+The table above uses the newer regression artifacts.
 
 ### Flash-Next preservation
 
@@ -81,6 +132,19 @@ The full 4096-position performance sweep remains manually available and was not 
 during this dense-port qualification.
 
 ### Workflows
+
+`.github/workflows/v100-qwen-accuracy.yml` compares public scoring and eager/graph/MTP generation
+against the original fork, including a repeated-text prompt for context lookup. Manual dispatch
+accepts an exact `artifact_path` under the runner's mounted model storage, so the same comparison
+can qualify each Qwen3.6/groupwise artifact once uploaded. Evidence is preserved as
+`v100-qwen-accuracy`, including `parity.json` and the per-token comparison exports.
+
+`.github/workflows/v100-qwen-model-matrix.yml` downloads four published peer artifacts into
+the runner's writable `../v100-qualification-models` directory, validates pinned publication
+metadata, size and SHA256, and compares scoring, eager/graph/MTP K=3/K=7 generation and
+throughput with the unchanged original-fork binaries. DFlash and DFlash2 are checked for
+the corresponding published artifacts. Models run serially on the V100. Qualification
+is pending in [run 37128702414](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37128702414).
 
 `.github/workflows/v100-27b-regression.yml` automatically checks the candidate and the real
 Flash-Next smoke path. Scoring and dense-runtime logs are uploaded immediately so failures
