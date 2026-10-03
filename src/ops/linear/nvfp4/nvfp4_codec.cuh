@@ -4,10 +4,8 @@
 #include "ops/common/memory.cuh"
 
 #include <cuda_bf16.h>
-#if !defined(NINFER_VOLTA_BUILD)
 #include <cuda_fp4.h>
 #include <cuda_fp8.h>
-#endif
 
 #include <cstdint>
 
@@ -20,26 +18,18 @@ __device__ __forceinline__ float decode_nvfp4_e2m1_scalar(std::uint8_t code) {
     return (code & 8U) != 0U ? -magnitude : magnitude;
 }
 
+// CUDA provides software decode conversions on SM70. Retain the original
+// fork's packed conversions in the hot A16/GEMV paths.
 __device__ __forceinline__ float2 decode_nvfp4_e2m1x2(std::uint8_t storage) {
-    return make_float2(decode_nvfp4_e2m1_scalar(storage & 0x0FU),
-                       decode_nvfp4_e2m1_scalar(storage >> 4));
+    __nv_fp4x2_e2m1 value;
+    value.__x = storage;
+    return static_cast<float2>(value);
 }
 
 __device__ __forceinline__ float decode_nvfp4_e4m3(std::uint8_t storage) {
-    const bool negative = (storage & 0x80U) != 0U;
-    const int exponent  = (storage >> 3) & 0x0F;
-    const int mantissa  = storage & 0x07;
-    float value = 0.0F;
-    if (exponent == 0) {
-        value = mantissa == 0 ? 0.0F : ldexpf(static_cast<float>(mantissa), -9);
-    } else if (exponent < 15) {
-        value = ldexpf(1.0F + static_cast<float>(mantissa) * 0.125F, exponent - 7);
-    } else if (mantissa < 7) {
-        value = ldexpf(1.0F + static_cast<float>(mantissa) * 0.125F, 8);
-    } else {
-        return __int_as_float(0x7FFFFFFF);
-    }
-    return negative ? -value : value;
+    __nv_fp8x2_e4m3 value;
+    value.__x = static_cast<std::uint16_t>(storage) | (static_cast<std::uint16_t>(storage) << 8);
+    return static_cast<float2>(value).x;
 }
 
 __device__ __forceinline__ std::uint8_t encode_nvfp4_e4m3_satfinite(float value) {

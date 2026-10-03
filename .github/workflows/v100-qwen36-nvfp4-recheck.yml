@@ -1,0 +1,210 @@
+name: V100 Qwen36 NVFP4 Recheck
+on:
+  push:
+    branches: [forwardport/v100-flash-next]
+    paths:
+      - '.github/workflows/v100-qwen36-nvfp4-recheck.yml'
+      - 'src/ops/linear/nvfp4/nvfp4_codec.cuh'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: v100-qwen36-nvfp4-recheck
+  cancel-in-progress: true
+jobs:
+  real-model:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - repo: neroued/Qwen3.6-27B-nvfp4-NInfer
+            filename: qwen3_6_27b_nvfp4.ninfer
+            revision: 300373c46a7911a6483111b0c8c6c8972f459937
+    env:
+      MODEL_REPOSITORY: ${{ matrix.repo }}
+      MODEL_FILENAME: ${{ matrix.filename }}
+      MODEL_REVISION: ${{ matrix.revision }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          persist-credentials: false
+          clean: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: geoffwatts/ninfer-v100
+          ref: b37d0dd3e1163b9d802d8bccfa89918bf68d793e
+          path: baseline
+          submodules: recursive
+          persist-credentials: false
+          clean: false
+      - name: Require qualifying runtime and unchanged-probe accuracy results
+        run: |
+          set -euo pipefail
+          python3 -m py_compile tools/validation/compare_v100_qwen_parity.py
+          python3 - <<'PYGATE'
+          import json, os, urllib.request
+          for run in (37139276244, 37139276200, 37139276263):
+              request = urllib.request.Request(
+                  f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{run}",
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  result = json.load(response)
+              if result['conclusion'] != 'success':
+                  raise SystemExit(f"Required qualification run {run}: {result['conclusion']}")
+          PYGATE
+          test -x ../build-27b/ninfer_v100_qwen_parity_probe
+          test -x ../build-27b-baseline/ninfer_v100_qwen_parity_probe
+          test -x ../build-27b/bench/ninfer_bench
+          test -x ../build-27b-baseline/bench/ninfer_bench
+          rm -rf -- model-results
+          mkdir -p model-results
+          nvidia-smi > model-results/gpu.txt
+          df -h .. | tee model-results/disk.txt
+      - name: Download published artifact and verify size and hash
+        run: |
+          set -euo pipefail
+          python3 tools/validation/download_qwen_qualification.py "$MODEL_REPOSITORY" "$MODEL_FILENAME" \
+            ../v100-qualification-models/v2 model-results "$MODEL_REVISION"
+      - name: Build corrected accuracy reference and preserve unchanged benchmark
+        run: |
+          set -euo pipefail
+          cp tools/validation/v100_qwen_parity.cpp baseline/tools/v100_qwen_parity.cpp
+          for label in candidate baseline; do
+            source=.
+            build=../build-27b
+            probe=tools/validation/v100_qwen_parity.cpp
+            media=ON
+            if [[ "$label" == baseline ]]; then source=baseline; build=../build-27b-baseline; probe=tools/v100_qwen_parity.cpp; media=OFF; fi
+            cat >> "$source/CMakeLists.txt" <<CMAKE
+          add_executable(ninfer_v100_qwen_parity_probe $probe)
+          target_include_directories(ninfer_v100_qwen_parity_probe PRIVATE \${PROJECT_SOURCE_DIR}/include)
+          target_link_libraries(ninfer_v100_qwen_parity_probe PRIVATE ninfer_engine)
+          CMAKE
+            cmake -S "$source" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70 \
+              -DNINFER_BUILD_MEDIA="$media" -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
+            cmake --build "$build" -j --target ninfer_bench ninfer_v100_qwen_parity_probe \
+              2>&1 | tee "model-results/$label-build.log"
+          done
+          ../build-27b-baseline/ninfer_v100_qwen_parity_probe \
+            "../v100-qualification-models/v2/$MODEL_FILENAME" bench/fixtures/bench_corpus.ids score \
+            model-results/baseline-original-score.txt 2>&1 | tee model-results/baseline-original-score.log
+          mkdir -p ../v100-qualification-bin
+          cp ../build-27b-baseline/bench/ninfer_bench "../v100-qualification-bin/$MODEL_FILENAME-baseline-original-bench"
+          git -C baseline apply --check "$PWD/tools/validation/v100_ordered_splitk_reference.patch"
+          git -C baseline apply "$PWD/tools/validation/v100_ordered_splitk_reference.patch"
+          cp tools/validation/v100_ordered_splitk_reference.patch model-results/reference-correction.patch
+          cmake --build ../build-27b-baseline -j --target ninfer_v100_qwen_parity_probe \
+            2>&1 | tee model-results/baseline-corrected-build.log
+          printf '%s\n' 'Accuracy reference: original b37d0dd plus isolated ordered split-K correction.' \
+            'Performance reference: unchanged original b37d0dd benchmark built before correction.' \
+            > model-results/reference.txt
+      - name: Compare real scoring and eager graph MTP generation with original V100 fork
+        run: |
+          set -euo pipefail
+          extras=(mtp7)
+          if [[ "$MODEL_FILENAME" == qwen3_6_35b_a3b.ninfer ]]; then extras+=(dflash); fi
+          if [[ "$MODEL_FILENAME" == qwen3_8_27b.ninfer ]]; then extras+=(dflash2); fi
+          for label in baseline candidate; do
+            build=../build-27b
+            if [[ "$label" == baseline ]]; then build=../build-27b-baseline; fi
+            for mode in score eager graph mtp "${extras[@]}"; do
+              "$build/ninfer_v100_qwen_parity_probe" "../v100-qualification-models/v2/$MODEL_FILENAME" \
+                bench/fixtures/bench_corpus.ids "$mode" "model-results/$label-$mode.txt" \
+                2>&1 | tee "model-results/$label-$mode.log"
+            done
+          done
+          for label in baseline candidate; do
+            build=../build-27b
+            if [[ "$label" == baseline ]]; then build=../build-27b-baseline; fi
+            "$build/ninfer_v100_qwen_parity_probe" "../v100-qualification-models/v2/$MODEL_FILENAME" \
+              bench/fixtures/bench_corpus.ids eager "model-results/$label-eager-repeat.txt" \
+              2>&1 | tee "model-results/$label-eager-repeat.log"
+          done
+          python3 - <<'PYORIGINAL'
+          from pathlib import Path
+          import math, json
+          def scores(label):
+              return [float(line.split()[2]) for line in Path(f'model-results/{label}-score.txt').read_text().splitlines()
+                      if line.startswith('score ')]
+          original, candidate = scores('baseline-original'), scores('candidate')
+          if len(original) != 4096 or len(candidate) != 4096:
+              raise RuntimeError('Incomplete original-fork scoring comparison')
+          errors = [abs(a - b) for a, b in zip(original, candidate)]
+          maximum = max(errors)
+          summary = {'reference': 'unchanged original fork', 'samples': len(errors),
+                     'max_logprob_error': maximum, 'mean_logprob_error': sum(errors)/len(errors)}
+          Path('model-results/original-score-parity.json').write_text(json.dumps(summary, indent=2) + '\n')
+          print(f'UNCHANGED_ORIGINAL_SCORE max_error={maximum} mean_error={sum(errors)/len(errors)}')
+          if not all(math.isfinite(x) for x in original + candidate) or maximum > 1e-5:
+              raise RuntimeError('Unchanged-original scoring drift')
+          PYORIGINAL
+          python3 tools/validation/compare_v100_qwen_parity.py model-results "${extras[@]}" --same-mode-reference --corrected-reference | tee model-results/summary.log
+      - name: Preserve direct accuracy evidence before benchmarking
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-nvfp4-recheck-accuracy
+          path: model-results
+          retention-days: 30
+      - name: Compare actual graph and MTP throughput with unchanged original V100 fork
+        run: |
+          set -euo pipefail
+          args=(--weights "../v100-qualification-models/v2/$MODEL_FILENAME" --corpus bench/fixtures/bench_corpus.ids --kv-dtype int8 -pg 1024,64 -r 2 --warmup 1 -o json)
+          for label in baseline candidate; do
+            benchmark=../build-27b/bench/ninfer_bench
+            if [[ "$label" == baseline ]]; then benchmark="../v100-qualification-bin/$MODEL_FILENAME-baseline-original-bench"; fi
+            "$benchmark" "${args[@]}" \
+              --output-file "model-results/$label-graph.json" > "model-results/$label-graph-bench.log" 2>&1
+            for drafts in 3 7; do
+              "$benchmark" "${args[@]}" --spec mtp --draft-tokens "$drafts" --lm-head-draft \
+                --output-file "model-results/$label-mtp-$drafts.json" > "model-results/$label-mtp-$drafts-bench.log" 2>&1
+            done
+          done
+          backend=
+          if [[ "$MODEL_FILENAME" == qwen3_6_35b_a3b.ninfer ]]; then backend=dflash; fi
+          if [[ "$MODEL_FILENAME" == qwen3_8_27b.ninfer ]]; then backend=dflash2; fi
+          if [[ -n "$backend" ]]; then
+            for label in baseline candidate; do
+              benchmark=../build-27b/bench/ninfer_bench
+              if [[ "$label" == baseline ]]; then benchmark="../v100-qualification-bin/$MODEL_FILENAME-baseline-original-bench"; fi
+              "$benchmark" "${args[@]}" --spec "$backend" --draft-tokens 3 --lm-head-draft \
+                --output-file "model-results/$label-$backend.json" > "model-results/$label-$backend-bench.log" 2>&1
+            done
+          fi
+      - name: Summarize and check actual throughput
+        run: |
+          set -euo pipefail
+          python3 - <<'PYPERF'
+          import json
+          from pathlib import Path
+          for mode in ('graph', 'mtp-3', 'mtp-7'):
+              rates = {}
+              for label in ('baseline', 'candidate'):
+                  report = json.loads(Path(f'model-results/{label}-{mode}.json').read_text())
+                  test = report['tests'][0]
+                  row = {'mode': mode, 'label': label, 'prefill_tok_s': test['prefill_tok_s_mean'],
+                         'generation_tok_s': test['decode_output_tok_s_mean'],
+                         'acceptance': test['speculative']['acceptance_rate']}
+                  print(json.dumps(row, sort_keys=True), flush=True)
+                  rates[label] = row
+              for metric in ('prefill_tok_s', 'generation_tok_s'):
+                  ratio = rates['candidate'][metric] / rates['baseline'][metric]
+                  print(f'PERFORMANCE {mode} {metric} candidate/original={ratio:.6f}', flush=True)
+                  if ratio < 0.95:
+                      raise RuntimeError(f'{mode} {metric}: greater than 5% measured regression')
+          print('PASS: measured NVFP4 throughput within 5% of unchanged original')
+          PYPERF
+      - name: Preserve qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-nvfp4-recheck-qualification
+          path: model-results
+          retention-days: 30
