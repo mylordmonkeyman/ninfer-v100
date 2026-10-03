@@ -1,0 +1,94 @@
+name: V100 27B HTTP Smoke
+on:
+  push:
+    branches: [forwardport/v100-flash-next]
+    paths: ['.github/workflows/v100-27b-http-smoke.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: v100-27b-http-smoke
+  cancel-in-progress: true
+jobs:
+  serve:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          persist-credentials: false
+          clean: false
+      - name: Build current server
+        run: |
+          set -euo pipefail
+          cmake -S . -B ../build-27b -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=ON -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
+          cmake --build ../build-27b -j --target ninfer-serve
+      - name: Exercise health models and actual chat generation
+        run: |
+          set -euo pipefail
+          mkdir -p http-smoke-results
+          python3 - <<'PY'
+          import json, subprocess, time, urllib.request
+          from pathlib import Path
+          out = Path('http-smoke-results')
+          args = ['../build-27b/apps/ninfer-serve', '/models/qwen3_8_27b_nvfp4.ninfer',
+                  '--host', '127.0.0.1', '--port', '18087', '--model-id', 'v100-27b-smoke',
+                  '--max-context', '2048', '--kv-capacity', '2048', '--max-concurrency', '1',
+                  '--prefill-chunk', '1024', '--kv-dtype', 'int8',
+                  '--spec', 'mtp', '--draft-tokens', '3', '--lm-head-draft']
+          def get(path):
+              with urllib.request.urlopen('http://127.0.0.1:18087'+path, timeout=10) as r:
+                  return json.load(r)
+          with (out/'server.log').open('w') as log:
+              process = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT)
+              try:
+                  deadline = time.monotonic()+600
+                  while True:
+                      if process.poll() is not None:
+                          raise RuntimeError(f'Server exited {process.returncode}')
+                      try:
+                          health = get('/health')
+                          break
+                      except (OSError, ValueError):
+                          if time.monotonic() >= deadline:
+                              raise RuntimeError('Server readiness timed out')
+                          time.sleep(1)
+                  models = get('/v1/models')
+                  if not any(m['id'] == 'v100-27b-smoke' for m in models['data']):
+                      raise RuntimeError('Configured model alias missing')
+                  body = {'model': 'v100-27b-smoke',
+                          'messages': [{'role': 'user', 'content': 'Reply with the word READY.'}],
+                          'max_tokens': 16, 'temperature': 0, 'enable_thinking': False,
+                          'stream': False}
+                  request = urllib.request.Request('http://127.0.0.1:18087/v1/chat/completions',
+                          data=json.dumps(body).encode(), headers={'Content-Type':'application/json'})
+                  with urllib.request.urlopen(request, timeout=180) as response:
+                      chat = json.load(response)
+                  message = chat['choices'][0]['message']
+                  if not isinstance(message.get('content'), str) or not message['content'].strip():
+                      raise RuntimeError('No answer text')
+                  if chat['usage']['completion_tokens'] <= 0:
+                      raise RuntimeError('No generated tokens')
+                  result = {'health': health, 'models': models, 'chat': chat}
+                  (out/'result.json').write_text(json.dumps(result, indent=2)+'\n')
+                  print(json.dumps(result, sort_keys=True))
+                  print('PASS: real Qwen3.8-27B NVFP4 HTTP generation with graphs and MTP K=3')
+              finally:
+                  if process.poll() is None:
+                      process.terminate()
+                      try:
+                          process.wait(timeout=30)
+                      except subprocess.TimeoutExpired:
+                          process.kill()
+                          process.wait(timeout=10)
+                  print((out/'server.log').read_text())
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: v100-27b-http-smoke
+          path: http-smoke-results
+          retention-days: 30

@@ -1,0 +1,50 @@
+name: V100 Qwen Qualification Report
+on:
+  push:
+    branches: [forwardport/v100-flash-next]
+    paths: ['.github/workflows/v100-qwen-qualification-report.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  summarize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read saved real-model accuracy and throughput evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 37096296837 --repo "$GITHUB_REPOSITORY" --name v100-27b-regression --dir results/original-dense
+          gh run download 37139276200 --repo "$GITHUB_REPOSITORY" --name v100-27b-regression --dir results/dense
+          for filename in qwen3_6_35b_a3b.ninfer qwen3_8_27b.ninfer qwen3_6_27b.ninfer qwen3_6_27b_nvfp4.ninfer; do
+            gh run download 37141867858 --repo "$GITHUB_REPOSITORY" --name "v100-qualification-$filename" --dir "results/$filename"
+          done
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for p in sorted(Path('results').rglob('*.json')):
+              artifact = p.relative_to(Path('results')).parts[0]
+              if artifact == 'original-dense' and not p.name.startswith('baseline-'):
+                  continue
+              report = json.loads(p.read_text())
+              if not isinstance(report, dict):
+                  continue
+              if p.name in ('parity.json', 'original-score-parity.json'):
+                  print(json.dumps({'artifact': artifact, 'file': p.name, 'accuracy': report}, sort_keys=True))
+              if report.get('artifact_type') != 'ninfer_bench_report':
+                  continue
+              for test in report['tests']:
+                  print(json.dumps({
+                      'artifact': artifact,
+                      'file': p.name,
+                      'label': test['label'],
+                      'prefill_tok_s': test['prefill_tok_s_mean'],
+                      'generation_tok_s': test['decode_output_tok_s_mean'],
+                      'graphs': report['config']['use_cuda_graph'],
+                      'mtp_drafts': report['config']['draft_tokens'],
+                      'acceptance': test['speculative']['acceptance_rate'],
+                      'gpu': report['environment']['gpu_name'],
+                  }, sort_keys=True))
+          PY
