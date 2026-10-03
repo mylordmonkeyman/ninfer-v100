@@ -52,13 +52,19 @@ jobs:
               -DNINFER_BUILD_MEDIA="$media" -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
             cmake --build "$build" -j --target ninfer_v100_qwen_short_probe 2>&1 | tee "short-results/$label-build.log"
           done
+      - name: Compare sampled tokens with actual model top probabilities
+        run: |
+          set -euo pipefail
+          ../build-27b/ninfer_v100_qwen_short_probe \
+            ../v100-qualification-models/v2/qwen3_6_27b.ninfer bench/fixtures/bench_corpus.ids int8-logprobs 8 \
+            2>&1 | tee short-results/candidate-choices.log
       - name: Check short-prompt shared-memory ordering
         run: |
           set -euo pipefail
           sanitizer=/usr/local/cuda-12.8/bin/compute-sanitizer
           if [[ ! -x "$sanitizer" ]]; then sanitizer=$(command -v compute-sanitizer); fi
           set +e
-          "$sanitizer" --tool racecheck --error-exitcode 86 \
+          timeout 180s "$sanitizer" --tool racecheck --error-exitcode 86 \
             ../build-27b/ninfer_v100_qwen_short_probe \
             ../v100-qualification-models/v2/qwen3_6_27b.ninfer bench/fixtures/bench_corpus.ids int8 8 \
             > short-results/candidate-racecheck.log 2>&1
