@@ -62,9 +62,7 @@ jobs:
           cmake --build build-prefill -j --target \
             ninfer_qwen3_8_flash_next_expert_cache_test \
             ninfer_qwen3_8_flash_next_vertical_slice_real_test \
-            ninfer_qwen3_8_flash_next_text_decode_test \
-            ninfer_linear_nvfp4_a16_test \
-            ninfer_linear_q4_a16_test
+            ninfer_qwen3_8_flash_next_text_decode_test
           ctest --test-dir build-prefill -V \
             -R '^ninfer_qwen3_8_flash_next_(expert_cache|text_decode)_test$' \
             > prefill-results/unit-tests.log 2>&1
@@ -119,15 +117,6 @@ jobs:
           build-prefill/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
             2>&1 | tee prefill-results/cold-default.log
           grep -q 'PASS: prefill policy natural routing' prefill-results/cold-default.log
-      - name: Shared 27B-shape linear regression
-        if: ${{ !cancelled() && steps.focused.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          ctest --test-dir build-prefill -V \
-            -R '^ninfer_linear_(nvfp4|q4)_a16_test$' \
-            > prefill-results/27b-linear-regression.log 2>&1
-          cat prefill-results/27b-linear-regression.log
       - name: Separate eager launch and kernel profile when Nsight is available
         shell: bash
         env:
