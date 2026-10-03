@@ -70,20 +70,37 @@ jobs:
 
           NSYS="$(find_nsys || true)"
           if [[ -z "$NSYS" ]] && command -v apt-get >/dev/null 2>&1; then
+            # First prefer a normal install when the runner grants root/sudo.
             prefix=()
             if [[ "$(id -u)" != 0 ]]; then
               if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
                 prefix=(sudo)
               fi
             fi
-            if [[ "$(id -u)" == 0 || ${#prefix[@]} -gt 0 ]]; then
+            pkg="$(apt-cache search '^nsight-systems' | awk '{print $1}' | sort -V | tail -n 1)"
+            if [[ -n "$pkg" && ( "$(id -u)" == 0 || ${#prefix[@]} -gt 0 ) ]]; then
               "${prefix[@]}" apt-get update
-              pkg="$(apt-cache search '^nsight-systems' | awk '{print $1}' | sort -V | tail -n 1)"
-              if [[ -n "$pkg" ]]; then
-                echo "Installing $pkg" | tee -a phase17-results/profiler.txt
-                "${prefix[@]}" apt-get install -y "$pkg"
-              fi
+              echo "Installing $pkg" | tee -a phase17-results/profiler.txt
+              "${prefix[@]}" apt-get install -y "$pkg"
               NSYS="$(find_nsys || true)"
+            fi
+
+            # The self-hosted runner normally has no passwordless sudo. NVIDIA's
+            # repository package can still be downloaded and unpacked locally.
+            if [[ -z "$NSYS" ]]; then
+              pkg="$(apt-cache search '^nsight-systems' | awk '{print $1}' | sort -V | tail -n 1)"
+              if [[ -n "$pkg" ]] && command -v dpkg-deb >/dev/null 2>&1; then
+                mkdir -p phase17-tools/deb phase17-tools/root
+                (
+                  cd phase17-tools/deb
+                  apt-get download "$pkg"
+                ) | tee -a phase17-results/profiler.txt
+                deb="$(find phase17-tools/deb -maxdepth 1 -type f -name '*.deb' | head -n 1)"
+                if [[ -n "$deb" ]]; then
+                  dpkg-deb -x "$deb" phase17-tools/root
+                  NSYS="$(find phase17-tools/root -type f -name nsys -perm -111 | head -n 1)"
+                fi
+              fi
             fi
           fi
 
