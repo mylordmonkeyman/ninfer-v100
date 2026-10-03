@@ -723,7 +723,7 @@ static int run_phase17_hit_graph_benchmark(const TextModelView& model,
     constexpr unsigned kIterations = 512;
 
     const auto source = model.host_experts->expert(0, 0);
-    PinnedHostBuffer packed(kExpertSlotBytes);
+    ninfer::PinnedHostBuffer packed(kExpertSlotBytes);
     auto* packed_bytes = static_cast<std::byte*>(packed.data());
     std::memcpy(packed_bytes, source.gate_up.codes, 1'638'400);
     std::memcpy(packed_bytes + 1'638'400, source.gate_up.scales, 204'800);
@@ -733,10 +733,10 @@ static int run_phase17_hit_graph_benchmark(const TextModelView& model,
     std::memcpy(packed_bytes + 2'764'804, source.down.weight_scale_divisor, 4);
     std::memset(packed_bytes + kExpertPairBytes, 0, kExpertSlotBytes-kExpertPairBytes);
 
-    DeviceBuffer weights(kExpertSlotBytes);
-    DeviceBuffer input(kInputBytes);
-    DeviceBuffer activation(kActivationBytes);
-    DeviceBuffer output(kOutputCount*sizeof(float));
+    ninfer::DeviceBuffer weights(kExpertSlotBytes);
+    ninfer::DeviceBuffer input(kInputBytes);
+    ninfer::DeviceBuffer activation(kActivationBytes);
+    ninfer::DeviceBuffer output(kOutputCount*sizeof(float));
     std::vector<std::uint16_t> host_input(2'560, 0x3f80U); // BF16 1.0
     CUDA_CHECK(cudaMemcpyAsync(weights.p, packed.data(), kExpertSlotBytes,
                                cudaMemcpyHostToDevice, device.stream));
