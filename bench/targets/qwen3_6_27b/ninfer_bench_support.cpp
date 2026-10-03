@@ -296,7 +296,8 @@ std::string usage_text(std::string_view program) {
         << "  --warmup <n>                discarded repetitions (default: " << kDefaultWarmup
         << ")\n"
         << "  --max-ctx <tokens>          override auto-sized context capacity\n"
-        << "  --desktop-reserve-gib <n>   desktop GPU memory reserve (default: 8 GiB)\n"
+        << "  --desktop-reserve-gib <n>   desktop GPU memory reserve (default: "
+        << kDefaultDesktopReserveBytes / (1024ULL * 1024ULL * 1024ULL) << " GiB)\n"
         << "  --prefill-chunk <tokens>    multiple of " << kPrefillChunkAlignment
         << " (default: " << kDefaultPrefillChunk << ")\n"
         << "  --kv-dtype <bf16|int8|fp8|nvfp4|k8v4>  KV cache storage (default: bf16)\n"

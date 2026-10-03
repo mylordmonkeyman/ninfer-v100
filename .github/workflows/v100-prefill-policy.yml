@@ -11,7 +11,7 @@ permissions:
   contents: read
 concurrency:
   group: v100-prefill-policy
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   prefill-policy:
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
@@ -55,19 +55,19 @@ jobs:
           set -euo pipefail
           mkdir -p prefill-results
           nvidia-smi > prefill-results/gpu.txt
-          cmake -S . -B build-prefill -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          cmake -S . -B ../build-prefill -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
             -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
             -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-prefill -j --target \
+          cmake --build ../build-prefill -j --target \
             ninfer_qwen3_8_flash_next_expert_cache_test \
             ninfer_qwen3_8_flash_next_vertical_slice_real_test \
             ninfer_qwen3_8_flash_next_text_decode_test
-          ctest --test-dir build-prefill -V \
+          ctest --test-dir ../build-prefill -V \
             -R '^ninfer_qwen3_8_flash_next_(expert_cache|text_decode)_test$' \
             > prefill-results/unit-tests.log 2>&1
           compute-sanitizer --tool memcheck --error-exitcode 1 \
-            build-prefill/tests/ninfer_qwen3_8_flash_next_expert_cache_test \
+            ../build-prefill/tests/ninfer_qwen3_8_flash_next_expert_cache_test \
             > prefill-results/cache-memcheck.log 2>&1
       - name: Natural short and longer prompts with following generation
         shell: bash
@@ -81,7 +81,7 @@ jobs:
           configs=(1)
           for i in "${!configs[@]}"; do
             NINFER_FLASH_NEXT_EXPERT_CACHE="${configs[$i]}" \
-              build-prefill/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+              ../build-prefill/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
               > "prefill-results/$i-cache${configs[$i]}.log" 2>&1
             cat "prefill-results/$i-cache${configs[$i]}.log"
             grep -q 'PASS: prefill policy natural routing' "prefill-results/$i-cache${configs[$i]}.log"
@@ -99,7 +99,7 @@ jobs:
           NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING: '1'
         run: |
           set -euo pipefail
-          build-prefill/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+          ../build-prefill/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
             2>&1 | tee prefill-results/long-default.log
           grep -q 'PASS: prefill policy natural routing' prefill-results/long-default.log
       - name: Cold cache with admissions and following generation
@@ -114,7 +114,7 @@ jobs:
           NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING: '1'
         run: |
           set -euo pipefail
-          build-prefill/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+          ../build-prefill/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
             2>&1 | tee prefill-results/cold-default.log
           grep -q 'PASS: prefill policy natural routing' prefill-results/cold-default.log
       - name: Separate eager launch and kernel profile when Nsight is available
@@ -137,7 +137,7 @@ jobs:
             nsys profile --trace=cuda --sample=none --cpuctxsw=none \
               --capture-range=cudaProfilerApi --capture-range-end=stop \
               --force-overwrite=true -o prefill-results/eager \
-              build-prefill/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+              ../build-prefill/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
               > prefill-results/profile.log 2>&1
             nsys stats --report cuda_api_sum,cuda_gpu_kern_sum,cuda_gpu_mem_time_sum \
               prefill-results/eager.nsys-rep > prefill-results/profile-summary.txt 2>&1

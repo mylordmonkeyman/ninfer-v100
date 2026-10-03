@@ -132,7 +132,9 @@ std::string serve_usage_text(const char* argv0) {
            " MiB of sizing headroom\n"
            "       --clamp-concurrency-to-pool clamps effective concurrency to what the KV pool can fully back\n"
            "       --kv-slack-floor-mib sets the minimum post-startup device memory slack floor (default 1024 MiB)\n"
-           "       --desktop-reserve-gib sets the device memory floor reserved for desktop/compositor (default 8 GiB)\n"
+           "       --desktop-reserve-gib sets the device memory floor reserved for desktop/compositor (default " +
+           std::to_string(kDefaultDesktopReserveBytes / (1024ULL * 1024ULL * 1024ULL)) +
+           " GiB)\n"
            "       --desktop-reserve-mib sets the desktop memory reserve floor in MiB\n"
            "       serves OpenAI Responses/Chat Completions and Anthropic Messages endpoints\n"
            "       --default-max-tokens defaults to " +

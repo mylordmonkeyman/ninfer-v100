@@ -1,4 +1,5 @@
 #include <ninfer/targets/qwen3_6_27b/package.h>
+#include <ninfer/targets/qwen3_6/round_state.h>
 
 #include "artifact/binder.h"
 #include "artifact/materializer.h"
@@ -43,7 +44,7 @@ struct Options {
 void print_usage(const char* executable) {
     std::cout << "usage: " << executable
               << " [--artifact <model.ninfer>] [--device <id>] [--warmup <n>] [--reps <n>]"
-                 " [--draft-tokens <1..5>] [--proposal-head full|optimized]"
+                 " [--draft-tokens <model/build limit>] [--proposal-head full|optimized]"
                  " [--no-cuda-graph]\n";
 }
 
@@ -88,8 +89,9 @@ Options parse_options(int argc, char** argv) {
     if (options.device < 0) { throw std::invalid_argument("--device must be nonnegative"); }
     if (options.warmup < 0) { throw std::invalid_argument("--warmup must be nonnegative"); }
     if (options.repetitions <= 0) { throw std::invalid_argument("--reps must be positive"); }
-    if (options.draft_tokens == 0 || options.draft_tokens > 5) {
-        throw std::invalid_argument("--draft-tokens must be in [1,5]");
+    if (options.draft_tokens == 0 || options.draft_tokens > ninfer::targets::qwen3_6::kMtpDecodeMaximumDrafts) {
+        throw std::invalid_argument("--draft-tokens must be in [1," +
+                                    std::to_string(ninfer::targets::qwen3_6::kMtpDecodeMaximumDrafts) + "]");
     }
     return options;
 }
