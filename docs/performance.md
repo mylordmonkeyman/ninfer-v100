@@ -1772,6 +1772,59 @@ scalar control; combine it with `NINFER_FLASH_NEXT_EXPERT_CACHE_BATCHED_PREFILL=
 for the batched control. Decode retains its existing expert execution path.
 The cache itself remains opt-in. The prefill-policy workflow now exercises the
 constructor-selected default, a 4,064-token prompt plus 32-token decode, and
-fresh-cache requests with active admissions. Results of those added cases are
-pending. No new Section 7 qualification is claimed, and Phase 17 Graph adoption
-has not been decided.
+fresh-cache requests with active admissions. Their measured outcomes are below.
+No new Section 7 qualification is claimed.
+
+
+#### Production-default long and cold qualification
+
+[Run 37086299716](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37086299716)
+at `c24ad484` passed build, focused cache/text-decode correctness, cache memcheck,
+natural short prompts, the long prompt and cold-cache requests. The same accepted
+precision profile and platform settings above were retained. Each comparison
+used bypass/default/default/bypass order, with two observations per policy.
+
+| Cache state | Prompt tokens | Bypass prefill tok/s | Default grouped prefill tok/s | Bypass following decode tok/s | Default following decode tok/s |
+|---|---:|---:|---:|---:|---:|
+| Decode-populated, frozen | 1024 | 38.46 | 51.21 | 9.06 | 8.78 |
+| Decode-populated, frozen | 4064 | 38.09 | 51.30 | 8.29 | 8.16 |
+| Empty at request start, admissions active | 128 | 29.44 | 32.40 | 7.51 | 7.63 |
+| Empty at request start, admissions active | 1024 | 38.55 | 39.34 | 8.16 | 8.58 |
+
+The long case consumed the complete 4,096-record sequence: 4,064 prompt tokens
+and 32 following teacher-forced decode steps. Frozen-policy repeat logits,
+finite logits and the committed state frontier passed. Long grouped prefill
+was 34.7% faster than bypass. Following decode rates were close, with no evidence
+here for a decode improvement. Cold-cache requests reset slots before every
+sample and retained cap-one background admissions. At 128 prompt tokens there
+were no GPU hits, so that rate difference cannot be attributed to grouped weight
+reuse. Cold 1,024-token prefill was roughly comparable; these two-sample results
+do not establish a small cold-cache speedup.
+
+The first integration run passed its short/default cases but rejected the long
+case before model load because smoke-count 4,096 is invalid. The corrected
+workflow selects the full manifest without a smoke override. This harness
+failure is separate from the subsequent passing long-prompt execution.
+
+The aggregate workflow is **not green**: its additional Q4 linear regression
+failed with `Q4 backend unavailable on Volta`. NVFP4 A16 linear conformance at
+27B shapes passed. The explicit Q4 rejection in `src/ops/linear/linear.cpp` is
+unchanged from the pre-integration `6f5dd837` revision, so the Q4 failure is an
+existing forward-port capability gap, not a grouped-prefill regression. It must
+remain visible in any claim about preservation of groupwise 27B support.
+
+The [whole-model 27B attempt](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37086517832)
+was blocked at prerequisite checking: `/models/qwen3_8_27b_nvfp4.ninfer` is not
+mounted in this runner. Neither the real scoring test nor its conditional
+pre-integration comparison ran. No full-model 27B regression or preserved
+whole-model 27B performance is established by these results.
+
+**Decision:** retain default grouped cached prefill for Flash-Next. The expert
+cache itself remains opt-in, with ordinary pinned fills, derived safe capacity,
+admission cap one and CPU/GPU overlap. Keep CUDA Graph off in hybrid mode.
+Nsight was unavailable in the earlier run; submission timers include driver
+backpressure and do not isolate total host launch overhead. Phase 17's launch
+measurement remains outstanding. The 27B artifact prerequisite and existing
+Q4 support gap should be resolved before claiming complete preservation of the
+historical 27B feature/performance set. The accepted Phase 11 milestone and its
+original Section 7 noncompliance are unchanged.
