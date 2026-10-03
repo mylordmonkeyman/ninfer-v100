@@ -103,6 +103,13 @@ jobs:
               ../build-27b/tests/ninfer_qwen3_6_27b_prefix_real_test \
               2>&1 | tee "regression-results/$scenario.log"
           done
+      - name: Preserve dense runtime diagnostics immediately
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-27b-runtime-diagnostics
+          path: regression-results/*.log
+          retention-days: 7
       - name: Preserve real Flash-Next grouped prefill behavior
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
