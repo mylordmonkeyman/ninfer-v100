@@ -11,16 +11,43 @@ jobs:
   summarize:
     runs-on: ubuntu-latest
     steps:
+      - name: Wait for current qualification attempts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PYWAIT'
+          import json, os, time, urllib.request
+          pending = {37152861678, 37152861712, 37152861694}
+          deadline = time.monotonic()+3600
+          while pending:
+              for run in tuple(pending):
+                  request = urllib.request.Request(
+                      f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{run}",
+                      headers={'Authorization': 'Bearer '+os.environ['GH_TOKEN'],
+                               'Accept': 'application/vnd.github+json'})
+                  with urllib.request.urlopen(request, timeout=60) as response:
+                      result = json.load(response)
+                  if result['status'] == 'completed':
+                      if result['conclusion'] != 'success':
+                          raise RuntimeError(f"Qualification {run}: {result['conclusion']}")
+                      pending.remove(run)
+                      print(f"PASS qualification {run}", flush=True)
+              if pending:
+                  if time.monotonic() >= deadline:
+                      raise RuntimeError('Qualification wait timed out')
+                  time.sleep(15)
+          PYWAIT
       - name: Read saved real-model accuracy and throughput evidence
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           gh run download 37096296837 --repo "$GITHUB_REPOSITORY" --name v100-27b-regression --dir results/original-dense
-          gh run download 37139276200 --repo "$GITHUB_REPOSITORY" --name v100-27b-regression --dir results/dense
-          for filename in qwen3_6_35b_a3b.ninfer qwen3_8_27b.ninfer qwen3_6_27b.ninfer qwen3_6_27b_nvfp4.ninfer; do
+          gh run download 37152861694 --repo "$GITHUB_REPOSITORY" --name v100-27b-regression --dir results/dense
+          for filename in qwen3_6_35b_a3b.ninfer qwen3_8_27b.ninfer qwen3_6_27b.ninfer; do
             gh run download 37141867858 --repo "$GITHUB_REPOSITORY" --name "v100-qualification-$filename" --dir "results/$filename"
           done
+          gh run download 37152861678 --repo "$GITHUB_REPOSITORY" --name v100-nvfp4-recheck-qualification --dir results/qwen3_6_27b_nvfp4.ninfer
           python3 - <<'PY'
           import json
           from pathlib import Path
