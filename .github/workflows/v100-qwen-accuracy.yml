@@ -7,6 +7,8 @@ on:
       - 'tools/validation/v100_qwen_parity.cpp'
       - 'tools/validation/compare_v100_qwen_parity.py'
       - 'src/targets/qwen3_6/**'
+      - 'src/targets/qwen3_6_27b/**'
+      - 'src/ops/**'
       - 'src/targets/qwen3_6_35b_a3b/**'
   workflow_dispatch:
     inputs:
