@@ -202,6 +202,8 @@ jobs:
                        'model': metadata['current']}
           (current/'reference-provenance.json').write_text(json.dumps(reference, indent=2)+'\n')
           print(json.dumps(reference, indent=2), flush=True)
+          if os.environ['LIVE_OUTCOME'] != 'success':
+              print('::warning::Live original accuracy diagnostic failed. Candidate qualification uses the archived qualified original; see live-original/parity.json and reference-provenance.json.', flush=True)
           PYARCHIVE
           python3 tools/validation/compare_v100_qwen_parity.py model-results mtp7 --same-mode-reference --corrected-reference | tee model-results/summary.log
           python3 - <<'PYLABEL'

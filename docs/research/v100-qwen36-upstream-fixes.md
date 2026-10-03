@@ -24,3 +24,9 @@ The older [aliased-state ownership fix](https://github.com/Neroued/ninfer/commit
 Preserve the live original's scoring and repeated-eager outputs and failures. Compare the current candidate independently with original exports from successful run 37141867858, checking identical published model metadata, the isolated ordered split-K reference patch, original/corrected archived scoring agreement, all same-mode generated tokens, and candidate eager repeatability. Use a freshly built unchanged original benchmark for performance. An archived parity result does not turn a live-reference failure into a live-reference pass.
 
 The upstream findings do not justify changing production arithmetic merely to make an unstable reference repeat. Further fixes require a reproducible failing operation or relevant runtime transition.
+
+## Current recheck result
+
+[Run 37155769244](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37155769244) passed candidate scoring, all same-mode generation, and eager repetition against the archived qualified original. Fresh unchanged-original scoring also matched exactly. The live corrected original's graph output differed by 62 tokens; that diagnostic remains failed and is preserved separately. The upstream review does not establish a cause for that instability.
+
+Fresh original/candidate generation measured 19.12/19.13 tok/s for ordinary graphs, 43.40/43.47 for MTP K=3, and 36.44/36.37 for MTP K=7. Prefill and generation remained within 0.6% in every tested mode. Restoring the original packed CUDA software decoder therefore resolves the measured candidate NVFP4 throughput regression on this workload. Workload: V100 32GB, CUDA 12.8, INT8 KV, one request, 1024 prompt tokens, 64 committed output tokens, one warmup and two repetitions.
