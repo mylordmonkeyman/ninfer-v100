@@ -250,6 +250,9 @@ void nvfp4_linear_swiglu_dispatch(const Tensor& x, const Weight& weight, Tensor&
         nvfp4_linear_swiglu_w4a4_launch(x, weight, out, workspace, stream);
         return;
     case Nvfp4LinearSwiGluRoute::TmaFusedW4A4: {
+#ifdef NINFER_VOLTA_BUILD
+        throw std::logic_error("NVFP4 TMA SwiGLU is unavailable on Volta; use A16");
+#else
         auto scope                       = workspace.scope();
         const Nvfp4W4a4Workspace scratch = allocate_fused_workspace(workspace, x.ne[1]);
         launch_nvfp4_w4a4_quantize(x, weight, scratch, stream);
@@ -259,6 +262,7 @@ void nvfp4_linear_swiglu_dispatch(const Tensor& x, const Weight& weight, Tensor&
             static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(out.data),
             x.ne[1], alpha, stream);
         return;
+#endif
     }
     case Nvfp4LinearSwiGluRoute::LinearW4A4Post:
         break;
