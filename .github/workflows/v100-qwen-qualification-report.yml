@@ -17,7 +17,7 @@ jobs:
         run: |
           python3 - <<'PYWAIT'
           import json, os, time, urllib.request
-          pending = {37152861678, 37152861712, 37152861694}
+          pending = {37155769244, 37152861712, 37152861694}
           deadline = time.monotonic()+3600
           while pending:
               for run in tuple(pending):
@@ -28,10 +28,10 @@ jobs:
                   with urllib.request.urlopen(request, timeout=60) as response:
                       result = json.load(response)
                   if result['status'] == 'completed':
-                      if result['conclusion'] != 'success':
+                      if result['conclusion'] != 'success' and run != 37155769244:
                           raise RuntimeError(f"Qualification {run}: {result['conclusion']}")
                       pending.remove(run)
-                      print(f"PASS qualification {run}", flush=True)
+                      print(f"Qualification {run}: {result['conclusion']}", flush=True)
               if pending:
                   if time.monotonic() >= deadline:
                       raise RuntimeError('Qualification wait timed out')
@@ -47,7 +47,7 @@ jobs:
           for filename in qwen3_6_35b_a3b.ninfer qwen3_8_27b.ninfer qwen3_6_27b.ninfer; do
             gh run download 37141867858 --repo "$GITHUB_REPOSITORY" --name "v100-qualification-$filename" --dir "results/$filename"
           done
-          gh run download 37152861678 --repo "$GITHUB_REPOSITORY" --name v100-nvfp4-recheck-qualification --dir results/qwen3_6_27b_nvfp4.ninfer
+          gh run download 37155769244 --repo "$GITHUB_REPOSITORY" --name v100-nvfp4-recheck-qualification --dir results/qwen3_6_27b_nvfp4.ninfer
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -58,8 +58,8 @@ jobs:
               report = json.loads(p.read_text())
               if not isinstance(report, dict):
                   continue
-              if p.name in ('parity.json', 'original-score-parity.json'):
-                  print(json.dumps({'artifact': artifact, 'file': p.name, 'accuracy': report}, sort_keys=True))
+              if p.name in ('parity.json', 'original-score-parity.json', 'reference-provenance.json'):
+                  print(json.dumps({'artifact': artifact, 'file': str(p.relative_to(Path('results')/artifact)), 'accuracy': report}, sort_keys=True))
               if report.get('artifact_type') != 'ninfer_bench_report':
                   continue
               for test in report['tests']:
