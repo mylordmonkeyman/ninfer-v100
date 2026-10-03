@@ -1,0 +1,344 @@
+name: V100 Phase 17 CUDA Graph Reconsideration
+on:
+  push:
+    branches: [forwardport/v100-flash-next]
+    paths:
+      - '.github/workflows/v100-phase17-graph.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: v100-phase17-hybrid
+  cancel-in-progress: false
+jobs:
+  launch-profile:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 180
+    env:
+      NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+      NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+      NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: '32'
+      NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: auto
+      NINFER_FLASH_NEXT_EXPERT_CACHE: '1'
+      NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS: '512'
+      NINFER_FLASH_NEXT_EXPERT_CACHE_ADMISSION_CAP: '1'
+      NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_STATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_CONV: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_READOUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_GATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_MOE_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT_LAYERS_32_47: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_SHARED_INPUT: '0'
+      NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE: '0'
+      NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify target and profiler
+        id: profiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p phase17-results
+          git rev-parse HEAD | tee phase17-results/head.txt
+          nvidia-smi | tee phase17-results/gpu.txt
+
+          find_nsys() {
+            if command -v nsys >/dev/null 2>&1; then command -v nsys; return 0; fi
+            for candidate in /opt/nvidia/nsight-systems/*/bin/nsys /usr/local/cuda-12.8/bin/nsys; do
+              if [[ -x "$candidate" ]]; then echo "$candidate"; return 0; fi
+            done
+            return 1
+          }
+
+          NSYS="$(find_nsys || true)"
+          if [[ -z "$NSYS" ]] && command -v apt-get >/dev/null 2>&1; then
+            prefix=()
+            if [[ "$(id -u)" != 0 ]]; then
+              if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+                prefix=(sudo)
+              fi
+            fi
+            if [[ "$(id -u)" == 0 || ${#prefix[@]} -gt 0 ]]; then
+              "${prefix[@]}" apt-get update
+              pkg="$(apt-cache search '^nsight-systems' | awk '{print $1}' | sort -V | tail -n 1)"
+              if [[ -n "$pkg" ]]; then
+                echo "Installing $pkg" | tee -a phase17-results/profiler.txt
+                "${prefix[@]}" apt-get install -y "$pkg"
+              fi
+              NSYS="$(find_nsys || true)"
+            fi
+          fi
+
+          if [[ -z "$NSYS" ]]; then
+            echo "Phase 17 requires an external CUDA timeline; Nsight Systems is unavailable." | tee phase17-results/profiler.txt
+            exit 2
+          fi
+          echo "$NSYS" > phase17-results/nsys-path.txt
+          "$NSYS" --version | tee phase17-results/nsys-version.txt
+          "$NSYS" stats --help-reports > phase17-results/nsys-reports.txt 2>&1 || true
+          echo "nsys=$NSYS" >> "$GITHUB_OUTPUT"
+
+      - name: Build real hybrid harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-phase17 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-phase17 -j --target \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            ninfer_qwen3_8_flash_next_expert_cache_test \
+            ninfer_qwen3_8_flash_next_text_decode_test
+          ctest --test-dir build-phase17 -V \
+            -R '^ninfer_qwen3_8_flash_next_(expert_cache|text_decode)_test$' \
+            > phase17-results/unit-tests.log 2>&1
+
+      - name: Profile cold and warmed eager hybrid decode
+        shell: bash
+        env:
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '128'
+          NINFER_PHASE17_PROFILE: '1'
+        run: |
+          set -euo pipefail
+          NSYS='${{ steps.profiler.outputs.nsys }}'
+          for stage in cold warm; do
+            base="phase17-results/$stage"
+            NINFER_PHASE17_STAGE="$stage" \
+              "$NSYS" profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+                --capture-range=cudaProfilerApi --capture-range-end=stop \
+                --force-overwrite=true -o "$base" \
+                build-phase17/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+                > "$base.log" 2>&1
+            cat "$base.log"
+            grep -q 'PASS: Phase 17 eager hybrid profile completed' "$base.log"
+            "$NSYS" stats --report cuda_api_sum,cuda_gpu_kern_sum,cuda_gpu_mem_time_sum \
+              "$base.nsys-rep" > "$base-summary.txt" 2>&1 || true
+
+            rm -f "$base.sqlite" "$base-trace.sqlite"
+            if ! "$NSYS" export --type sqlite --force-overwrite=true \
+                    --output "$base.sqlite" "$base.nsys-rep" \
+                    > "$base-export.log" 2>&1; then
+              "$NSYS" export --type sqlite --force-overwrite=true \
+                    --output "$base" "$base.nsys-rep" \
+                    >> "$base-export.log" 2>&1
+            fi
+            sqlite="$(find phase17-results -maxdepth 1 -type f -name "${stage}*.sqlite" | head -n 1)"
+            if [[ -z "$sqlite" ]]; then
+              echo "No SQLite export produced for $stage" >&2
+              cat "$base-export.log" >&2
+              exit 3
+            fi
+            if [[ "$sqlite" != "$base-trace.sqlite" ]]; then
+              cp "$sqlite" "$base-trace.sqlite"
+            fi
+          done
+
+      - name: Analyze CUDA API and GPU idle intervals
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, math, pathlib, sqlite3
+
+          root = pathlib.Path("phase17-results")
+
+          def percentile(values, q):
+              if not values:
+                  return 0.0
+              v = sorted(values)
+              if len(v) == 1:
+                  return v[0]
+              x = (len(v)-1)*q
+              lo, hi = math.floor(x), math.ceil(x)
+              if lo == hi:
+                  return v[lo]
+              return v[lo]*(hi-x)+v[hi]*(x-lo)
+
+          def parse_harness(stage):
+              rows = []
+              for line in (root/f"{stage}.log").read_text(errors="replace").splitlines():
+                  line = line.strip()
+                  if line.startswith("{") and '"phase17":"profile"' in line:
+                      rows.append(json.loads(line))
+              if len(rows) != 1:
+                  raise RuntimeError(f"{stage}: expected one Phase 17 JSON row, got {len(rows)}")
+              return rows[0]
+
+          def table_columns(con, table):
+              return {r[1] for r in con.execute(f'pragma table_info("{table}")')}
+
+          def load_strings(con, tables):
+              for name in ("StringIds", "StringIdsTable"):
+                  if name in tables:
+                      cols = table_columns(con, name)
+                      if {"id","value"} <= cols:
+                          return dict(con.execute(f'SELECT id,value FROM "{name}"'))
+              return {}
+
+          def union_stats(intervals):
+              if not intervals:
+                  return dict(active_ms=0.0, span_ms=0.0, idle_ms=0.0, gaps=0)
+              intervals = sorted((int(a), int(b)) for a,b in intervals if b >= a)
+              start0 = intervals[0][0]
+              cur_s, cur_e = intervals[0]
+              active = 0
+              gaps = 0
+              idle = 0
+              for s,e in intervals[1:]:
+                  if s <= cur_e:
+                      cur_e = max(cur_e,e)
+                  else:
+                      active += cur_e-cur_s
+                      idle += s-cur_e
+                      gaps += 1
+                      cur_s,cur_e=s,e
+              active += cur_e-cur_s
+              span = cur_e-start0
+              return dict(active_ms=active/1e6, span_ms=span/1e6,
+                          idle_ms=idle/1e6, gaps=gaps)
+
+          def analyze(stage):
+              harness = parse_harness(stage)
+              tokens = int(harness["tokens"])
+              con = sqlite3.connect(root/f"{stage}-trace.sqlite")
+              tables = {r[0] for r in con.execute(
+                  "select name from sqlite_master where type='table'")}
+              strings = load_strings(con, tables)
+
+              runtime = "CUPTI_ACTIVITY_KIND_RUNTIME"
+              if runtime not in tables:
+                  raise RuntimeError(f"{stage}: runtime CUDA API table missing")
+              rcols = table_columns(con, runtime)
+              needed = {"start","end","globalTid"}
+              if not needed <= rcols:
+                  raise RuntimeError(f"{stage}: runtime table lacks {needed-rcols}")
+
+              name_col = "nameId" if "nameId" in rcols else None
+              select = "start,end,globalTid" + (",nameId" if name_col else "")
+              api_rows = []
+              for row in con.execute(f'SELECT {select} FROM "{runtime}"'):
+                  start,end,tid = row[:3]
+                  name = strings.get(row[3], "") if name_col else ""
+                  api_rows.append((int(start),int(end),int(tid),name))
+              launch_rows = [r for r in api_rows if "launch" in r[3].lower()]
+              by_thread = {}
+              for r in launch_rows:
+                  by_thread.setdefault(r[2], []).append((r[1]-r[0])/1e3)
+              primary_tid = max(by_thread, key=lambda t: len(by_thread[t])) if by_thread else None
+              primary_launch = by_thread.get(primary_tid, [])
+              primary_api = [(e-s)/1e3 for s,e,t,n in api_rows if t == primary_tid]
+              all_launch = [(e-s)/1e3 for s,e,t,n in launch_rows]
+
+              gpu_intervals = []
+              per_stream = {}
+              gpu_tables = []
+              for t in tables:
+                  if not t.startswith("CUPTI_ACTIVITY_KIND_"):
+                      continue
+                  if not any(k in t for k in ("KERNEL","MEMCPY","MEMSET")):
+                      continue
+                  cols = table_columns(con,t)
+                  if not {"start","end"} <= cols:
+                      continue
+                  gpu_tables.append(t)
+                  if "streamId" in cols:
+                      rows = con.execute(f'SELECT start,end,streamId FROM "{t}"')
+                      for s,e,stream in rows:
+                          gpu_intervals.append((s,e))
+                          per_stream.setdefault(int(stream),[]).append((s,e))
+                  else:
+                      rows = con.execute(f'SELECT start,end FROM "{t}"')
+                      gpu_intervals.extend((s,e) for s,e in rows)
+
+              global_gpu = union_stats(gpu_intervals)
+              primary_stream = None
+              primary_stream_stats = dict(active_ms=0.0,span_ms=0.0,idle_ms=0.0,gaps=0)
+              if per_stream:
+                  primary_stream = max(per_stream, key=lambda s: len(per_stream[s]))
+                  primary_stream_stats = union_stats(per_stream[primary_stream])
+
+              wall_ms = float(harness["seconds"])*1000.0
+              result = {
+                  "stage":stage, "tokens":tokens, "wall_ms":wall_ms,
+                  "tokens_per_s":harness["tokens_per_s"],
+                  "cache":harness,
+                  "cuda_api_calls":len(api_rows),
+                  "cuda_api_calls_per_token":len(api_rows)/tokens,
+                  "primary_launch_thread":primary_tid,
+                  "primary_launch_calls":len(primary_launch),
+                  "primary_launch_calls_per_token":len(primary_launch)/tokens,
+                  "primary_launch_api_wall_ms":sum(primary_launch)/1000.0,
+                  "primary_launch_api_wall_ms_per_token":sum(primary_launch)/1000.0/tokens,
+                  "primary_launch_api_p50_us":percentile(primary_launch,0.50),
+                  "primary_launch_api_p95_us":percentile(primary_launch,0.95),
+                  "primary_launch_api_max_us":max(primary_launch) if primary_launch else 0.0,
+                  "all_launch_api_wall_ms":sum(all_launch)/1000.0,
+                  "primary_cuda_api_wall_ms":sum(primary_api)/1000.0,
+                  "primary_cuda_api_wall_ms_per_token":sum(primary_api)/1000.0/tokens,
+                  "gpu_tables":sorted(gpu_tables),
+                  "gpu_active_ms":global_gpu["active_ms"],
+                  "gpu_span_ms":global_gpu["span_ms"],
+                  "gpu_idle_gap_ms":global_gpu["idle_ms"],
+                  "gpu_idle_gap_ms_per_token":global_gpu["idle_ms"]/tokens,
+                  "gpu_busy_fraction_of_span":
+                      global_gpu["active_ms"]/global_gpu["span_ms"] if global_gpu["span_ms"] else 0.0,
+                  "gpu_idle_gap_count":global_gpu["gaps"],
+                  "primary_stream":primary_stream,
+                  "primary_stream_active_ms":primary_stream_stats["active_ms"],
+                  "primary_stream_span_ms":primary_stream_stats["span_ms"],
+                  "primary_stream_idle_gap_ms":primary_stream_stats["idle_ms"],
+                  "primary_stream_idle_gap_ms_per_token":
+                      primary_stream_stats["idle_ms"]/tokens,
+                  "primary_stream_idle_gap_count":primary_stream_stats["gaps"],
+              }
+              con.close()
+              return result
+
+          results=[analyze("cold"),analyze("warm")]
+          (root/"phase17-analysis.json").write_text(json.dumps(results,indent=2)+"\n")
+          for r in results:
+              print(json.dumps(r,sort_keys=True))
+
+          warm=next(r for r in results if r["stage"]=="warm")
+          threshold_ms=6.0
+          launch_upper=warm["primary_launch_api_wall_ms_per_token"]
+          idle=warm["gpu_idle_gap_ms_per_token"]
+          decision = {
+              "threshold_ms_per_token":threshold_ms,
+              "warm_primary_launch_api_wall_ms_per_token":launch_upper,
+              "warm_global_gpu_idle_gap_ms_per_token":idle,
+              "measurement_interpretation":
+                  "CUDA launch API wall includes possible driver backpressure and is not isolated launch cost.",
+              "graph_investigation_priority":
+                  "low" if launch_upper < threshold_ms and idle < threshold_ms else "requires_followup"
+          }
+          (root/"phase17-decision-input.json").write_text(json.dumps(decision,indent=2)+"\n")
+          print(json.dumps(decision,sort_keys=True))
+          PY
+
+      - name: Preserve Phase 17 evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase17-launch-profile
+          path: phase17-results
+          retention-days: 30
