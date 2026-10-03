@@ -1,11 +1,5 @@
 #pragma once
 
-#if defined(NINFER_VOLTA_BUILD)
-
-#include "ops/common/volta_mma.cuh"
-
-#else
-
 #include "ops/common/memory.cuh"
 
 // Every one of these wraps a raw PTX instruction that is Ampere+/Hopper+ only
@@ -216,5 +210,3 @@ __device__ __forceinline__ void mma_nvfp4_e4m3(float& c0, float& c1, float& c2, 
 }
 
 } // namespace ninfer::ops
-
-#endif // NINFER_VOLTA_BUILD
