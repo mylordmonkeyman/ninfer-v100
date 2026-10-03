@@ -52,27 +52,34 @@ jobs:
               -DNINFER_BUILD_MEDIA="$media" -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
             cmake --build "$build" -j --target ninfer_v100_qwen_short_probe 2>&1 | tee "short-results/$label-build.log"
           done
-      - name: Compare sampled tokens with actual model top probabilities
+      - name: Separate request reuse from GPU scheduling
         run: |
           set -euo pipefail
+          for filename in qwen3_6_27b.ninfer qwen3_6_27b_nvfp4.ninfer; do
+            for scheduling in normal blocking; do
+              blocking=0
+              if [[ "$scheduling" == blocking ]]; then blocking=1; fi
+              CUDA_LAUNCH_BLOCKING="$blocking" ../build-27b/ninfer_v100_qwen_short_probe \
+                "../v100-qualification-models/v2/$filename" bench/fixtures/bench_corpus.ids int8-logprobs 8 \
+                2>&1 | tee "short-results/$filename-$scheduling.log"
+            done
+          done
           ../build-27b/ninfer_v100_qwen_short_probe \
-            ../v100-qualification-models/v2/qwen3_6_27b.ninfer bench/fixtures/bench_corpus.ids int8-logprobs 8 \
-            2>&1 | tee short-results/candidate-choices.log
-      - name: Check short-prompt shared-memory ordering
+            ../v100-qualification-models/v2/qwen3_6_27b.ninfer bench/fixtures/bench_corpus.ids int8-logprobs 8 fresh-engine \
+            2>&1 | tee short-results/groupwise-fresh-engine.log
+      - name: Identify kernels used by the unstable NVFP4 short prompt
         run: |
           set -euo pipefail
-          sanitizer=/usr/local/cuda-12.8/bin/compute-sanitizer
-          if [[ ! -x "$sanitizer" ]]; then sanitizer=$(command -v compute-sanitizer); fi
-          set +e
-          timeout 180s "$sanitizer" --tool racecheck --error-exitcode 86 \
-            ../build-27b/ninfer_v100_qwen_short_probe \
-            ../v100-qualification-models/v2/qwen3_6_27b.ninfer bench/fixtures/bench_corpus.ids int8 8 \
-            > short-results/candidate-racecheck.log 2>&1
-          sanitizer_status=$?
-          set -e
-          head -120 short-results/candidate-racecheck.log
-          tail -10 short-results/candidate-racecheck.log
-          exit "$sanitizer_status"
+          if command -v nsys >/dev/null; then
+            nsys profile --sample=none --trace=cuda --force-overwrite=true -o short-results/nvfp4-kernels \
+              ../build-27b/ninfer_v100_qwen_short_probe \
+              ../v100-qualification-models/v2/qwen3_6_27b_nvfp4.ninfer bench/fixtures/bench_corpus.ids int8 8 \
+              > short-results/nvfp4-profile.log 2>&1
+            nsys stats --report cuda_gpu_kern_sum --format csv short-results/nvfp4-kernels.nsys-rep \
+              | tee short-results/nvfp4-kernel-summary.csv
+          else
+            echo "Nsight Systems is unavailable; repeatability evidence is still retained."
+          fi
       - name: Preserve diagnostic evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

@@ -1,6 +1,7 @@
 #include "ninfer/engine.h"
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -33,7 +34,8 @@ template<class T> void print_logprobs(const T& result) {
 // Same public Engine workload in both forks; isolate the failing 31-token prompt.
 int main(int argc, char** argv) {
     try {
-        if (argc != 5) throw std::runtime_error("usage: short-probe ARTIFACT CORPUS KV OUTPUT_TOKENS");
+        if (argc != 5 && argc != 6) throw std::runtime_error("usage: short-probe ARTIFACT CORPUS KV OUTPUT_TOKENS [fresh-engine]");
+        const bool fresh_engine = argc == 6 && std::string(argv[5]) == "fresh-engine";
         std::ifstream corpus(argv[2]);
         std::vector<ninfer::TokenId> ids;
         ninfer::TokenId token;
@@ -52,8 +54,12 @@ int main(int argc, char** argv) {
         else if (kv == "fp8") options.kv_cache = ninfer::KvCacheStorage::Fp8E4M3Row256;
         else if (kv == "bf16") options.kv_cache = ninfer::KvCacheStorage::BFloat16;
         else throw std::runtime_error("unknown KV storage");
-        ninfer::Engine engine(options);
+        auto engine = std::make_unique<ninfer::Engine>(options);
         for (int round = 0; round < 3; ++round) {
+            if (round > 0 && fresh_engine) {
+                engine.reset();
+                engine = std::make_unique<ninfer::Engine>(options);
+            }
             ninfer::RequestOptions request;
             request.execution.requested_output_tokens = std::stoul(argv[4]);
             request.execution.allow_prefix_reuse = false;
@@ -63,7 +69,7 @@ int main(int argc, char** argv) {
             neutral_repetition(request.execution.sampling);
             if (kv == "int8-logprobs") enable_logprobs(request.execution);
             request.stop.include_model_defaults = false;
-            auto result = engine.generate(engine.prepare_tokens(ids, false), request);
+            auto result = engine->generate(engine->prepare_tokens(ids, false), request);
             std::cout << "ROUND " << round;
             for (auto generated : result.generated_token_ids) std::cout << ' ' << generated;
             std::cout << std::endl;
