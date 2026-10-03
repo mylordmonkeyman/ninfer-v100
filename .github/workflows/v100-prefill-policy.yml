@@ -61,7 +61,9 @@ jobs:
           cmake --build build-prefill -j --target \
             ninfer_qwen3_8_flash_next_expert_cache_test \
             ninfer_qwen3_8_flash_next_vertical_slice_real_test \
-            ninfer_qwen3_8_flash_next_text_decode_test
+            ninfer_qwen3_8_flash_next_text_decode_test \
+            ninfer_linear_nvfp4_a16_test \
+            ninfer_linear_q4_a16_test
           ctest --test-dir build-prefill -V \
             -R '^ninfer_qwen3_8_flash_next_(expert_cache|text_decode)_test$' \
             > prefill-results/unit-tests.log 2>&1
@@ -73,11 +75,11 @@ jobs:
         env:
           NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '1056'
           NINFER_PREFILL_POLICY_BENCHMARK: '1'
-          NINFER_PREFILL_POLICY_GROUPED: '1'
+          NINFER_PREFILL_POLICY_DEFAULT: '1'
           NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING: '1'
         run: |
           set -euo pipefail
-          configs=(1 1)
+          configs=(1)
           for i in "${!configs[@]}"; do
             NINFER_FLASH_NEXT_EXPERT_CACHE="${configs[$i]}" \
               build-prefill/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
@@ -85,27 +87,51 @@ jobs:
             cat "prefill-results/$i-cache${configs[$i]}.log"
             grep -q 'PASS: prefill policy natural routing' "prefill-results/$i-cache${configs[$i]}.log"
           done
-      - name: Admission active prefill and following generation
+      - name: Long prompt with production default and following generation
         shell: bash
         env:
-          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '1056'
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '4096'
           NINFER_PREFILL_POLICY_BENCHMARK: '1'
-          NINFER_PREFILL_POLICY_ACTIVE: '1'
-          NINFER_PREFILL_POLICY_GROUPED: '1'
+          NINFER_PREFILL_POLICY_DEFAULT: '1'
+          NINFER_PREFILL_POLICY_LONG: '1'
           NINFER_FLASH_NEXT_EXPERT_CACHE: '1'
           NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING: '1'
         run: |
           set -euo pipefail
           build-prefill/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
-            > prefill-results/active.log 2>&1
-          cat prefill-results/active.log
-          grep -q 'PASS: prefill policy natural routing' prefill-results/active.log
+            > prefill-results/long-default.log 2>&1
+          cat prefill-results/long-default.log
+          grep -q 'PASS: prefill policy natural routing' prefill-results/long-default.log
+      - name: Cold cache with admissions and following generation
+        shell: bash
+        env:
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '1056'
+          NINFER_PREFILL_POLICY_BENCHMARK: '1'
+          NINFER_PREFILL_POLICY_DEFAULT: '1'
+          NINFER_PREFILL_POLICY_COLD: '1'
+          NINFER_FLASH_NEXT_EXPERT_CACHE: '1'
+          NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING: '1'
+        run: |
+          set -euo pipefail
+          build-prefill/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            > prefill-results/cold-default.log 2>&1
+          cat prefill-results/cold-default.log
+          grep -q 'PASS: prefill policy natural routing' prefill-results/cold-default.log
+      - name: Shared 27B-shape linear regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build-prefill -V \
+            -R '^ninfer_linear_(nvfp4|q4)_a16_test$' \
+            > prefill-results/27b-linear-regression.log 2>&1
+          cat prefill-results/27b-linear-regression.log
       - name: Separate eager launch and kernel profile when Nsight is available
         shell: bash
         env:
           NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '160'
           NINFER_PREFILL_POLICY_BENCHMARK: '1'
           NINFER_PREFILL_POLICY_PROFILE: '1'
+          NINFER_PREFILL_POLICY_DEFAULT: '1'
           NINFER_FLASH_NEXT_EXPERT_CACHE: '1'
           NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING: '1'
         run: |
