@@ -1,0 +1,44 @@
+name: V100 27B Report
+on:
+  push:
+    branches: [forwardport/v100-flash-next]
+    paths: ['.github/workflows/v100-27b-report.yml']
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Completed V100 27B Regression run to summarize
+        type: string
+        default: '37098263741'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  summarize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read saved real-model benchmark reports
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REFERENCE_RUN: ${{ inputs.run_id || '37098263741' }}
+        run: |
+          set -euo pipefail
+          gh run download "$REFERENCE_RUN" --repo "$GITHUB_REPOSITORY" --name v100-27b-regression --dir results
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for p in sorted(Path('results').rglob('*.json')):
+              report = json.loads(p.read_text())
+              if report.get('artifact_type') != 'ninfer_bench_report':
+                  continue
+              for test in report['tests']:
+                  print(json.dumps({
+                      'file': p.name,
+                      'label': test['label'],
+                      'prefill_tok_s': test['prefill_tok_s_mean'],
+                      'generation_tok_s': test['decode_output_tok_s_mean'],
+                      'graphs': report['config']['use_cuda_graph'],
+                      'mtp_drafts': report['config']['draft_tokens'],
+                      'acceptance': test['speculative']['acceptance_rate'],
+                      'gpu': report['environment']['gpu_name'],
+                  }, sort_keys=True))
+          PY
