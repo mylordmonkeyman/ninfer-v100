@@ -118,6 +118,10 @@ before directly overwriting recurrent state for the subsequent lane-reuse test.
 This removes an ordering race in the test without changing runtime behavior.
 Baseline, candidate, and telemetry test logs are all refreshed even if one suite
 fails, preventing an earlier run's log from being mistaken for current evidence.
+The reuse assertion dirties and reads both exact PLE state slots owned by the
+released lane on the executor stream, and verifies that the allocator returns
+that lane. It no longer relies on default-stream ordering or an implicit first-
+slot assumption.
 
 The separate throughput screen performs two process-level ABBA cycles for cache
 off and cache on, with telemetry/cache timing/stage ledger disabled. It reports

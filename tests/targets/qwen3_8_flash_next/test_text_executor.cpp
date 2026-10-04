@@ -931,17 +931,30 @@ int test_cuda_ledger_and_executor(ninfer::DeviceContext& device) {
     device.synchronize();
 
     // 4. Recurrent state slot zeroing on allocation/reuse
-    std::vector<std::uint16_t> dirty_ple(10'240 * 9, 0xABCD);
-    CUDA_CHECK(cudaMemcpy(alloc.state_view().ple_convolution_states.data, dirty_ple.data(),
-                          dirty_ple.size() * sizeof(std::uint16_t), cudaMemcpyHostToDevice));
+    constexpr std::size_t kPleSlotElements = 10'240ULL * 9ULL;
+    const std::uint32_t reuse_lane = elane0.lane_index();
+    const std::uint32_t reuse_slots = flash_next_slots_per_lane(cfg.speculative_draft_tokens);
+    auto* reuse_ple = static_cast<std::byte*>(alloc.state_view().ple_convolution_states.data) +
+                      reuse_lane * reuse_slots * kPleSlotElements * sizeof(std::uint16_t);
+    std::vector<std::uint16_t> dirty_ple(kPleSlotElements * reuse_slots, 0xABCD);
+    CUDA_CHECK(cudaMemcpyAsync(reuse_ple, dirty_ple.data(),
+                               dirty_ple.size() * sizeof(std::uint16_t),
+                               cudaMemcpyHostToDevice, device.stream));
+    device.synchronize();
 
     executor.release_lane(elane0);
     auto reallocated = executor.allocate_lane();
+    if (reallocated.lane_index() != reuse_lane) {
+        std::cerr << "Lane allocator did not reuse the released lane\n";
+        return 1;
+    }
     device.synchronize();
 
-    std::vector<std::uint16_t> clean_ple(10'240 * 9, 0x1234);
-    CUDA_CHECK(cudaMemcpy(clean_ple.data(), alloc.state_view().ple_convolution_states.data,
-                          clean_ple.size() * sizeof(std::uint16_t), cudaMemcpyDeviceToHost));
+    std::vector<std::uint16_t> clean_ple(dirty_ple.size(), 0x1234);
+    CUDA_CHECK(cudaMemcpyAsync(clean_ple.data(), reuse_ple,
+                               clean_ple.size() * sizeof(std::uint16_t),
+                               cudaMemcpyDeviceToHost, device.stream));
+    device.synchronize();
     for (std::size_t i = 0; i < clean_ple.size(); ++i) {
         if (clean_ple[i] != 0) {
             std::cerr << "Recurrent state not zeroed on lane reallocation\n";
