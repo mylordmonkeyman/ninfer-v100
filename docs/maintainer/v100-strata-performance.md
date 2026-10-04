@@ -87,6 +87,14 @@ runs existing operator/executor tests with diagnostics off and on, compares
 position Phase 11 oracle gate on both builds. A busy GPU causes a clear failure;
 the workflow never stops another workload. Failed gates prevent later steps.
 
+Operator/executor fixtures run with their default precision profile. The strict
+whole-model oracle and throughput steps retain the frozen Phase 17 FP32 profile;
+that profile requires host experts absent from some synthetic executor fixtures.
+The first hardware run built both versions successfully and passed five baseline
+operator tests, then stopped at this fixture/profile mismatch before any candidate
+GPU tests or oracle/throughput results. The workflow now scopes the profiles to
+their respective workloads; qualification remains pending the corrected run.
+
 The separate throughput screen performs two process-level ABBA cycles for cache
 off and cache on, with telemetry/cache timing/stage ledger disabled. It reports
 process medians and complete ranges, checks equal cache capacity, and rejects

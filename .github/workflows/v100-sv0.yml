@@ -134,6 +134,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Synthetic executor fixtures include device-only experts. The real-model
+          # FP32 profile requires host experts; use the fixtures' default profile.
+          # This step-local environment does not change the oracle/throughput steps.
+          for variable in ${!NINFER_FLASH_NEXT_FP32_@}; do
+            unset "$variable"
+          done
+          unset NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE
+          unset NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE
           for root in sv0-baseline .; do
             name=baseline
             if [[ "$root" == . ]]; then name=candidate; fi
