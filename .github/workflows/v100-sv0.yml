@@ -8,6 +8,10 @@ on:
       - 'src/targets/qwen3_8_flash_next/impl/perf_telemetry.h'
       - 'src/targets/qwen3_8_flash_next/impl/expert_cache*'
       - 'src/targets/qwen3_8_flash_next/impl/expert_heat.h'
+      - 'src/targets/qwen3_8_flash_next/impl/expert_profile.h'
+      - 'src/targets/qwen3_8_flash_next/impl/load/**'
+      - 'src/targets/qwen3_8_flash_next/impl/runtime_state.cpp'
+      - 'tests/targets/qwen3_8_flash_next/test_expert_profile.cpp'
       - 'tests/targets/qwen3_8_flash_next/test_expert_cache.cpp'
       - 'tests/targets/qwen3_8_flash_next/test_expert_heat.cpp'
       - 'src/targets/qwen3_8_flash_next/impl/text_executor*'
@@ -39,6 +43,7 @@ jobs:
           cmake --build build-sv0 -j --target \
             ninfer_qwen3_8_flash_next_perf_telemetry_test \
             ninfer_qwen3_8_flash_next_expert_heat_test \
+            ninfer_qwen3_8_flash_next_expert_profile_test \
             ninfer_qwen3_8_flash_next_expert_cache_test \
             ninfer_qwen3_8_flash_next_moe_test \
             ninfer_qwen3_8_flash_next_ple_pipeline_test \
@@ -48,8 +53,8 @@ jobs:
             ninfer_selected_block_attention_test
       - name: Run host JSON and reporting checks
         run: |
-          ctest --test-dir build-sv0 --output-on-failure -R '^ninfer_qwen3_8_flash_next_(perf_telemetry|expert_heat)_test$'
-          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/diagnostics -p 'test_v100_sv0*.py'
+          ctest --test-dir build-sv0 --output-on-failure -R '^ninfer_qwen3_8_flash_next_(perf_telemetry|expert_heat|expert_profile)_test$'
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/diagnostics -p 'test_v100*.py'
   hardware:
     needs: compile
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]

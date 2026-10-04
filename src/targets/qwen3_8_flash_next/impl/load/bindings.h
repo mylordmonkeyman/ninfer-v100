@@ -137,6 +137,7 @@ struct VisionPlan {
 };
 
 struct BindingPlan {
+    artifact::ArtifactIdentity identity;
     LoadFeatures features;
     qwen3_6::FrontendResourcePlan frontend;
     artifact::ObjectHandle token_embedding;

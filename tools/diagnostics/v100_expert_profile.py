@@ -21,10 +21,12 @@ def frequencies(path, phase):
     return counts
 
 
-def build_profile(counts, artifact_sha256, phase):
+def build_profile(counts, artifact_sha256, phase, model_id, weights_id):
+    if not model_id or not weights_id:
+        raise ValueError("actual artifact model_id and weights_id are required")
     if len(artifact_sha256) != 64 or any(c not in '0123456789abcdef' for c in artifact_sha256):
         raise ValueError('artifact SHA256 must be 64 lowercase hexadecimal characters')
-    return dict(magic='NINFER_V100_EXPERT_PROFILE', version=1,
+    return dict(magic='NINFER_V100_EXPERT_PROFILE', version=2, model_id=model_id, weights_id=weights_id,
                 artifact_sha256=artifact_sha256, layers=48, experts_per_layer=512,
                 phase=phase, ranking=[sorted(range(512), key=lambda e: (-row[e], e))
                                      for row in counts], frequency=counts)
@@ -59,7 +61,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--train-log', type=Path, required=True)
     parser.add_argument('--evaluation-log', type=Path, required=True)
-    parser.add_argument('--artifact-sha256', required=True)
+    parser.add_argument('--artifact-sha256', required=True, help='artifact provenance hash')
+    parser.add_argument('--model-id', required=True, help='identity from actual artifact metadata')
+    parser.add_argument('--weights-id', required=True, help='identity from actual artifact metadata')
     parser.add_argument('--slots', type=Path, required=True, help='JSON array of 48 per-layer slot capacities')
     parser.add_argument('--phase', choices=['decode', 'prefill', 'all'], default='decode')
     parser.add_argument('--profile-output', type=Path, required=True)
@@ -71,7 +75,7 @@ def main():
         raise ValueError('training and evaluation traces must differ')
     if args.profile_output.resolve() == args.evaluation_output.resolve():
         raise ValueError('profile and evaluation outputs must differ')
-    profile = build_profile(frequencies(args.train_log, args.phase), args.artifact_sha256, args.phase)
+    profile = build_profile(frequencies(args.train_log, args.phase), args.artifact_sha256, args.phase, args.model_id, args.weights_id)
     profile['training_trace_sha256'] = train_hash
     result = evaluate(profile, frequencies(args.evaluation_log, args.phase), json.loads(args.slots.read_text()))
     result.update(artifact_sha256=args.artifact_sha256, training_trace_sha256=train_hash,

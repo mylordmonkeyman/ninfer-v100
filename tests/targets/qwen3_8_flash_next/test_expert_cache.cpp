@@ -218,6 +218,33 @@ int main(){try{
     heat_cache.admit(1, std::span(ids,1)); heat_cache.drain();
     heat_cache.ready_view(0,1); heat_cache.ready_view(1,0);
     }
+    host.model_id="fixture";host.weights_id="canonical";
+    FlashNextExpertProfile profile;
+    profile.model_id=host.model_id;profile.weights_id=host.weights_id;
+    for (auto& row : profile.ranking) {
+        for (int i=0;i<512;++i) row[i]=i;
+        std::swap(row[0],row[2]); // Seed expert 2, unlike default ascending/LRU order.
+    }
+    FlashNextExpertCache seeded(host,1,false,1);
+    auto wrong=profile;wrong.weights_id="other";
+    bool rejected=false;
+    try { seeded.seed(wrong); } catch (const std::invalid_argument&) { rejected=true; }
+    require(rejected && seeded.stats().admitted==0,"seed identity rejection mutated cache");
+    seeded.seed(profile);
+    require(seeded.stats().ready==48 && seeded.stats().admitted==48,
+        "startup seed returned before canonical Ready publication");
+    require(seeded.stats().maximum_outstanding<=4,"startup seed exceeded queue bound");
+    for (unsigned layer_id=0;layer_id<48;++layer_id) seeded.ready_view(layer_id,2);
+    seeded.begin_layer(false);
+    require(seeded.execute(0,2,d_input.p,0,device.stream),"ranked startup expert missing");
+    seeded.download(out,device.stream);
+    std::vector<float> expected_seed(2560);
+    flash_next_cpu_nvfp4_expert_pair_reference(layer.expert(2),
+        std::span(input.data(),2560),expected_seed,scratch);
+    compare(out,expected_seed);
+    rejected=false;
+    try { seeded.seed(profile); } catch (const std::logic_error&) { rejected=true; }
+    require(rejected,"seed overwrote a nonempty cache");
     std::cout<<"PASS: budget, canonical bytes, oracle, admission, LRU, heat, leases, namespaces\n";
     return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

@@ -3,6 +3,7 @@
 #include "core/arena.h"
 #include "targets/qwen3_8_flash_next/impl/expert_bank.h"
 #include "targets/qwen3_8_flash_next/impl/expert_heat.h"
+#include "targets/qwen3_8_flash_next/impl/expert_profile.h"
 #include <cuda_runtime.h>
 #include <array>
 #include <condition_variable>
@@ -95,6 +96,8 @@ public:
     [[nodiscard]] unsigned admission_cap() const { return admission_cap_; }
     // At most admission_cap new experts per layer call; pool pressure declines admission.
     void admit(unsigned layer, std::span<const std::int32_t> ids);
+    // Startup only: canonical fills complete before the runtime publishes the cache.
+    void seed(const FlashNextExpertProfile& profile);
     void drain(); // test/shutdown boundary, never used by the current-token fill path
     struct LayerSnapshot {
         unsigned ready = 0, uploading = 0, leased = 0;

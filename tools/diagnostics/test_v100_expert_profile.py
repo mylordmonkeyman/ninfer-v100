@@ -6,7 +6,7 @@ class ExpertProfileTest(unittest.TestCase):
     def test_ranking_and_held_out_hits(self):
         train = [[0] * 512 for _ in range(48)]
         train[0][9], train[0][2], train[0][4] = 8, 8, 3
-        profile = build_profile(train, 'a' * 64, 'decode')
+        profile = build_profile(train, 'a' * 64, 'decode', 'model', 'weights')
         self.assertEqual(profile['ranking'][0][:3], [2, 9, 4])
         held_out = [[0] * 512 for _ in range(48)]
         held_out[0][2], held_out[0][4] = 3, 7
@@ -20,8 +20,8 @@ class ExpertProfileTest(unittest.TestCase):
     def test_reject_bad_geometry_and_artifact(self):
         rows = [[0] * 512 for _ in range(48)]
         with self.assertRaises(ValueError):
-            build_profile(rows, 'model-name', 'decode')
-        profile = build_profile(rows, 'a' * 64, 'decode')
+            build_profile(rows, 'model-name', 'decode', 'model', 'weights')
+        profile = build_profile(rows, 'a' * 64, 'decode', 'model', 'weights')
         for slots in ([1] * 47, [513] * 48, [True] * 48):
             with self.assertRaises(ValueError):
                 evaluate(profile, rows, slots)

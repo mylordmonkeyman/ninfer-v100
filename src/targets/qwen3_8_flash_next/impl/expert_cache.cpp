@@ -125,6 +125,48 @@ FlashNextExpertCache::~FlashNextExpertCache() {
     if(fill_start_)cudaEventDestroy(fill_start_);
     if(fill_stop_)cudaEventDestroy(fill_stop_);
 }
+void FlashNextExpertCache::seed(const FlashNextExpertProfile& profile) {
+    if (host_.model_id.empty() || host_.weights_id.empty() ||
+        profile.model_id != host_.model_id || profile.weights_id != host_.weights_id)
+        throw std::invalid_argument("expert profile artifact identity mismatch");
+    {
+        std::lock_guard lock(mutex_); check_failure();
+        if (!consumers_.empty() || filling_ || !queue_.empty() ||
+            std::any_of(entries_.begin(), entries_.end(), [](const Entry& e) {
+                return e.state != State::Empty;
+            })) throw std::logic_error("expert profile seeding requires an empty idle cache");
+        // Validate before enqueuing any work, including zero-budget profiles.
+        for (const auto& row : profile.ranking) {
+            std::array<bool,512> seen{};
+            for (int id : row) {
+                if (id < 0 || id >= 512 || seen[id])
+                    throw std::invalid_argument("invalid expert profile permutation");
+                seen[id] = true;
+            }
+        }
+    }
+    const auto start = std::chrono::steady_clock::now();
+    for (unsigned layer = 0; layer < 48; ++layer) {
+        for (unsigned rank = 0; rank < budget_.slots_per_layer;) {
+            {
+                std::lock_guard lock(mutex_); check_failure();
+                // Same bounded worker and exact canonical pack/H2D/publish path as admission.
+                while (rank < budget_.slots_per_layer && queue_.size()+unsigned(filling_) < 4) {
+                    const unsigned slot = layer*budget_.slots_per_layer+rank;
+                    entries_[slot] = {profile.ranking[layer][rank], State::Uploading, ++epoch_, 0};
+                    queue_.push_back(slot); ++stats_.admitted; ++rank;
+                    stats_.maximum_outstanding = std::max(stats_.maximum_outstanding,
+                        unsigned(queue_.size())+unsigned(filling_));
+                }
+                work_.notify_one();
+            }
+            drain();
+        }
+    }
+    std::fprintf(stderr,"v100.profile.seeded=%zu\nv100.profile.startup_ms=%.3f\n",
+        entries_.size(), std::chrono::duration<double,std::milli>(
+            std::chrono::steady_clock::now()-start).count());
+}
 void FlashNextExpertCache::check_failure() const { if(failure_)std::rethrow_exception(failure_); }
 HostNvfp4ExpertPairView FlashNextExpertCache::view(unsigned slot) const {
     auto* base=static_cast<const std::byte*>(storage_->p)+std::size_t(slot)*kExpertSlotBytes;

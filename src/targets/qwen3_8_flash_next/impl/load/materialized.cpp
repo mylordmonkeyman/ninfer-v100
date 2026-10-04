@@ -318,7 +318,11 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
     }
     std::size_t full_index = 0;
     std::size_t gdn_index  = 0;
-    if (plan.features.host_backed_experts) { text.host_experts.emplace(); }
+    if (plan.features.host_backed_experts) {
+        text.host_experts.emplace();
+        text.host_experts->model_id = plan.identity.model_id;
+        text.host_experts->weights_id = plan.identity.weights_id;
+    }
     for (std::size_t layer = 0; layer < plan.text_layers.size(); ++layer) {
         const TextLayerPlan& source = plan.text_layers[layer];
         TextLayerWeights& target    = text.layers[layer];

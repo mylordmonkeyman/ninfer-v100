@@ -286,6 +286,7 @@ VisionPlan bind_vision(artifact::Binder& binder, bool enabled) {
 ArtifactLoadPlan bind_artifact(artifact::Binder& binder, LoadFeatures features) {
     ArtifactLoadPlan out;
     BindingPlan& plan    = out.bindings;
+    plan.identity        = binder.reader().identity();
     plan.features        = features;
     plan.frontend        = qwen3_6::bind_frontend_resources(binder);
     // FP8 at load: keep the BF16 payload in the file mapping (retain_mapped_tensor adds zero

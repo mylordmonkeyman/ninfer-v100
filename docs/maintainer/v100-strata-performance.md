@@ -180,7 +180,7 @@ resource, and request-level acceptance requirements are met.
 
 `tools/diagnostics/v100_expert_profile.py` builds an offline static residency
 proposal from validated SV0 JSONL. Supply separate training and evaluation logs,
-the exact model artifact SHA-256, and a JSON array of 48 slot capacities from the
+the actual artifact model/weights identity, its SHA-256 provenance, and a JSON array of 48 slot capacities from the
 intended cache allocation. Ranking uses descending routing count with expert
 index as the deterministic tie-breaker. Decode, prefill, or combined observations
 can be selected explicitly. Identical trace contents are rejected.
@@ -189,6 +189,7 @@ can be selected explicitly. Identical trace contents are rejected.
 python3 tools/diagnostics/v100_expert_profile.py \
   --train-log train.log --evaluation-log held-out.log \
   --artifact-sha256 "$ARTIFACT_SHA256" --slots layer-slots.json \
+  --model-id "$MODEL_ID" --weights-id "$WEIGHTS_ID" \
   --phase decode --profile-output expert-profile.json \
   --evaluation-output profile-coverage.json
 ```
@@ -196,8 +197,7 @@ python3 tools/diagnostics/v100_expert_profile.py \
 The profile includes geometry, artifact identity, complete per-layer ranking,
 counts, and training trace identity. Outputs are written through `.tmp` and rename.
 Coverage is a static projection, not a simulation of dynamic fills or leases;
-no runtime consumes this format yet. Runtime profile seeding remains pending
-implementation. No training-only or synthetic coverage result
+the runtime optionally consumes schema v2 for startup seeding. No training-only or synthetic coverage result
 qualifies a residency policy.
 
 
@@ -216,6 +216,22 @@ applies `heat = decay * old_heat + interval_count`; pending counts participate i
 victim scores. No decay coefficient is promoted by default. Cache reset clears
 heat as well as residency. LRU allocates no heat table and performs no heat update.
 
-This implements replacement only. Startup seeding, profile identity verification,
-learned persistence, and held-out request performance qualification remain SV1
-work. No adaptive policy is qualified or enabled by default.
+Adaptive replacement passed V100 correctness and default-policy parity in run
+37203161634. Learned persistence, profile-prior replacement, and held-out request
+performance qualification remain SV1 work. No adaptive policy is qualified or enabled by default.
+
+### SV1 startup profile seeding
+
+`NINFER_V100_EXPERT_PROFILE=/path/profile.json` optionally seeds each layer's allocated
+slots with its highest-ranked experts. Profile schema v2 binds `model_id` and `weights_id`
+to the actual artifact Reader identity. The offline builder now requires those metadata
+values via `--model-id` and `--weights-id`; its `--artifact-sha256` remains provenance,
+not a runtime hash verification claim. Schema, identity, and all 48 complete expert
+permutations are validated before fills. Startup uses the existing canonical packing,
+H2D stream, and Ready publication path, with at most four outstanding jobs and a drain
+before the runtime exposes the cache. Seeding reports resident count and startup time.
+
+Default behavior stays LRU with no profile. Seeding can accompany opt-in heat or decay;
+this is initialization only, not yet profile-prior replacement or learned persistence.
+Host parser checks and hardware ranked-seed/Ready/numerical checks cover this path.
+Held-out real-model policy throughput and resource qualification remain pending.

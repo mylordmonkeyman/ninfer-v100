@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace ninfer::artifact {
 class MaterializedArtifact;
@@ -63,6 +64,7 @@ struct HostNvfp4ExpertLayerView {
 inline constexpr std::size_t kFlashNextRoutedExpertLayers = 48;
 
 struct HostNvfp4ExpertTableView {
+    std::string model_id, weights_id;
     std::array<HostNvfp4ExpertLayerView, kFlashNextRoutedExpertLayers> layers{};
 
     [[nodiscard]] HostNvfp4ExpertPairView expert(std::int32_t layer,
