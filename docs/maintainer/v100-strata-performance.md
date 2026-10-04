@@ -6,7 +6,12 @@ Frozen source: `forwardport/v100-flash-next` at
 Reference inspected: `jmnargi/Strata-V100` `9d7774919e26d235359bc2c3001f61f607eb288d`.
 Milestones are SV0–SV8 in the supplied specification; they do not advance Phase 18.
 
-## Current milestone: SV0 instrumentation and hardware qualification
+## Current milestone: SV1 expert residency
+
+On 2026-10-04 the user explicitly accepted the frozen baseline and authorized
+continuation. SV0 is accepted by measured baseline parity. The independent
+Phase 11 oracle and its numerical thresholds remain unchanged and its existing
+failure remains reported; this decision does not qualify that numerical gate.
 
 `NINFER_V100_TELEMETRY=1` emits schema-1 JSONL on stderr for host-backed MoE
 layer calls and PLE gathers. It also enables the existing expert-cache CUDA event
@@ -107,9 +112,10 @@ Phase 11 numerical gate (mean KL `0.004876`, top-1 agreement `0.96875`). The SV0
 workflow therefore records oracle exit status instead of aborting immediately,
 requires candidate and telemetry routing/input traces to match the baseline
 exactly, compares selected full-manifest metrics exactly, and runs the disabled-
-instrumentation throughput screen. A final step still fails unless both unchanged
-oracle invocations pass; collecting later evidence never converts a failed gate
-into qualification.
+instrumentation throughput screen. At that point the final step still required both unchanged oracle invocations
+to pass. The subsequent user acceptance replaces this SV0 condition with exact
+frozen-baseline parity and checks that all 4,096 positions remain finite. Oracle
+qualification remains a separate reported result.
 
 Self-hosted checkouts retain build caches, so each run now clears only its exact
 `sv0-results` contents before recording evidence. The shared executor test also
@@ -155,13 +161,12 @@ not establish a production throughput improvement.
 
 SV0 is therefore behaviorally parity-validated but not specification-qualified:
 the required unchanged Phase 11 oracle already fails on the frozen source and
-fails identically on the candidate. SV1 execution-policy work remains blocked
-until that pre-existing numerical gate is repaired on the frozen baseline or the
-project explicitly accepts exact baseline parity in place of that requirement.
+fails identically on the candidate. The user subsequently accepted exact
+baseline parity for SV0 and authorized SV1.
 
-Host-only checks pass locally. CUDA builds and hardware gates must pass before
-SV1 execution changes; no performance improvement or completed SV0 qualification
-is claimed until the evidence supports it.
+Host-only checks pass locally. CUDA builds and hardware correctness gates must
+pass before promotion of SV1 policies; no performance improvement is claimed
+until request-level evidence supports it.
 
 ## Subsequent order
 
@@ -191,6 +196,26 @@ python3 tools/diagnostics/v100_expert_profile.py \
 The profile includes geometry, artifact identity, complete per-layer ranking,
 counts, and training trace identity. Outputs are written through `.tmp` and rename.
 Coverage is a static projection, not a simulation of dynamic fills or leases;
-no runtime consumes this format yet. Runtime seeding/replacement remains gated by
-the SV0 oracle acceptance decision. No training-only or synthetic coverage result
+no runtime consumes this format yet. Runtime profile seeding remains pending
+implementation. No training-only or synthetic coverage result
 qualifies a residency policy.
+
+
+## SV1 adaptive replacement implementation
+
+`NINFER_V100_EXPERT_POLICY=lru|heat|decay` selects replacement; `lru` remains
+the default. Heat policies accumulate selected route IDs once per layer call,
+including hits, before background admission. Victims remain restricted to their
+layer and uploads/leases remain protected. A heat-policy admission must be hotter
+than its victim; equal heat retains the resident and reduces churn. Equal-score
+victims use the existing access epoch as a tie-breaker.
+
+Decay experiments require explicit `NINFER_V100_EXPERT_DECAY` in `(0,1]` and
+`NINFER_V100_EXPERT_DECAY_INTERVAL`, measured in calls to each layer. Each interval
+applies `heat = decay * old_heat + interval_count`; pending counts participate in
+victim scores. No decay coefficient is promoted by default. Cache reset clears
+heat as well as residency. LRU allocates no heat table and performs no heat update.
+
+This implements replacement only. Startup seeding, profile identity verification,
+learned persistence, and held-out request performance qualification remain SV1
+work. No adaptive policy is qualified or enabled by default.

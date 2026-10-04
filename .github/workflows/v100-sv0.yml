@@ -6,6 +6,10 @@ on:
       - '.github/workflows/v100-sv0.yml'
       - 'src/ops/linear/bf16/bf16_telemetry*'
       - 'src/targets/qwen3_8_flash_next/impl/perf_telemetry.h'
+      - 'src/targets/qwen3_8_flash_next/impl/expert_cache*'
+      - 'src/targets/qwen3_8_flash_next/impl/expert_heat.h'
+      - 'tests/targets/qwen3_8_flash_next/test_expert_cache.cpp'
+      - 'tests/targets/qwen3_8_flash_next/test_expert_heat.cpp'
       - 'src/targets/qwen3_8_flash_next/impl/text_executor*'
       - 'tests/targets/qwen3_8_flash_next/test_text_executor.cpp'
       - 'tools/diagnostics/v100_sv0*'
@@ -34,6 +38,7 @@ jobs:
             -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
           cmake --build build-sv0 -j --target \
             ninfer_qwen3_8_flash_next_perf_telemetry_test \
+            ninfer_qwen3_8_flash_next_expert_heat_test \
             ninfer_qwen3_8_flash_next_expert_cache_test \
             ninfer_qwen3_8_flash_next_moe_test \
             ninfer_qwen3_8_flash_next_ple_pipeline_test \
@@ -43,7 +48,7 @@ jobs:
             ninfer_selected_block_attention_test
       - name: Run host JSON and reporting checks
         run: |
-          ctest --test-dir build-sv0 --output-on-failure -R '^ninfer_qwen3_8_flash_next_perf_telemetry_test$'
+          ctest --test-dir build-sv0 --output-on-failure -R '^ninfer_qwen3_8_flash_next_(perf_telemetry|expert_heat)_test$'
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/diagnostics -p 'test_v100_sv0*.py'
   hardware:
     needs: compile
@@ -222,16 +227,18 @@ jobs:
             --candidate build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
             --output sv0-results --cycles 2
           cat sv0-results/screening.txt >> "$GITHUB_STEP_SUMMARY"
-      - name: Enforce SV0 oracle qualification
+      - name: Enforce user-accepted SV0 baseline parity
         shell: bash
         run: |
           set -euo pipefail
-          smoke=$(cat sv0-results/candidate-oracle-smoke-exit.txt)
-          full=$(cat sv0-results/candidate-oracle-full-exit.txt)
-          if [[ "$smoke" != 0 || "$full" != 0 ]]; then
-            echo "::error::SV0 remains unqualified: unchanged Phase 11 oracle gate returned smoke=$smoke full=$full."
-            exit 1
-          fi
+          # User accepted frozen-baseline parity on 2026-10-04.
+          # The independent oracle still runs unchanged; its failure stays visible.
+          cmp sv0-results/baseline-oracle-full-metrics.txt sv0-results/candidate-oracle-full-metrics.txt
+          cmp sv0-results/baseline-oracle-full-exit.txt sv0-results/candidate-oracle-full-exit.txt
+          grep -qx 'phase11.positions=4096' sv0-results/candidate-oracle-full-metrics.txt
+          grep -qx 'phase11.nonfinite_positions=0' sv0-results/candidate-oracle-full-metrics.txt
+          echo 'SV0 accepted by frozen-baseline parity; independent oracle exits:' >> "$GITHUB_STEP_SUMMARY"
+          cat sv0-results/candidate-oracle-smoke-exit.txt sv0-results/candidate-oracle-full-exit.txt >> "$GITHUB_STEP_SUMMARY"
       - name: Preserve SV0 evidence including failures
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

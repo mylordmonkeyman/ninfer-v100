@@ -193,6 +193,31 @@ int main(){try{
     require(!cap_two.execute(0,2,d_input.p,0,device.stream),"reset retained Ready entry");
     cap_two.admit(0,ids);cap_two.drain();
     require(cap_two.stats().admitted==2,"reset did not restore admissions");
-    std::cout<<"PASS: budget, canonical bytes, oracle, admission, LRU, leases, namespaces\n";
+    for (const char* policy : {"heat", "decay"}) {
+    setenv("NINFER_V100_EXPERT_POLICY", policy, 1);
+    setenv("NINFER_V100_EXPERT_DECAY", "0.5", 1);
+    setenv("NINFER_V100_EXPERT_DECAY_INTERVAL", "1", 1);
+    FlashNextExpertCache heat_cache(host,1,false,1);
+    unsetenv("NINFER_V100_EXPERT_POLICY");
+    unsetenv("NINFER_V100_EXPERT_DECAY");
+    unsetenv("NINFER_V100_EXPERT_DECAY_INTERVAL");
+    const std::int32_t hot[] = {0,0,0,0};
+    heat_cache.admit(0, hot); heat_cache.drain();
+    const std::int32_t cold = 1;
+    heat_cache.admit(0, std::span(&cold,1)); heat_cache.drain();
+    require(heat_cache.stats().admitted == 1,"heat evicted hotter resident");
+    heat_cache.begin_layer(false);
+    require(heat_cache.execute(0,0,d_input.p,0,device.stream),"heat resident lease");
+    const std::int32_t rising[] = {1,1,1,1,1};
+    heat_cache.admit(0, rising); heat_cache.drain();
+    require(heat_cache.stats().admitted == 1,"heat evicted leased resident");
+    heat_cache.download(out,device.stream);
+    heat_cache.admit(0, std::span(&cold,1)); heat_cache.drain();
+    heat_cache.ready_view(0,1);
+    require(heat_cache.stats().admitted == 2,"heat did not replace colder released resident");
+    heat_cache.admit(1, std::span(ids,1)); heat_cache.drain();
+    heat_cache.ready_view(0,1); heat_cache.ready_view(1,0);
+    }
+    std::cout<<"PASS: budget, canonical bytes, oracle, admission, LRU, heat, leases, namespaces\n";
     return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

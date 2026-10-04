@@ -2,6 +2,7 @@
 
 #include "core/arena.h"
 #include "targets/qwen3_8_flash_next/impl/expert_bank.h"
+#include "targets/qwen3_8_flash_next/impl/expert_heat.h"
 #include <cuda_runtime.h>
 #include <array>
 #include <condition_variable>
@@ -131,6 +132,7 @@ private:
     bool stop_ = false, filling_ = false;
     std::uint64_t epoch_ = 0;
     FlashNextExpertCacheStats stats_;
+    std::unique_ptr<FlashNextExpertHeat> heat_;
     HostNvfp4ExpertPairView view(unsigned slot) const;
     void fill_loop() noexcept;
     void check_failure() const;

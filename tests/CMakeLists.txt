@@ -734,6 +734,12 @@ foreach(test_target IN LISTS ninfer_qwen3_6_27b_internal_tests)
 endforeach()
 
 # SV0 JSON/histogram contract is intentionally host-only and independently buildable.
+add_executable(ninfer_qwen3_8_flash_next_expert_heat_test
+  targets/qwen3_8_flash_next/test_expert_heat.cpp)
+target_include_directories(ninfer_qwen3_8_flash_next_expert_heat_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(ninfer_qwen3_8_flash_next_expert_heat_test PRIVATE cxx_std_20)
+add_test(NAME ninfer_qwen3_8_flash_next_expert_heat_test COMMAND ninfer_qwen3_8_flash_next_expert_heat_test)
+
 add_executable(ninfer_qwen3_8_flash_next_perf_telemetry_test
   targets/qwen3_8_flash_next/test_perf_telemetry.cpp)
 target_include_directories(ninfer_qwen3_8_flash_next_perf_telemetry_test PRIVATE ${PROJECT_SOURCE_DIR}/src)

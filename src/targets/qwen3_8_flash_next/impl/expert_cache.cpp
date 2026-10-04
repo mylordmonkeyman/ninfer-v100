@@ -33,6 +33,25 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
     if (admission_cap < 1 || admission_cap > 2)
         throw std::invalid_argument("expert cache admission cap must be 1 or 2");
     if (!max_tokens) throw std::invalid_argument("zero expert cache token capacity");
+    if (const char* policy = std::getenv("NINFER_V100_EXPERT_POLICY"); policy && *policy) {
+        if (std::strcmp(policy, "heat") == 0) {
+            heat_ = std::make_unique<FlashNextExpertHeat>();
+        } else if (std::strcmp(policy, "decay") == 0) {
+            const char* coefficient = std::getenv("NINFER_V100_EXPERT_DECAY");
+            const char* interval = std::getenv("NINFER_V100_EXPERT_DECAY_INTERVAL");
+            if (!coefficient || !interval)
+                throw std::invalid_argument("decay policy requires explicit coefficient and layer-call interval");
+            char* end = nullptr;
+            const double decay = std::strtod(coefficient, &end);
+            if (end == coefficient || *end) throw std::invalid_argument("invalid expert decay");
+            const auto calls = std::strtoul(interval, &end, 10);
+            if (end == interval || *end || !calls || calls > std::numeric_limits<unsigned>::max())
+                throw std::invalid_argument("invalid expert decay interval");
+            heat_ = std::make_unique<FlashNextExpertHeat>(decay, static_cast<unsigned>(calls));
+        } else if (std::strcmp(policy, "lru") != 0) {
+            throw std::invalid_argument("expert policy must be lru, heat, or decay");
+        }
+    }
     for (const auto& layer : host.layers) {
         if (layer.compact_bytes_per_expert_pair() != kExpertPairBytes ||
             layer.gate_up.experts != 512 || layer.down.experts != 512)
@@ -282,6 +301,7 @@ void FlashNextExpertCache::reset() {
     std::fill(entries_.begin(), entries_.end(), Entry{});
     stats_ = {};
     epoch_ = 0;
+    if (heat_) heat_->reset();
     admissions_enabled_ = true;
 }
 void FlashNextExpertCache::admit(unsigned layer,std::span<const std::int32_t> ids) {
@@ -289,6 +309,7 @@ void FlashNextExpertCache::admit(unsigned layer,std::span<const std::int32_t> id
         std::chrono::steady_clock::time_point{};
     std::lock_guard lock(mutex_);check_failure();
     if(layer>=48)throw std::invalid_argument("invalid cache layer");
+    if (heat_) heat_->observe(layer, ids);
     if(!admissions_enabled_||!budget_.slots_per_layer)return;
     const unsigned begin=layer*budget_.slots_per_layer,end=begin+budget_.slots_per_layer;
     unsigned admitted = 0;
@@ -302,10 +323,21 @@ void FlashNextExpertCache::admit(unsigned layer,std::span<const std::int32_t> id
         for(unsigned i=begin;i<end;++i){
             const auto& e=entries_[i];
             if(e.leases||e.state==State::Uploading)continue;
-            if(victim==end||e.state==State::Empty||e.epoch<entries_[victim].epoch)victim=i;
+            bool colder = victim == end;
+            if (!colder && heat_ && e.state != State::Empty) {
+                const auto score = heat_->score(layer, e.expert);
+                const auto old_score = heat_->score(layer, entries_[victim].expert);
+                colder = score < old_score || (score == old_score && e.epoch < entries_[victim].epoch);
+            } else if (!colder) {
+                colder = e.epoch < entries_[victim].epoch;
+            }
+            if(colder||e.state==State::Empty)victim=i;
             if(e.state==State::Empty)break;
         }
         if(victim==end){++stats_.victim_declined_calls;break;}
+        if (heat_ && entries_[victim].state != State::Empty &&
+            heat_->score(layer, id) <= heat_->score(layer, entries_[victim].expert))
+            continue;
         if(entries_[victim].state!=State::Empty)++stats_.evicted;
         entries_[victim]={id,State::Uploading,++epoch_,0};
         queue_.push_back(victim);++stats_.admitted;++admitted;
