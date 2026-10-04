@@ -111,6 +111,14 @@ instrumentation throughput screen. A final step still fails unless both unchange
 oracle invocations pass; collecting later evidence never converts a failed gate
 into qualification.
 
+Self-hosted checkouts retain build caches, so each run now clears only its exact
+`sv0-results` contents before recording evidence. The shared executor test also
+drains any CUDA work submitted before its intentional invalid-model exception
+before directly overwriting recurrent state for the subsequent lane-reuse test.
+This removes an ordering race in the test without changing runtime behavior.
+Baseline, candidate, and telemetry test logs are all refreshed even if one suite
+fails, preventing an earlier run's log from being mistaken for current evidence.
+
 The separate throughput screen performs two process-level ABBA cycles for cache
 off and cache on, with telemetry/cache timing/stage ledger disabled. It reports
 process medians and complete ranges, checks equal cache capacity, and rejects

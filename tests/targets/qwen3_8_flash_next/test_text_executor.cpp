@@ -926,6 +926,9 @@ int test_cuda_ledger_and_executor(ninfer::DeviceContext& device) {
                   << "\n";
         return 1;
     }
+    // The failed decode may have submitted work before validation threw. Drain
+    // that work before directly mutating recurrent state for the reuse check.
+    device.synchronize();
 
     // 4. Recurrent state slot zeroing on allocation/reuse
     std::vector<std::uint16_t> dirty_ple(10'240 * 9, 0xABCD);

@@ -101,6 +101,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p sv0-results
+          find sv0-results -mindepth 1 -maxdepth 1 -delete
           git rev-parse HEAD > sv0-results/candidate-sha.txt
           git -C sv0-baseline rev-parse HEAD > sv0-results/baseline-sha.txt
           nvidia-smi -q > sv0-results/gpu.txt
@@ -151,16 +152,26 @@ jobs:
           done
           unset NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE
           unset NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE
+          status=0
           for root in sv0-baseline .; do
             name=baseline
             if [[ "$root" == . ]]; then name=candidate; fi
+            set +e
             ctest --test-dir "$root/build-sv0" -V \
               -R '^ninfer_(qwen3_8_flash_next_(expert_cache|moe|ple_pipeline|text_decode|text_executor)|selected_block_attention)_test$' \
               > "sv0-results/$name-tests.log" 2>&1
+            test_status=$?
+            set -e
+            if (( test_status != 0 )); then status=$test_status; fi
           done
+          set +e
           NINFER_V100_TELEMETRY=1 ctest --test-dir build-sv0 -V \
             -R '^ninfer_qwen3_8_flash_next_(expert_cache|moe|ple_pipeline|text_decode|text_executor)_test$' \
             > sv0-results/telemetry-tests.log 2>&1
+          telemetry_status=$?
+          set -e
+          if (( telemetry_status != 0 )); then status=$telemetry_status; fi
+          exit "$status"
       - name: Strict oracle smoke and exact routing/input trace comparison
         shell: bash
         run: |
