@@ -19,6 +19,19 @@ int main() {
     mixed.cpu_miss_routes = 5;
     mixed.cache_result_d2h_bytes = 10*2560*4;
     mixed.routed_sum_h2d_bytes = 2560*4;
+    PerfContext context{.executor=1, .transaction=9, .phase="verify"};
+    context.span_count = 1;
+    context.spans[0] = {0, 1, 0, 2, 42};
+    {
+        PerfContextScope scope(context);
+        const auto record = mixed.json(histogram);
+        if (record.find("\"transaction\":9") == std::string::npos ||
+            record.find("\"phase\":\"verify\"") == std::string::npos) return 1;
+        try { PerfContextScope nested(context); throw std::runtime_error("test unwind"); }
+        catch (const std::runtime_error&) {}
+        if (!active_perf_context || active_perf_context->transaction != 9) return 1;
+    }
+    if (active_perf_context != nullptr) return 1;
     std::cout << mixed.json(histogram) << '\n';
     return 0;
 }

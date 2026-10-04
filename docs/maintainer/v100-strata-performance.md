@@ -6,12 +6,13 @@ Frozen source: `forwardport/v100-flash-next` at
 Reference inspected: `jmnargi/Strata-V100` `9d7774919e26d235359bc2c3001f61f607eb288d`.
 Milestones are SV0–SV8 in the supplied specification; they do not advance Phase 18.
 
-## Current milestone: SV0 instrumentation, first tranche
+## Current milestone: SV0 instrumentation and hardware qualification
 
 `NINFER_V100_TELEMETRY=1` emits schema-1 JSONL on stderr for host-backed MoE
 layer calls and PLE gathers. It also enables the existing expert-cache CUDA event
-measurements. No routing, arithmetic, cache admission/replacement, or execution
-policy is changed. With telemetry off, histogram construction, JSON formatting,
+measurements. No routing, arithmetic, cache admission/replacement, or production execution
+policy is changed. Enabled diagnostics add CUDA events and waits when reading
+completed transfer/projection timings; use them only for attribution. With telemetry off, histogram construction, JSON formatting,
 cache snapshots, and additional clock reads are skipped.
 
 Layer records contain all 512 routing counts, distinct expert counts, hit/CPU
@@ -52,17 +53,52 @@ python3 tools/diagnostics/v100_sv0_report.py run.log \
 thermal state, NUMA placement, CPU workers, memory pressure, model/artifact hash,
 runtime flags, and cache/profile state. Run instrumented attribution separately
 from throughput measurements. Logs aggregate by layer and prefill/decode phase;
-they do not infer request IDs from layer numbers. Reports preserve unavailable
+every eager execution record carries an executor/transaction context and
+lane/epoch/column/token-index mapping. These are lane incarnations and execution
+transactions, not external HTTP request IDs. Direct operator tests have null
+context, and graph replays do not emit BF16 dispatch records. Reports preserve unavailable
 metrics and always mark qualification pending.
 
-## Remaining SV0 requirements
+## Projection and memory attribution
 
-Before SV1 execution changes, add explicit request correlation, isolated transfer
-timing, BF16 timing by implementation, and full VRAM category accounting. Run
-SM70 builds and existing Flash-Next tests, the unchanged Phase 11 independent
-oracle checks, and alternating baseline/candidate throughput measurements with
-telemetry **disabled**. The local host-only histogram/JSON/report checks do not
-satisfy that hardware gate. No optimization is promoted by this first tranche.
+BF16 dispatch collects reusable CUDA event pairs per executor, classified by
+implementation and `(N,K,T)`. Event collection skips graph capture, and event
+results are read only after all round work has been submitted. Prefill attribution
+therefore waits for measured projections before returning its pending round;
+normal telemetry-disabled execution keeps its asynchronous return behavior.
+These records cover the BF16 linear dispatcher, not every fused BF16 operation.
+The existing stage ledger remains the source for QSA prefill attention intervals.
+
+Memory records expose the artifact device arena, extra embedding/output-head,
+MTP expert/proposal buffers, runtime persistent/workspace allocations, KV/state,
+round tensors, sampling workspace, and graph allowance. Artifact arena bytes may
+include dense MTP and vision tensors. Planner categories and aggregate allocations
+must not be summed together. Graph allowance is a reservation, not an observed
+CUDA allocation; diagnostic event storage is not included. Expert cache bytes
+remain reported separately, after the cache has actually been configured.
+
+## Hardware gate
+
+`.github/workflows/v100-sv0.yml` triggers on this performance branch. It first
+builds SM70 instrumentation and correctness targets on a CUDA 12.8 hosted runner.
+Then the self-hosted V100 runner builds both the fixed baseline and candidate,
+runs existing operator/executor tests with diagnostics off and on, compares
+64-position routing/input traces exactly, and executes the unchanged >=4096
+position Phase 11 oracle gate on both builds. A busy GPU causes a clear failure;
+the workflow never stops another workload. Failed gates prevent later steps.
+
+The separate throughput screen performs two process-level ABBA cycles for cache
+off and cache on, with telemetry/cache timing/stage ledger disabled. It reports
+process medians and complete ranges, checks equal cache capacity, and rejects
+missing thermal evidence or observed thermal throttling. The existing harness
+uses short teacher-forced prefill/decode and includes logit downloads; it is not
+production request throughput. Filesystem/PLE access is warm in this screen.
+Full cold/warm, context-length, continuation, and MTP request benchmarks remain
+required before optimization promotion. Reports always distinguish these limits.
+
+Host-only checks pass locally. CUDA builds and hardware gates must pass before
+SV1 execution changes; no performance improvement or completed SV0 qualification
+is claimed until the evidence supports it.
 
 ## Subsequent order
 

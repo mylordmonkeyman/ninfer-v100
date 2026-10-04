@@ -80,7 +80,7 @@ public:
     // Enqueue pinned result transfer before CPU misses; wait/copy/release only at merge.
     void begin_download(std::size_t output_bytes, cudaStream_t stream);
     double finish_download(std::span<float> pair_outputs, cudaStream_t stream,
-                           double* wait_us = nullptr);
+                           double* wait_us = nullptr, double* result_copy_us = nullptr);
     void record_schedule(double cpu_us, double gpu_us, double wait_us, double wall_us);
     [[nodiscard]] bool timing_enabled() const { return timing_enabled_; }
     [[nodiscard]] bool serial_schedule() const { return serial_schedule_; }
@@ -113,7 +113,7 @@ private:
     std::unique_ptr<DeviceBuffer> storage_, activations_, outputs_, batch_tasks_;
     std::unique_ptr<PinnedHostBuffer> fill_buffer_, result_buffer_, batch_descriptors_, group_descriptors_;
     cudaStream_t fill_stream_ = nullptr;
-    cudaEvent_t hit_start_ = nullptr, hit_stop_ = nullptr;
+    cudaEvent_t hit_start_ = nullptr, hit_stop_ = nullptr, result_copy_start_ = nullptr;
     cudaEvent_t fill_start_ = nullptr, fill_stop_ = nullptr;
     unsigned admission_cap_ = 1;
     bool prefill_enabled_ = true, batched_prefill_ = false, batched_decode_ = false;

@@ -86,7 +86,17 @@ HostExpertWorkerPool& host_expert_worker_pool() {
     return pool;
 }
 
+struct HostMoeTransferTiming {
+    cudaEvent_t start = nullptr, stop = nullptr;
+    HostMoeTransferTiming() {
+        CUDA_CHECK(cudaEventCreate(&start));
+        try { CUDA_CHECK(cudaEventCreate(&stop)); }
+        catch (...) { cudaEventDestroy(start); throw; }
+    }
+    ~HostMoeTransferTiming() { cudaEventDestroy(start); cudaEventDestroy(stop); }
+};
 struct HostMoeCpuBuffers {
+    std::unique_ptr<HostMoeTransferTiming> transfer_timing;
     std::vector<std::uint16_t> input;
     std::vector<float> input_fp32;
     std::vector<std::int32_t> ids;
@@ -385,10 +395,10 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     }
 
     if (cache != nullptr) cache->begin_download(cpu.pair_outputs.size()*sizeof(float), stream);
-    double gpu_us = 0, wait_us = 0;
+    double gpu_us = 0, wait_us = 0, result_copy_us = 0;
     const auto finish_hits = [&] {
         if (cache == nullptr) return;
-        gpu_us = cache->finish_download(cpu.pair_outputs, stream, &wait_us);
+        gpu_us = cache->finish_download(cpu.pair_outputs, stream, &wait_us, telemetry ? &result_copy_us : nullptr);
     };
     // Serial is a diagnostic control. Production starts misses while hit kernels and
     // the pinned result transfer are already in flight, then joins only at the merge.
@@ -444,11 +454,16 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     constexpr std::size_t kRoutedBytesPerToken =
         kFlashNextExpertHidden * sizeof(float);
     static_assert(kActivationPitchBytes >= kRoutedBytesPerToken);
+    if (telemetry) {
+        if (!cpu.transfer_timing) cpu.transfer_timing = std::make_unique<HostMoeTransferTiming>();
+        CUDA_CHECK(cudaEventRecord(cpu.transfer_timing->start, stream));
+    }
     CUDA_CHECK(cudaMemcpy2DAsync(
         scratch.activations.data, kActivationPitchBytes,
         cpu.routed_sum.data(), kRoutedBytesPerToken,
         kRoutedBytesPerToken, static_cast<std::size_t>(tokens),
         cudaMemcpyHostToDevice, stream));
+    if (telemetry) CUDA_CHECK(cudaEventRecord(cpu.transfer_timing->stop, stream));
     flash_next_moe_host_routed_merge_launch(
         resident_weights, scratch, output, tokens, stream,
         use_shared_fp32_intermediate, output_fp32);
@@ -469,6 +484,12 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         m.router_rendezvous_us = rendezvous_us;
         m.cpu_branch_us = std::chrono::duration<double, std::micro>(cpu_finished-cpu_started).count();
         m.gpu_hit_window_us = gpu_us;
+        m.cache_result_d2h_us = result_copy_us;
+        CUDA_CHECK(cudaEventSynchronize(cpu.transfer_timing->stop));
+        float routed_copy_ms = 0;
+        CUDA_CHECK(cudaEventElapsedTime(&routed_copy_ms, cpu.transfer_timing->start, cpu.transfer_timing->stop));
+        m.routed_sum_timing = true;
+        m.routed_sum_h2d_us = double(routed_copy_ms)*1000;
         m.merge_wait_us = wait_us;
         m.branch_wall_us = branch_wall_us;
         m.cache_timing = cache && cache->timing_enabled();

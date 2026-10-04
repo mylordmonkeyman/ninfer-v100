@@ -1,0 +1,195 @@
+name: V100 SV0 Baseline and Observability
+on:
+  push:
+    branches: [perf/v100-strata-derived]
+    paths:
+      - '.github/workflows/v100-sv0.yml'
+      - 'src/ops/linear/bf16/bf16_telemetry*'
+      - 'src/targets/qwen3_8_flash_next/impl/perf_telemetry.h'
+      - 'src/targets/qwen3_8_flash_next/impl/text_executor*'
+      - 'tools/diagnostics/v100_sv0*'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compile:
+    runs-on: ubuntu-24.04
+    container:
+      image: nvidia/cuda:12.8.1-devel-ubuntu24.04
+    timeout-minutes: 60
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates python3 python3-pip pkg-config
+          python3 -m pip install --break-system-packages 'cmake>=3.28,<4' ninja
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build SM70 instrumentation and correctness targets
+        run: |
+          cmake -S . -B build-sv0 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-sv0 -j --target \
+            ninfer_qwen3_8_flash_next_perf_telemetry_test \
+            ninfer_qwen3_8_flash_next_expert_cache_test \
+            ninfer_qwen3_8_flash_next_moe_test \
+            ninfer_qwen3_8_flash_next_ple_pipeline_test \
+            ninfer_qwen3_8_flash_next_text_decode_test \
+            ninfer_qwen3_8_flash_next_text_executor_test \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            ninfer_selected_block_attention_test
+      - name: Run host JSON and reporting checks
+        run: |
+          ctest --test-dir build-sv0 --output-on-failure -R '^ninfer_qwen3_8_flash_next_perf_telemetry_test$'
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/diagnostics -p 'test_v100_sv0*.py'
+  hardware:
+    needs: compile
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    concurrency:
+      group: v100-sv0-hardware
+      cancel-in-progress: false
+    timeout-minutes: 180
+    env:
+      NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+      NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+      NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: '32'
+      NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: auto
+      NINFER_FLASH_NEXT_EXPERT_CACHE: '0'
+      NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING: '0'
+      NINFER_V100_TELEMETRY: '0'
+      NINFER_FLASH_NEXT_STAGE_LEDGER: '0'
+      NINFER_FLASH_NEXT_FP32_HYPER_STATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_CONV: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_READOUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_GATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_MOE_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT_LAYERS_32_47: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_SHARED_INPUT: '0'
+      NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE: '0'
+      NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          persist-credentials: false
+          clean: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: e184de12772999f8d336ea395cedcc0cf0543c52
+          path: sv0-baseline
+          submodules: recursive
+          persist-credentials: false
+          clean: false
+      - name: Record hardware and build the fixed baseline and candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sv0-results
+          git rev-parse HEAD > sv0-results/candidate-sha.txt
+          git -C sv0-baseline rev-parse HEAD > sv0-results/baseline-sha.txt
+          nvidia-smi -q > sv0-results/gpu.txt
+          /usr/local/cuda-12.8/bin/nvcc --version > sv0-results/cuda.txt
+          numactl --hardware > sv0-results/numa.txt
+          test -r "$NINFER_WEIGHTS"
+          test -r "$NINFER_FLASH_NEXT_ORACLE_MANIFEST"
+          for root in sv0-baseline .; do
+            cmake -S "$root" -B "$root/build-sv0" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+              -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
+              -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+            cmake --build "$root/build-sv0" -j --target \
+              ninfer_qwen3_8_flash_next_expert_cache_test \
+              ninfer_qwen3_8_flash_next_moe_test \
+              ninfer_qwen3_8_flash_next_ple_pipeline_test \
+              ninfer_qwen3_8_flash_next_text_decode_test \
+              ninfer_qwen3_8_flash_next_text_executor_test \
+              ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+              ninfer_selected_block_attention_test
+          done
+      - name: Verify available V100 memory without stopping other workloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits | tr -d '[:space:]')
+          if (( free_mib < 28000 )); then
+            echo "::error::V100 is busy ($free_mib MiB free); retry when available."
+            exit 1
+          fi
+      - name: Existing correctness tests with diagnostics off and on
+        shell: bash
+        run: |
+          set -euo pipefail
+          for root in sv0-baseline .; do
+            name=baseline
+            if [[ "$root" == . ]]; then name=candidate; fi
+            ctest --test-dir "$root/build-sv0" -V \
+              -R '^ninfer_(qwen3_8_flash_next_(expert_cache|moe|ple_pipeline|text_decode|text_executor)|selected_block_attention)_test$' \
+              > "sv0-results/$name-tests.log" 2>&1
+          done
+          NINFER_V100_TELEMETRY=1 ctest --test-dir build-sv0 -V \
+            -R '^ninfer_qwen3_8_flash_next_(expert_cache|moe|ple_pipeline|text_decode|text_executor)_test$' \
+            > sv0-results/telemetry-tests.log 2>&1
+      - name: Strict oracle smoke and exact routing/input trace comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS=64 NINFER_PHASE12_CPU_TRACE="$PWD/sv0-results/baseline-trace.bin" \
+            sv0-baseline/build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            > sv0-results/baseline-oracle-smoke.log 2>&1
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS=64 NINFER_PHASE12_CPU_TRACE="$PWD/sv0-results/candidate-trace.bin" \
+            build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            > sv0-results/candidate-oracle-smoke.log 2>&1
+          cmp sv0-results/baseline-trace.bin sv0-results/candidate-trace.bin
+          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS=64 NINFER_V100_TELEMETRY=1 \
+            NINFER_PHASE12_CPU_TRACE="$PWD/sv0-results/telemetry-trace.bin" \
+            build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            > sv0-results/telemetry-oracle-smoke.log 2>&1
+          cmp sv0-results/candidate-trace.bin sv0-results/telemetry-trace.bin
+          python3 tools/diagnostics/v100_sv0_report.py sv0-results/telemetry-oracle-smoke.log \
+            --candidate-sha "$(cat sv0-results/candidate-sha.txt)" --output sv0-results/telemetry-report.json
+      - name: Unchanged long-prefix oracle gate for baseline and candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          for root in sv0-baseline .; do
+            name=baseline
+            if [[ "$root" == . ]]; then name=candidate; fi
+            NINFER_PHASE11_ORACLE_SMOKE_POSITIONS=4096 \
+              "$root/build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test" \
+              > "sv0-results/$name-oracle-full.log" 2>&1
+            grep -q 'PASS: Phase 11 whole-model eager host-backed vertical slice' "sv0-results/$name-oracle-full.log"
+          done
+      - name: Alternating throughput screening with all instrumentation disabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/diagnostics/v100_sv0_benchmark.py \
+            --baseline sv0-baseline/build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            --candidate build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            --output sv0-results --cycles 2
+          cat sv0-results/screening.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve SV0 evidence including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-sv0-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            sv0-results/*.log
+            sv0-results/*.json
+            sv0-results/*.txt
+          retention-days: 30

@@ -44,8 +44,29 @@ def summarize(records):
     layers = {}
     ple = []
     stages = []
+    projections = []
+    memory = []
+    contexts = {}
     for row in records:
         kind = row['kind']
+        context = row.get('context')
+        if context is not None:
+            for key in ('executor', 'transaction'):
+                numeric(context[key], key, integer=True)
+            context_key = (context['executor'], context['transaction'])
+            if context_key in contexts and contexts[context_key] != context:
+                raise ValueError('conflicting executor/transaction lane mapping')
+            contexts[context_key] = context
+        if kind in ('model_memory', 'runtime_memory'):
+            for key, value in row.items():
+                if key.endswith('_bytes'):
+                    numeric(value, key, integer=True)
+            memory.append(row)
+            continue
+        if kind == 'bf16_projection':
+            numeric(row['gpu_us'], 'gpu_us')
+            projections.append(row)
+            continue
         if kind == 'ple_gather':
             for key in ('tokens', 'payload_bytes', 'gather_us'):
                 numeric(row[key], key, integer=key != 'gather_us')
@@ -91,18 +112,19 @@ def summarize(records):
             result[key] = sum(numeric(r[key], key, integer=True) for r in rows)
         for key in ('cpu_branch_us', 'gpu_hit_window_us', 'merge_wait_us', 'branch_wall_us',
                     'router_rendezvous_us', 'overlap_lower_bound_us', 'distinct_experts',
-                    'routes_per_distinct_expert'):
-            result[key] = distribution([numeric(r[key], key) for r in rows if r[key] is not None])
+                    'routes_per_distinct_expert', 'cache_result_d2h_us', 'routed_sum_h2d_us'):
+            result[key] = distribution([numeric(r[key], key) for r in rows if r.get(key) is not None])
         # Background fills span inference calls. Global cumulative totals are snapshots, not
         # per-layer deltas, and must not be summed across layers or cache resets.
         result['last_cache_snapshot'] = rows[-1]['cache']
         layer_summary.append(result)
     return dict(schema=1, milestone='SV0', scope='caller_supplied_log_interval',
                 qualified=False, layer_summary=layer_summary, routing_frequency=frequency,
-                ple_gather=ple, prefill_stage_ledger=stages,
-                unavailable=['request_identity', 'ple_page_read_time', 'isolated_cache_result_d2h_time',
-                             'isolated_routed_sum_h2d_time', 'bf16_time_by_dispatched_implementation',
-                             'complete_vram_breakdown', 'request_throughput', 'oracle_acceptance',
+                ple_gather=ple, prefill_stage_ledger=stages, bf16_projections=projections,
+                memory_records=memory, execution_contexts=list(contexts.values()),
+                unavailable=['external_request_identity', 'ple_page_read_time',
+                             'captured_graph_bf16_time', 'exact_cuda_graph_allocation_bytes',
+                             'request_throughput', 'oracle_acceptance',
                              'disabled_telemetry_throughput_parity'])
 
 

@@ -173,7 +173,9 @@ void FlashNextStageLedger::finish_chunk(cudaStream_t stream) {
                 << "\",\"calls\":" << last_stats_.stage_calls[s]
                 << ",\"interval_ms\":" << last_stats_.stage_ms[s] << '}';
         }
-        out << "]}";
+        out << "]";
+        append_perf_context(out);
+        out << '}';
         emit_perf_json(out.str());
     }
 

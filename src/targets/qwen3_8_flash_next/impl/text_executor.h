@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/arena.h"
+#include "ops/linear/bf16/bf16_telemetry.h"
 #include "core/decode_graph.h"
 #include "core/device.h"
 #include "core/tensor.h"
@@ -242,6 +243,9 @@ private:
     // Program reclassifies this out of the host bucket; see ExecutionTimingRecorder.
     std::uint64_t round_device_wait_ns_ = 0;
     bool round_in_flight_ = false;
+    std::uint64_t perf_executor_id_ = 0;
+    std::unique_ptr<ops::detail::Bf16TimingCollector> bf16_timing_;
+    void finish_perf_projections();
     // Eager-only: custom embedding columns for the round being built (never captured).
     std::vector<const Tensor*> pending_custom_embeddings_;
 

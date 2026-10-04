@@ -3,6 +3,7 @@
 #include "artifact/typed_binding.h"
 #include "core/device.h"
 #include "core/host_memory.h"
+#include "targets/qwen3_8_flash_next/impl/perf_telemetry.h"
 #include "targets/qwen3_8_flash_next/impl/load/quantize_nvfp4_expert_bank.h"
 #include "targets/qwen3_8_flash_next/impl/load/quantize_output_head.h"
 
@@ -439,6 +440,17 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
     std::fprintf(stderr, "flash_next host_ple_warm bytes=%zu duration_ms=%.3f\n", host_bytes,
                  std::chrono::duration<double, std::milli>(
                      std::chrono::steady_clock::now() - warm_started).count());
+    if (v100_perf_telemetry_enabled()) {
+        std::ostringstream out;
+        out << "{\"sv\":0,\"schema\":1,\"kind\":\"model_memory\",\"artifact_arena_bytes\":"
+            << backing.stats().device_capacity_bytes
+            << ",\"embedding_fp8_bytes\":" << token_embedding_fp8.bytes
+            << ",\"output_head_fp8_bytes\":" << output_head_fp8.bytes
+            << ",\"mtp_expert_bytes\":" << mtp_expert_gate_up_nvfp4.bytes + mtp_expert_down_nvfp4.bytes
+            << ",\"proposal_head_bytes\":" << proposal_head_payload.bytes + proposal_head_fp8.bytes
+            << ",\"proposal_token_ids_bytes\":" << proposal_token_ids.bytes << '}';
+        emit_perf_json(out.str());
+    }
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

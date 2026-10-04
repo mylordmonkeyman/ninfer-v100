@@ -84,6 +84,7 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
     if (timing_enabled_) {
         CUDA_CHECK(cudaEventCreate(&hit_start_));
         CUDA_CHECK(cudaEventCreate(&hit_stop_));
+        CUDA_CHECK(cudaEventCreate(&result_copy_start_));
         CUDA_CHECK(cudaEventCreate(&fill_start_));
         CUDA_CHECK(cudaEventCreate(&fill_stop_));
     }
@@ -101,6 +102,7 @@ FlashNextExpertCache::~FlashNextExpertCache() {
     if(fill_stream_)cudaStreamDestroy(fill_stream_);
     if(hit_start_)cudaEventDestroy(hit_start_);
     if(hit_stop_)cudaEventDestroy(hit_stop_);
+    if(result_copy_start_)cudaEventDestroy(result_copy_start_);
     if(fill_start_)cudaEventDestroy(fill_start_);
     if(fill_stop_)cudaEventDestroy(fill_stop_);
 }
@@ -224,12 +226,14 @@ void FlashNextExpertCache::begin_download(std::size_t bytes, cudaStream_t stream
             stats_.grouped_groups += groups;
         }
     }
+    if (timing_enabled_) CUDA_CHECK(cudaEventRecord(result_copy_start_, stream));
     CUDA_CHECK(cudaMemcpyAsync(result_buffer_->data(), outputs_->p, bytes,
                                cudaMemcpyDeviceToHost, stream));
     if (timing_enabled_) CUDA_CHECK(cudaEventRecord(hit_stop_, stream));
 }
 double FlashNextExpertCache::finish_download(std::span<float> output, cudaStream_t stream,
-    double* wait_us) {
+    double* wait_us, double* result_copy_us) {
+    if (result_copy_us) *result_copy_us = 0;
     if (wait_us) *wait_us = 0;
     if (consumers_.empty()) return 0;
     const auto waiting = timing_enabled_ ? std::chrono::steady_clock::now() :
@@ -239,6 +243,11 @@ double FlashNextExpertCache::finish_download(std::span<float> output, cudaStream
         std::chrono::steady_clock::now()-waiting).count();
     float gpu_ms = 0;
     if (timing_enabled_) CUDA_CHECK(cudaEventElapsedTime(&gpu_ms, hit_start_, hit_stop_));
+    if (result_copy_us && timing_enabled_) {
+        float ms = 0;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, result_copy_start_, hit_stop_));
+        *result_copy_us = double(ms)*1000;
+    }
     std::lock_guard lock(mutex_); check_failure();
     for (auto [slot, path] : consumers_) {
         std::memcpy(output.data() + std::size_t(path)*2560,

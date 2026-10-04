@@ -2,6 +2,7 @@
 
 #include "targets/qwen3_8_flash_next/impl/mtp_forward.h"
 #include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
+#include "targets/qwen3_8_flash_next/impl/perf_telemetry.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode_workspace.h"
 #include "ninfer/ops/embedding.h"
@@ -144,7 +145,42 @@ FlashNextTextExecutor::FlashNextTextExecutor(const TextModelView& model,
                       ? (allocation.plan().config.speculative_draft_tokens + 1U)
                       : 1U))))),
       round_completion_(device) {
+    if (v100_perf_telemetry_enabled()) {
+        perf_executor_id_ = next_perf_executor_id();
+        bf16_timing_ = std::make_unique<ops::detail::Bf16TimingCollector>();
+        const auto& p = allocation.plan();
+        std::ostringstream out;
+        out << "{\"sv\":0,\"schema\":1,\"kind\":\"runtime_memory\",\"executor\":" << perf_executor_id_
+            << ",\"runtime_reserved_bytes\":" << p.total_device_bytes
+            << ",\"persistent_allocation_bytes\":" << allocation.persistent_bytes()
+            << ",\"workspace_allocation_bytes\":" << p.workspace_bytes
+            << ",\"attention_kv_bytes\":" << p.attention_kv_bytes
+            << ",\"indexer_kv_bytes\":" << p.indexer_block_keys_bytes
+            << ",\"block_tables_bytes\":" << p.block_tables_bytes
+            << ",\"recurrent_state_bytes\":" << p.recurrent_state_bytes
+            << ",\"mtp_persistent_state_bytes\":" << p.mtp_persistent_state_bytes
+            << ",\"round_tensors_bytes\":" << p.round_tensors_bytes
+            << ",\"mtp_round_tensors_bytes\":" << p.mtp_round_tensors_bytes
+            << ",\"sampling_workspace_allocation_bytes\":" << sampling_workspace_.capacity()
+            << ",\"graph_allowance_bytes\":" << p.cuda_graph_allowance_bytes << '}';
+        emit_perf_json(out.str());
+    }
     instantiate_graphs();
+}
+
+void FlashNextTextExecutor::finish_perf_projections() {
+    if (!bf16_timing_) return;
+    bf16_timing_->finish([](int n, int k, int t, const char* implementation, double us) {
+        std::ostringstream out;
+        out.imbue(std::locale::classic());
+        out.precision(17);
+        out << "{\"sv\":0,\"schema\":1,\"kind\":\"bf16_projection\",\"n\":" << n
+            << ",\"k\":" << k << ",\"tokens\":" << t << ",\"implementation\":\""
+            << implementation << "\",\"gpu_us\":" << us;
+        append_perf_context(out);
+        out << '}';
+        emit_perf_json(out.str());
+    });
 }
 
 void FlashNextTextExecutor::instantiate_graphs() {
@@ -499,6 +535,18 @@ PendingRound FlashNextTextExecutor::finish_prepared_round(
     const FlashNextDecodeStateSink* sink, bool force_eager, std::int32_t active_blocks) {
     const auto batch_size = static_cast<std::uint32_t>(requests.size());
     try {
+        std::optional<PerfContextScope> perf_scope;
+        std::optional<ops::detail::ScopedBf16Timing> bf16_scope;
+        if (bf16_timing_) {
+            PerfContext context{.executor=perf_executor_id_, .transaction=prepared.transaction_id, .phase="decode"};
+            context.span_count = batch_size;
+            for (unsigned i = 0; i < batch_size; ++i) {
+                const auto h = requests[i].handle;
+                context.spans[i] = {i, 1, h.lane_index(), h.epoch(), requests[i].token_index};
+            }
+            perf_scope.emplace(context);
+            bf16_scope.emplace(*bf16_timing_);
+        }
         pending_is_prefill_chunk_ = false;
 
         // 1. Sync dirty tables to device (out of captured graph)
@@ -573,6 +621,7 @@ PendingRound FlashNextTextExecutor::finish_prepared_round(
         Tensor logits =
             alloc_.round_tensors().logits.slice(1, 0, static_cast<std::int32_t>(batch_size));
 
+        finish_perf_projections();
         round_in_flight_ = true;
         return PendingRound(this, prepared.transaction_id, batch_size, logits, final_hidden,
                             hyper_hidden, std::span(sampled_tokens.data(), batch_size));
@@ -611,6 +660,15 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
         ledger_.begin_prefill_chunk(handle, token_ids, first_token_index, ple_metadata_);
 
     try {
+        std::optional<PerfContextScope> perf_scope;
+        std::optional<ops::detail::ScopedBf16Timing> bf16_scope;
+        if (bf16_timing_) {
+            PerfContext context{.executor=perf_executor_id_, .transaction=prepared.transaction_id, .phase="prefill"};
+            context.span_count = 1;
+            context.spans[0] = {0, num_tokens, handle.lane_index(), handle.epoch(), first_token_index};
+            perf_scope.emplace(context);
+            bf16_scope.emplace(*bf16_timing_);
+        }
         pending_is_prefill_chunk_             = true;
         pending_prefill_lane_                 = lane;
         pending_prefill_initial_active_slot_  = initial_active_slot;
@@ -716,6 +774,7 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
             device_.stream, effective_sink, alloc_.plan().config.use_qsa_prefill_mma,
             &hyper_hidden, visual_embeddings != nullptr ? &dev_token_ids : nullptr);
 
+        finish_perf_projections();
         round_in_flight_ = true;
         return PendingRound(this, prepared.transaction_id, 1, logits, final_hidden, hyper_hidden);
     } catch (...) {
@@ -784,6 +843,15 @@ PendingRound FlashNextTextExecutor::execute_speculative_verify_round(
                                         ple_metadata_);
 
     try {
+        std::optional<PerfContextScope> perf_scope;
+        std::optional<ops::detail::ScopedBf16Timing> bf16_scope;
+        if (bf16_timing_) {
+            PerfContext context{.executor=perf_executor_id_, .transaction=prepared.transaction_id, .phase="verify"};
+            context.span_count = 1;
+            context.spans[0] = {0, num_tokens, handle.lane_index(), handle.epoch(), first_token_index};
+            perf_scope.emplace(context);
+            bf16_scope.emplace(*bf16_timing_);
+        }
         pending_is_prefill_chunk_ = false;
         ledger_.sync_tables_if_dirty(alloc_, device_.stream);
         ple_pipeline_.gather_pinned(prepared.ple_indices);
@@ -831,6 +899,7 @@ PendingRound FlashNextTextExecutor::execute_speculative_verify_round(
             sampled_tokens_host[i] = host_egr->sampled_tokens[i];
         }
 
+        finish_perf_projections();
         round_in_flight_ = true;
         return PendingRound(this, prepared.transaction_id, num_tokens, logits, final_hidden,
                             hyper_hidden, std::span(sampled_tokens_host.data(), num_tokens));

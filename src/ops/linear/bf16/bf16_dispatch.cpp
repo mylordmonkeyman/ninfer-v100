@@ -2,6 +2,7 @@
 
 #include "ops/linear/bf16/bf16_config.h"
 #include "ops/linear/bf16/bf16_launch.h"
+#include "ops/linear/bf16/bf16_telemetry.h"
 
 #include <cstdint>
 #include <stdexcept>
@@ -81,7 +82,8 @@ Bf16Launch select_bf16_launch(std::int32_t n, std::int32_t k, std::int32_t t, Li
 void bf16_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
                    cudaStream_t stream) {
     const Bf16Launch launch = select_bf16_launch(weight.n, weight.k, x.ne[1], policy);
-    launch(x, weight, out, stream);
+    if (active_bf16_timing) active_bf16_timing->launch(launch, x, weight, out, stream);
+    else launch(x, weight, out, stream);
 }
 
 } // namespace ninfer::ops::detail

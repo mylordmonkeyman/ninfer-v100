@@ -56,6 +56,20 @@ class ReportTest(unittest.TestCase):
         report = summarize([first, second])
         self.assertEqual(report['layer_summary'][0]['last_cache_snapshot']['fills_total'], 12)
 
+    def test_execution_context_mapping_and_projection_records(self):
+        first = measurement()
+        first['context'] = dict(executor=1, transaction=9, phase='decode',
+                                lanes=[dict(first_column=0, columns=1, lane=0, epoch=2, first_token_index=42)])
+        projection = dict(sv=0, schema=1, kind='bf16_projection', n=640, k=2560, tokens=1,
+                          implementation='volta_simt', gpu_us=13, context=first['context'])
+        report = summarize([first, projection])
+        self.assertEqual(report['execution_contexts'][0]['transaction'], 9)
+        self.assertEqual(report['bf16_projections'][0]['implementation'], 'volta_simt')
+        bad = copy.deepcopy(projection)
+        bad['context']['lanes'][0]['epoch'] = 3
+        with self.assertRaisesRegex(ValueError, 'conflicting'):
+            summarize([first, bad])
+
     def test_log_interval_and_no_data_failure(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root)/'run.log'
