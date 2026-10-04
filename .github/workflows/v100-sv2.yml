@@ -6,7 +6,14 @@ on:
       - '.github/workflows/v100-sv2.yml'
       - 'include/ninfer/ops/expert_route_combine.h'
       - 'src/ops/launcher/expert_route_combine.cu'
+      - 'src/targets/qwen3_8_flash_next/impl/expert_cache.cpp'
+      - 'src/targets/qwen3_8_flash_next/impl/expert_cache.h'
+      - 'src/targets/qwen3_8_flash_next/impl/moe.cpp'
+      - 'src/targets/qwen3_8_flash_next/impl/moe_workspace.h'
+      - 'src/targets/qwen3_8_flash_next/impl/perf_telemetry.h'
       - 'tests/ops/test_expert_route_combine.cpp'
+      - 'tests/targets/qwen3_8_flash_next/test_expert_cache.cpp'
+      - 'tools/diagnostics/v100_sv2_runtime.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -32,20 +39,49 @@ jobs:
           cmake -S . -B build-sv2 -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
             -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-sv2 --target ninfer_expert_route_combine_test
+          cmake --build build-sv2 --target ninfer_expert_route_combine_test \
+            ninfer_qwen3_8_flash_next_expert_cache_test \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test
   hardware:
     needs: compile
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:
       group: v100-sv0-hardware
       cancel-in-progress: false
-    timeout-minutes: 30
+    timeout-minutes: 120
+    env:
+      NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+      NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+      NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: '32'
+      NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: auto
+      NINFER_FLASH_NEXT_FP32_HYPER_STATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_CONV: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_READOUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_GATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_MOE_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT_LAYERS_32_47: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_SHARED_INPUT: '0'
+      NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE: '0'
+      NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE: '0'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
           clean: false
-      - name: Build and check independent route sum and exact host ordering
+      - name: Build and check route storage, reduction, and held-out integration
         shell: bash
         run: |
           set -euo pipefail
@@ -55,7 +91,7 @@ jobs:
           nvidia-smi -q > sv2-results/gpu.txt
           /usr/local/cuda-12.8/bin/nvcc --version > sv2-results/cuda.txt
           free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits | tr -d '[:space:]')
-          if (( free_mib < 2048 )); then
+          if (( free_mib < 28000 )); then
             echo '::error::V100 lacks test headroom; no workloads were stopped.'
             exit 1
           fi
@@ -63,10 +99,16 @@ jobs:
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
             -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
             -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-sv0 --target ninfer_expert_route_combine_test
+          cmake --build build-sv0 --target ninfer_expert_route_combine_test \
+            ninfer_qwen3_8_flash_next_expert_cache_test \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test
           build-sv0/tests/ninfer_expert_route_combine_test | tee sv2-results/route-combine.log
-          echo 'SV2 combine operator only; runtime transfers and end-to-end qualification pending.' >> "$GITHUB_STEP_SUMMARY"
-      - name: Preserve SV2 operator evidence
+          build-sv0/tests/ninfer_qwen3_8_flash_next_expert_cache_test | tee sv2-results/expert-cache.log
+          python3 tools/diagnostics/v100_sv2_runtime.py \
+            --executable build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            --output sv2-results --repeats 3
+          cat sv2-results/runtime-report.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve SV2 evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

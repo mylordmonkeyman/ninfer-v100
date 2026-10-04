@@ -355,9 +355,18 @@ roundoff bound; exact host FMA bits are supplementary ordering evidence. Tests
 cover T=1–5, 128, 256, and 4096, 0/50/100% route provenance, output guards,
 shared-slab preservation, and compact output.
 
-The operator is not yet used by the runtime. `.github/workflows/v100-sv2.yml`
-builds and checks it before integration. Next, scalar/grouped/batched GPU hits
-must write into a single device route layout, only CPU misses must be uploaded
-from pinned storage, leases must remain protected until hit completion, and the
-device sum must feed the existing shared/final merge. Transfer-byte elimination
-and full mixed-route integration remain unqualified.
+The opt-in `NINFER_V100_DEVICE_ROUTE_COMBINE=1` runtime path now gives the MoE
+workspace one FP32 device route matrix. Scalar/grouped/batched cache hits write
+directly to their route rows; CPU misses write reusable pinned host storage and
+only contiguous miss runs cross H2D. Deferred hit work completes before leases
+are released, and the device reduction writes the routed sum into the existing
+pitched activation slab before the unchanged shared/final merge. The legacy
+host reduction remains the default.
+
+`.github/workflows/v100-sv2.yml` checks the standalone operator, direct cache
+output and lease release, then compares cache-off and mixed-LRU legacy/device
+execution on a disjoint real-model workload. It requires exact held-out final
+BF16 logits and decode top-1, zero hit-result D2H, zero full routed-sum H2D, and
+exact miss-only H2D byte accounting. Runtime integration and throughput remain
+unqualified until that V100 evidence completes; MTP, continuation, and
+production-server qualification remain subsequent gates.

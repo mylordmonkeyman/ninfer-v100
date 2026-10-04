@@ -119,6 +119,27 @@ int main(){try{
         std::cout<<"cache.group.exact_parity.tokens="<<tokens<<'\n';
     }
     cache.set_grouped_prefill(false);
+    {
+        constexpr unsigned paths=4;
+        DeviceBuffer direct_device(paths*2560*sizeof(float));
+        std::vector<float> direct(paths*2560),expected(paths*2560);
+        cache.set_batched_prefill(true);cache.set_grouped_prefill(true);
+        cache.begin_layer(true);
+        for(unsigned path=0;path<paths;++path) {
+            require(cache.execute_to(0,path%2,
+                static_cast<std::uint16_t*>(d_input.p)+path*2560,
+                static_cast<float*>(direct_device.p)+path*2560,path,device.stream),
+                "direct device Ready hit missing");
+            flash_next_cpu_nvfp4_expert_pair_reference(layer.expert(path%2),
+                std::span(input.data()+path*2560,2560),
+                std::span(expected.data()+path*2560,2560),scratch);
+        }
+        cache.begin_device_results(device.stream);
+        cache.finish_device_results(device.stream);
+        direct_device.copy_to_host(direct.data(),direct.size()*sizeof(float));
+        compare(direct,expected);
+        std::cout<<"cache.direct_device.paths="<<paths<<'\n';
+    }
     cache.set_batched_prefill(false);cache.begin_layer(false);
     HostExpertWorkerPool pool(4, false);
     for (unsigned hits : {0U, 1U, 4U}) {

@@ -91,9 +91,9 @@ struct ExpertLayerMeasurement {
     std::uint64_t tokens = 0, gpu_hit_routes = 0, cpu_miss_routes = 0;
     // Actual payload submitted: the baseline downloads the WHOLE route buffer if ANY hit exists.
     std::uint64_t cache_result_d2h_bytes = 0, routed_sum_h2d_bytes = 0;
-    std::uint64_t route_input_d2h_bytes = 0;
+    std::uint64_t route_input_d2h_bytes = 0, cpu_miss_h2d_bytes = 0;
     double router_rendezvous_us = 0, cpu_branch_us = 0, gpu_hit_window_us = 0;
-    double cache_result_d2h_us = 0, routed_sum_h2d_us = 0;
+    double cache_result_d2h_us = 0, routed_sum_h2d_us = 0, cpu_miss_h2d_us = 0;
     double merge_wait_us = 0, branch_wall_us = 0, overlap_lower_bound_us = 0;
     unsigned ready_experts = 0, uploading_experts = 0, leased_experts = 0;
     std::uint64_t cache_hits_total = 0, cache_misses_total = 0;
@@ -114,6 +114,7 @@ struct ExpertLayerMeasurement {
             << ",\"cache_result_d2h_bytes\":" << cache_result_d2h_bytes
             << ",\"routed_sum_h2d_bytes\":" << routed_sum_h2d_bytes
             << ",\"route_input_d2h_bytes\":" << route_input_d2h_bytes
+            << ",\"cpu_miss_h2d_bytes\":" << cpu_miss_h2d_bytes
             << ",\"router_rendezvous_us\":" << router_rendezvous_us
             << ",\"cpu_branch_us\":" << cpu_branch_us
             << ",\"gpu_hit_window_us\":";
@@ -122,6 +123,8 @@ struct ExpertLayerMeasurement {
         if (cache_timing) out << cache_result_d2h_us; else out << "null";
         out << ",\"routed_sum_h2d_us\":";
         if (routed_sum_timing) out << routed_sum_h2d_us; else out << "null";
+        out << ",\"cpu_miss_h2d_us\":";
+        if (routed_sum_timing) out << cpu_miss_h2d_us; else out << "null";
         out << ",\"merge_wait_us\":";
         if (cache_timing) out << merge_wait_us; else out << "null";
         out << ",\"branch_wall_us\":" << branch_wall_us << ",\"overlap_lower_bound_us\":";

@@ -47,6 +47,13 @@ FlashNextMoeWorkspace allocate_flash_next_moe_workspace(Arena& arena, std::int32
     // Ten routed SwiGLU paths followed by the always-on shared path.
     out.activations = arena.alloc(DType::BF16, {640, 11, tokens}, 256);
 
+#if defined(NINFER_VOLTA_BUILD)
+    // SM70 software W4A16 uses FP32 down partials for prefill.  The host-backed
+    // SV2 path also uses this as its canonical device route matrix at every shape:
+    // cached experts write hits in place and CPU misses fill the remaining rows.
+    out.down_intermediate = arena.alloc(DType::FP32, {2'560, 10, tokens}, 256);
+#endif
+
     if (tokens > 8) {
         out.expert_counts     = arena.alloc(DType::I32, {512}, 16);
         out.expert_offsets    = arena.alloc(DType::I32, {513}, 16);
@@ -67,14 +74,10 @@ FlashNextMoeWorkspace allocate_flash_next_moe_workspace(Arena& arena, std::int32
                 10 * (kFlashNextMoeMmaPrefillThreshold - 1) * 2;
             const std::int32_t staged_columns       = std::max(10 * tokens, kSimtTailColumns);
             out.staged_down   = arena.alloc(DType::BF16, {2'560, staged_columns}, 256);
-        } else
-#endif
-        {
-            // SM70 uses software W4A16 at every prefill size, including T >= 256.
-            // Its down kernel always writes FP32 partials; the BF16 MMA staging
-            // allocation is never a valid substitute for that destination.
+        } else {
             out.down_intermediate = arena.alloc(DType::FP32, {2'560, 10, tokens}, 256);
         }
+#endif
         out.task_counter      = arena.alloc(DType::I32, {4}, 16);
         out.act_codes         = arena.alloc(DType::U8, {1'280, tokens}, 256);
         out.act_scales        = arena.alloc(DType::U8, {160, tokens}, 256);

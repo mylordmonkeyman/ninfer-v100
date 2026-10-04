@@ -242,6 +242,19 @@ void FlashNextExpertCache::begin_layer(bool prefill) {
 }
 bool FlashNextExpertCache::execute(unsigned layer,int expert,const void* input,
     unsigned path,cudaStream_t stream) {
+    if (outputs_ && (std::size_t(path)+1)*2560*sizeof(float)>outputs_->bytes)
+        throw std::out_of_range("expert cache hit buffer capacity");
+    return execute_impl(layer,expert,input,
+        outputs_ ? static_cast<float*>(outputs_->p)+std::size_t(path)*2560 : nullptr,
+        path,stream);
+}
+bool FlashNextExpertCache::execute_to(unsigned layer,int expert,const void* input,
+    float* output,unsigned path,cudaStream_t stream) {
+    if (output==nullptr) throw std::invalid_argument("expert cache device output is null");
+    return execute_impl(layer,expert,input,output,path,stream);
+}
+bool FlashNextExpertCache::execute_impl(unsigned layer,int expert,const void* input,
+    float* output,unsigned path,cudaStream_t stream) {
     unsigned slot=0;
     {
         std::lock_guard lock(mutex_); check_failure();
@@ -250,8 +263,7 @@ bool FlashNextExpertCache::execute(unsigned layer,int expert,const void* input,
         for(unsigned i=layer*budget_.slots_per_layer;i<(layer+1)*budget_.slots_per_layer;++i)
             if(entries_[i].expert==expert&&entries_[i].state==State::Ready){slot=i;found=true;break;}
         if(!found){++stats_.misses;return false;}
-        if((std::size_t(path)+1)*2560*sizeof(float)>outputs_->bytes)
-            throw std::out_of_range("expert cache hit buffer capacity");
+        if(output==nullptr)throw std::logic_error("Ready cache entry has no output storage");
         entries_[slot].epoch=++epoch_;++entries_[slot].leases;
         if (consumers_.empty() && timing_enabled_)
             CUDA_CHECK(cudaEventRecord(hit_start_, stream));
@@ -261,14 +273,14 @@ bool FlashNextExpertCache::execute(unsigned layer,int expert,const void* input,
         auto* descriptors=static_cast<FlashNextCachedExpertTask*>(batch_descriptors_->data());
         descriptors[consumers_.size()-1] = {view(slot), input,
             static_cast<std::uint16_t*>(activations_->p)+std::size_t(path)*640,
-            static_cast<float*>(outputs_->p)+std::size_t(path)*2560};
+            output};
         return true;
     }
     const auto submitted = timing_enabled_ ? std::chrono::steady_clock::now() :
         std::chrono::steady_clock::time_point{};
     flash_next_cached_expert_launch(view(slot),input,
         static_cast<std::uint16_t*>(activations_->p)+std::size_t(path)*640,
-        static_cast<float*>(outputs_->p)+std::size_t(path)*2560,stream);
+        output,stream);
     if (timing_enabled_) {
         std::lock_guard lock(mutex_);
         stats_.hit_submission_us += std::chrono::duration<double, std::micro>(
@@ -277,9 +289,8 @@ bool FlashNextExpertCache::execute(unsigned layer,int expert,const void* input,
     }
     return true;
 }
-void FlashNextExpertCache::begin_download(std::size_t bytes, cudaStream_t stream) {
+void FlashNextExpertCache::submit_consumers(cudaStream_t stream) {
     if (consumers_.empty()) return;
-    if (bytes > outputs_->bytes) throw std::out_of_range("expert cache result capacity");
     if (batching_layer_) {
         const auto submitted = timing_enabled_ ? std::chrono::steady_clock::now() :
             std::chrono::steady_clock::time_point{};
@@ -338,10 +349,38 @@ void FlashNextExpertCache::begin_download(std::size_t bytes, cudaStream_t stream
             stats_.grouped_groups += groups;
         }
     }
+}
+void FlashNextExpertCache::begin_download(std::size_t bytes, cudaStream_t stream) {
+    if (consumers_.empty()) return;
+    if (bytes > outputs_->bytes) throw std::out_of_range("expert cache result capacity");
+    submit_consumers(stream);
     if (timing_enabled_) CUDA_CHECK(cudaEventRecord(result_copy_start_, stream));
     CUDA_CHECK(cudaMemcpyAsync(result_buffer_->data(), outputs_->p, bytes,
                                cudaMemcpyDeviceToHost, stream));
     if (timing_enabled_) CUDA_CHECK(cudaEventRecord(hit_stop_, stream));
+}
+void FlashNextExpertCache::begin_device_results(cudaStream_t stream) {
+    if (consumers_.empty()) return;
+    submit_consumers(stream);
+    if (timing_enabled_) CUDA_CHECK(cudaEventRecord(hit_stop_, stream));
+}
+double FlashNextExpertCache::finish_consumers(cudaStream_t stream,double* wait_us) {
+    if (wait_us) *wait_us=0;
+    if (consumers_.empty()) return 0;
+    const auto waiting=timing_enabled_?std::chrono::steady_clock::now():
+        std::chrono::steady_clock::time_point{};
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    if(wait_us&&timing_enabled_)*wait_us=std::chrono::duration<double,std::micro>(
+        std::chrono::steady_clock::now()-waiting).count();
+    float gpu_ms=0;
+    if(timing_enabled_)CUDA_CHECK(cudaEventElapsedTime(&gpu_ms,hit_start_,hit_stop_));
+    std::lock_guard lock(mutex_);check_failure();
+    for(auto [slot,path]:consumers_){(void)path;--entries_[slot].leases;}
+    consumers_.clear();
+    return double(gpu_ms)*1000;
+}
+double FlashNextExpertCache::finish_device_results(cudaStream_t stream,double* wait_us) {
+    return finish_consumers(stream,wait_us);
 }
 double FlashNextExpertCache::finish_download(std::span<float> output, cudaStream_t stream,
     double* wait_us, double* result_copy_us) {

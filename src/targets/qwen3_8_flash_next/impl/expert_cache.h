@@ -77,12 +77,18 @@ public:
     void set_grouped_prefill(bool value) { grouped_prefill_ = value; }
     bool execute(unsigned layer, int expert, const void* device_input,
                  unsigned path, cudaStream_t stream);
+    // SV2 path: write a hit directly into caller-owned device route storage.
+    bool execute_to(unsigned layer, int expert, const void* device_input,
+                    float* device_output, unsigned path, cudaStream_t stream);
     // Completes hit consumers and releases their slot leases before any eviction.
     void download(std::span<float> pair_outputs, cudaStream_t stream);
     // Enqueue pinned result transfer before CPU misses; wait/copy/release only at merge.
     void begin_download(std::size_t output_bytes, cudaStream_t stream);
     double finish_download(std::span<float> pair_outputs, cudaStream_t stream,
                            double* wait_us = nullptr, double* result_copy_us = nullptr);
+    // Submit any deferred hit work without a result D2H, then join and release leases.
+    void begin_device_results(cudaStream_t stream);
+    double finish_device_results(cudaStream_t stream, double* wait_us = nullptr);
     void record_schedule(double cpu_us, double gpu_us, double wait_us, double wall_us);
     [[nodiscard]] bool timing_enabled() const { return timing_enabled_; }
     [[nodiscard]] bool serial_schedule() const { return serial_schedule_; }
@@ -145,6 +151,10 @@ private:
     double prior_weight_ = 0;
     bool static_profile_ = false, adaptive_heat_ = false, shutdown_profile_save_ = false;
     HostNvfp4ExpertPairView view(unsigned slot) const;
+    bool execute_impl(unsigned layer, int expert, const void* device_input,
+                      float* device_output, unsigned path, cudaStream_t stream);
+    void submit_consumers(cudaStream_t stream);
+    double finish_consumers(cudaStream_t stream, double* wait_us);
     void fill_loop() noexcept;
     void check_failure() const;
 };
