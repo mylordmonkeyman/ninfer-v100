@@ -203,14 +203,13 @@ jobs:
             name=baseline
             if [[ "$root" == . ]]; then name=candidate; fi
             set +e
-            NINFER_PHASE11_ORACLE_SMOKE_POSITIONS=4096 \
-              "$root/build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test" \
+            "$root/build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test" \
               > "sv0-results/$name-oracle-full.log" 2>&1
             status=$?
             set -e
             echo "$status" > "sv0-results/$name-oracle-full-exit.txt"
             grep -E '^phase11\.(host_expert\.(completed_layer_calls|routed_tokens|expert_pairs)|sampled_tokens|positions|nonfinite_positions|top1_agreement|mean_kl|p99_kl|relative_mean_nll_delta|mean_top5_overlap|mean_top10_overlap|maximum_logit_error|first_divergence\.|worst_kl\.)' \
-              "sv0-results/$name-oracle-full.log" > "sv0-results/$name-oracle-full-metrics.txt"
+              "sv0-results/$name-oracle-full.log" > "sv0-results/$name-oracle-full-metrics.txt" || true
           done
           cmp sv0-results/baseline-oracle-full-exit.txt sv0-results/candidate-oracle-full-exit.txt
           cmp sv0-results/baseline-oracle-full-metrics.txt sv0-results/candidate-oracle-full-metrics.txt

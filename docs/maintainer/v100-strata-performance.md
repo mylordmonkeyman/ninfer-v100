@@ -83,8 +83,8 @@ remain reported separately, after the cache has actually been configured.
 builds SM70 instrumentation and correctness targets on a CUDA 12.8 hosted runner.
 Then the self-hosted V100 runner builds both the fixed baseline and candidate,
 runs existing operator/executor tests with diagnostics off and on, compares
-64-position routing/input traces exactly, and executes the unchanged >=4096
-position Phase 11 oracle gate on both builds. A busy GPU causes a clear failure;
+64-position routing/input traces exactly, and executes the unchanged full-manifest
+Phase 11 oracle gate on both builds. A busy GPU causes a clear failure;
 the workflow never stops another workload. Failed gates prevent later steps.
 
 Operator/executor fixtures run with their default precision profile. The strict
@@ -106,7 +106,7 @@ suite. Its frozen baseline then reached and failed the unchanged 64-position
 Phase 11 numerical gate (mean KL `0.004876`, top-1 agreement `0.96875`). The SV0
 workflow therefore records oracle exit status instead of aborting immediately,
 requires candidate and telemetry routing/input traces to match the baseline
-exactly, compares selected 4096-position metrics exactly, and runs the disabled-
+exactly, compares selected full-manifest metrics exactly, and runs the disabled-
 instrumentation throughput screen. A final step still fails unless both unchanged
 oracle invocations pass; collecting later evidence never converts a failed gate
 into qualification.
@@ -122,6 +122,13 @@ The reuse assertion dirties and reads both exact PLE state slots owned by the
 released lane on the executor stream, and verifies that the allocator returns
 that lane. It no longer relies on default-stream ordering or an implicit first-
 slot assumption.
+
+The first full-manifest evidence attempt incorrectly passed `4096` through the
+smoke-count override, whose valid range ends at `4095`; the executable rejected
+the request before model load. The workflow now leaves that override unset, as
+required to select the unchanged 4,096-position manifest. Metric extraction is
+also non-short-circuiting so both baseline and candidate logs are preserved if a
+future executable exits before emitting the selected summary fields.
 
 The separate throughput screen performs two process-level ABBA cycles for cache
 off and cache on, with telemetry/cache timing/stage ledger disabled. It reports
