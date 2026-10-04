@@ -203,7 +203,7 @@ qualifies a residency policy.
 
 ## SV1 adaptive replacement implementation
 
-`NINFER_V100_EXPERT_POLICY=lru|heat|decay` selects replacement; `lru` remains
+`NINFER_V100_EXPERT_POLICY=lru|heat|decay|static|profile` selects replacement; `lru` remains
 the default. Heat policies accumulate selected route IDs once per layer call,
 including hits, before background admission. Victims remain restricted to their
 layer and uploads/leases remain protected. A heat-policy admission must be hotter
@@ -217,8 +217,7 @@ victim scores. No decay coefficient is promoted by default. Cache reset clears
 heat as well as residency. LRU allocates no heat table and performs no heat update.
 
 Adaptive replacement passed V100 correctness and default-policy parity in run
-37203161634. Learned persistence, profile-prior replacement, and held-out request
-performance qualification remain SV1 work. No adaptive policy is qualified or enabled by default.
+37203161634. Held-out request performance qualification remains SV1 work. No adaptive policy is qualified or enabled by default.
 
 ### SV1 startup profile seeding
 
@@ -232,6 +231,30 @@ H2D stream, and Ready publication path, with at most four outstanding jobs and a
 before the runtime exposes the cache. Seeding reports resident count and startup time.
 
 Default behavior stays LRU with no profile. Seeding can accompany opt-in heat or decay;
-this is initialization only, not yet profile-prior replacement or learned persistence.
+seeding supplies the original ranking for profile-prior replacement and learned persistence.
 Host parser checks and hardware ranked-seed/Ready/numerical checks cover this path.
 Held-out real-model policy throughput and resource qualification remain pending.
+
+### SV1 learned profiles and prior replacement
+
+`static` keeps the seeded Ready set fixed and restores it after a diagnostic reset. `profile` combines measured cumulative
+heat with `NINFER_V100_EXPERT_PRIOR_WEIGHT * (512 - rank) / 512`; the positive, finite
+weight must be chosen explicitly. Both require a startup profile in the runtime.
+Uploads and leases remain protected, victims remain within their layer, and equal
+scores retain residents. No coefficient or policy is enabled by default.
+
+`NINFER_V100_EXPERT_PROFILE_SAVE=/path/learned.json` enables heat collection and
+atomic profile saving on clean cache destruction after successful runtime startup. Explicit inference-owner calls
+to `save_profile` also save at a drained boundary when heat collection is enabled.
+Learned ordering puts current Ready residents first, then measured heat, original
+profile ranking, and expert index. Saved frequencies exclude the artificial prior.
+The write closes `<file>.tmp` successfully before rename. Explicit saves throw on
+failure; shutdown saves log `v100.profile.save_failed` and preserve the old file.
+With LRU plus saving, heat observation does not change replacement behavior.
+
+Startup seeding passed V100 run 37209468461 (artifact 11307454288), including
+canonical output checks and default-policy trace/full-metric parity. Static/prior
+and learned persistence now have host and hardware checks; their hardware result
+and held-out performance qualification are pending. The independent Phase11
+oracle remains a separate, unchanged numerical failure accepted by the user as
+the frozen baseline.

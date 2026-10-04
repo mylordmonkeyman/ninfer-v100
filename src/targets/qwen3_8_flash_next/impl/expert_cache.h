@@ -98,6 +98,10 @@ public:
     void admit(unsigned layer, std::span<const std::int32_t> ids);
     // Startup only: canonical fills complete before the runtime publishes the cache.
     void seed(const FlashNextExpertProfile& profile);
+    // Explicit inference-owner boundary; throws on write/fill failure.
+    void save_profile(const std::filesystem::path& path);
+    // Arm only after successful startup, so failed initialization cannot overwrite a profile.
+    void enable_shutdown_profile_save() { shutdown_profile_save_ = true; }
     void drain(); // test/shutdown boundary, never used by the current-token fill path
     struct LayerSnapshot {
         unsigned ready = 0, uploading = 0, leased = 0;
@@ -136,6 +140,10 @@ private:
     std::uint64_t epoch_ = 0;
     FlashNextExpertCacheStats stats_;
     std::unique_ptr<FlashNextExpertHeat> heat_;
+    std::unique_ptr<FlashNextExpertProfile> original_profile_;
+    std::string save_profile_path_;
+    double prior_weight_ = 0;
+    bool static_profile_ = false, adaptive_heat_ = false, shutdown_profile_save_ = false;
     HostNvfp4ExpertPairView view(unsigned slot) const;
     void fill_loop() noexcept;
     void check_failure() const;

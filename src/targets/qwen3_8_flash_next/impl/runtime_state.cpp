@@ -101,13 +101,19 @@ void FlashNextRuntimeAllocation::configure_expert_cache(const TextModelView& mod
             throw std::invalid_argument("expert cache admission cap must be 1 or 2");
         admission_cap=static_cast<unsigned>(*env-'0');
     }
+    const char* profile_path=std::getenv("NINFER_V100_EXPERT_PROFILE");
+    const char* policy=std::getenv("NINFER_V100_EXPERT_POLICY");
+    if (policy && (std::string_view(policy)=="static" || std::string_view(policy)=="profile") &&
+        (!profile_path || !*profile_path))
+        throw std::invalid_argument("static/profile policy requires a startup expert profile");
     auto cache=std::make_unique<FlashNextExpertCache>(*model.host_experts,
         std::max(plan_.config.prefill_chunk,plan_.config.max_concurrency),
         plan_.config.speculative_draft_tokens>0,maximum,admission_cap);
-    if (const char* path=std::getenv("NINFER_V100_EXPERT_PROFILE"); path && *path) {
+    if (const char* path=profile_path; path && *path) {
         cache->seed(FlashNextExpertProfile::load(path, model.host_experts->model_id,
             model.host_experts->weights_id));
     }
+    cache->enable_shutdown_profile_save();
     expert_cache_=std::move(cache);
     state_view_.expert_cache=expert_cache_.get();
 }

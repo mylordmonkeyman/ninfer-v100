@@ -15,6 +15,15 @@ int main() {
     decay.observe(0, {}); decay.observe(0, {});
     CHECK(decay.score(0,1) == 2);
     decay.reset(); CHECK(decay.score(0,1) == 0);
+    std::array<std::array<int,512>,48> ranking{};
+    for (auto& row:ranking) for (int id=0;id<512;++id) row[id]=id;
+    std::swap(ranking[0][0],ranking[0][9]);
+    FlashNextExpertHeat prior;
+    prior.set_prior(ranking,512);
+    CHECK(prior.score(0,9)==512 && prior.measured(0,9)==0);
+    prior.observe(0,std::array<std::int32_t,1>{0});
+    CHECK(prior.measured(0,0)==1 && prior.score(0,0)==504);
+    prior.reset(); CHECK(prior.score(0,9)==512 && prior.measured(0,0)==0);
     bool rejected = false;
     try { count.observe(0, std::array<std::int32_t,2>{1,512}); }
     catch (const std::invalid_argument&) { rejected = true; }

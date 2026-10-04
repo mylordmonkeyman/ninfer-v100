@@ -34,7 +34,17 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
         throw std::invalid_argument("expert cache admission cap must be 1 or 2");
     if (!max_tokens) throw std::invalid_argument("zero expert cache token capacity");
     if (const char* policy = std::getenv("NINFER_V100_EXPERT_POLICY"); policy && *policy) {
-        if (std::strcmp(policy, "heat") == 0) {
+        if (std::strcmp(policy, "static") == 0) {
+            static_profile_=true; admissions_enabled_=false;
+        } else if (std::strcmp(policy, "profile") == 0) {
+            const char* weight=std::getenv("NINFER_V100_EXPERT_PRIOR_WEIGHT");
+            char* end=nullptr;
+            if (!weight) throw std::invalid_argument("profile policy requires explicit prior weight");
+            prior_weight_=std::strtod(weight,&end);
+            if (end==weight || *end || !std::isfinite(prior_weight_) || prior_weight_<=0)
+                throw std::invalid_argument("invalid expert profile prior weight");
+            heat_=std::make_unique<FlashNextExpertHeat>();
+        } else if (std::strcmp(policy, "heat") == 0) {
             heat_ = std::make_unique<FlashNextExpertHeat>();
         } else if (std::strcmp(policy, "decay") == 0) {
             const char* coefficient = std::getenv("NINFER_V100_EXPERT_DECAY");
@@ -49,8 +59,15 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
                 throw std::invalid_argument("invalid expert decay interval");
             heat_ = std::make_unique<FlashNextExpertHeat>(decay, static_cast<unsigned>(calls));
         } else if (std::strcmp(policy, "lru") != 0) {
-            throw std::invalid_argument("expert policy must be lru, heat, or decay");
+            throw std::invalid_argument("expert policy must be lru, heat, decay, static, or profile");
         }
+    }
+    adaptive_heat_=bool(heat_);
+    if (const char* path=std::getenv("NINFER_V100_EXPERT_PROFILE_SAVE");path && *path) {
+        if (host.model_id.empty() || host.weights_id.empty())
+            throw std::invalid_argument("learned profile requires actual artifact identity");
+        save_profile_path_=path;
+        if (!heat_) heat_=std::make_unique<FlashNextExpertHeat>();
     }
     for (const auto& layer : host.layers) {
         if (layer.compact_bytes_per_expert_pair() != kExpertPairBytes ||
@@ -116,6 +133,12 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
         budget_.used_limit_bytes,result_buffer_->size()+fill_buffer_->size()+batch_descriptors_->size()+group_descriptors_->size());
 }
 FlashNextExpertCache::~FlashNextExpertCache() {
+    if (shutdown_profile_save_ && !save_profile_path_.empty()) {
+        try { save_profile(save_profile_path_); }
+        catch (const std::exception& e) {
+            std::fprintf(stderr,"v100.profile.save_failed=%s\n",e.what());
+        }
+    }
     { std::lock_guard lock(mutex_); stop_=true; work_.notify_one(); }
     if(worker_.joinable())worker_.join();
     if(fill_stream_)cudaStreamDestroy(fill_stream_);
@@ -145,6 +168,8 @@ void FlashNextExpertCache::seed(const FlashNextExpertProfile& profile) {
             }
         }
     }
+    original_profile_=std::make_unique<FlashNextExpertProfile>(profile);
+    if (prior_weight_>0) heat_->set_prior(profile.ranking,prior_weight_);
     const auto start = std::chrono::steady_clock::now();
     for (unsigned layer = 0; layer < 48; ++layer) {
         for (unsigned rank = 0; rank < budget_.slots_per_layer;) {
@@ -166,6 +191,32 @@ void FlashNextExpertCache::seed(const FlashNextExpertProfile& profile) {
     std::fprintf(stderr,"v100.profile.seeded=%zu\nv100.profile.startup_ms=%.3f\n",
         entries_.size(), std::chrono::duration<double,std::milli>(
             std::chrono::steady_clock::now()-start).count());
+}
+void FlashNextExpertCache::save_profile(const std::filesystem::path& path) {
+    drain();
+    if (!heat_) throw std::logic_error("profile save requires heat collection enabled before inference");
+    FlashNextExpertProfile profile;
+    FlashNextExpertProfile::Heat measured{};
+    FlashNextExpertProfile::Residents residents{};
+    {
+        std::lock_guard lock(mutex_); check_failure();
+        if (!consumers_.empty()) throw std::logic_error("profile save with outstanding consumers");
+        if (host_.model_id.empty() || host_.weights_id.empty())
+            throw std::invalid_argument("profile save requires actual artifact identity");
+        if (original_profile_) profile=*original_profile_;
+        else {
+            profile.model_id=host_.model_id;profile.weights_id=host_.weights_id;
+            for (auto& row:profile.ranking) for (int id=0;id<512;++id) row[id]=id;
+        }
+        for (unsigned layer=0;layer<48;++layer) {
+            if (heat_) for (unsigned id=0;id<512;++id) measured[layer][id]=heat_->measured(layer,id);
+            for (unsigned slot=layer*budget_.slots_per_layer;
+                    slot<(layer+1)*budget_.slots_per_layer;++slot)
+                if (entries_[slot].state==State::Ready) residents[layer][entries_[slot].expert]=true;
+        }
+    }
+    profile.learned(measured,residents).save(path,measured);
+    std::fprintf(stderr,"v100.profile.saved=%s\n",path.c_str());
 }
 void FlashNextExpertCache::check_failure() const { if(failure_)std::rethrow_exception(failure_); }
 HostNvfp4ExpertPairView FlashNextExpertCache::view(unsigned slot) const {
@@ -338,13 +389,19 @@ void FlashNextExpertCache::record_schedule(double cpu, double gpu, double wait, 
 }
 void FlashNextExpertCache::reset() {
     drain();
-    std::lock_guard lock(mutex_);
-    if (!consumers_.empty()) throw std::logic_error("cache reset with outstanding consumers");
-    std::fill(entries_.begin(), entries_.end(), Entry{});
-    stats_ = {};
-    epoch_ = 0;
-    if (heat_) heat_->reset();
-    admissions_enabled_ = true;
+    std::unique_ptr<FlashNextExpertProfile> reseed;
+    {
+        std::lock_guard lock(mutex_);
+        if (!consumers_.empty()) throw std::logic_error("cache reset with outstanding consumers");
+        std::fill(entries_.begin(), entries_.end(), Entry{});
+        stats_ = {};
+        epoch_ = 0;
+        if (heat_) heat_->reset();
+        admissions_enabled_ = !static_profile_;
+        if (static_profile_ && original_profile_)
+            reseed=std::make_unique<FlashNextExpertProfile>(*original_profile_);
+    }
+    if (reseed) seed(*reseed);
 }
 void FlashNextExpertCache::admit(unsigned layer,std::span<const std::int32_t> ids) {
     const auto started = timing_enabled_ ? std::chrono::steady_clock::now() :
@@ -366,7 +423,7 @@ void FlashNextExpertCache::admit(unsigned layer,std::span<const std::int32_t> id
             const auto& e=entries_[i];
             if(e.leases||e.state==State::Uploading)continue;
             bool colder = victim == end;
-            if (!colder && heat_ && e.state != State::Empty) {
+            if (!colder && adaptive_heat_ && e.state != State::Empty) {
                 const auto score = heat_->score(layer, e.expert);
                 const auto old_score = heat_->score(layer, entries_[victim].expert);
                 colder = score < old_score || (score == old_score && e.epoch < entries_[victim].epoch);
@@ -377,7 +434,7 @@ void FlashNextExpertCache::admit(unsigned layer,std::span<const std::int32_t> id
             if(e.state==State::Empty)break;
         }
         if(victim==end){++stats_.victim_declined_calls;break;}
-        if (heat_ && entries_[victim].state != State::Empty &&
+        if (adaptive_heat_ && entries_[victim].state != State::Empty &&
             heat_->score(layer, id) <= heat_->score(layer, entries_[victim].expert))
             continue;
         if(entries_[victim].state!=State::Empty)++stats_.evicted;

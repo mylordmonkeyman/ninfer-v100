@@ -2,6 +2,9 @@
 
 #include <nlohmann/json.hpp>
 #include <array>
+#include <algorithm>
+#include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -42,6 +45,44 @@ struct FlashNextExpertProfile {
             }
         }
         return profile;
+    }
+    using Heat = std::array<std::array<double,512>,48>;
+    using Residents = std::array<std::array<bool,512>,48>;
+    // Residents first; measured heat, original ranking, then expert index resolve ties.
+    [[nodiscard]] FlashNextExpertProfile learned(const Heat& heat, const Residents& resident) const {
+        auto result = *this;
+        for (unsigned layer=0;layer<48;++layer) {
+            std::array<unsigned,512> prior{};
+            for (unsigned rank=0;rank<512;++rank) prior[ranking[layer][rank]]=rank;
+            for (unsigned id=0;id<512;++id) {
+                if (!std::isfinite(heat[layer][id]) || heat[layer][id]<0)
+                    throw std::invalid_argument("invalid learned expert heat");
+                result.ranking[layer][id]=id;
+            }
+            auto& row=result.ranking[layer];
+            std::sort(row.begin(),row.end(),[&](int a,int b) {
+                if (resident[layer][a]!=resident[layer][b]) return resident[layer][a];
+                if (heat[layer][a]!=heat[layer][b]) return heat[layer][a]>heat[layer][b];
+                if (prior[a]!=prior[b]) return prior[a]<prior[b];
+                return a<b;
+            });
+        }
+        return result;
+    }
+    void save(const std::filesystem::path& path, const Heat& heat) const {
+        nlohmann::json j={{"magic","NINFER_V100_EXPERT_PROFILE"},{"version",2},
+            {"model_id",model_id},{"weights_id",weights_id},{"layers",48},
+            {"experts_per_layer",512},{"ranking",ranking},{"frequency",heat},
+            {"source","runtime_learned"}};
+        auto temporary=path; temporary += ".tmp";
+        {
+            std::ofstream output(temporary);
+            if (!output) throw std::runtime_error("cannot create learned expert profile");
+            output << j.dump(2) << '\n';
+            output.close();
+            if (!output) throw std::runtime_error("cannot write learned expert profile");
+        }
+        std::filesystem::rename(temporary,path);
     }
     static FlashNextExpertProfile load(const char* path, std::string_view model,
             std::string_view weights) {

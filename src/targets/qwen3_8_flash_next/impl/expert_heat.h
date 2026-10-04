@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <span>
+#include <memory>
 #include <stdexcept>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
@@ -30,14 +31,33 @@ public:
             calls_[layer] = 0;
         }
     }
-    [[nodiscard]] double score(unsigned layer, unsigned expert) const {
+    void set_prior(const std::array<std::array<int,512>,48>& ranking, double weight) {
+        if (!std::isfinite(weight) || weight<=0)
+            throw std::invalid_argument("profile prior weight must be positive and finite");
+        auto prior=std::make_unique<std::array<std::array<double,512>,48>>();
+        for (unsigned layer=0;layer<48;++layer) {
+            std::array<bool,512> seen{};
+            for (unsigned rank=0;rank<512;++rank) {
+                const int id=ranking[layer][rank];
+                if (id<0 || id>=512 || seen[id]) throw std::invalid_argument("invalid prior ranking");
+                seen[id]=true;
+                (*prior)[layer][id]=weight*(512-rank)/512.0;
+            }
+        }
+        prior_=std::move(prior);
+    }
+    [[nodiscard]] double measured(unsigned layer, unsigned expert) const {
         return heat_.at(layer).at(expert) + pending_.at(layer).at(expert);
+    }
+    [[nodiscard]] double score(unsigned layer, unsigned expert) const {
+        return measured(layer,expert) + (prior_ ? prior_->at(layer).at(expert) : 0);
     }
     void reset() { heat_ = {}; pending_ = {}; calls_ = {}; }
 private:
     std::array<std::array<double, 512>, 48> heat_{};
     std::array<std::array<std::uint64_t, 512>, 48> pending_{};
     std::array<unsigned, 48> calls_{};
+    std::unique_ptr<std::array<std::array<double,512>,48>> prior_;
     double decay_;
     unsigned interval_;
 };

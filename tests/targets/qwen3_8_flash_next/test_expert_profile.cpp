@@ -30,6 +30,24 @@ int main() { try {
     bad=j; bad["version"]=1;
     rejects([&]{FlashNextExpertProfile::parse(bad,"model","weights");});
     rejects([&]{FlashNextExpertProfile::load("/nonexistent-v100-profile","model","weights");});
-    std::cout<<"PASS: identity, schema, complete unique rankings\n";
+    FlashNextExpertProfile::Heat heat{};
+    FlashNextExpertProfile::Residents resident{};
+    resident[0][10]=true; heat[0][11]=10; heat[0][12]=10;
+    std::swap(p.ranking[0][11],p.ranking[0][12]);
+    auto learned=p.learned(heat,resident);
+    require(learned.ranking[0][0]==10 && learned.ranking[0][1]==12 &&
+        learned.ranking[0][2]==11 && learned.ranking[0][3]==0);
+    const auto directory=std::filesystem::temp_directory_path()/"ninfer-v100-profile-host-test";
+    std::filesystem::create_directory(directory);
+    const auto path=directory/"profile.json";
+    learned.save(path,heat);
+    p.save(path,heat); // Atomic replacement, not append.
+    const auto restored=FlashNextExpertProfile::load(path.c_str(),"model","weights");
+    require(restored.ranking==p.ranking && !std::filesystem::exists(path.string()+".tmp"));
+    rejects([&]{learned.save(directory/"absent"/"profile.json",heat);});
+    heat[0][0]=std::numeric_limits<double>::infinity();
+    rejects([&]{(void)p.learned(heat,resident);});
+    std::filesystem::remove_all(directory);
+    std::cout<<"PASS: identity, schema, rankings, learned ordering, atomic save/reload\n";
     return 0;
 } catch (const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; } }

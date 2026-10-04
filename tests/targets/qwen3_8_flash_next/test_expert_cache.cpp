@@ -245,6 +245,58 @@ int main(){try{
     rejected=false;
     try { seeded.seed(profile); } catch (const std::logic_error&) { rejected=true; }
     require(rejected,"seed overwrote a nonempty cache");
+    setenv("NINFER_V100_EXPERT_POLICY","static",1);
+    FlashNextExpertCache static_cache(host,1,false,1);
+    unsetenv("NINFER_V100_EXPERT_POLICY");
+    static_cache.seed(profile);
+    static_cache.admit(0,ids);static_cache.drain();
+    require(static_cache.stats().admitted==48,"static profile admitted dynamic experts");
+    static_cache.ready_view(0,2);
+    static_cache.reset();static_cache.admit(0,ids);static_cache.drain();
+    require(static_cache.stats().admitted==48,"static profile reset changed fixed residency");
+    setenv("NINFER_V100_EXPERT_POLICY","profile",1);
+    setenv("NINFER_V100_EXPERT_PRIOR_WEIGHT","512",1);
+    FlashNextExpertCache prior_cache(host,1,false,1);
+    unsetenv("NINFER_V100_EXPERT_POLICY");unsetenv("NINFER_V100_EXPERT_PRIOR_WEIGHT");
+    prior_cache.seed(profile);
+    const std::int32_t newcomer=1;
+    prior_cache.admit(0,std::span(&newcomer,1));prior_cache.drain();
+    require(prior_cache.stats().admitted==48,"profile prior lost hotter seeded expert");
+    prior_cache.begin_layer(false);
+    require(prior_cache.execute(0,2,d_input.p,0,device.stream),"profile prior lease missing");
+    const std::int32_t hotter[]={1,1,1,1,1,1};
+    prior_cache.admit(0,hotter);prior_cache.drain();
+    require(prior_cache.stats().admitted==48,"profile prior evicted leased expert");
+    prior_cache.download(out,device.stream);
+    prior_cache.admit(0,std::span(&newcomer,1));prior_cache.drain();
+    prior_cache.ready_view(0,1);prior_cache.ready_view(1,2);
+    require(prior_cache.stats().admitted==49,"measured heat failed to overcome prior");
+    const auto save_path=std::filesystem::temp_directory_path()/"ninfer-v100-cache-learned.json";
+    prior_cache.save_profile(save_path);
+    const auto learned=FlashNextExpertProfile::load(save_path.c_str(),host.model_id,host.weights_id);
+    require(learned.ranking[0][0]==1 && learned.ranking[1][0]==2,
+        "learned profile failed resident-first layer ordering");
+    std::filesystem::remove(save_path);
+    // Saving with LRU must observe heat without changing LRU replacement.
+    setenv("NINFER_V100_EXPERT_POLICY","lru",1);
+    setenv("NINFER_V100_EXPERT_PROFILE_SAVE",save_path.c_str(),1);
+    {
+        FlashNextExpertCache learning_lru(host,1,false,1);
+        unsetenv("NINFER_V100_EXPERT_POLICY");unsetenv("NINFER_V100_EXPERT_PROFILE_SAVE");
+        learning_lru.admit(0,std::array<std::int32_t,4>{0,0,0,0});learning_lru.drain();
+        learning_lru.admit(0,std::span(&newcomer,1));learning_lru.drain();
+        learning_lru.ready_view(0,1);
+        learning_lru.enable_shutdown_profile_save();
+    }
+    const auto saved=FlashNextExpertProfile::load(save_path.c_str(),host.model_id,host.weights_id);
+    require(saved.ranking[0][0]==1 && saved.ranking[0][1]==0,
+        "shutdown save or observation-only LRU failed");
+    std::ifstream saved_input(save_path);
+    nlohmann::json saved_json; saved_input>>saved_json;
+    require(saved_json["frequency"][0][0]==4 && saved_json["frequency"][0][1]==1,
+        "LRU saving did not preserve measured frequencies");
+    saved_input.close();
+    std::filesystem::remove(save_path);
     std::cout<<"PASS: budget, canonical bytes, oracle, admission, LRU, heat, leases, namespaces\n";
     return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
