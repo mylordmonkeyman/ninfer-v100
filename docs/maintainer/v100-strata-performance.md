@@ -254,7 +254,40 @@ With LRU plus saving, heat observation does not change replacement behavior.
 
 Startup seeding passed V100 run 37209468461 (artifact 11307454288), including
 canonical output checks and default-policy trace/full-metric parity. Static/prior
-and learned persistence now have host and hardware checks; their hardware result
-and held-out performance qualification are pending. The independent Phase11
+and learned persistence passed V100 run 37215774635 (artifact 11310560177):
+6/6 candidate correctness tests, 5/5 telemetry checks, and default-policy exact
+trace/full-metric parity. Held-out performance qualification remains pending. The independent Phase11
 oracle remains a separate, unchanged numerical failure accepted by the user as
 the frozen baseline.
+
+### SV1 real-artifact held-out screen
+
+`.github/workflows/v100-sv1.yml` runs the actual artifact executor with separate
+384-token corpus segments: source positions 0–383 for training and 2048–2431 for
+held-out evaluation. Each segment starts with fresh recurrent state and uses
+128 prefill plus 256 teacher-forced decode tokens. Original oracle logits are
+not reused for these changed prefixes. The Phase 11 gate is unchanged.
+
+`tools/diagnostics/v100_sv1_residency.py` trains with real routing, verifies the
+clean-shutdown profile's measured frequencies against all 48 layers of telemetry,
+and reloads the runtime-produced profile with static residency before inference.
+A separate frequency-ranked training profile seeds static/heat/decay/profile arms.
+The evaluation-only route histogram never changes the supplied ranking.
+Cache-off and empty dynamic LRU are controls. The planner's training capacity is
+fixed for all cached evaluation arms; cache/transfer/runtime allocation categories
+must match. Actual CUDA-used memory and startup latency are recorded separately.
+
+Each policy receives one diagnostic pass and three fresh-process timing passes
+in alternating order. Timing disables telemetry, cache events, and stage ledgers.
+Diagnostics preserve hits by layer/phase, CPU miss branch wall time, fills,
+evictions, queue bounds, and complete route counts. Static actual hit counts must
+match projection onto that arm's actual routes. A separate CPU-only projection
+is retained because CPU/GPU arithmetic can change downstream routing. Decay 0.9
+at 32 layer calls and prior weight 32 are explicit screening coefficients only.
+
+The report keeps the final BF16 logits and per-position decode top-1 results for
+supplementary pairwise screening, checks finite outputs and the committed state
+frontier, and samples GPU thermal status. It never promotes a policy. This
+teacher-forced executor screen includes logits downloads and finite scans, uses
+warm PLE/filesystem access, and does not replace independent numerical
+qualification or production request/MTP/continuation/long-context measurements.

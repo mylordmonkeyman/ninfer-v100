@@ -1393,6 +1393,139 @@ static int run_cache_benchmark(FlashNextTextExecutor& executor,
     return 0;
 }
 
+// SV1 reuses the real artifact executor but supplies a separate bounded workload.
+// Corpus slices start fresh at token index zero; no oracle logits are attributed
+// to a different prefix. This is policy screening, not the Phase 11 oracle gate.
+struct Sv1Workload {
+    std::string name;
+    std::vector<std::int32_t> tokens;
+    unsigned prefill_tokens = 0;
+};
+
+static Sv1Workload load_sv1_workload(const char* path) {
+    std::ifstream input(path);
+    if (!input) throw std::runtime_error("cannot open SV1 workload");
+    json j; input >> j;
+    Sv1Workload w{j.at("name").get<std::string>(),
+                  j.at("tokens").get<std::vector<std::int32_t>>(),
+                  j.at("prefill_tokens").get<unsigned>()};
+    if (w.name.empty() || w.tokens.size() > 4096 || w.prefill_tokens == 0 ||
+        w.prefill_tokens >= w.tokens.size() ||
+        std::any_of(w.tokens.begin(), w.tokens.end(), [](int t) { return t < 0 || t >= 248077; }))
+        throw std::invalid_argument("invalid bounded SV1 workload");
+    return w;
+}
+
+static int run_sv1_residency(FlashNextTextExecutor& executor,
+    FlashNextRuntimeAllocation& allocation, ninfer::DeviceContext& device,
+    const Sv1Workload& workload, const ninfer::artifact::ArtifactIdentity& identity,
+    double startup_seconds) {
+    auto* cache = allocation.state_view().expert_cache;
+    const auto stats = [&] { return cache ? cache->stats() : FlashNextExpertCacheStats{}; };
+    std::size_t free_bytes = 0, total_bytes = 0;
+    CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+    const auto initial = stats();
+    std::array<unsigned,48> ready{};
+    if (cache) for (unsigned layer=0;layer<48;++layer) {
+        const auto snapshot = cache->layer_snapshot(layer);
+        if (snapshot.uploading || snapshot.leased)
+            throw std::runtime_error("SV1 startup published unfinished cache fills");
+        ready[layer] = snapshot.ready;
+    }
+    const char* profile = std::getenv("NINFER_V100_EXPERT_PROFILE");
+    if (cache && profile && *profile &&
+        std::any_of(ready.begin(),ready.end(),[&](auto n) { return n != cache->budget().slots_per_layer; }))
+        throw std::runtime_error("SV1 real-artifact startup residency incomplete");
+    const char* policy = std::getenv("NINFER_V100_EXPERT_POLICY");
+    std::cout << json{{"sv1","startup"},{"workload",workload.name},
+        {"model_id",identity.model_id},{"weights_id",identity.weights_id},
+        {"policy",cache?(policy?policy:"lru"):"off"},
+        {"cache_bytes",cache?cache->budget().cache_bytes:0},
+        {"transfer_budget_bytes",cache?cache->budget().transfer_bytes:0},
+        {"slots_per_layer",cache?cache->budget().slots_per_layer:0},
+        {"ready_by_layer",ready},{"startup_seconds",startup_seconds},
+        {"cuda_used_bytes",total_bytes-free_bytes},
+        {"runtime_plan_device_bytes",allocation.plan().total_device_bytes}}.dump() << '\n';
+    auto lane = executor.allocate_lane();
+    const std::array<LaneCommitDecision,1> decisions{{{.accept=true}}};
+    std::vector<std::uint16_t> final_logits;
+    std::vector<int> decode_top1;
+    const auto read = [&](const ninfer::Tensor& tensor) {
+        final_logits.resize(static_cast<std::size_t>(tensor.ne[0]));
+        CUDA_CHECK(cudaMemcpyAsync(final_logits.data(),tensor.data,
+            final_logits.size()*sizeof(std::uint16_t),cudaMemcpyDeviceToHost,device.stream));
+        device.synchronize();
+        float maximum = -std::numeric_limits<float>::infinity();
+        int best = 0;
+        for (std::size_t i=0;i<final_logits.size();++i) {
+            const float v=bf16_to_float(final_logits[i]);
+            if (!std::isfinite(v)) throw std::runtime_error("nonfinite SV1 logits");
+            if (i<248077 && v>maximum) { maximum=v; best=static_cast<int>(i); }
+        }
+        return best;
+    };
+    const auto emit = [&](const char* shape,unsigned count,double seconds,
+            const FlashNextExpertCacheStats& before,const FlashNextExpertCacheStats& after) {
+        std::cout << json{{"sv1","measurement"},{"shape",shape},{"tokens",count},
+            {"seconds",seconds},{"tokens_per_s",count/seconds},
+            {"hits",after.hits-before.hits},{"misses",after.misses-before.misses},
+            {"admitted",after.admitted-before.admitted},{"evicted",after.evicted-before.evicted},
+            {"cpu_branch_us",cache && cache->timing_enabled() ? json(after.cpu_branch_us-before.cpu_branch_us) : json(nullptr)},
+            {"maximum_outstanding",after.maximum_outstanding}}.dump() << '\n' << std::flush;
+    };
+    device.synchronize();
+    auto started=std::chrono::steady_clock::now();
+    for (unsigned offset=0;offset<workload.prefill_tokens;offset+=128) {
+        const auto count=std::min(128U,workload.prefill_tokens-offset);
+        std::vector<std::array<std::int32_t,3>> positions(count);
+        for (unsigned i=0;i<count;++i) {
+            const auto p=static_cast<std::int32_t>(offset+i); positions[i]={p,p,p};
+        }
+        auto round=executor.execute_prefill_chunk(lane,
+            std::span(workload.tokens).subspan(offset,count),positions,offset);
+        (void)read(round.logits()); round.commit(decisions);
+    }
+    device.synchronize();
+    const auto prefill_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
+    const auto prefilled=stats();
+    emit("prefill",workload.prefill_tokens,prefill_seconds,initial,prefilled);
+    started=std::chrono::steady_clock::now();
+    for (unsigned i=workload.prefill_tokens;i<workload.tokens.size();++i) {
+        const auto p=static_cast<std::int32_t>(i);
+        LaneStepRequest request{.handle=lane,.token_id=workload.tokens[i],.token_index=p,
+            .mrope_positions={p,p,p},.sampling={},.custom_embedding=nullptr};
+        auto round=executor.execute_round(std::span(&request,1),nullptr);
+        decode_top1.push_back(read(round.logits())); round.commit(decisions);
+    }
+    device.synchronize();
+    const auto seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
+    const auto completed=stats();
+    emit("decode",static_cast<unsigned>(workload.tokens.size()-workload.prefill_tokens),seconds,prefilled,completed);
+    if (executor.committed_frontier(lane)!=static_cast<int>(workload.tokens.size()))
+        throw std::runtime_error("SV1 state frontier mismatch");
+    executor.release_lane(lane); device.synchronize();
+    started=std::chrono::steady_clock::now();
+    if(cache)cache->drain();
+    const auto drained=stats();
+    const double drain_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
+    if (drained.maximum_outstanding>4) throw std::runtime_error("SV1 fill queue bound violated");
+    const char* output=std::getenv("NINFER_V100_SV1_LOGITS");
+    if (!output || !*output) throw std::invalid_argument("SV1 final logits output required");
+    std::ofstream file(output,std::ios::binary);
+    file.write(reinterpret_cast<const char*>(final_logits.data()),
+        static_cast<std::streamsize>(final_logits.size()*sizeof(std::uint16_t)));
+    file.close();
+    if(!file)throw std::runtime_error("cannot write SV1 final logits");
+    std::cout << json{{"sv1","complete"},{"tokens",workload.tokens.size()},
+        {"decode_top1",decode_top1},{"final_logit_words",final_logits.size()},
+        {"drain_seconds",drain_seconds},{"fill_bytes",drained.fill_bytes-initial.fill_bytes},
+        {"fill_wall_us",drained.fill_wall_us-initial.fill_wall_us},
+        {"admitted",drained.admitted-initial.admitted},{"evicted",drained.evicted-initial.evicted},
+        {"qualified",false}}.dump() << '\n' << std::flush;
+    std::cout << "PASS: SV1 real-artifact workload finite and committed\n";
+    return 0;
+}
+
 int main() {
 #if !defined(NINFER_VOLTA_BUILD)
     std::cout << "SKIP: Phase 11 real vertical slice is an SM70 qualification target\n";
@@ -1421,18 +1554,30 @@ int main() {
         const fs::path weights_path(weights_env);
         const fs::path manifest_path(oracle_env);
         const std::uint32_t required_positions = required_oracle_positions();
-        std::vector<OracleRecord> records = load_manifest(manifest_path);
-        if (records.size() < required_positions) {
+        const char* sv1_path=std::getenv("NINFER_V100_SV1_WORKLOAD");
+        const bool sv1=sv1_path && *sv1_path;
+        Sv1Workload sv1_workload;
+        std::vector<OracleRecord> records;
+        if (sv1) {
+            sv1_workload=load_sv1_workload(sv1_path);
+            records.resize(sv1_workload.tokens.size());
+            for (std::size_t i=0;i<records.size();++i) {
+                records[i].position=static_cast<std::uint32_t>(i);
+                records[i].token_id=sv1_workload.tokens[i];
+            }
+        } else { records=load_manifest(manifest_path); }
+        if (!sv1 && records.size() < required_positions) {
             throw std::runtime_error(
                 "Phase 11 oracle has fewer positions than required");
         }
-        if (required_positions < 4'096U && records.size() > required_positions) {
+        if (!sv1 && required_positions < 4'096U && records.size() > required_positions) {
             records.resize(required_positions);
         }
-        std::cout << "phase11.oracle_mode="
-                  << (required_positions < 4'096U ? "smoke" : "qualification")
-                  << '\n'
-                  << "phase11.required_positions=" << required_positions << '\n';
+        if (!sv1) {
+            std::cout << "phase11.oracle_mode="
+                      << (required_positions < 4'096U ? "smoke" : "qualification")
+                      << '\n' << "phase11.required_positions=" << required_positions << '\n';
+        }
 
         const std::uint32_t max_context = round_up_128(
             std::max<std::uint64_t>(8'192ULL, records.size() + 1ULL));
@@ -1476,7 +1621,12 @@ int main() {
         const auto vram_result =
             reconcile_phase11_vram(preflight.vram_ledger, vram);
         print_vram(preflight.vram_ledger, vram_result);
+        const auto cache_started=std::chrono::steady_clock::now();
         allocation.configure_expert_cache(model.text_view());
+        const double cache_startup_seconds=std::chrono::duration<double>(
+            std::chrono::steady_clock::now()-cache_started).count();
+        if (sv1) return run_sv1_residency(executor,allocation,device,sv1_workload,
+            preflight.identity,cache_startup_seconds);
 
         reset_flash_next_host_expert_execution_stats();
         if (const char* graph_pair = std::getenv("NINFER_PHASE17_HIT_GRAPH_BENCHMARK");
