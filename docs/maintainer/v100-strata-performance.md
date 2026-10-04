@@ -101,6 +101,16 @@ records the overlay and matching harness hashes, and leaves its engine sources
 unchanged. Neither run reached candidate GPU tests or oracle/throughput results;
 qualification remains pending the corrected run.
 
+The next run passed all baseline/candidate correctness tests and the telemetry-on
+suite. Its frozen baseline then reached and failed the unchanged 64-position
+Phase 11 numerical gate (mean KL `0.004876`, top-1 agreement `0.96875`). The SV0
+workflow therefore records oracle exit status instead of aborting immediately,
+requires candidate and telemetry routing/input traces to match the baseline
+exactly, compares selected 4096-position metrics exactly, and runs the disabled-
+instrumentation throughput screen. A final step still fails unless both unchanged
+oracle invocations pass; collecting later evidence never converts a failed gate
+into qualification.
+
 The separate throughput screen performs two process-level ABBA cycles for cache
 off and cache on, with telemetry/cache timing/stage ledger disabled. It reports
 process medians and complete ranges, checks equal cache capacity, and rejects

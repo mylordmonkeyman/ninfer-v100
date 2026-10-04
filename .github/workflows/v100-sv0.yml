@@ -165,18 +165,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS=64 NINFER_PHASE12_CPU_TRACE="$PWD/sv0-results/baseline-trace.bin" \
-            sv0-baseline/build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
-            > sv0-results/baseline-oracle-smoke.log 2>&1
-          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS=64 NINFER_PHASE12_CPU_TRACE="$PWD/sv0-results/candidate-trace.bin" \
-            build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
-            > sv0-results/candidate-oracle-smoke.log 2>&1
+          run_smoke() {
+            local name="$1" executable="$2" telemetry="$3"
+            set +e
+            NINFER_PHASE11_ORACLE_SMOKE_POSITIONS=64 NINFER_V100_TELEMETRY="$telemetry" \
+              NINFER_PHASE12_CPU_TRACE="$PWD/sv0-results/$name-trace.bin" \
+              "$executable" > "sv0-results/$name-oracle-smoke.log" 2>&1
+            local status=$?
+            set -e
+            echo "$status" > "sv0-results/$name-oracle-smoke-exit.txt"
+          }
+          run_smoke baseline sv0-baseline/build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test 0
+          run_smoke candidate build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test 0
           cmp sv0-results/baseline-trace.bin sv0-results/candidate-trace.bin
-          NINFER_PHASE11_ORACLE_SMOKE_POSITIONS=64 NINFER_V100_TELEMETRY=1 \
-            NINFER_PHASE12_CPU_TRACE="$PWD/sv0-results/telemetry-trace.bin" \
-            build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
-            > sv0-results/telemetry-oracle-smoke.log 2>&1
+          run_smoke telemetry build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test 1
           cmp sv0-results/candidate-trace.bin sv0-results/telemetry-trace.bin
+          cmp sv0-results/baseline-oracle-smoke-exit.txt sv0-results/candidate-oracle-smoke-exit.txt
+          cmp sv0-results/candidate-oracle-smoke-exit.txt sv0-results/telemetry-oracle-smoke-exit.txt
           python3 tools/diagnostics/v100_sv0_report.py sv0-results/telemetry-oracle-smoke.log \
             --candidate-sha "$(cat sv0-results/candidate-sha.txt)" --output sv0-results/telemetry-report.json
       - name: Unchanged long-prefix oracle gate for baseline and candidate
@@ -186,11 +191,18 @@ jobs:
           for root in sv0-baseline .; do
             name=baseline
             if [[ "$root" == . ]]; then name=candidate; fi
+            set +e
             NINFER_PHASE11_ORACLE_SMOKE_POSITIONS=4096 \
               "$root/build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test" \
               > "sv0-results/$name-oracle-full.log" 2>&1
-            grep -q 'PASS: Phase 11 whole-model eager host-backed vertical slice' "sv0-results/$name-oracle-full.log"
+            status=$?
+            set -e
+            echo "$status" > "sv0-results/$name-oracle-full-exit.txt"
+            grep -E '^phase11\.(host_expert\.(completed_layer_calls|routed_tokens|expert_pairs)|sampled_tokens|positions|nonfinite_positions|top1_agreement|mean_kl|p99_kl|relative_mean_nll_delta|mean_top5_overlap|mean_top10_overlap|maximum_logit_error|first_divergence\.|worst_kl\.)' \
+              "sv0-results/$name-oracle-full.log" > "sv0-results/$name-oracle-full-metrics.txt"
           done
+          cmp sv0-results/baseline-oracle-full-exit.txt sv0-results/candidate-oracle-full-exit.txt
+          cmp sv0-results/baseline-oracle-full-metrics.txt sv0-results/candidate-oracle-full-metrics.txt
       - name: Alternating throughput screening with all instrumentation disabled
         shell: bash
         run: |
@@ -200,6 +212,16 @@ jobs:
             --candidate build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
             --output sv0-results --cycles 2
           cat sv0-results/screening.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Enforce SV0 oracle qualification
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke=$(cat sv0-results/candidate-oracle-smoke-exit.txt)
+          full=$(cat sv0-results/candidate-oracle-full-exit.txt)
+          if [[ "$smoke" != 0 || "$full" != 0 ]]; then
+            echo "::error::SV0 remains unqualified: unchanged Phase 11 oracle gate returned smoke=$smoke full=$full."
+            exit 1
+          fi
       - name: Preserve SV0 evidence including failures
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
