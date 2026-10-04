@@ -7,6 +7,7 @@
 #include "targets/qwen3_8_flash_next/impl/moe_route.h"
 #include "targets/qwen3_8_flash_next/impl/moe_workspace.h"
 #include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
+#include "targets/qwen3_8_flash_next/impl/perf_telemetry.h"
 
 #include <algorithm>
 #include <atomic>
@@ -329,6 +330,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     cpu.tasks.reserve(routed_paths);
     std::fill(cpu.routed_sum.begin(), cpu.routed_sum.end(), 0.0F);
 
+    const bool telemetry = v100_perf_telemetry_enabled();
+    const auto rendezvous_started = telemetry ? PerfClock::now() : PerfClock::time_point{};
     if (use_routed_expert_input_fp32) {
         CUDA_CHECK(cudaMemcpyAsync(
             cpu.input_fp32.data(), routed_expert_input_fp32->data,
@@ -347,7 +350,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
     if (cache) cache->begin_layer(prefill);
-    const bool measure = cache != nullptr && cache->timing_enabled();
+    const double rendezvous_us = telemetry ? perf_elapsed_us(rendezvous_started) : 0;
+    const bool measure = telemetry || (cache != nullptr && cache->timing_enabled());
     using Clock = std::chrono::steady_clock;
     const auto branch_started = measure ? Clock::now() : Clock::time_point{};
     // Independent routed expert pairs are computed concurrently. Each task writes
@@ -399,10 +403,11 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     }
     const auto cpu_finished = measure ? Clock::now() : Clock::time_point{};
     if (!serial) finish_hits();
-    if (measure) cache->record_schedule(
+    const double branch_wall_us = measure ? perf_elapsed_us(branch_started) : 0;
+    if (measure && cache) cache->record_schedule(
         std::chrono::duration<double, std::micro>(cpu_finished-cpu_started).count(),
         gpu_us, wait_us,
-        std::chrono::duration<double, std::micro>(Clock::now()-branch_started).count());
+        branch_wall_us);
     // Admission is background work and cannot make a miss a current-token GPU dependency.
     if (cache != nullptr && !use_routed_expert_input_fp32 &&
         !resolve_fp32_intermediate_diagnostic()) cache->admit(layer, cpu.ids);
@@ -449,6 +454,42 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         use_shared_fp32_intermediate, output_fp32);
     if (output_fp32 != nullptr) {
         s_host_expert_fp32_output_calls.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (telemetry) {
+        ExpertLayerMeasurement m;
+        m.layer = layer;
+        m.prefill = prefill;
+        m.tokens = tokens;
+        m.gpu_hit_routes = routed_paths - cpu.tasks.size();
+        m.cpu_miss_routes = cpu.tasks.size();
+        m.cache_result_d2h_bytes = m.gpu_hit_routes ? cpu.pair_outputs.size()*sizeof(float) : 0;
+        m.routed_sum_h2d_bytes = cpu.routed_sum.size()*sizeof(float);
+        m.route_input_d2h_bytes = input_words*(use_routed_expert_input_fp32 ? sizeof(float) : sizeof(std::uint16_t))
+            + routed_paths*(sizeof(std::int32_t)+sizeof(float));
+        m.router_rendezvous_us = rendezvous_us;
+        m.cpu_branch_us = std::chrono::duration<double, std::micro>(cpu_finished-cpu_started).count();
+        m.gpu_hit_window_us = gpu_us;
+        m.merge_wait_us = wait_us;
+        m.branch_wall_us = branch_wall_us;
+        m.cache_timing = cache && cache->timing_enabled();
+        m.overlap_lower_bound_us = std::max(0.0, m.cpu_branch_us + gpu_us - branch_wall_us);
+        m.cache_present = cache != nullptr;
+        if (cache) {
+            const auto snapshot = cache->layer_snapshot(layer);
+            m.ready_experts = snapshot.ready;
+            m.uploading_experts = snapshot.uploading;
+            m.leased_experts = snapshot.leased;
+            m.cache_hits_total = snapshot.totals.hits;
+            m.cache_misses_total = snapshot.totals.misses;
+            m.admissions_total = snapshot.totals.admitted;
+            m.fills_total = snapshot.totals.ready;
+            m.evictions_total = snapshot.totals.evicted;
+            m.expert_staging_bytes_total = snapshot.totals.fill_bytes;
+            m.expert_staging_us_total = snapshot.totals.h2d_us;
+            m.cache_bytes = cache->budget().cache_bytes;
+            m.cache_transfer_budget_bytes = cache->budget().transfer_bytes;
+        }
+        emit_perf_json(m.json(ExpertRouteHistogram(cpu.ids)));
     }
 }
 

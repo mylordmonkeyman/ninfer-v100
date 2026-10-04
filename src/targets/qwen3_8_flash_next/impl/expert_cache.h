@@ -95,6 +95,12 @@ public:
     // At most admission_cap new experts per layer call; pool pressure declines admission.
     void admit(unsigned layer, std::span<const std::int32_t> ids);
     void drain(); // test/shutdown boundary, never used by the current-token fill path
+    struct LayerSnapshot {
+        unsigned ready = 0, uploading = 0, leased = 0;
+        FlashNextExpertCacheStats totals;
+    };
+    // Observability only; snapshot does not drain fills or change slot leases.
+    [[nodiscard]] LayerSnapshot layer_snapshot(unsigned layer) const;
     [[nodiscard]] FlashNextExpertCacheStats stats() const;
     [[nodiscard]] const FlashNextExpertCacheBudget& budget() const { return budget_; }
     [[nodiscard]] HostNvfp4ExpertPairView ready_view(unsigned layer, int expert);

@@ -1,5 +1,6 @@
 #include "targets/qwen3_8_flash_next/impl/expert_cache.h"
 #include "core/device.h"
+#include "targets/qwen3_8_flash_next/impl/perf_telemetry.h"
 #include <algorithm>
 #include <cstdio>
 #include <chrono>
@@ -41,7 +42,7 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
         const char* value = std::getenv(name);
         return value != nullptr && std::strcmp(value, "1") == 0;
     };
-    timing_enabled_ = enabled("NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING");
+    timing_enabled_ = enabled("NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING") || v100_perf_telemetry_enabled();
     serial_schedule_ = enabled("NINFER_FLASH_NEXT_EXPERT_CACHE_SERIAL");
     if (const char* value = std::getenv("NINFER_FLASH_NEXT_EXPERT_CACHE_PREFILL"); value && *value) {
         if (std::strcmp(value, "0") && std::strcmp(value, "1"))
@@ -358,6 +359,19 @@ void FlashNextExpertCache::fill_loop() noexcept {
 }
 void FlashNextExpertCache::drain(){std::unique_lock lock(mutex_);
     idle_.wait(lock,[this]{return queue_.empty()&&!filling_;});check_failure();}
+FlashNextExpertCache::LayerSnapshot FlashNextExpertCache::layer_snapshot(unsigned layer) const {
+    if (layer >= 48) throw std::invalid_argument("invalid telemetry cache layer");
+    std::lock_guard lock(mutex_);
+    check_failure();
+    LayerSnapshot snapshot;
+    snapshot.totals = stats_;
+    for (unsigned i = layer*budget_.slots_per_layer; i < (layer+1)*budget_.slots_per_layer; ++i) {
+        snapshot.ready += entries_[i].state == State::Ready;
+        snapshot.uploading += entries_[i].state == State::Uploading;
+        snapshot.leased += entries_[i].leases != 0;
+    }
+    return snapshot;
+}
 FlashNextExpertCacheStats FlashNextExpertCache::stats() const {
     std::lock_guard lock(mutex_);check_failure();return stats_;
 }

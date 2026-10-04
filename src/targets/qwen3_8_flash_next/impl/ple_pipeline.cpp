@@ -1,6 +1,7 @@
 #include "targets/qwen3_8_flash_next/impl/ple_pipeline.h"
 
 #include "core/arena.h"
+#include "targets/qwen3_8_flash_next/impl/perf_telemetry.h"
 #include "targets/qwen3_8_flash_next/impl/ple_decode_kernels.h"
 
 #include <cuda_runtime.h>
@@ -110,11 +111,14 @@ PleGatherPipeline::prepare(std::span<const std::array<std::int64_t, 16>> global_
     const std::size_t codes_bytes  = tokens * 16 * kPleCodesPerRow;
     const std::size_t scales_bytes = tokens * 16 * kPleScalesPerRow;
 
+    const bool telemetry = v100_perf_telemetry_enabled();
+    const auto started = telemetry ? PerfClock::now() : PerfClock::time_point{};
     gather_ple_rows_compressed(
         table_, global_rows,
         std::span<std::byte>(base, codes_bytes),
         std::span<std::byte>(base + codes_bytes, scales_bytes));
 
+    if (telemetry) emit_ple_perf(tokens, codes_bytes+scales_bytes, perf_elapsed_us(started), true);
     return Ticket(this, slot_index, slot.generation, tokens);
 }
 
@@ -161,6 +165,8 @@ void PleGatherPipeline::gather_pinned(
         throw std::invalid_argument("PLE gather batch is outside the startup-fixed capacity");
     }
     auto* output = static_cast<std::uint16_t*>(fixed_host_buffer_.data());
+    const bool telemetry = v100_perf_telemetry_enabled();
+    const auto started = telemetry ? PerfClock::now() : PerfClock::time_point{};
 
     // Served decode runs at B=1, and this gather sits in the inter-round window that nsys
     // measured at 0.99 ms/token of GPU idle (~1.2 host gaps >100 us per token). At that batch the
@@ -177,6 +183,7 @@ void PleGatherPipeline::gather_pinned(
                 table_, global_rows[token],
                 std::span<std::uint16_t>(output + token * kPleOutputWidth, kPleOutputWidth));
         }
+        if (telemetry) emit_ple_perf(global_rows.size(), global_rows.size()*kPleTokenBytes, perf_elapsed_us(started), false);
         return;
     }
 
@@ -193,6 +200,7 @@ void PleGatherPipeline::gather_pinned(
     for (std::future<void>& w : work) {
         w.get();
     }
+    if (telemetry) emit_ple_perf(global_rows.size(), global_rows.size()*kPleTokenBytes, perf_elapsed_us(started), false);
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

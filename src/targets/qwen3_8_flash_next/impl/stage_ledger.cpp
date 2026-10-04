@@ -1,4 +1,5 @@
 #include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
+#include "targets/qwen3_8_flash_next/impl/perf_telemetry.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -154,6 +155,26 @@ void FlashNextStageLedger::finish_chunk(cudaStream_t stream) {
     if (last_stats_.total_chunk_ms > 0.0f) {
         last_stats_.accounted_pct = (last_stats_.sum_accounted_ms / last_stats_.total_chunk_ms) * 100.0f;
         last_stats_.residual_pct  = (last_stats_.residual_ms / last_stats_.total_chunk_ms) * 100.0f;
+    }
+
+    if (v100_perf_telemetry_enabled()) {
+        std::ostringstream out;
+        out.imbue(std::locale::classic());
+        out.precision(17);
+        out << "{\"sv\":0,\"schema\":1,\"kind\":\"prefill_stage_ledger\",\"tokens\":" << current_tokens_
+            << ",\"chunk\":" << chunk_counter_ << ",\"total_chunk_ms\":" << last_stats_.total_chunk_ms
+            << ",\"residual_ms\":" << last_stats_.residual_ms << ",\"stages\":[";
+        bool first = true;
+        for (std::size_t s = 0; s < static_cast<std::size_t>(FlashNextStageId::Count); ++s) {
+            if (!last_stats_.stage_calls[s]) continue;
+            if (!first) out << ',';
+            first = false;
+            out << "{\"stage\":\"" << stage_name(static_cast<FlashNextStageId>(s))
+                << "\",\"calls\":" << last_stats_.stage_calls[s]
+                << ",\"interval_ms\":" << last_stats_.stage_ms[s] << '}';
+        }
+        out << "]}";
+        emit_perf_json(out.str());
     }
 
     // Print Detailed Stage Table
