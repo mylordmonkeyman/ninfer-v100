@@ -112,6 +112,14 @@ jobs:
             --executable build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
             --output sv1-results --repeats 3
           cat sv1-results/report.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Collect unchanged full oracle evidence for every policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/diagnostics/v100_sv1_residency.py \
+            --executable build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            --output sv1-results --oracle-only
+          cat sv1-results/oracle-report.txt >> "$GITHUB_STEP_SUMMARY"
       - name: Preserve evidence including failures
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

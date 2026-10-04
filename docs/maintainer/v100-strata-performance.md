@@ -291,3 +291,35 @@ frontier, and samples GPU thermal status. It never promotes a policy. This
 teacher-forced executor screen includes logits downloads and finite scans, uses
 warm PLE/filesystem access, and does not replace independent numerical
 qualification or production request/MTP/continuation/long-context measurements.
+
+Run 37226714270 (2026-10-04, artifact 11313372633) passed this screen on V100
+SM70/CUDA 12.8. All cached policies used 165 slots per layer, 21,899,243,520 cache
+bytes, and identical CUDA-used memory (29,982,851,072 bytes). Learned profile
+save/reload, complete routing, finite outputs, committed frontier, and thermal
+checks passed. Three telemetry-disabled process observations gave:
+
+| Policy | Decode t/s median | Decode hit rate | Diagnostic CPU miss time |
+|---|---:|---:|---:|
+| Cache off | 6.926 | 0% | 25.527 s |
+| LRU | 10.756 | 67.47% | 12.659 s |
+| Static | 10.953 | 69.03% | 12.080 s |
+| Heat | 12.158 | 83.02% | 9.036 s |
+| Decay | 12.275 | 84.03% | 8.682 s |
+| Profile prior | 11.640 | 77.12% | 10.234 s |
+
+Decay's median decode rate was 14.1% above LRU with nonoverlapping observed
+ranges, and its diagnostic CPU miss branch was 31.4% shorter. Seeded startup
+took about 7.5–7.8 seconds. These are workload-specific screening results.
+Pairwise outputs differ: decode top-1 agreement versus cache-off was 98.05%
+for LRU, 97.66% for heat, and 94.14% for decay; final-position KL was
+0.001926, 0.001787, and 0.006228 respectively. Each arm reproduced its own
+outputs across diagnostic/timing observations. No policy is promoted.
+
+The workflow next collects all six policies' numerical metrics against the
+unchanged full 4096-position Phase11 manifest. `--oracle-only` consumes the
+current screen's identity-bound training profile and capacity, records exact
+oracle exit status, and requires complete finite metrics and route coverage.
+A known numerical gate failure remains explicitly reported as failed; an early
+execution failure is rejected. This evidence step does not alter thresholds or
+declare independent qualification. Full-manifest numerical evaluation is
+separate from the disjoint held-out performance screen above.

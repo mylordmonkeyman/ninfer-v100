@@ -90,12 +90,39 @@ def compare_logits(expected, actual):
                 bitwise_equal=expected == actual)
 
 
-def run(executable, output, name, workload, arm, slots, profile=None, learned=None, telemetry=False, discover=False):
+def parse_oracle(path, status):
+    text = path.read_text()
+    metrics = {}
+    for line in text.splitlines():
+        if line.startswith('phase11.') and '=' in line:
+            key, value = line.split('=', 1)
+            try:
+                metrics[key.removeprefix('phase11.')] = float(value)
+            except ValueError:
+                pass
+    required = ('positions', 'nonfinite_positions', 'mean_kl', 'p99_kl',
+                'top1_agreement', 'relative_mean_nll_delta', 'maximum_logit_error',
+                'host_expert.completed_layer_calls', 'host_expert.expert_pairs')
+    if any(key not in metrics or not math.isfinite(metrics[key]) for key in required):
+        raise ValueError(f'{path}: missing or nonfinite full-oracle metrics')
+    if (metrics['positions'] != 4096 or metrics['nonfinite_positions'] != 0 or
+            metrics['host_expert.completed_layer_calls'] != 4096*48 or
+            metrics['host_expert.expert_pairs'] != 4096*48*10):
+        raise ValueError(f'{path}: incomplete or nonfinite full-oracle execution')
+    passed = 'PASS: Phase 11 whole-model eager host-backed vertical slice' in text
+    failed = 'FAIL: Phase 11 teacher-forced oracle gate' in text
+    if not ((status == 0 and passed and not failed) or
+            (status == 1 and failed and not passed)):
+        raise ValueError(f'{path}: execution failed outside the independent oracle gate')
+    return dict(exit_status=status, independent_oracle_passed=passed, metrics=metrics)
+
+
+def run(executable, output, name, workload, arm, slots, profile=None, learned=None, telemetry=False, discover=False, oracle=False):
     env = os.environ.copy()
     for key in tuple(env):
         if key.startswith('NINFER_PHASE') or key.startswith('NINFER_V100_EXPERT_') or key.startswith('NINFER_V100_SV1_'):
             env.pop(key)
-    env.update(NINFER_V100_SV1_WORKLOAD=str(workload.resolve()),
+    env.update(NINFER_V100_SV1_WORKLOAD=str(workload.resolve()) if workload else '',
                NINFER_V100_SV1_LOGITS=str((output/f'{name}.bf16').resolve()),
                NINFER_FLASH_NEXT_EXPERT_CACHE='0' if arm == 'off' else '1',
                NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS=str(slots),
@@ -119,6 +146,9 @@ def run(executable, output, name, workload, arm, slots, profile=None, learned=No
         env.update(NINFER_V100_EXPERT_DECAY='0.9', NINFER_V100_EXPERT_DECAY_INTERVAL='32')
     if arm == 'profile':
         env['NINFER_V100_EXPERT_PRIOR_WEIGHT'] = '32'
+    if oracle:
+        env.pop('NINFER_V100_SV1_WORKLOAD')
+        env.pop('NINFER_V100_SV1_LOGITS')
     snapshots = [gpu_snapshot()]
     done, errors = threading.Event(), []
     def monitor():
@@ -132,17 +162,22 @@ def run(executable, output, name, workload, arm, slots, profile=None, learned=No
     try:
         with (output/f'{name}.log').open('w') as log:
             process = subprocess.run([str(executable.resolve())], env=env, stdout=log,
-                                     stderr=subprocess.STDOUT, timeout=1200)
+                                     stderr=subprocess.STDOUT, timeout=3600 if oracle else 1200)
     finally:
         done.set()
         worker.join()
     snapshots.append(gpu_snapshot())
     atomic_json(output/f'{name}-hardware.json', dict(snapshots=snapshots, errors=errors,
                 environment={k:v for k,v in env.items() if k.startswith('NINFER_')}))
-    if process.returncode or errors:
+    if (process.returncode and not oracle) or errors:
         raise RuntimeError(f'{name}: executable or hardware monitor failed; see preserved logs')
     if any(not s['thermal_status_observed'] or s['thermal_throttled'] for s in snapshots):
         raise ValueError(f'{name}: thermal evidence unavailable or throttled')
+    if oracle:
+        result = parse_oracle(output/f'{name}.log', process.returncode)
+        result.update(name=name, arm=arm)
+        print(f'{name}: completed; independent oracle passed={result["independent_oracle_passed"]}', flush=True)
+        return result
     result = parse_run(output/f'{name}.log')
     result.update(name=name, arm=arm, telemetry=telemetry)
     if not discover and arm != 'off' and result['startup']['slots_per_layer'] != slots:
@@ -156,11 +191,36 @@ def main():
     parser.add_argument('--executable', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--repeats', type=int, default=3)
+    parser.add_argument('--oracle-only', action='store_true',
+                        help='evaluate unchanged full manifest using the completed screen profiles')
     args = parser.parse_args()
     if args.repeats < 3:
         parser.error('at least three independent process observations required')
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    if args.oracle_only:
+        screen = json.loads((output/'report.json').read_text())
+        if screen['candidate_sha'] != subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip():
+            raise ValueError('oracle screen profile belongs to a different candidate')
+        observations = []
+        for arm in ARMS:
+            result = run(args.executable, output, f'oracle-{arm}', None, arm,
+                         screen['cache_slots_per_layer'],
+                         output/'ranked-profile.json' if arm not in ('off','lru') else None,
+                         oracle=True)
+            observations.append(result)
+            atomic_json(output/'oracle-observations.json',dict(qualified=False,
+                        scope='unchanged_full_manifest_policy_numerical_evidence',
+                        observations=observations))
+        lines = ['Unchanged independent 4096-position oracle; no policy promotion.', '',
+                 '| Policy | Oracle passed | Mean KL | P99 KL | Top-1 agreement |',
+                 '|---|---:|---:|---:|---:|']
+        for row in observations:
+            m = row['metrics']
+            lines.append(f"| {row['arm']} | {row['independent_oracle_passed']} | {m['mean_kl']:.8f} | {m['p99_kl']:.8f} | {m['top1_agreement']:.4%} |")
+        (output/'oracle-report.txt').write_text('\n'.join(lines)+'\n')
+        print('\n'.join(lines))
+        return
     manifest = Path(os.environ['NINFER_FLASH_NEXT_ORACLE_MANIFEST'])
     positions = json.loads(manifest.read_text())['positions']
     # Explicit nonoverlapping contiguous corpus segments, each with fresh state.

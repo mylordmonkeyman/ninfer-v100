@@ -3,10 +3,28 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from v100_sv1_residency import compare_logits, parse_run
+from v100_sv1_residency import compare_logits, parse_run, parse_oracle
 
 
 class ResidencyReportTest(unittest.TestCase):
+    def test_full_oracle_failure_remains_visible_and_early_exit_rejected(self):
+        metrics = dict(positions=4096, nonfinite_positions=0, mean_kl=.1,
+                       p99_kl=1.8, top1_agreement=.91, relative_mean_nll_delta=.01,
+                       maximum_logit_error=2)
+        metrics['host_expert.completed_layer_calls'] = 4096*48
+        metrics['host_expert.expert_pairs'] = 4096*48*10
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'oracle.log'
+            content = '\n'.join(f'phase11.{key}={value}' for key,value in metrics.items())
+            path.write_text(content+'\nFAIL: Phase 11 teacher-forced oracle gate\n')
+            self.assertFalse(parse_oracle(path,1)['independent_oracle_passed'])
+            with self.assertRaises(ValueError): parse_oracle(path,0)
+            path.write_text(content+'\nFAIL: Phase 11 vertical slice: incomplete\n')
+            with self.assertRaises(ValueError): parse_oracle(path,1)
+            path.write_text(content.replace('phase11.positions=4096','phase11.positions=64')+
+                            '\nFAIL: Phase 11 teacher-forced oracle gate\n')
+            with self.assertRaises(ValueError): parse_oracle(path,1)
+
     def test_incomplete_and_corrupt_measurements_rejected(self):
         rows = [dict(sv1='startup'), dict(sv1='complete',tokens=6,decode_top1=[0]*4)]
         rows += [dict(sv1='measurement',shape=shape,tokens=count,seconds=1,
