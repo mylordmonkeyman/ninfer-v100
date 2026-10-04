@@ -307,6 +307,9 @@ run and why.
 
 Use unrestricted build-tool parallelism for repository compilation. Invoke CMake builds as
 `cmake --build <build-dir> -j`; do not supply a numeric job limit such as `-j2` or `-j32`.
+Exception authorized by the user on 2026-10-04: project performance workflows set
+`CMAKE_BUILD_PARALLEL_LEVEL: 32` and invoke `cmake --build <build-dir>` without `-j`,
+so CMake honors the configured 32-job limit. Apply this to future performance workflows.
 
 These are conventional project resources, not a checklist of resources every task must use:
 

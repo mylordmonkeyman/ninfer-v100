@@ -20,6 +20,8 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 32
 jobs:
   compile:
     runs-on: ubuntu-24.04
@@ -40,7 +42,7 @@ jobs:
           cmake -S . -B build-sv0 -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
             -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-sv0 -j --target \
+          cmake --build build-sv0 --target \
             ninfer_qwen3_8_flash_next_perf_telemetry_test \
             ninfer_qwen3_8_flash_next_expert_heat_test \
             ninfer_qwen3_8_flash_next_expert_profile_test \
@@ -132,7 +134,7 @@ jobs:
               -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
               -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
               -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-            cmake --build "$root/build-sv0" -j --target \
+            cmake --build "$root/build-sv0" --target \
               ninfer_qwen3_8_flash_next_expert_cache_test \
               ninfer_qwen3_8_flash_next_moe_test \
               ninfer_qwen3_8_flash_next_ple_pipeline_test \
