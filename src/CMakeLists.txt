@@ -98,6 +98,7 @@ add_library(ninfer_ops STATIC
   ops/launcher/sigmoid_gate_mul.cu
   ops/launcher/silu_and_mul.cu
   ops/launcher/target_logprobs.cu
+  ops/launcher/expert_route_combine.cu
   ops/launcher/vision_pos_embed.cu
   ops/rmsnorm_rope/rmsnorm_rope.cpp
   ops/rmsnorm_rope/launch.cu

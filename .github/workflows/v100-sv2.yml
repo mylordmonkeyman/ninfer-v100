@@ -1,0 +1,75 @@
+name: V100 SV2 Device Route Combine
+on:
+  push:
+    branches: [perf/v100-strata-derived]
+    paths:
+      - '.github/workflows/v100-sv2.yml'
+      - 'include/ninfer/ops/expert_route_combine.h'
+      - 'src/ops/launcher/expert_route_combine.cu'
+      - 'tests/ops/test_expert_route_combine.cpp'
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 32
+jobs:
+  compile:
+    runs-on: ubuntu-24.04
+    container:
+      image: nvidia/cuda:12.8.1-devel-ubuntu24.04
+    timeout-minutes: 60
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates python3 python3-pip pkg-config
+          python3 -m pip install --break-system-packages 'cmake>=3.28,<4' ninja
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build SM70 route combine
+        run: |
+          cmake -S . -B build-sv2 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-sv2 --target ninfer_expert_route_combine_test
+  hardware:
+    needs: compile
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    concurrency:
+      group: v100-sv0-hardware
+      cancel-in-progress: false
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          clean: false
+      - name: Build and check independent route sum and exact host ordering
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sv2-results
+          find sv2-results -mindepth 1 -maxdepth 1 -delete
+          git rev-parse HEAD > sv2-results/candidate-sha.txt
+          nvidia-smi -q > sv2-results/gpu.txt
+          /usr/local/cuda-12.8/bin/nvcc --version > sv2-results/cuda.txt
+          free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits | tr -d '[:space:]')
+          if (( free_mib < 2048 )); then
+            echo '::error::V100 lacks test headroom; no workloads were stopped.'
+            exit 1
+          fi
+          cmake -S . -B build-sv0 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-sv0 --target ninfer_expert_route_combine_test
+          build-sv0/tests/ninfer_expert_route_combine_test | tee sv2-results/route-combine.log
+          echo 'SV2 combine operator only; runtime transfers and end-to-end qualification pending.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve SV2 operator evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-sv2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: sv2-results/
+          retention-days: 30

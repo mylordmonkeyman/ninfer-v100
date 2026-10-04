@@ -323,3 +323,41 @@ A known numerical gate failure remains explicitly reported as failed; an early
 execution failure is rejected. This evidence step does not alter thresholds or
 declare independent qualification. Full-manifest numerical evaluation is
 separate from the disjoint held-out performance screen above.
+
+Run 37229616603 (2026-10-04, artifact 11316495073) completed all six full
+4096-position independent-oracle evaluations with zero nonfinite positions and
+complete routed-layer coverage. All still failed the unchanged numerical gate:
+
+| Policy | Mean KL | P99 KL | Top-1 agreement |
+|---|---:|---:|---:|
+| Cache off | 0.10880759 | 1.88303806 | 91.3574% |
+| LRU | 0.09505473 | 2.09959815 | 92.9199% |
+| Static | 0.12204488 | 1.97835612 | 89.8682% |
+| Heat | 0.12541878 | 2.35374574 | 89.9902% |
+| Decay | 0.11572333 | 2.00828330 | 91.7236% |
+| Profile prior | 0.10245882 | 1.93551218 | 91.5283% |
+
+Cache-off reproduced the accepted frozen-baseline metrics. Relative numerical
+results are mixed; they do not establish independent qualification or justify a
+new tolerance. The repeated held-out screen measured decay at 12.410 t/s versus
+LRU at 10.793 t/s, with equal cached capacity. SV1 implementation and required
+held-out hit/miss/throughput/fill/eviction/resource evidence are available; LRU
+remains default and production/MTP/continuation qualification is pending.
+
+### SV2 device route reduction
+
+`ops::expert_route_combine` consumes FP32 `[T][10][2560]` route outputs and
+FP32 `[T][10]` weights. It executes ten ascending-path round-to-nearest FMAs,
+starting at +0, and supports a pitched destination that preserves the shared
+expert's existing slab. This is an allocation-free, stream-ordered Op supporting
+SM70. The independent naive FP64 sum is checked with the standard gamma-10 FP32
+roundoff bound; exact host FMA bits are supplementary ordering evidence. Tests
+cover T=1–5, 128, 256, and 4096, 0/50/100% route provenance, output guards,
+shared-slab preservation, and compact output.
+
+The operator is not yet used by the runtime. `.github/workflows/v100-sv2.yml`
+builds and checks it before integration. Next, scalar/grouped/batched GPU hits
+must write into a single device route layout, only CPU misses must be uploaded
+from pinned storage, leases must remain protected until hit completion, and the
+device sum must feed the existing shared/final merge. Transfer-byte elimination
+and full mixed-route integration remain unqualified.

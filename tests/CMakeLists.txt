@@ -635,6 +635,9 @@ ninfer_add_op_test(ninfer_sparse_moe_test
 ninfer_add_op_test(ninfer_mtp_pack_test
   SOURCES ops/test_mtp_pack.cpp
   LIBRARIES ninfer_ops)
+ninfer_add_op_test(ninfer_expert_route_combine_test
+  SOURCES ops/test_expert_route_combine.cpp
+  LIBRARIES ninfer_ops)
 ninfer_add_op_test(ninfer_mtp_round_test
   SOURCES ops/test_mtp_round.cpp
   LIBRARIES ninfer_ops)
