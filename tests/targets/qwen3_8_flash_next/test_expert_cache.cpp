@@ -82,6 +82,26 @@ int main(){try{
         require(scalar==batched,"batched expert outputs changed scalar arithmetic");
         std::cout<<"cache.batch.exact_parity.tokens="<<tokens<<'\n';
     }
+    for (unsigned paths : {1U, 5U, 10U}) {
+        std::vector<float> scalar(paths*2560), batched(paths*2560), expected(paths*2560);
+        for (bool batch : {false,true}) {
+            cache.set_batched_decode(batch);
+            cache.begin_layer(false);
+            for (unsigned path=0; path<paths; ++path) {
+                require(cache.execute(0,path%2,
+                    static_cast<std::uint16_t*>(d_input.p)+path*2560,
+                    path,device.stream), "decode batch Ready hit missing");
+                if (batch) flash_next_cpu_nvfp4_expert_pair_reference(layer.expert(path%2),
+                    std::span(input.data()+path*2560,2560),
+                    std::span(expected.data()+path*2560,2560),scratch);
+            }
+            cache.download(batch?batched:scalar,device.stream);
+        }
+        require(scalar==batched,"decode batching changed exact expert outputs");
+        compare(batched,expected);
+        std::cout<<"cache.decode_batch.exact_parity.paths="<<paths<<'\n';
+    }
+    cache.set_batched_decode(false);
     for(unsigned tokens:{1U,3U,5U,8U,128U}) {
         std::vector<float> scalar(tokens*2560),grouped(tokens*2560),expected(tokens*2560);
         for(bool group:{false,true}) {
@@ -137,14 +157,31 @@ int main(){try{
     require(!cache.execute(1,0,d_input.p,0,device.stream),"layer namespace collision");
     cache.admit(1,std::span(ids,1));cache.drain();cache.ready_view(1,0);
     require(cache.stats().evicted==1,"LRU victim not replaced");
-    FlashNextExpertCache single_slot(host,1,false,1);
-    single_slot.admit(0,std::span(ids,1));single_slot.drain();
-    require(single_slot.execute(0,0,d_input.p,0,device.stream),"single-slot lease");
-    single_slot.admit(0,std::span(&new_id,1));single_slot.drain();
-    require(single_slot.stats().admitted==1,"leased slot was recycled");
-    single_slot.download(out,device.stream);
-    single_slot.admit(0,std::span(&new_id,1));single_slot.drain();
-    require(single_slot.stats().admitted==2,"released slot was not recyclable");
+    for (bool batched : {false,true}) {
+        FlashNextExpertCache single_slot(host,1,false,1);
+        single_slot.set_batched_decode(batched);
+        single_slot.admit(0,std::span(ids,1));single_slot.drain();
+        single_slot.begin_layer(false);
+        require(single_slot.execute(0,0,d_input.p,0,device.stream),"single-slot lease");
+        // A batched descriptor holds its lease even before kernels are submitted.
+        single_slot.admit(0,std::span(&new_id,1));single_slot.drain();
+        require(single_slot.stats().admitted==1,"leased slot was recycled");
+        single_slot.download(out,device.stream);
+        std::vector<float> expected(2560);
+        flash_next_cpu_nvfp4_expert_pair_reference(layer.expert(0),
+            std::span(input.data(),2560),expected,scratch);
+        compare(out,expected);
+        single_slot.admit(0,std::span(&new_id,1));single_slot.drain();
+        require(single_slot.stats().admitted==2,"released slot was not recyclable");
+        single_slot.ready_view(0,2);
+        single_slot.begin_layer(false);
+        require(single_slot.execute(0,2,d_input.p,0,device.stream),"replacement decode hit");
+        single_slot.download(out,device.stream);
+        flash_next_cpu_nvfp4_expert_pair_reference(layer.expert(2),
+            std::span(input.data(),2560),expected,scratch);
+        compare(out,expected);
+        std::cout<<"cache.decode_lease.batched="<<batched<<'\n';
+    }
     FlashNextExpertCache cap_two(host,1,false,2,2);
     cap_two.admit(0,ids);cap_two.drain();
     require(cap_two.stats().admitted==2,"admission cap two");

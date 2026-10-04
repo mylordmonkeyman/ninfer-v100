@@ -1823,8 +1823,132 @@ whole-model 27B performance is established by these results.
 cache itself remains opt-in, with ordinary pinned fills, derived safe capacity,
 admission cap one and CPU/GPU overlap. Keep CUDA Graph off in hybrid mode.
 Nsight was unavailable in the earlier run; submission timers include driver
-backpressure and do not isolate total host launch overhead. Phase 17's launch
-measurement remains outstanding. The 27B artifact prerequisite and existing
+backpressure and do not isolate total host launch overhead. Those earlier runs
+did not supply Phase 17's launch measurement; the later Phase 17 evidence is below.
+The 27B artifact prerequisite and existing
 Q4 support gap should be resolved before claiming complete preservation of the
 historical 27B feature/performance set. The accepted Phase 11 milestone and its
 original Section 7 noncompliance are unchanged.
+
+### Phase 17: hybrid launch profiling and Graph decision
+
+[Run 37160836636](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37160836636)
+at `c2b5f342` passed on runner `v100-sm70`, GPU0 Tesla V100 PCIe 32 GB,
+CUDA 12.8, with Nsight Systems 2024.2.3. The actual job logs confirm successful
+build, focused cache/text tests, cold/warm CUDA timeline collection, SQLite
+analysis, stable expert-pair Graph comparison, and exact whole-model batching
+replay. These tests were already completed when this continuation inspected
+the branch; no additional GPU job was dispatched for this review.
+
+The real Flash-Next mixed artifact and accepted Phase 11 precision profile were
+retained, with 32 CPU expert workers, 165 cache slots/layer, cap-one admissions,
+ordinary pinned buffers, GPU-hit/CPU-miss overlap, one lane, and no MTP.
+Both profiles evaluate 64 teacher-forced decode positions from the natural
+oracle sequence. CUDA modules and workers are warmed before resetting the cold
+cache. The warm profile populates the cache with two passes, drains fills,
+freezes admissions and performs one further unmeasured pass. It is a frozen
+high-reuse control, not a warmed serving request with ongoing admissions.
+
+| Nsight observation | Cold cache, admissions active | Warm cache, admissions frozen |
+|---|---:|---:|
+| Profiled decode tok/s | 7.807 | 14.255 |
+| GPU hit coverage | 41.77% | 90.01% |
+| CUDA API calls/token | 2,004.41 | 2,290.16 |
+| Primary-thread kernel launch calls/token | 1,388.97 | 1,852.09 |
+| Primary-thread launch API wall ms/token | 17.622 | 12.386 |
+| Primary-thread total CUDA API wall ms/token | 36.363 | 39.056 |
+| Launch API P50 / P95, microseconds | 10.475 / 27.408 | 5.559 / 12.118 |
+| GPU active union ms/token | 39.333 | 41.667 |
+| Global GPU idle gaps ms/token | 88.757 | 28.485 |
+| GPU active fraction of observed span | 30.71% | 59.39% |
+
+GPU activity is the union of kernel and memcpy intervals across streams; the
+idle figure is the complement between the first and last observed activities.
+CPU expert branch wall averages 74.005 and 20.963 ms/token respectively, while
+cache-hit submission wall averages 5.372 and 6.267 ms/token. These branch and API
+intervals overlap other work and must not be added to token latency.
+CUDA API duration and submission wall still include possible driver backpressure;
+neither measures pure launch cost. Likewise, idle gaps include CPU miss work,
+joins and host dispatch, not solely removable dispatch overhead. Nsight supplies
+the missing external timeline, but this aggregate analysis does not causally
+partition those gaps. The workflow's `requires_followup` flag is a prioritization
+signal, not proof that Graph can recover the measured API or idle wall time.
+
+#### Stable cached expert Graph
+
+The Graph experiment captures only the two kernels for one actual layer-0
+expert, with privately owned immutable packed weights and stable input,
+activation and output addresses. It never graphs arbitrary hit/miss patterns
+or changes cache ownership. Two 512-iteration samples per mode use
+eager/graph/graph/eager order and produce exactly identical output.
+
+| Per expert pair | Eager | Graph |
+|---|---:|---:|
+| Host submission wall, microseconds | 4.227 | 2.145 |
+| CUDA-event stream interval, microseconds | 41.457 | 40.662 |
+
+The stream interval includes any submission starvation; it is not an isolated
+kernel-duration sum. The observed reduction is only 0.795 microseconds/pair.
+A simple extrapolation at the warm profile's 432.05 hits/token gives roughly
+0.343 ms/token of stream-interval savings, against 70.153 ms/token profiled
+decode wall. This extrapolation is not an end-to-end Graph benchmark or an upper
+bound for larger stable GPU regions. It does not justify adding per-hit Graph
+objects, cache-slot address binding and lifetime management to hybrid execution.
+
+#### Decode-hit batching alternative
+
+The existing batched expert leaf was evaluated as an opt-in decode alternative.
+Two scalar passes populate one common cache, then admissions are frozen.
+Scalar and batched replay match every BF16 logit exactly and preserve the
+committed frontier. Four timed 64-position observations per mode give these
+arithmetic means; each sample runs scalar before batched, so small order effects
+are not controlled by alternating order.
+
+| Frozen-cache decode observation | Scalar hits | Batched hits |
+|---|---:|---:|
+| Decode tok/s | 15.414 | 16.748 |
+| Decode wall ms/token | 64.881 | 59.708 |
+| Hit-kernel launches/token | 864.09 | 96.00 |
+| Hit submission wall ms/token | 3.034 | 0.780 |
+| Accumulated GPU branch ms/token | 21.790 | 12.382 |
+| Accumulated merge wait ms/token | 11.074 | 6.769 |
+
+Both modes have 27,651 hits and 3,069 misses per pass. Batching reduces hit-kernel
+launches by 88.9% and improves mean replay throughput by 8.7%. This combines a
+different GPU launch shape with reduced submission work; it does not isolate
+launch overhead as the sole cause. These are unprofiled harness rates for a short,
+repeated frozen-cache prefix, not general generation or HTTP serving rates.
+No active-admission batching qualification or batching-specific memcheck is
+established by this run.
+
+**Decision:** retain eager hybrid execution and scalar decode hits as the
+production defaults. Do not integrate per-expert Graphs on this evidence.
+`NINFER_FLASH_NEXT_EXPERT_CACHE_BATCHED_DECODE=1` remains experimental; its
+measured benefit warrants a focused cold/active-admission and longer-prefix
+comparison before promotion. Larger stable non-expert GPU portions remain
+unmeasured, and isolated backpressure-free launch cost is not claimed. The
+measurement and this bounded Graph decision are recorded without changing the
+accepted precision profile, cache policy, joins, state semantics or dense-model
+execution. Flash-Next MTP remains Phase 18; none of these checks qualifies it.
+
+
+#### Active-admission batching qualification
+
+`v100-phase17-batching.yml` adds a scoped qualification, without changing the
+production decode default or enabling MTP. It compares scalar and batched hits
+across cold-active, warm-active and frozen caches, at 512 teacher-forced positions
+with four AB/BA observations per mode. Each timed observation resets the cache;
+warm scenarios receive the same two scalar priming passes. Logit downloads are
+excluded from throughput samples. Fill-tail drain time, coverage, admissions,
+evictions, launches and branch intervals are recorded separately.
+
+A second 256-position, two-observation comparison caps capacity at eight slots
+per layer and requires active evictions. After active churn, both modes replay
+one shared frozen Ready set with exact full-logit, finite-output, routing-count
+and committed-frontier checks. Active-placement differences remain separate
+numerical diagnostics. Focused cache tests independently check batched decode
+outputs, queued-descriptor leases and reuse after replacement, under memcheck.
+
+Status: prepared for physical-run qualification; no results or production
+promotion are claimed until the job evidence is reviewed. This work is Phase 17
+only. Phase 18 remains deferred at the user's instruction.

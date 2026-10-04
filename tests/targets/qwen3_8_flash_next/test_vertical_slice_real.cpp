@@ -928,6 +928,176 @@ static int run_phase17_decode_fusion_benchmark(FlashNextTextExecutor& executor,
     return 0;
 }
 
+// Active admissions may change CPU/GPU placement between replays. Exact mode
+// parity is therefore checked on a common frozen Ready set after active churn;
+// active-placement differences are reported separately, as in Phase 15.
+static int run_phase17_batch_qualification(FlashNextTextExecutor& executor,
+    FlashNextRuntimeAllocation& allocation, ninfer::DeviceContext& device,
+    const std::vector<OracleRecord>& records) {
+    auto* cache = allocation.state_view().expert_cache;
+    if (!cache || !cache->timing_enabled())
+        throw std::runtime_error("Phase 17 batching qualification requires timed expert cache");
+    const auto parse = [](const char* key, unsigned fallback) {
+        const char* value = std::getenv(key);
+        if (!value) return fallback;
+        char* end = nullptr;
+        const auto count = std::strtoul(value, &end, 10);
+        if (end == value || *end != '\0' || count < 2 || count > 4096)
+            throw std::invalid_argument(std::string(key)+" must be in [2,4096]");
+        return static_cast<unsigned>(count);
+    };
+    const unsigned count = parse("NINFER_PHASE17_BATCH_TOKENS", 512);
+    const unsigned samples = parse("NINFER_PHASE17_BATCH_SAMPLES", 4);
+    if (records.size() < count)
+        throw std::runtime_error("Phase 17 batching qualification has too few oracle records");
+    const bool require_eviction = std::getenv("NINFER_PHASE17_REQUIRE_EVICTION") != nullptr;
+    const std::array<LaneCommitDecision,1> decisions{{{.accept=true}}};
+    cache->set_serial_schedule(false);
+
+    struct Replay {
+        double seconds = 0, drain_seconds = 0;
+        std::vector<std::uint16_t> logits;
+        FlashNextExpertCacheStats before{}, completed{}, after{};
+    };
+    const auto run = [&](bool batched, bool read_logits) {
+        cache->set_batched_decode(batched);
+        Replay r;
+        auto lane = executor.allocate_lane();
+        device.synchronize();
+        r.before = cache->stats();
+        const auto started = std::chrono::steady_clock::now();
+        for (unsigned i=0; i<count; ++i) {
+            const auto pos = static_cast<std::int32_t>(records[i].position);
+            LaneStepRequest request{.handle=lane, .token_id=records[i].token_id,
+                .token_index=pos, .mrope_positions={pos,pos,pos}, .sampling={},
+                .custom_embedding=nullptr};
+            auto round = executor.execute_round(std::span(&request,1), nullptr);
+            if (read_logits) {
+                const auto logits = round.logits();
+                const auto offset = r.logits.size();
+                r.logits.resize(offset+static_cast<std::size_t>(logits.ne[0]));
+                CUDA_CHECK(cudaMemcpyAsync(r.logits.data()+offset, logits.data,
+                    static_cast<std::size_t>(logits.ne[0])*sizeof(std::uint16_t),
+                    cudaMemcpyDeviceToHost, device.stream));
+                device.synchronize();
+                for (std::size_t j=offset; j<r.logits.size(); ++j)
+                    if (!std::isfinite(std::bit_cast<float>(std::uint32_t(r.logits[j])<<16)))
+                        throw std::runtime_error("Phase 17 batching produced nonfinite logits");
+            }
+            round.commit(decisions);
+        }
+        device.synchronize();
+        r.seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now()-started).count();
+        r.completed = cache->stats();
+        if (executor.committed_frontier(lane) != static_cast<std::int32_t>(count))
+            throw std::runtime_error("Phase 17 batching committed frontier mismatch");
+        executor.release_lane(lane);
+        device.synchronize();
+        const auto draining = std::chrono::steady_clock::now();
+        cache->drain();
+        r.drain_seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now()-draining).count();
+        r.after = cache->stats();
+        if (r.after.maximum_outstanding > 4)
+            throw std::runtime_error("Phase 17 batching fill queue bound violated");
+        return r;
+    };
+    const auto prepare = [&](std::string_view stage) {
+        cache->reset();
+        cache->set_serial_schedule(false);
+        if (stage != "cold_active") {
+            // Identical scalar priming policy for both measured alternatives.
+            run(false,false);
+            run(false,false);
+        }
+        if (stage == "warm_fixed") cache->freeze_admissions();
+    };
+    const auto exact_check = [&](std::string_view stage) {
+        cache->freeze_admissions();
+        const auto scalar = run(false,true);
+        const auto batch = run(true,true);
+        if (scalar.logits != batch.logits)
+            throw std::runtime_error("Phase 17 batching changed fixed-cache exact logits");
+        if (scalar.after.hits-scalar.before.hits != batch.after.hits-batch.before.hits ||
+            scalar.after.misses-scalar.before.misses != batch.after.misses-batch.before.misses)
+            throw std::runtime_error("Phase 17 fixed-cache routing changed");
+        std::cout << json{{"phase17","batch_qualification_correctness"},
+            {"stage",stage}, {"tokens",count}, {"exact_logits_match",true},
+            {"finite_logits",true}, {"committed_frontier",count}}.dump() << '\n' << std::flush;
+    };
+
+    run(false,false); // warm workers/modules before any reset or observation
+    for (std::string_view stage : {"cold_active", "warm_active", "warm_fixed"}) {
+        // Active placement can vary with asynchronous fill completion. Preserve
+        // this diagnostic without requiring CPU/GPU arithmetic to be identical.
+        std::vector<std::uint16_t> scalar_active;
+        for (bool batched : {false,true}) {
+            prepare(stage);
+            auto r = run(batched,true);
+            if (!batched) scalar_active = std::move(r.logits);
+            else {
+                double error=0, norm=0, maximum=0;
+                for (std::size_t i=0; i<r.logits.size(); ++i) {
+                    const auto a=std::bit_cast<float>(std::uint32_t(r.logits[i])<<16);
+                    const auto b=std::bit_cast<float>(std::uint32_t(scalar_active[i])<<16);
+                    const double delta=double(a)-b;
+                    error+=delta*delta; norm+=double(b)*b;
+                    maximum=std::max(maximum,std::abs(delta));
+                }
+                std::cout << json{{"phase17","batch_placement_diagnostic"},
+                    {"stage",stage}, {"tokens",count},
+                    {"nrmse",std::sqrt(error/std::max(norm,1e-30))},
+                    {"maximum_logit_error",maximum},
+                    {"interpretation","different active cache placement; not exact-mode qualification"}}
+                    .dump() << '\n' << std::flush;
+            }
+            // In particular, freeze the cache populated by batched active
+            // admissions before checking scalar/batch semantic equivalence.
+            if (batched) exact_check(stage);
+        }
+        for (unsigned sample=0; sample<samples; ++sample) {
+            // AB/BA alternation; each observation starts from its own cold or
+            // identically primed cache, with reset/drain outside inference timing.
+            for (unsigned order=0; order<2; ++order) {
+                const bool batched = ((sample%2) == 0) ? order == 1 : order == 0;
+                prepare(stage);
+                const auto r = run(batched,false);
+                const auto& b=r.before; const auto& a=r.after;
+                const auto hits=a.hits-b.hits, misses=a.misses-b.misses;
+                const auto admitted=a.admitted-b.admitted, evicted=a.evicted-b.evicted;
+                if (!hits || !misses)
+                    throw std::runtime_error("Phase 17 batching did not exercise both branches");
+                if (stage != "warm_fixed" && !admitted)
+                    throw std::runtime_error("Phase 17 active batching did not exercise fills");
+                if (require_eviction && stage != "warm_fixed" && !evicted)
+                    throw std::runtime_error("Phase 17 constrained batching did not exercise eviction");
+                if (stage == "warm_fixed" && (admitted || evicted))
+                    throw std::runtime_error("Phase 17 frozen batching changed residency");
+                std::cout << json{{"phase17","batch_qualification"}, {"stage",stage},
+                    {"mode",batched?"batched":"scalar"}, {"sample",sample}, {"order",order},
+                    {"tokens",count}, {"seconds",r.seconds}, {"tokens_per_s",count/r.seconds},
+                    {"drain_seconds",r.drain_seconds},
+                    {"tokens_per_s_with_drain",count/(r.seconds+r.drain_seconds)},
+                    {"slots_per_layer",cache->budget().slots_per_layer},
+                    {"hits",hits}, {"misses",misses}, {"admitted",admitted}, {"evicted",evicted},
+                    {"fill_bytes",a.fill_bytes-b.fill_bytes},
+                    {"ready_at_return",r.completed.ready-b.ready}, {"ready_after_drain",a.ready-b.ready},
+                    {"maximum_outstanding",a.maximum_outstanding},
+                    {"hit_kernel_launches",a.hit_kernel_launches-b.hit_kernel_launches},
+                    {"hit_submission_us",a.hit_submission_us-b.hit_submission_us},
+                    {"cpu_branch_us",a.cpu_branch_us-b.cpu_branch_us},
+                    {"gpu_branch_us",a.gpu_branch_us-b.gpu_branch_us},
+                    {"merge_wait_us",a.merge_wait_us-b.merge_wait_us}}
+                    .dump() << '\n' << std::flush;
+            }
+        }
+    }
+    cache->set_batched_decode(false);
+    std::cout << "PASS: Phase 17 batching active admissions, exact frozen replay, state frontier\n";
+    return 0;
+}
+
 static int run_phase17_profile(FlashNextTextExecutor& executor,
     FlashNextRuntimeAllocation& allocation, ninfer::DeviceContext& device,
     const std::vector<OracleRecord>& records) {
@@ -1312,6 +1482,10 @@ int main() {
         if (const char* graph_pair = std::getenv("NINFER_PHASE17_HIT_GRAPH_BENCHMARK");
             graph_pair != nullptr && std::string_view(graph_pair) == "1") {
             return run_phase17_hit_graph_benchmark(model.text_view(), device);
+        }
+        if (const char* qualify = std::getenv("NINFER_PHASE17_BATCH_QUALIFICATION");
+            qualify != nullptr && std::string_view(qualify) == "1") {
+            return run_phase17_batch_qualification(executor, allocation, device, records);
         }
         if (const char* fusion = std::getenv("NINFER_PHASE17_FUSION_BENCHMARK");
             fusion != nullptr && std::string_view(fusion) == "1") {

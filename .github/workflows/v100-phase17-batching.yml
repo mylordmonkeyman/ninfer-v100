@@ -1,0 +1,121 @@
+name: V100 Phase 17 Decode Batching Qualification
+on:
+  push:
+    branches: [forwardport/v100-flash-next]
+    paths:
+      - '.github/workflows/v100-phase17-batching.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: v100-phase17-hybrid
+  cancel-in-progress: false
+jobs:
+  batch-qualification:
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    timeout-minutes: 180
+    env:
+      NINFER_WEIGHTS: '/models/qwen3-8b-flash-next'
+      NINFER_FLASH_NEXT_ORACLE_MANIFEST: '/oracle/phase11/manifest.json'
+      NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: '32'
+      NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: 'auto'
+      NINFER_FLASH_NEXT_EXPERT_CACHE: '1'
+      NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS: '512'
+      NINFER_FLASH_NEXT_EXPERT_CACHE_ADMISSION_CAP: '1'
+      NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_STATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_CONV: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_READOUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_GATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_MOE_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT_LAYERS_32_47: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_SHARED_INPUT: '0'
+      NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE: '0'
+      NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE: '0'
+      NINFER_PHASE17_BATCH_QUALIFICATION: '1'
+      NINFER_PHASE17_BATCH_TOKENS: '512'
+      NINFER_PHASE17_BATCH_SAMPLES: '4'
+      NINFER_PHASE11_ORACLE_SMOKE_POSITIONS: '512'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          persist-credentials: false
+          clean: false
+      - name: Verify GPU and build scoped qualification
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf phase17-batching-results
+          mkdir -p phase17-batching-results
+          git rev-parse HEAD | tee phase17-batching-results/head.txt
+          nvidia-smi | tee phase17-batching-results/gpu.txt
+          cmake -S . -B build-phase17 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-phase17 -j --target \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            ninfer_qwen3_8_flash_next_expert_cache_test \
+            ninfer_qwen3_8_flash_next_text_decode_test
+          ctest --test-dir build-phase17 -V \
+            -R '^ninfer_qwen3_8_flash_next_(expert_cache|text_decode)_test$' \
+            > phase17-batching-results/unit-tests.log 2>&1
+      - name: Check batched descriptor leases and replacement memory safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          compute-sanitizer --tool memcheck --error-exitcode 1 \
+            build-phase17/tests/ninfer_qwen3_8_flash_next_expert_cache_test \
+            > phase17-batching-results/cache-memcheck.log 2>&1
+          grep -q 'cache.decode_batch.exact_parity.paths=10' phase17-batching-results/cache-memcheck.log
+          grep -q 'cache.decode_lease.batched=1' phase17-batching-results/cache-memcheck.log
+          grep -q 'ERROR SUMMARY: 0 errors' phase17-batching-results/cache-memcheck.log
+      - name: Longer-prefix cold active warm active and frozen comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          build-phase17/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            2>&1 | tee phase17-batching-results/derived-capacity.log
+          grep -q 'PASS: Phase 17 batching active admissions, exact frozen replay, state frontier' \
+            phase17-batching-results/derived-capacity.log
+      - name: Force active slot churn with a constrained cache
+        shell: bash
+        env:
+          NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS: '8'
+          NINFER_PHASE17_BATCH_TOKENS: '256'
+          NINFER_PHASE17_BATCH_SAMPLES: '2'
+          NINFER_PHASE17_REQUIRE_EVICTION: '1'
+        run: |
+          set -euo pipefail
+          build-phase17/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            2>&1 | tee phase17-batching-results/eviction-stress.log
+          grep -q 'PASS: Phase 17 batching active admissions, exact frozen replay, state frontier' \
+            phase17-batching-results/eviction-stress.log
+      - name: Summarize paired throughput without promoting runtime defaults
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/diagnostics/v100_phase17_batch_summary.py phase17-batching-results \
+            | tee phase17-batching-results/summary.txt
+          cat phase17-batching-results/summary.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve qualification evidence including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase17-batching-qualification
+          path: phase17-batching-results
+          retention-days: 30
