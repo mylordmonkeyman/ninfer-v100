@@ -139,6 +139,26 @@ production request throughput. Filesystem/PLE access is warm in this screen.
 Full cold/warm, context-length, continuation, and MTP request benchmarks remain
 required before optimization promotion. Reports always distinguish these limits.
 
+Run [37185578367](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37185578367)
+completed the SV0 evidence path at `9a21095d`. Baseline, candidate, and
+telemetry-enabled correctness suites passed; the 64-position routing/input traces
+and exit statuses matched exactly. The frozen baseline and candidate also emitted
+identical full-manifest metrics over 4,096 positions: mean KL `0.10880759`, P99 KL
+`1.88303806`, top-1 agreement `0.91357422`, and first divergence at position 13.
+Both returned failure from the unchanged oracle gate.
+
+With all instrumentation disabled, the candidate median changes relative to the
+frozen baseline ranged from `-0.28%` to `+3.30%` across decode/prefill with cache
+off, overlap, and serial schedules. This is consistent with ordinary screening
+variance and provides no evidence of disabled-telemetry overhead. It also does
+not establish a production throughput improvement.
+
+SV0 is therefore behaviorally parity-validated but not specification-qualified:
+the required unchanged Phase 11 oracle already fails on the frozen source and
+fails identically on the candidate. SV1 execution-policy work remains blocked
+until that pre-existing numerical gate is repaired on the frozen baseline or the
+project explicitly accepts exact baseline parity in place of that requirement.
+
 Host-only checks pass locally. CUDA builds and hardware gates must pass before
 SV1 execution changes; no performance improvement or completed SV0 qualification
 is claimed until the evidence supports it.
