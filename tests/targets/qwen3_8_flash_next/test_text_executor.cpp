@@ -1480,7 +1480,14 @@ int test_cuda_graph_decode_equivalence(ninfer::DeviceContext& device) {
             const std::size_t expected_cap =
                 flash_next_text_decode_workspace_capacity_bytes(plan_graph.maximum_blocks, B);
             const std::size_t peak_capture = alloc_graph.workspace().peak_used();
-            if (((peak_capture + 255U) & ~255ULL) != expected_cap) {
+            const bool graphs_enabled = plan_graph.config.use_cuda_graph;
+            if (!graphs_enabled && (peak_capture != 0 ||
+                !exec_graph.decode_graphs().profiles.empty() ||
+                !exec_graph.decode_graphs().topologies.empty())) {
+                std::cerr << "Disabled graphs must not capture or consume workspace\n";
+                return 1;
+            }
+            if (graphs_enabled && ((peak_capture + 255U) & ~255ULL) != expected_cap) {
                 std::cerr << "Workspace peak_used after capture mismatch at B=" << B << ": got "
                           << peak_capture << " (aligned " << ((peak_capture + 255U) & ~255ULL)
                           << ") expected " << expected_cap << "\n";
@@ -1591,8 +1598,9 @@ int test_cuda_graph_decode_equivalence(ninfer::DeviceContext& device) {
                 round_mixed.commit(decisions);
                 device.synchronize();
 
-                if (((alloc_graph.workspace().peak_used() + 255U) & ~255ULL) != expected_cap ||
-                    alloc_graph.workspace().peak_used() != peak_capture) {
+                const std::size_t peak_replay = alloc_graph.workspace().peak_used();
+                if (((peak_replay + 255U) & ~255ULL) != expected_cap ||
+                    (graphs_enabled && peak_replay != peak_capture)) {
                     std::cerr << "Workspace peak_used after replay mismatch at B=" << B << ": got "
                               << alloc_graph.workspace().peak_used() << " expected " << peak_capture
                               << "\n";
@@ -4103,11 +4111,15 @@ int main(int argc, char** argv) {
     if (test_prefill_chunk_executor(device) != 0) return 1;
     if (test_prefill_chunk_workspace_envelope(device) != 0) return 1;
     if (test_cuda_graph_decode_equivalence(device) != 0) return 1;
-    if (test_decode_graph_bucket_key_layout(device) != 0) return 1;
-    if (test_cuda_graph_bucketed_decode(device) != 0) return 1;
+    if (ninfer::targets::qwen3_8_flash_next::detail::flash_next_cuda_graph_enabled(true)) {
+        if (test_decode_graph_bucket_key_layout(device) != 0) return 1;
+        if (test_cuda_graph_bucketed_decode(device) != 0) return 1;
+        if (test_measure_cuda_graph_footprint(device) != 0) return 1;
+        if (test_cuda_graph_timing_benchmark(device) != 0) return 1;
+    } else {
+        std::cout << "SKIP: whole-model graph topology/footprint/timing; runtime disables graphs on this build\n";
+    }
     if (test_cuda_graph_frontier_masking_and_churn(device) != 0) return 1;
-    if (test_measure_cuda_graph_footprint(device) != 0) return 1;
-    if (test_cuda_graph_timing_benchmark(device) != 0) return 1;
     if (test_prefill_chunk_timing_benchmark(device, false) != 0) return 1;
     if (test_stage_ledger_smoke(device) != 0) return 1;
     if (test_g9_prefill_determinism(device) != 0) return 1;

@@ -7,6 +7,7 @@ on:
       - 'src/ops/linear/bf16/bf16_telemetry*'
       - 'src/targets/qwen3_8_flash_next/impl/perf_telemetry.h'
       - 'src/targets/qwen3_8_flash_next/impl/text_executor*'
+      - 'tests/targets/qwen3_8_flash_next/test_text_executor.cpp'
       - 'tools/diagnostics/v100_sv0*'
   workflow_dispatch:
 permissions:
@@ -107,6 +108,14 @@ jobs:
           numactl --hardware > sv0-results/numa.txt
           test -r "$NINFER_WEIGHTS"
           test -r "$NINFER_FLASH_NEXT_ORACLE_MANIFEST"
+          # Share the capability-aware test harness; baseline engine sources stay frozen.
+          cp tests/targets/qwen3_8_flash_next/test_text_executor.cpp \
+            sv0-baseline/tests/targets/qwen3_8_flash_next/test_text_executor.cpp
+          git -C sv0-baseline diff -- tests/targets/qwen3_8_flash_next/test_text_executor.cpp \
+            > sv0-results/baseline-test-harness-overlay.txt
+          sha256sum tests/targets/qwen3_8_flash_next/test_text_executor.cpp \
+            sv0-baseline/tests/targets/qwen3_8_flash_next/test_text_executor.cpp \
+            > sv0-results/executor-test-harness-sha256.txt
           for root in sv0-baseline .; do
             cmake -S "$root" -B "$root/build-sv0" -G Ninja -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \

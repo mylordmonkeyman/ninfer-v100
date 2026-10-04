@@ -90,10 +90,16 @@ the workflow never stops another workload. Failed gates prevent later steps.
 Operator/executor fixtures run with their default precision profile. The strict
 whole-model oracle and throughput steps retain the frozen Phase 17 FP32 profile;
 that profile requires host experts absent from some synthetic executor fixtures.
-The first hardware run built both versions successfully and passed five baseline
-operator tests, then stopped at this fixture/profile mismatch before any candidate
-GPU tests or oracle/throughput results. The workflow now scopes the profiles to
-their respective workloads; qualification remains pending the corrected run.
+The first hardware run stopped at this fixture/profile mismatch. The corrected
+run passed those stages, then exposed an existing executor-test assumption that
+whole-model graphs are enabled. The frozen Volta runtime explicitly disables
+these graphs. The shared test harness now verifies the disabled capture state and
+retains bit-exact eager-fallback tokens/logits, workspace bounds, and lane churn.
+Graph topology/footprint/timing tests run only on builds supporting whole-model
+graphs. The workflow overlays only this same test source onto the frozen baseline,
+records the overlay and matching harness hashes, and leaves its engine sources
+unchanged. Neither run reached candidate GPU tests or oracle/throughput results;
+qualification remains pending the corrected run.
 
 The separate throughput screen performs two process-level ABBA cycles for cache
 off and cache on, with telemetry/cache timing/stage ledger disabled. It reports
