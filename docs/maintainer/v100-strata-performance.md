@@ -170,3 +170,27 @@ streaming; SV4 grouped AVX2 misses; SV5 early route handoff; SV6 PLE queued I/O;
 SV7 Volta tensor-core projections/attention; SV8 optional KV tiering only after
 SV1–SV7 measurements. Every feature remains switchable until its numerical,
 resource, and request-level acceptance requirements are met.
+
+## SV1 profile preparation
+
+`tools/diagnostics/v100_expert_profile.py` builds an offline static residency
+proposal from validated SV0 JSONL. Supply separate training and evaluation logs,
+the exact model artifact SHA-256, and a JSON array of 48 slot capacities from the
+intended cache allocation. Ranking uses descending routing count with expert
+index as the deterministic tie-breaker. Decode, prefill, or combined observations
+can be selected explicitly. Identical trace contents are rejected.
+
+```bash
+python3 tools/diagnostics/v100_expert_profile.py \
+  --train-log train.log --evaluation-log held-out.log \
+  --artifact-sha256 "$ARTIFACT_SHA256" --slots layer-slots.json \
+  --phase decode --profile-output expert-profile.json \
+  --evaluation-output profile-coverage.json
+```
+
+The profile includes geometry, artifact identity, complete per-layer ranking,
+counts, and training trace identity. Outputs are written through `.tmp` and rename.
+Coverage is a static projection, not a simulation of dynamic fills or leases;
+no runtime consumes this format yet. Runtime seeding/replacement remains gated by
+the SV0 oracle acceptance decision. No training-only or synthetic coverage result
+qualifies a residency policy.
