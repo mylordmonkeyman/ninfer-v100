@@ -1,4 +1,5 @@
 #include "targets/qwen3_8_flash_next/impl/runtime_plan.h"
+#include "targets/qwen3_8_flash_next/impl/expert_stream.h"
 
 #include "ninfer/ops/sampling.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode.h"
@@ -261,7 +262,9 @@ flash_next_capacity_curve(const FlashNextRuntimeConfig& config) {
     const FixedBaseBreakdown fixed =
         compute_fixed_base_bytes(config, resolved_state_slots, attention_logical_pages,
                                  indexer_logical_pages, maximum_blocks);
-    const std::size_t fixed_base_bytes = fixed.total_bytes();
+    const std::size_t expert_stream_bytes = flash_next_expert_stream_requested()
+        ? flash_next_expert_stream_device_bytes(config.prefill_chunk) : 0;
+    const std::size_t fixed_base_bytes = checked_add(fixed.total_bytes(), expert_stream_bytes);
 
     const std::size_t graph_allowance =
         flash_next_cuda_graph_enabled(config.use_cuda_graph)
@@ -364,10 +367,13 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
                   flash_next_decode_graph_buckets(plan.maximum_blocks).count)
             : 0ULL;
     plan.cuda_graph_allowance_bytes = graph_allowance;
+    plan.expert_stream_device_bytes = flash_next_expert_stream_requested()
+        ? flash_next_expert_stream_device_bytes(config.prefill_chunk) : 0;
 
     plan.total_device_bytes = checked_add(
         checked_add(plan.attention_kv_bytes, plan.indexer_block_keys_bytes),
-        checked_add(fixed_base_bytes, graph_allowance));
+        checked_add(fixed_base_bytes,
+                    checked_add(graph_allowance, plan.expert_stream_device_bytes)));
     plan.capacity_curve = curve;
 
     if (config.vision_enabled) {

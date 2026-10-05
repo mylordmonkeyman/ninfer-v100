@@ -1,10 +1,28 @@
 #include "targets/qwen3_8_flash_next/impl/expert_stream.h"
 #include "core/device.h"
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <string_view>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
+bool flash_next_expert_stream_requested() {
+    const char* policy = std::getenv("NINFER_V100_PREFILL_EXPERT_POLICY");
+    if (!policy || !*policy || std::string_view(policy) == "cpu-cache") return false;
+    if (std::string_view(policy) == "stream" || std::string_view(policy) == "auto") return true;
+    throw std::invalid_argument(
+        "NINFER_V100_PREFILL_EXPERT_POLICY must be cpu-cache, stream or auto");
+}
+
+std::size_t flash_next_expert_stream_device_bytes(unsigned maximum_routes) {
+    if (!maximum_routes || maximum_routes > 8192U * 10U)
+        throw std::invalid_argument("invalid prefill stream route capacity");
+    const std::size_t descriptors =
+        ((std::size_t(maximum_routes) + 3) / 4) * sizeof(FlashNextCachedExpertGroup);
+    return 4 * (kExpertSlotBytes + std::size_t(maximum_routes) * 640 * 2 + descriptors);
+}
+
 FlashNextExpertStream::FlashNextExpertStream(unsigned maximum_routes)
     : maximum_routes_(maximum_routes) {
     if (!maximum_routes || maximum_routes > 8192U*10U)
@@ -23,6 +41,8 @@ FlashNextExpertStream::FlashNextExpertStream(unsigned maximum_routes)
             device_bytes_+=kExpertSlotBytes+s.activations->bytes+descriptors;
             pinned_bytes_+=kExpertSlotBytes+descriptors;
         }
+        if (device_bytes_ != flash_next_expert_stream_device_bytes(maximum_routes_))
+            throw std::logic_error("prefill stream device plan mismatch");
     } catch (...) { cleanup(); throw; }
 }
 FlashNextExpertStream::~FlashNextExpertStream() { cleanup(); }

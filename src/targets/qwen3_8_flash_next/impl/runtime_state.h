@@ -2,6 +2,7 @@
 
 #include "core/arena.h"
 #include "targets/qwen3_8_flash_next/impl/expert_cache.h"
+#include "targets/qwen3_8_flash_next/impl/expert_stream.h"
 #include "core/device.h"
 #include "core/tensor.h"
 #include "ninfer/ops/sampling.h"
@@ -130,11 +131,13 @@ public:
     [[nodiscard]] void* persistent_base() noexcept { return storage_->p; }
     [[nodiscard]] const void* persistent_base() const noexcept { return storage_->p; }
     [[nodiscard]] std::size_t persistent_bytes() const noexcept {
-        return plan_.total_device_bytes - plan_.workspace_bytes - plan_.cuda_graph_allowance_bytes;
+        return plan_.total_device_bytes - plan_.workspace_bytes -
+            plan_.cuda_graph_allowance_bytes - plan_.expert_stream_device_bytes;
     }
 
 private:
     std::unique_ptr<FlashNextExpertCache> expert_cache_;
+    std::unique_ptr<FlashNextExpertStream> expert_stream_;
     FlashNextRuntimePlan plan_;
     std::unique_ptr<DeviceBuffer> storage_;
     std::unique_ptr<WorkspaceArena> workspace_;

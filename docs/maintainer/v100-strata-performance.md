@@ -514,11 +514,25 @@ waits for the prior consumer; packing/upload of later slots can overlap compute.
 No persistent cache is referenced or evicted. Device/pinned capacity and expert
 transfer bytes are reported. The caller must retain inputs/outputs until finish.
 
-`v100-sv3.yml` compiles and tests multiple ring wraps, 1–5 and 8–2048 route
-sizes, rejected-group cleanup, destination guards, and the unchanged independent
-CPU expert mathematical criterion. This first primitive is not yet integrated
-into MoE/Program memory planning or a production prefill policy. Hardware
-validation is pending; it makes no prefill throughput or overlap-efficiency
-claim. Next integrate ownership/budgeting, reuse existing per-expert grouping,
-persistent hits and pollution controls, then measure the cpu-cache/stream/auto
-choices with explicit calibrated costs before selecting thresholds.
+Run `37333323795` passed SM70 compilation and the V100 primitive test across
+multiple ring wraps, 1–5 and 8–2048 route sizes, rejected-group cleanup,
+destination guards, and the unchanged independent CPU expert mathematical
+criterion. Worst observed NRMSE was `3.86488e-7` with cosine `1.0`.
+
+The ring is now Program-owned and included in the runtime capacity curve when
+`NINFER_V100_PREFILL_EXPERT_POLICY=stream|auto`; its separately allocated bytes
+are subtracted from the main persistent arena and checked against the plan.
+`stream` uses it for every prefill chunk. `auto` requires an explicit measured
+`NINFER_V100_PREFILL_STREAM_MIN_TOKENS` threshold. Both require the already
+qualified device route combine. Streamed prefill uploads each distinct selected
+expert once, writes the SV2 route matrix directly, copies only route IDs to the
+host, and neither consults nor admits into the persistent cache. Decode remains
+unchanged. Telemetry separately records streamed routes, distinct experts, and
+expert H2D bytes.
+
+The real-model workflow now checks all 48 layers at a bounded 32-token prefill:
+all routes must use the ring, CPU misses/cache hits must remain zero, activation
+D2H is forbidden, and exact expert transfer accounting is required. Hardware
+validation of this integration is pending. It makes no prefill throughput or
+auto-threshold claim; calibration across representative prefill sizes remains
+required before `auto` can be selected or any default can change.

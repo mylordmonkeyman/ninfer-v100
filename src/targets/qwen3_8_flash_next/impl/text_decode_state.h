@@ -6,13 +6,17 @@
 #include "targets/qwen3_8_flash_next/impl/qsa_indexer.h"
 
 #include <array>
+#include <cstdint>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
 class FlashNextExpertCache;
+class FlashNextExpertStream;
 
 struct FlashNextDecodeStateView {
     FlashNextExpertCache* expert_cache = nullptr;
+    FlashNextExpertStream* expert_stream = nullptr;
+    std::int32_t expert_stream_min_tokens = 0;
     // The final cache belongs to MTP and is bound only when speculation is enabled.
     std::array<QsaIndexerCacheView, kFullAttentionLayers + 1> qsa_indexer_caches;
     std::array<QsaAttentionCacheView, kFullAttentionLayers + 1> qsa_attention_caches;

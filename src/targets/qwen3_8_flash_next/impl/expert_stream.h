@@ -2,6 +2,9 @@
 #include "targets/qwen3_8_flash_next/impl/expert_cache.h"
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
+[[nodiscard]] bool flash_next_expert_stream_requested();
+[[nodiscard]] std::size_t flash_next_expert_stream_device_bytes(unsigned maximum_routes);
+
 struct FlashNextStreamRoute {
     const void* input_bf16;
     float* output_fp32;

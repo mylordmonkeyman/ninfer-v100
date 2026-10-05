@@ -37,6 +37,7 @@ void validate_plan_match(const FlashNextRuntimePlan& actual) {
         actual.workspace_bytes != expected.workspace_bytes ||
         actual.sampling_runtime_bytes != expected.sampling_runtime_bytes ||
         actual.cuda_graph_allowance_bytes != expected.cuda_graph_allowance_bytes ||
+        actual.expert_stream_device_bytes != expected.expert_stream_device_bytes ||
         actual.total_device_bytes != expected.total_device_bytes ||
         actual.capacity_curve.main_page_tokens != expected.capacity_curve.main_page_tokens ||
         actual.capacity_curve.minimum_main_page_groups !=
@@ -75,7 +76,8 @@ FlashNextRuntimeAllocation::FlashNextRuntimeAllocation(FlashNextRuntimePlan plan
     }
 
     const std::size_t persistent_bytes =
-        plan_.total_device_bytes - plan_.workspace_bytes - plan_.cuda_graph_allowance_bytes;
+        plan_.total_device_bytes - plan_.workspace_bytes - plan_.cuda_graph_allowance_bytes -
+        plan_.expert_stream_device_bytes;
     storage_   = std::make_unique<DeviceBuffer>(persistent_bytes);
     workspace_ = std::make_unique<WorkspaceArena>(plan_.workspace_bytes);
 
@@ -84,6 +86,39 @@ FlashNextRuntimeAllocation::FlashNextRuntimeAllocation(FlashNextRuntimePlan plan
 }
 
 void FlashNextRuntimeAllocation::configure_expert_cache(const TextModelView& model) {
+    const char* prefill_policy = std::getenv("NINFER_V100_PREFILL_EXPERT_POLICY");
+    if (flash_next_expert_stream_requested()) {
+        if (!model.host_experts || plan_.config.use_cuda_graph) {
+            throw std::invalid_argument(
+                "Flash-Next expert streaming requires host experts and graphs disabled");
+        }
+        const char* combine = std::getenv("NINFER_V100_DEVICE_ROUTE_COMBINE");
+        if (!combine || std::string_view(combine) != "1") {
+            throw std::invalid_argument(
+                "Flash-Next expert streaming requires NINFER_V100_DEVICE_ROUTE_COMBINE=1");
+        }
+        std::int32_t threshold = 1;
+        if (std::string_view(prefill_policy) == "auto") {
+            const char* value = std::getenv("NINFER_V100_PREFILL_STREAM_MIN_TOKENS");
+            if (!value || !*value) {
+                throw std::invalid_argument(
+                    "auto prefill expert policy requires NINFER_V100_PREFILL_STREAM_MIN_TOKENS");
+            }
+            char* end = nullptr;
+            const auto parsed = std::strtol(value, &end, 10);
+            if (end == value || *end || parsed < 1 || parsed > plan_.config.prefill_chunk) {
+                throw std::invalid_argument(
+                    "NINFER_V100_PREFILL_STREAM_MIN_TOKENS is outside the prefill chunk");
+            }
+            threshold = static_cast<std::int32_t>(parsed);
+        }
+        expert_stream_ = std::make_unique<FlashNextExpertStream>(plan_.config.prefill_chunk);
+        if (expert_stream_->device_bytes() != plan_.expert_stream_device_bytes) {
+            throw std::logic_error("Flash-Next expert stream allocation exceeded its plan");
+        }
+        state_view_.expert_stream = expert_stream_.get();
+        state_view_.expert_stream_min_tokens = threshold;
+    }
     const char* enabled=std::getenv("NINFER_FLASH_NEXT_EXPERT_CACHE");
     if(!enabled||!*enabled||std::string_view(enabled)=="0")return;
     if(expert_cache_)return;

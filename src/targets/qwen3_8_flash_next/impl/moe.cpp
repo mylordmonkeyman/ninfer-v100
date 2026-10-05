@@ -1,5 +1,6 @@
 #include "targets/qwen3_8_flash_next/impl/moe.h"
 #include "targets/qwen3_8_flash_next/impl/expert_cache.h"
+#include "targets/qwen3_8_flash_next/impl/expert_stream.h"
 
 #include "core/layout.h"
 #include "targets/qwen3_8_flash_next/impl/cpu_expert_pool.h"
@@ -252,7 +253,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                                 const Tensor* router_input_fp32,
                                 const Tensor* routed_expert_input_fp32,
                                 const Tensor* shared_expert_input_fp32,
-                                Tensor* output_fp32, FlashNextExpertCache* cache, unsigned layer, bool prefill) {
+                                Tensor* output_fp32, FlashNextExpertCache* cache, unsigned layer,
+                                bool prefill, FlashNextExpertStream* expert_stream) {
     const std::int32_t tokens = input.ne[1];
     if (input.dtype != DType::BF16 || output.dtype != DType::BF16 || input.ne[0] != 2'560 ||
         output.ne[0] != 2'560 || tokens < 1 || output.ne[1] != tokens ||
@@ -351,10 +353,16 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
 #else
     const bool device_route_combine = false;
 #endif
+    const bool stream_experts = prefill && expert_stream != nullptr;
+    if (stream_experts && !device_route_combine) {
+        throw std::invalid_argument(
+            "Flash-Next prefill expert streaming requires device route combine");
+    }
+    if (stream_experts) cache = nullptr;
     HostMoeCpuBuffers& cpu = s_host_moe_buffers;
     if (use_routed_expert_input_fp32) {
         cpu.input_fp32.resize(input_words);
-    } else {
+    } else if (!stream_experts) {
         cpu.input.resize(input_words);
     }
     cpu.ids.resize(routed_paths);
@@ -377,7 +385,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         CUDA_CHECK(cudaMemcpyAsync(
             cpu.input_fp32.data(), routed_expert_input_fp32->data,
             input_words * sizeof(float), cudaMemcpyDeviceToHost, stream));
-    } else {
+    } else if (!stream_experts) {
         CUDA_CHECK(cudaMemcpyAsync(cpu.input.data(), input.data,
                                    input_words * sizeof(std::uint16_t),
                                    cudaMemcpyDeviceToHost, stream));
@@ -397,6 +405,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     const bool measure = telemetry || (cache != nullptr && cache->timing_enabled());
     using Clock = std::chrono::steady_clock;
     const auto branch_started = measure ? Clock::now() : Clock::time_point{};
+    std::array<std::vector<FlashNextStreamRoute>, 512> streamed_routes;
     // Independent routed expert pairs are computed concurrently. Each task writes
     // a private FP32 vector. Routing alpha is then accumulated below on this thread
     // in the original token/path order so the reduction contract remains deterministic.
@@ -404,13 +413,26 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         const std::size_t token_offset =
             static_cast<std::size_t>(token) * kFlashNextExpertHidden;
         const std::uint16_t* token_input =
-            use_routed_expert_input_fp32 ? nullptr : cpu.input.data() + token_offset;
+            use_routed_expert_input_fp32 || stream_experts ? nullptr :
+                cpu.input.data() + token_offset;
         const float* token_input_fp32 =
             use_routed_expert_input_fp32 ? cpu.input_fp32.data() + token_offset : nullptr;
         for (std::int32_t path = 0; path < 10; ++path) {
             const std::size_t route_index =
                 static_cast<std::size_t>(token) * 10ULL +
                 static_cast<std::size_t>(path);
+            if (stream_experts) {
+                const auto expert_id = cpu.ids[route_index];
+                if (expert_id < 0 || expert_id >= 512) {
+                    throw std::runtime_error("Flash-Next router returned invalid expert id");
+                }
+                streamed_routes[static_cast<std::size_t>(expert_id)].push_back(
+                    FlashNextStreamRoute{
+                        static_cast<const std::uint16_t*>(input.data) + token_offset,
+                        static_cast<float*>(scratch.down_intermediate.data) +
+                            route_index * kFlashNextExpertHidden});
+                continue;
+            }
             const bool cache_hit = cache != nullptr && !use_routed_expert_input_fp32 &&
                 !resolve_fp32_intermediate_diagnostic() &&
                 (device_route_combine ? cache->execute_to(layer, cpu.ids[route_index],
@@ -432,6 +454,15 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                 .output = device_route_combine ? nullptr :
                     cpu.pair_outputs.data()+route_index*kFlashNextExpertHidden,
             });
+        }
+    }
+    std::uint64_t streamed_experts = 0;
+    if (stream_experts) {
+        for (std::size_t expert_id = 0; expert_id < streamed_routes.size(); ++expert_id) {
+            if (streamed_routes[expert_id].empty()) continue;
+            expert_stream->submit(host_experts.expert(static_cast<std::int32_t>(expert_id)),
+                                  streamed_routes[expert_id], stream);
+            ++streamed_experts;
         }
     }
     if (device_route_combine && !cpu.tasks.empty()) {
@@ -457,11 +488,13 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     const bool serial = cache != nullptr && cache->serial_schedule();
     if (serial) finish_hits();
     const auto cpu_started = measure ? Clock::now() : Clock::time_point{};
-    try {
-        host_expert_worker_pool().run(cpu.tasks);
-    } catch (...) {
-        if (!serial) finish_hits();
-        throw;
+    if (!stream_experts) {
+        try {
+            host_expert_worker_pool().run(cpu.tasks);
+        } catch (...) {
+            if (!serial) finish_hits();
+            throw;
+        }
     }
     const auto cpu_finished = measure ? Clock::now() : Clock::time_point{};
     if (!serial) finish_hits();
@@ -547,15 +580,20 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         m.layer = layer;
         m.prefill = prefill;
         m.tokens = tokens;
-        m.gpu_hit_routes = routed_paths - cpu.tasks.size();
+        m.gpu_hit_routes = stream_experts ? 0 : routed_paths - cpu.tasks.size();
         m.cpu_miss_routes = cpu.tasks.size();
+        m.stream_routes = stream_experts ? routed_paths : 0;
+        m.stream_experts = streamed_experts;
+        m.stream_expert_h2d_bytes = stream_experts ?
+            streamed_experts * kExpertSlotBytes : 0;
         m.cache_result_d2h_bytes = device_route_combine ? 0 :
             (m.gpu_hit_routes ? cpu.pair_outputs.size()*sizeof(float) : 0);
         m.routed_sum_h2d_bytes = device_route_combine ? 0 :
             cpu.routed_sum.size()*sizeof(float);
         m.cpu_miss_h2d_bytes = device_route_combine ?
             m.cpu_miss_routes*kFlashNextExpertHidden*sizeof(float) : 0;
-        m.route_input_d2h_bytes = input_words*(use_routed_expert_input_fp32 ? sizeof(float) : sizeof(std::uint16_t))
+        m.route_input_d2h_bytes =
+            (stream_experts ? 0 : input_words*(use_routed_expert_input_fp32 ? sizeof(float) : sizeof(std::uint16_t)))
             + routed_paths*(sizeof(std::int32_t)+(device_route_combine?0:sizeof(float)));
         m.router_rendezvous_us = rendezvous_us;
         m.cpu_branch_us = std::chrono::duration<double, std::micro>(cpu_finished-cpu_started).count();

@@ -39,7 +39,8 @@ int main() { try {
     std::vector<float> actual(total*2560+16);
     DeviceBuffer output(actual.size()*4);output.fill(0xA5);
     FlashNextExpertStream ring(2048);
-    require(ring.device_bytes()>4*kExpertSlotBytes && ring.pinned_bytes()>4*kExpertSlotBytes,
+    require(ring.device_bytes()==flash_next_expert_stream_device_bytes(2048) &&
+            ring.pinned_bytes()>4*kExpertSlotBytes,
             "staging memory accounting excludes bounded scratch");
     std::size_t offset=0;
     for(unsigned i=0;i<counts.size();++i) {

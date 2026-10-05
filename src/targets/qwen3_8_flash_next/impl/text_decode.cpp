@@ -856,7 +856,9 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                 nullptr
 #endif
                 , state.expert_cache && state.expert_cache->prefill_enabled() ?
-                    state.expert_cache : nullptr, static_cast<unsigned>(layer), true
+                    state.expert_cache : nullptr, static_cast<unsigned>(layer), true,
+                state.expert_stream && tokens >= state.expert_stream_min_tokens ?
+                    state.expert_stream : nullptr
             );
         } else {
             flash_next_moe(round_ws.block_input, model.layers[layer].moe,

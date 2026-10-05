@@ -89,6 +89,7 @@ struct ExpertLayerMeasurement {
     unsigned layer = 0;
     bool prefill = false, cache_present = false, cache_timing = false, routed_sum_timing = false;
     std::uint64_t tokens = 0, gpu_hit_routes = 0, cpu_miss_routes = 0;
+    std::uint64_t stream_routes = 0, stream_experts = 0, stream_expert_h2d_bytes = 0;
     // Actual payload submitted: the baseline downloads the WHOLE route buffer if ANY hit exists.
     std::uint64_t cache_result_d2h_bytes = 0, routed_sum_h2d_bytes = 0;
     std::uint64_t route_input_d2h_bytes = 0, cpu_miss_h2d_bytes = 0;
@@ -110,6 +111,9 @@ struct ExpertLayerMeasurement {
             << ",\"routes\":" << histogram.routes << ",\"distinct_experts\":" << histogram.distinct
             << ",\"routes_per_distinct_expert\":" << (histogram.distinct ? double(histogram.routes)/histogram.distinct : 0)
             << ",\"gpu_hit_routes\":" << gpu_hit_routes << ",\"cpu_miss_routes\":" << cpu_miss_routes
+            << ",\"stream_routes\":" << stream_routes
+            << ",\"stream_experts\":" << stream_experts
+            << ",\"stream_expert_h2d_bytes\":" << stream_expert_h2d_bytes
             << ",\"hit_fraction\":" << (histogram.routes ? double(gpu_hit_routes)/histogram.routes : 0)
             << ",\"cache_result_d2h_bytes\":" << cache_result_d2h_bytes
             << ",\"routed_sum_h2d_bytes\":" << routed_sum_h2d_bytes

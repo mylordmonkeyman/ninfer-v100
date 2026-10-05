@@ -5,7 +5,16 @@ on:
     paths:
       - '.github/workflows/v100-sv3.yml'
       - 'src/targets/qwen3_8_flash_next/impl/expert_stream.*'
+      - 'src/targets/qwen3_8_flash_next/impl/moe.*'
+      - 'src/targets/qwen3_8_flash_next/impl/perf_telemetry.h'
+      - 'src/targets/qwen3_8_flash_next/impl/program.cpp'
+      - 'src/targets/qwen3_8_flash_next/impl/runtime_state.*'
+      - 'src/targets/qwen3_8_flash_next/impl/runtime_plan.*'
+      - 'src/targets/qwen3_8_flash_next/impl/text_decode*'
       - 'tests/targets/qwen3_8_flash_next/test_expert_stream.cpp'
+      - 'tools/diagnostics/v100_sv3_runtime.py'
+      - 'tools/diagnostics/test_v100_sv3_runtime.py'
+      - 'docs/maintainer/v100-strata-performance.md'
   workflow_dispatch:
 permissions:
   contents: read
@@ -32,15 +41,42 @@ jobs:
             -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
             -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
           cmake --build build-sv3 --target ninfer_qwen3_8_flash_next_expert_stream_test
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
+            tools.diagnostics.test_v100_sv3_runtime
   hardware:
     needs: compile
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:
       group: v100-sv0-hardware
       cancel-in-progress: false
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       CUDA_VISIBLE_DEVICES: '0'
+      NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+      NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+      NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: '32'
+      NINFER_FLASH_NEXT_FP32_HYPER_STATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_CONV: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_READOUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_GATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_MOE_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT_LAYERS_32_47: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_SHARED_INPUT: '0'
+      NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE: '0'
+      NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE: '0'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -63,6 +99,14 @@ jobs:
             -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
           cmake --build build-sv3 --target ninfer_qwen3_8_flash_next_expert_stream_test
           build-sv3/tests/ninfer_qwen3_8_flash_next_expert_stream_test 2>&1 | tee sv3-results/staging.log
+      - name: Build and exercise the real prefill integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build-sv3 --target ninfer_qwen3_8_flash_next_vertical_slice_real_test
+          python3 tools/diagnostics/v100_sv3_runtime.py \
+            --executable build-sv3/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            --output sv3-results --positions 32 | tee sv3-results/runtime.log
       - name: Preserve staging evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
