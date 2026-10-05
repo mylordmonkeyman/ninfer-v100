@@ -12,6 +12,7 @@ on:
       - 'src/targets/qwen3_8_flash_next/impl/runtime_plan.*'
       - 'src/targets/qwen3_8_flash_next/impl/text_decode*'
       - 'tests/targets/qwen3_8_flash_next/test_expert_stream.cpp'
+      - 'tests/targets/qwen3_8_flash_next/test_vertical_slice_real.cpp'
       - 'tools/diagnostics/v100_sv3_runtime.py'
       - 'tools/diagnostics/test_v100_sv3_runtime.py'
       - 'tools/diagnostics/v100_sv3_calibrate.py'

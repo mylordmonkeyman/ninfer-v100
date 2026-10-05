@@ -545,6 +545,13 @@ expert caching is disabled in both calibration arms so this isolates the
 CPU-versus-staged-GPU miss decision. The collector deliberately does not select
 an automatic threshold or change the default.
 
+Calibration run `37365646019` passed compile, ring tests, and real integration,
+then exposed a harness allocation mismatch: the oracle test allocated only a
+128-token prefill chunk and rejected the 256-token probe before inference.
+Prefill probes now allocate the supported 2048-token chunk consistently for
+all calibration sizes and both arms; ordinary full-oracle runs retain their
+128-token allocation. The partial diagnostics do not establish a crossover.
+
 The real-model integration requires:
 all routes must use the ring, CPU misses/cache hits must remain zero, activation
 D2H is forbidden, and exact expert transfer accounting is required. Hardware

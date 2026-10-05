@@ -1581,8 +1581,12 @@ int main() {
 
         const std::uint32_t max_context = round_up_128(
             std::max<std::uint64_t>(8'192ULL, records.size() + 1ULL));
-        const auto contract =
-            make_phase11_vertical_slice_contract(max_context, 128);
+        // Prefill calibration uses the supported production chunk capacity in
+        // every arm/size. The unchanged teacher-forced oracle retains 128.
+        const char* probe_env = std::getenv("NINFER_PHASE11_PREFILL_PROBE_POSITIONS");
+        const bool prefill_probe_enabled = probe_env != nullptr && probe_env[0] != '\0';
+        const auto contract = make_phase11_vertical_slice_contract(
+            max_context, prefill_probe_enabled ? 2048U : 128U);
 
         const auto preflight =
             preflight_text_file(weights_path, contract.runtime, 0);
