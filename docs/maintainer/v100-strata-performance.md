@@ -434,3 +434,38 @@ artifact-identity-bound profile from the held-out LRU diagnostic and the
 still exercising mixed CPU/GPU expert arithmetic. The rerun requires exact
 selected metrics and status with the independent oracle thresholds unchanged;
 adaptive LRU remains the separate throughput screen.
+
+Run `37270512213` completed all SV2 checks on 2026-10-05 (artifact
+`11331205267`). The identity-bound static full-prefix control passed exact
+legacy/device selected metrics and status over 4096 positions: mean KL
+`0.11192840`, P99 `2.26605414`, top-1 `0.91625977`. Cache-off also stayed exact
+at the accepted frozen-baseline metrics. Both independent numerical gates
+remain false, with thresholds unchanged. Focused 0/50/100% integrated cache
+coverage and all held-out telemetry-off output controls passed. The repeated
+LRU executor screen measured legacy `10.421` versus device `11.944` median
+decode t/s, with ranges `10.366–10.506` and `11.874–12.025`. This supports the
+bounded screen only; the device path remains opt-in.
+
+### SV2 production HTTP prefix and MTP screen
+
+`.github/workflows/v100-sv2-serve.yml` builds the actual `ninfer-serve` binary,
+consumes the fixed identity-bound profile from the explicitly named successful
+SV2 artifact, and runs `tools/diagnostics/v100_sv2_serve.py`. It compares legacy
+and device route modes with no speculation and with MTP draft window 3. Each
+arm receives three fresh server processes in alternating order. The workload
+includes a cold two-turn prompt, read-only prefix replay, a follow-up using the
+assistant output, and read-only continuation replay.
+
+The screen requires equal fixed cache allocation (64 slots per layer), complete
+startup seeding, exact greedy response/finish/output-token signatures between
+legacy and device modes, matching HTTP/Engine token accounting, and positive
+prefix reuse on each replay/follow-up. MTP arms must record actual drafted
+tokens rather than merely load MTP weights. Request JSONL retains acceptance,
+backend, prefix path, TTFT, prefill, decode and Engine timings. Diagnostics are
+disabled for throughput; thermal status is sampled separately. Servers bind
+loopback only and cleanup terminates only the subprocess started by the test.
+
+This is a short production-path screen using one active request, BF16 KV,
+4096 context, and bounded cache capacity. It does not replace the broader
+concurrency/cancellation/long-context/vision matrix, independent numerical
+qualification, or a default-promotion decision. Hardware results are pending.
