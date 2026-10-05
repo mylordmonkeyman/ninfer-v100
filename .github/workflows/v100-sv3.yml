@@ -90,7 +90,7 @@ jobs:
       - name: Prepare staging evidence
         run: |
           mkdir -p sv3-results
-          find sv3-results -mindepth 1 -maxdepth 1 -delete
+          find sv3-results -mindepth 1 -delete
           git rev-parse HEAD > sv3-results/candidate-sha.txt
           nvidia-smi -q > sv3-results/gpu.txt
           /usr/local/cuda-12.8/bin/nvcc --version > sv3-results/cuda.txt
