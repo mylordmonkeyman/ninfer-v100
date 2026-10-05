@@ -18,10 +18,12 @@ def validate(stderr: str, positions: int, cached: bool = False) -> dict:
             continue
         if record.get("kind") == "expert_layer" and record.get("prefill"):
             records.append(record)
-    if len(records) != 48:
-        raise RuntimeError(f"expected 48 streamed prefill layers, found {len(records)}")
-    if sorted(record.get("layer", -1) for record in records) != list(range(48)):
-        raise RuntimeError("streamed prefill layer coverage mismatch")
+    passes = 2 if cached else 1
+    if len(records) != 48 * passes:
+        raise RuntimeError(f"expected {48 * passes} streamed prefill layers, found {len(records)}")
+    for start in range(0, len(records), 48):
+        if sorted(record.get("layer", -1) for record in records[start:start + 48]) != list(range(48)):
+            raise RuntimeError("streamed prefill layer coverage mismatch")
     for record in records:
         experts = record.get("stream_experts", 0)
         if record.get("tokens") != positions or record.get("routes") != positions * 10:
@@ -42,22 +44,48 @@ def validate(stderr: str, positions: int, cached: bool = False) -> dict:
                 "cache_result_d2h_bytes", "routed_sum_h2d_bytes", "cpu_miss_h2d_bytes")):
             raise RuntimeError("streamed prefill introduced expert result transfers")
         if cached:
-            if (record.get("admissions_total") != 3072 or
-                    record.get("fills_total") != 3072 or
-                    record.get("evictions_total") != 0 or
-                    record.get("leased_experts") != 0):
+            cache = record.get("cache", {})
+            if (cache.get("admissions_total") != 3072 or
+                    cache.get("fills_total") != 3072 or
+                    cache.get("evictions_total") != 0 or
+                    cache.get("leased_experts") != 0):
                 raise RuntimeError("streamed prefill changed the seeded resident set or retained leases")
     if cached and (sum(r["gpu_hit_routes"] for r in records) == 0 or
                    sum(r["stream_routes"] for r in records) == 0):
         raise RuntimeError("cached prefill did not exercise both resident hits and staged misses")
     return {
         "positions": positions,
-        "layers": len(records),
+        "layers": 48,
+        "passes": passes,
         "routes": sum(r["stream_routes"] for r in records),
         "resident_routes": sum(r.get("gpu_hit_routes", 0) for r in records),
         "experts": sum(r["stream_experts"] for r in records),
         "expert_h2d_bytes": sum(r["stream_expert_h2d_bytes"] for r in records),
     }
+
+
+def parse_runtime_probe(stdout: str, positions: int, cached: bool = False) -> dict:
+    try:
+        from .v100_sv3_calibrate import parse_probe
+    except ImportError:
+        from v100_sv3_calibrate import parse_probe
+    lines = [line for line in stdout.splitlines()
+             if line.startswith("phase11.prefill_probe.")]
+    passes = 2 if cached else 1
+    if len(lines) != passes:
+        raise RuntimeError("prefill probe pass count mismatch")
+    probes = []
+    for index, line in enumerate(lines):
+        cumulative = positions * 10 * 48 * (index + 1)
+        if f"expert_pairs={cumulative}" not in line.split():
+            raise RuntimeError("prefill probe cumulative expert count mismatch")
+        normalized = line.replace(f"expert_pairs={cumulative}",
+                                  f"expert_pairs={positions * 10 * 48}")
+        probes.append(parse_probe(normalized, positions))
+    keys = ("candidate_top1", "oracle_top1", "kl", "relative_nll_delta", "max_logit_error")
+    if any(probe[key] != probes[0][key] for probe in probes for key in keys):
+        raise RuntimeError("prefill probe repeated numerical metrics differ")
+    return probes[0]
 
 
 def main() -> int:
@@ -94,6 +122,7 @@ def main() -> int:
     (args.output / "runtime.stderr.log").write_text(result.stderr)
     if result.returncode:
         raise RuntimeError(f"streamed real-model probe exited {result.returncode}")
+    parse_runtime_probe(result.stdout, args.positions, cached=bool(args.profile))
     summary = validate(result.stderr, args.positions, cached=bool(args.profile))
     (args.output / "runtime-summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n")

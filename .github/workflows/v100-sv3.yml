@@ -130,9 +130,9 @@ jobs:
             | tee sv3-results/resident.log
           python3 - <<'PY'
           from pathlib import Path
-          from tools.diagnostics.v100_sv3_calibrate import parse_probe
-          off = parse_probe(Path('sv3-results/runtime.stdout.log').read_text(), 32)
-          cached = parse_probe(Path('sv3-results/resident/runtime.stdout.log').read_text(), 32)
+          from tools.diagnostics.v100_sv3_runtime import parse_runtime_probe
+          off = parse_runtime_probe(Path('sv3-results/runtime.stdout.log').read_text(), 32)
+          cached = parse_runtime_probe(Path('sv3-results/resident/runtime.stdout.log').read_text(), 32, cached=True)
           keys = ('candidate_top1', 'oracle_top1', 'kl', 'relative_nll_delta', 'max_logit_error')
           if any(off[key] != cached[key] for key in keys):
               raise RuntimeError('resident/stream numerical metrics differ from all-stream control')

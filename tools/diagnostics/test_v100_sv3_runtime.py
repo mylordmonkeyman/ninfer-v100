@@ -38,14 +38,14 @@ class Sv3RuntimeTest(unittest.TestCase):
             "stream_experts": 5,
             "stream_expert_h2d_bytes": 5 * MODULE.EXPERT_SLOT_BYTES,
             "route_input_d2h_bytes": 1280,
-            "admissions_total": 3072, "fills_total": 3072,
-            "evictions_total": 0, "leased_experts": 0,
+            "cache": {"admissions_total": 3072, "fills_total": 3072,
+                      "evictions_total": 0, "leased_experts": 0},
         } for layer in range(48)]
-        summary = MODULE.validate("\n".join(map(json.dumps, rows)), 32, cached=True)
-        self.assertEqual(summary["resident_routes"], 48 * 160)
-        rows[7]["admissions_total"] += 1
+        summary = MODULE.validate("\n".join(map(json.dumps, rows + rows)), 32, cached=True)
+        self.assertEqual(summary["resident_routes"], 96 * 160)
+        rows[7]["cache"]["admissions_total"] += 1
         with self.assertRaisesRegex(RuntimeError, "seeded resident set"):
-            MODULE.validate("\n".join(map(json.dumps, rows)), 32, cached=True)
+            MODULE.validate("\n".join(map(json.dumps, rows + rows)), 32, cached=True)
 
 
 if __name__ == "__main__":
