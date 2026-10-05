@@ -358,7 +358,6 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         throw std::invalid_argument(
             "Flash-Next prefill expert streaming requires device route combine");
     }
-    if (stream_experts) cache = nullptr;
     HostMoeCpuBuffers& cpu = s_host_moe_buffers;
     if (use_routed_expert_input_fp32) {
         cpu.input_fp32.resize(input_words);
@@ -406,9 +405,12 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     using Clock = std::chrono::steady_clock;
     const auto branch_started = measure ? Clock::now() : Clock::time_point{};
     std::array<std::vector<FlashNextStreamRoute>, 512> streamed_routes;
+    std::uint64_t streamed_route_count = 0, streamed_experts = 0;
+    bool stream_hits_submitted = false;
     // Independent routed expert pairs are computed concurrently. Each task writes
     // a private FP32 vector. Routing alpha is then accumulated below on this thread
     // in the original token/path order so the reduction contract remains deterministic.
+    try {
     for (std::int32_t token = 0; token < tokens; ++token) {
         const std::size_t token_offset =
             static_cast<std::size_t>(token) * kFlashNextExpertHidden;
@@ -426,11 +428,17 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                 if (expert_id < 0 || expert_id >= 512) {
                     throw std::runtime_error("Flash-Next router returned invalid expert id");
                 }
+                if (cache && cache->execute_to(layer, expert_id,
+                        static_cast<const std::uint16_t*>(input.data) + token_offset,
+                        static_cast<float*>(scratch.down_intermediate.data) +
+                            route_index * kFlashNextExpertHidden,
+                        static_cast<unsigned>(route_index), stream)) continue;
                 streamed_routes[static_cast<std::size_t>(expert_id)].push_back(
                     FlashNextStreamRoute{
                         static_cast<const std::uint16_t*>(input.data) + token_offset,
                         static_cast<float*>(scratch.down_intermediate.data) +
                             route_index * kFlashNextExpertHidden});
+                ++streamed_route_count;
                 continue;
             }
             const bool cache_hit = cache != nullptr && !use_routed_expert_input_fp32 &&
@@ -456,14 +464,31 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
             });
         }
     }
-    std::uint64_t streamed_experts = 0;
     if (stream_experts) {
+        // Submit grouped resident consumers before streaming nonresidents. Their
+        // leases remain held until the common compute stream has completed.
+        if (cache) cache->begin_device_results(stream);
+        stream_hits_submitted = true;
         for (std::size_t expert_id = 0; expert_id < streamed_routes.size(); ++expert_id) {
             if (streamed_routes[expert_id].empty()) continue;
             expert_stream->submit(host_experts.expert(static_cast<std::int32_t>(expert_id)),
                                   streamed_routes[expert_id], stream);
             ++streamed_experts;
         }
+    }
+    } catch (...) {
+        if (stream_experts) {
+            const auto failure = std::current_exception();
+            // Host grouping/packing can fail after Ready consumers were leased.
+            // Drain both owners before propagating the original failure.
+            if (cache) {
+                if (!stream_hits_submitted) cache->begin_device_results(stream);
+                cache->finish_device_results(stream);
+            }
+            expert_stream->finish();
+            std::rethrow_exception(failure);
+        }
+        throw;
     }
     if (device_route_combine && !cpu.tasks.empty()) {
         device_route_host_outputs = cpu.ensure_pinned_pair_outputs(
@@ -472,7 +497,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
             cpu.tasks[i].output=device_route_host_outputs+i*kFlashNextExpertHidden;
     }
 
-    if (cache != nullptr) {
+    if (cache != nullptr && !stream_experts) {
         if (device_route_combine) cache->begin_device_results(stream);
         else cache->begin_download(cpu.pair_outputs.size()*sizeof(float), stream);
     }
@@ -504,7 +529,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         gpu_us, wait_us,
         branch_wall_us);
     // Admission is background work and cannot make a miss a current-token GPU dependency.
-    if (cache != nullptr && !use_routed_expert_input_fp32 &&
+    if (cache != nullptr && !stream_experts && !use_routed_expert_input_fp32 &&
         !resolve_fp32_intermediate_diagnostic()) cache->admit(layer, cpu.ids);
 
     if (!device_route_combine) {
@@ -580,9 +605,10 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         m.layer = layer;
         m.prefill = prefill;
         m.tokens = tokens;
-        m.gpu_hit_routes = stream_experts ? 0 : routed_paths - cpu.tasks.size();
+        m.gpu_hit_routes = stream_experts ? routed_paths - streamed_route_count :
+            routed_paths - cpu.tasks.size();
         m.cpu_miss_routes = cpu.tasks.size();
-        m.stream_routes = stream_experts ? routed_paths : 0;
+        m.stream_routes = streamed_route_count;
         m.stream_experts = streamed_experts;
         m.stream_expert_h2d_bytes = stream_experts ?
             streamed_experts * kExpertSlotBytes : 0;

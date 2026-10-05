@@ -21,6 +21,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 env:
   CMAKE_BUILD_PARALLEL_LEVEL: 32
 jobs:
@@ -93,6 +94,13 @@ jobs:
           git rev-parse HEAD > sv3-results/candidate-sha.txt
           nvidia-smi -q > sv3-results/gpu.txt
           /usr/local/cuda-12.8/bin/nvcc --version > sv3-results/cuda.txt
+      - name: Download validated identity-bound resident profile
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: v100-sv2-37270512213-1
+          run-id: 37270512213
+          github-token: ${{ github.token }}
+          path: sv3-profile-source
       - name: Build and test ring reuse against independent expert oracle
         shell: bash
         run: |
@@ -111,6 +119,25 @@ jobs:
           python3 tools/diagnostics/v100_sv3_runtime.py \
             --executable build-sv3/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
             --output sv3-results --positions 32 | tee sv3-results/runtime.log
+      - name: Check resident hits and ephemeral misses on the real model
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/diagnostics/v100_sv3_runtime.py \
+            --executable build-sv3/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            --output sv3-results/resident --positions 32 \
+            --profile sv3-profile-source/sv2-static-profile.json \
+            | tee sv3-results/resident.log
+          python3 - <<'PY'
+          from pathlib import Path
+          from tools.diagnostics.v100_sv3_calibrate import parse_probe
+          off = parse_probe(Path('sv3-results/runtime.stdout.log').read_text(), 32)
+          cached = parse_probe(Path('sv3-results/resident/runtime.stdout.log').read_text(), 32)
+          keys = ('candidate_top1', 'oracle_top1', 'kl', 'relative_nll_delta', 'max_logit_error')
+          if any(off[key] != cached[key] for key in keys):
+              raise RuntimeError('resident/stream numerical metrics differ from all-stream control')
+          print('Resident and all-stream numerical metrics match exactly.')
+          PY
       - name: Calibrate CPU and staged-GPU prefill across supported chunk sizes
         shell: bash
         run: |

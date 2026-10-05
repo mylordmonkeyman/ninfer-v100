@@ -525,8 +525,11 @@ are subtracted from the main persistent arena and checked against the plan.
 `stream` uses it for every prefill chunk. `auto` requires an explicit measured
 `NINFER_V100_PREFILL_STREAM_MIN_TOKENS` threshold. Both require the already
 qualified device route combine. Streamed prefill uploads each distinct selected
-expert once, writes the SV2 route matrix directly, copies only route IDs to the
-host, and neither consults nor admits into the persistent cache. Decode remains
+nonresident expert once, writes the SV2 route matrix directly, and copies only
+route IDs to the host. Ready persistent hits use the existing grouped cache
+kernels and write that same matrix without restaging. Streamed prefill does not
+admit or evict persistent residents, and completion releases all hit leases.
+Decode remains
 unchanged. Telemetry separately records streamed routes, distinct experts, and
 expert H2D bytes.
 
@@ -542,18 +545,41 @@ cell. A separate telemetry observation checks exact route and transfer bytes,
 thermal status, repeated numerical output, and equal KV/state/workspace
 capacity; the staging-ring reservation is reported separately. Persistent
 expert caching is disabled in both calibration arms so this isolates the
-CPU-versus-staged-GPU miss decision. The collector deliberately does not select
-an automatic threshold or change the default.
+CPU-versus-staged-GPU miss decision. The collector reports evidence without
+changing defaults.
 
 Calibration run `37365646019` passed compile, ring tests, and real integration,
 then exposed a harness allocation mismatch: the oracle test allocated only a
 128-token prefill chunk and rejected the 256-token probe before inference.
 Prefill probes now allocate the supported 2048-token chunk consistently for
 all calibration sizes and both arms; ordinary full-oracle runs retain their
-128-token allocation. The partial diagnostics do not establish a crossover.
+128-token allocation. The partial diagnostics did not establish a crossover.
+
+Corrected run `37368840887` passed the complete calibration with three fresh
+processes per cell, finite outputs, exact repeated numerical metrics within
+each arm, equal final top-1 across arms, thermal checks, equal logical runtime
+capacity, and exact transfer accounting. Artifact `11370913476` preserves the
+observations. Median prefill throughput on V100 was:
+
+| Tokens | CPU t/s | Stream t/s | Stream change |
+|---:|---:|---:|---:|
+| 128 | 27.195 | 17.887 | -34.23% |
+| 256 | 33.938 | 29.752 | -12.33% |
+| 512 | 39.706 | 48.087 | +21.11% |
+| 1024 | 44.152 | 71.240 | +61.35% |
+| 2048 | 46.933 | 107.275 | +128.57% |
+
+Ranges were separate at every size. `512` is an evidence-backed experimental
+token threshold for this cache-off workload. It is not a qualified default or
+a calibrated per-expert reuse policy. Resident-hit coexistence is now
+implemented and awaits V100 validation: focused 0/50/100% resident layouts,
+independent expert/combine oracle checks, and a real identity-bound 64-slot
+LRU profile probe that requires both hits and streamed misses while holding
+admissions, fills, evictions, and leases unchanged. Cached throughput remains
+to be measured before selecting a general automatic policy.
 
 The real-model integration requires:
-all routes must use the ring, CPU misses/cache hits must remain zero, activation
-D2H is forbidden, and exact expert transfer accounting is required. Hardware
-calibration across representative prefill sizes remains required before `auto`
-can be selected or any default can change.
+cache-off routes must all use the ring; cached routes must partition into
+Ready hits and streamed misses with zero CPU expert work. Activation D2H is
+forbidden, and exact expert transfer accounting is required. `auto` continues
+to require an explicitly supplied threshold; defaults remain unchanged.
