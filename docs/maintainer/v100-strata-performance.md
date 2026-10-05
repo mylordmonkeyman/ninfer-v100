@@ -392,7 +392,21 @@ the legacy combined-sum payload; despite this, this screen measured faster
 decode. These results establish the held-out transfer/arithmetic screen, not
 production performance or default promotion. Artifact `11319068181` preserves
 the operator/cache checks, reports, finite/state checks and thermal samples.
-The unchanged4096 independent oracle legacy/device comparison is the next
-numerical gate; its preexisting baseline failure remains separately reported.
-T=2–5 mixed-runtime, maximum-prefill, MTP, continuation and production-server
-qualification remain pending. The runtime path remains opt-in.
+Run `37248276974` then compared the legacy and device paths over the unchanged
+4096-position manifest. Cache-off and LRU each had exact selected metrics and
+the same exit status between paths. Cache-off reproduced mean KL 0.10880759,
+P99 KL 1.88303806 and 91.3574% top-1 agreement; LRU reproduced mean KL
+0.09505473, P99 KL 2.09959815 and 92.9199% top-1 agreement. The independent
+oracle gate remained false in every arm, as it was for the accepted baseline;
+no threshold was changed. Artifact `11321129468` preserves this full-prefix
+evidence.
+
+The focused cache test also drives the actual direct-output cache and device
+combine together at 0%, 50% and 100% hit layouts for T=1–5 and the current
+2048-token MoE prefill test extent. CPU-miss rows use the independent CPU expert
+reference and cross H2D only in contiguous missing-route runs; every case
+reports zero hit-result D2H and zero routed-sum H2D. It additionally verifies
+that owner-side exception cleanup completes submitted hit work, releases the
+lease and makes a single cache slot reusable. MTP, continuation and
+production-server qualification remain pending. The runtime path remains
+opt-in.
