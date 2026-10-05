@@ -54,6 +54,33 @@ def validate_transfers(path, device):
                 cpu_miss_h2d_bytes=sum(row.get('cpu_miss_h2d_bytes', 0) for row in rows))
 
 
+def expert_provenance(path):
+    """Return the route and aggregate cache provenance emitted by telemetry."""
+    return [
+        (row['layer'], row['prefill'], row['tokens'], row['gpu_hit_routes'],
+         row['cpu_miss_routes'], tuple(row['frequency']))
+        for row in read_records(path) if row.get('kind') == 'expert_layer'
+    ]
+
+
+def compare_diagnostics(legacy, device, legacy_logits, device_logits,
+                        legacy_log, device_log, require_exact):
+    final_exact = legacy_logits == device_logits
+    top1_exact = legacy['complete']['decode_top1'] == device['complete']['decode_top1']
+    provenance_exact = expert_provenance(legacy_log) == expert_provenance(device_log)
+    if require_exact and (not final_exact or not top1_exact or not provenance_exact):
+        raise ValueError('cache-off telemetry changed device-combine arithmetic or provenance')
+    # Asynchronous cache fills are intentionally not drained by telemetry. A different
+    # hit/miss boundary selects CPU versus GPU expert arithmetic and can then change later
+    # routing. Never attribute that output difference to the route combine. Conversely,
+    # equal provenance must still produce exact output.
+    if not require_exact and provenance_exact and (not final_exact or not top1_exact):
+        raise ValueError('device combine changed held-out output at equal cache provenance')
+    return dict(final_logits_bitwise_equal=final_exact,
+                decode_top1_exact=top1_exact,
+                route_and_cache_provenance_exact=provenance_exact)
+
+
 ORACLE_PARITY_METRICS = (
     'positions', 'nonfinite_positions', 'mean_kl', 'p99_kl', 'top1_agreement',
     'relative_mean_nll_delta', 'maximum_logit_error',
@@ -158,18 +185,24 @@ def main():
 
     numerical = []
     for arm in ARMS:
-        reference = diagnostics[f'legacy-{arm}']
-        expected = read_logits(output/f'legacy-diagnostic-{arm}.bf16',
+        legacy_diagnostic = diagnostics[f'legacy-{arm}']
+        device_diagnostic = diagnostics[f'device-{arm}']
+        legacy_diagnostic_logits = read_logits(
+            output/f'legacy-diagnostic-{arm}.bf16',
+            legacy_diagnostic['complete']['final_logit_words'])
+        device_diagnostic_logits = read_logits(
+            output/f'device-diagnostic-{arm}.bf16',
+            device_diagnostic['complete']['final_logit_words'])
+        diagnostic = compare_diagnostics(
+            legacy_diagnostic, device_diagnostic,
+            legacy_diagnostic_logits, device_diagnostic_logits,
+            output/f'legacy-diagnostic-{arm}.log',
+            output/f'device-diagnostic-{arm}.log', arm == 'off')
+
+        reference = next(item for item in observations
+                         if item['name'] == f'legacy-timing-0-{arm}')
+        expected = read_logits(output/f'legacy-timing-0-{arm}.bf16',
                                reference['complete']['final_logit_words'])
-        actual_row = diagnostics[f'device-{arm}']
-        actual = read_logits(output/f'device-diagnostic-{arm}.bf16',
-                             actual_row['complete']['final_logit_words'])
-        exact = expected == actual
-        top1_exact = reference['complete']['decode_top1'] == actual_row['complete']['decode_top1']
-        if not exact or not top1_exact:
-            raise ValueError(f'{arm}: device combine changed held-out output')
-        numerical.append(dict(arm=arm, final_logits_bitwise_equal=exact,
-                              decode_top1_exact=top1_exact))
         for repeat in range(args.repeats):
             for mode in MODES:
                 row = next(item for item in observations
@@ -178,6 +211,9 @@ def main():
                                        row['complete']['final_logit_words'])
                 if observed != expected or row['complete']['decode_top1'] != reference['complete']['decode_top1']:
                     raise ValueError(f'{row["name"]}: repeated output changed legacy arithmetic')
+        numerical.append(dict(
+            arm=arm, timing_final_logits_bitwise_equal=True,
+            timing_decode_top1_exact=True, diagnostic=diagnostic))
 
     throughput = []
     for mode in MODES:
@@ -201,8 +237,11 @@ def main():
              '| Mode | Cache | Decode t/s median (range) |', '|---|---|---:|']
     for row in throughput:
         lines.append(f"| {row['mode']} | {row['arm']} | {row['median']:.3f} ({row['minimum']:.3f}–{row['maximum']:.3f}) |")
-    lines.extend(['', 'Held-out final BF16 logits and decode top-1 are exact for each cache arm.',
+    lines.extend(['', 'Telemetry-off held-out final BF16 logits and decode top-1 are exact for each cache arm.',
                   'Device mode reports zero cache-result D2H, zero routed-sum H2D, and exact miss-only H2D bytes.'])
+    lru_diagnostic = next(row for row in numerical if row['arm'] == 'lru')['diagnostic']
+    if not lru_diagnostic['route_and_cache_provenance_exact']:
+        lines.append('Telemetry changed asynchronous LRU hit/miss provenance; its outputs are reported but are not an arithmetic control.')
     (output/'runtime-report.txt').write_text('\n'.join(lines)+'\n')
     print('\n'.join(lines))
 

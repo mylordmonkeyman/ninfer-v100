@@ -410,3 +410,16 @@ that owner-side exception cleanup completes submitted hit work, releases the
 lease and makes a single cache slot reusable. MTP, continuation and
 production-server qualification remain pending. The runtime path remains
 opt-in.
+
+Run `37254910291` passed the expanded focused cache coverage, including all
+2048-token 0/50/100% layouts and the exception/lease cleanup case. Its held-out
+screen then exposed a qualification-harness error: detailed telemetry delayed
+asynchronous LRU filling enough to change one hit/miss boundary, after which the
+CPU-versus-GPU expert arithmetic changed later routing. All three telemetry-off
+legacy/device observations remained bitwise identical. The harness therefore
+uses telemetry only for route/transfer attribution, requires cache-off
+telemetry to remain exact, and accepts a telemetry-on LRU output difference
+only when the recorded route/cache provenance also differs. Equal provenance
+still requires bitwise output and top-1 identity; all telemetry-off timing
+observations remain exact arithmetic controls. No numerical tolerance or
+independent-oracle threshold was changed.
