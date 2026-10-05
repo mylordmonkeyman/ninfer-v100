@@ -6,6 +6,7 @@ on:
       - '.github/workflows/v100-sv2-serve.yml'
       - 'tools/diagnostics/v100_sv2_serve.py'
       - 'tools/diagnostics/test_v100_sv2_serve.py'
+      - 'src/targets/qwen3_8_flash_next/impl/program.cpp'
   workflow_dispatch:
 permissions:
   contents: read

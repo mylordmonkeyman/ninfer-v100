@@ -1536,7 +1536,8 @@ Program::plan_request(const qwen3_6::PreparedPrompt& prompt,
     base->summary.prefix_reuse_path    = PrefixReusePath::Root;
     base->summary.publish_continuation =
         options.allow_prefix_reuse && prompt_data.identity.reusable &&
-        (impl_->plan_.config.continuation_capacity > 0);
+        options.allow_prefix_publication && (impl_->plan_.config.continuation_capacity > 0);
+    if (!base->summary.publish_continuation) { base->context_cache.opportunities.clear(); }
     if (base->summary.publish_continuation) {
         base->checkpoint_slots_required = 1;
         if (impl_->continuation_slots_.size() > 1 && derive_turn_closure_frontier(prompt_data)) {
@@ -1594,6 +1595,9 @@ Program::inspect_admission(const qwen3_6::PreparedPrompt& prompt, const RequestB
     const detail::ContinuationSlot* cont_slot = nullptr;
 
     const bool has_source = source != nullptr || shared_source != nullptr;
+    // Read-only replay must leave the catalogued endpoint and its rewrite available
+    // for a later follow-up, even when the anonymous owner has no session binding.
+    must_retain_private_source = must_retain_private_source || !base.summary().publish_continuation;
     if ((source != nullptr && shared_source != nullptr) || has_source != checkpoint.has_value()) {
         throw std::logic_error("Flash-Next admission requires one owner and its selected checkpoint");
     }

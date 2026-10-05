@@ -478,3 +478,14 @@ source directory. The harness accepts this alias explicitly without resolving
 away its suffix. Readiness polling also retries connection resets while checking
 for server exit on each iteration. No inference or performance result was
 produced by the failed run.
+
+Run `37317924275` reached the public Engine and completed four HTTP requests.
+Cold/replay and follow-up/replay greedy outputs matched, and replays reused
+308/393 tokens, but the intervening follow-up fell back to root. Flash-Next
+ignored `allow_prefix_publication` in its base plan and consumed the original
+anonymous owner during the read-only replay, replacing its endpoint without
+retaining the prior turn-closure checkpoint. The planner now suppresses
+publication/write opportunities for read-only requests and retains their
+selected private source. The same production regression check still requires
+positive reuse on the follow-up; no output, reuse, or MTP gate was relaxed.
+Hardware validation of this lifecycle fix is pending.
