@@ -367,6 +367,32 @@ host reduction remains the default.
 output and lease release, then compares cache-off and mixed-LRU legacy/device
 execution on a disjoint real-model workload. It requires exact held-out final
 BF16 logits and decode top-1, zero hit-result D2H, zero full routed-sum H2D, and
-exact miss-only H2D byte accounting. Runtime integration and throughput remain
-unqualified until that V100 evidence completes; MTP, continuation, and
-production-server qualification remain subsequent gates.
+exact miss-only H2D byte accounting. Run `37240970132` on CUDA12.8/SM70 passed
+on 2026-10-05 UTC. Three fresh-process timing observations, alternating order,
+on the 128-prefill/256-decode held-out workload gave:
+
+| Cache | Legacy decode t/s median (range) | Device decode t/s median (range) |
+|---|---:|---:|
+| Off | 6.870 (6.833–6.897) | 7.650 (7.630–7.707) |
+| LRU | 10.602 (10.394–10.701) | 12.041 (11.795–12.068) |
+
+Final BF16 logits and all decode top-1 decisions were exact within each cache
+arm, including all timing observations. Both LRU diagnostics used 165 slots per
+layer, 21,899,243,520 cache bytes and 29,982,851,072 observed CUDA-used bytes;
+both counted 82,905 hits and 101,415 misses over 184,320 routes.
+
+| LRU diagnostic payload | Legacy bytes | Device bytes |
+|---|---:|---:|
+| Hit-result D2H | 1,229,619,200 | 0 |
+| Routed-sum H2D | 188,743,680 | 0 |
+| CPU-miss route H2D | 0 | 1,038,489,600 |
+
+Cache-off device execution uploaded 1,887,436,800 miss-route bytes, ten times
+the legacy combined-sum payload; despite this, this screen measured faster
+decode. These results establish the held-out transfer/arithmetic screen, not
+production performance or default promotion. Artifact `11319068181` preserves
+the operator/cache checks, reports, finite/state checks and thermal samples.
+The unchanged4096 independent oracle legacy/device comparison is the next
+numerical gate; its preexisting baseline failure remains separately reported.
+T=2–5 mixed-runtime, maximum-prefill, MTP, continuation and production-server
+qualification remain pending. The runtime path remains opt-in.

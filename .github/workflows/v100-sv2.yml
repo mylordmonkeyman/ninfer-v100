@@ -14,6 +14,7 @@ on:
       - 'tests/ops/test_expert_route_combine.cpp'
       - 'tests/targets/qwen3_8_flash_next/test_expert_cache.cpp'
       - 'tools/diagnostics/v100_sv2_runtime.py'
+      - 'tools/diagnostics/test_v100_sv2_runtime.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -42,13 +43,14 @@ jobs:
           cmake --build build-sv2 --target ninfer_expert_route_combine_test \
             ninfer_qwen3_8_flash_next_expert_cache_test \
             ninfer_qwen3_8_flash_next_vertical_slice_real_test
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/diagnostics -p 'test_v100*.py'
   hardware:
     needs: compile
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:
       group: v100-sv0-hardware
       cancel-in-progress: false
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       NINFER_WEIGHTS: /models/qwen3-8b-flash-next
       NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
@@ -108,6 +110,14 @@ jobs:
             --executable build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
             --output sv2-results --repeats 3
           cat sv2-results/runtime-report.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Compare unchanged full-prefix numerical evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/diagnostics/v100_sv2_runtime.py \
+            --executable build-sv0/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            --output sv2-results --oracle-only
+          cat sv2-results/oracle-report.txt >> "$GITHUB_STEP_SUMMARY"
       - name: Preserve SV2 evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

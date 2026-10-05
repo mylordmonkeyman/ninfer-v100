@@ -18,12 +18,12 @@ MODES = ('legacy', 'device')
 ARMS = ('off', 'lru')
 
 
-def invoke(executable, output, name, workload, arm, slots, telemetry=False):
+def invoke(executable, output, name, workload, arm, slots, telemetry=False, oracle=False):
     old = os.environ.get('NINFER_V100_DEVICE_ROUTE_COMBINE')
     try:
         os.environ['NINFER_V100_DEVICE_ROUTE_COMBINE'] = '1' if name.startswith('device-') else '0'
         return run(executable, output, name, workload, arm, slots,
-                   telemetry=telemetry, discover=slots == 512)
+                   telemetry=telemetry, discover=slots == 512, oracle=oracle)
     finally:
         if old is None:
             os.environ.pop('NINFER_V100_DEVICE_ROUTE_COMBINE', None)
@@ -48,8 +48,28 @@ def validate_transfers(path, device):
         if actual != expected:
             raise ValueError(f'{path}: miss-only H2D byte accounting mismatch')
     return dict(routes=routes, hits=hits, misses=misses,
-                hit_fraction=hits/routes, cpu_miss_h2d_bytes=sum(
-                    row.get('cpu_miss_h2d_bytes', 0) for row in rows))
+                hit_fraction=hits/routes,
+                cache_result_d2h_bytes=sum(row['cache_result_d2h_bytes'] for row in rows),
+                routed_sum_h2d_bytes=sum(row['routed_sum_h2d_bytes'] for row in rows),
+                cpu_miss_h2d_bytes=sum(row.get('cpu_miss_h2d_bytes', 0) for row in rows))
+
+
+ORACLE_PARITY_METRICS = (
+    'positions', 'nonfinite_positions', 'mean_kl', 'p99_kl', 'top1_agreement',
+    'relative_mean_nll_delta', 'maximum_logit_error',
+    'host_expert.completed_layer_calls', 'host_expert.expert_pairs',
+)
+
+
+def compare_oracle(legacy, device):
+    # Resource/timing metrics are deliberately excluded from numerical parity.
+    if legacy['exit_status'] != device['exit_status'] or legacy['independent_oracle_passed'] != device['independent_oracle_passed']:
+        raise ValueError('device reduction changed the independent oracle gate outcome')
+    for key in ORACLE_PARITY_METRICS:
+        if legacy['metrics'][key] != device['metrics'][key]:
+            raise ValueError(f'device reduction changed full-prefix oracle metric: {key}')
+    return dict(selected_metrics_exact=True, exit_status_exact=True,
+                independent_oracle_passed=device['independent_oracle_passed'])
 
 
 def main():
@@ -57,11 +77,40 @@ def main():
     parser.add_argument('--executable', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--repeats', type=int, default=3)
+    parser.add_argument('--oracle-only', action='store_true',
+                        help='compare unchanged full4096 manifest after the held-out screen')
     args = parser.parse_args()
     if args.repeats < 3:
         parser.error('at least three fresh-process observations required')
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    if args.oracle_only:
+        screen = json.loads((output/'runtime-report.json').read_text())
+        head = subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+        if screen['candidate_sha'] != head:
+            raise ValueError('full-prefix comparison requires this candidate screen')
+        observations, parity = {}, {}
+        for arm in ARMS:
+            for mode in MODES:
+                name = f'{mode}-oracle-{arm}'
+                observations[name] = invoke(args.executable, output, name, None,
+                    arm, screen['cache_slots_per_layer'], oracle=True)
+                atomic_json(output/'oracle-observations.json', dict(
+                    qualified=False, observations=observations, parity=parity))
+            parity[arm] = compare_oracle(observations[f'legacy-oracle-{arm}'],
+                                        observations[f'device-oracle-{arm}'])
+            atomic_json(output/'oracle-observations.json', dict(
+                qualified=False, observations=observations, parity=parity))
+        lines = ['SV2 unchanged4096 manifest: legacy/device selected metrics and exit status exact.',
+                 'Independent oracle thresholds are unchanged; its actual pass/fail is reported below.', '',
+                 '| Cache | Mode | Oracle passed | Mean KL | P99 KL | Top-1 |',
+                 '|---|---|---:|---:|---:|---:|']
+        for name, row in observations.items():
+            m = row['metrics']
+            lines.append(f"| {row['arm']} | {name.split('-')[0]} | {row['independent_oracle_passed']} | {m['mean_kl']:.8f} | {m['p99_kl']:.8f} | {m['top1_agreement']:.4%} |")
+        (output/'oracle-report.txt').write_text('\n'.join(lines)+'\n')
+        print('\n'.join(lines))
+        return
     manifest = Path(os.environ['NINFER_FLASH_NEXT_ORACLE_MANIFEST'])
     positions = json.loads(manifest.read_text())['positions']
     if len(positions) < 2432:
