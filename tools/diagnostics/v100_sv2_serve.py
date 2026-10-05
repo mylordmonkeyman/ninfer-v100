@@ -66,7 +66,7 @@ def validate_events(events, responses, mtp):
     return done
 
 
-def run_server(executable, profile, output, mode, mtp, repeat):
+def run_server(executable, artifact, profile, output, mode, mtp, repeat):
     name = f'{mode}-mtp{int(mtp)}-{repeat}'
     log_path, request_path = output/f'{name}.log', output/f'{name}-requests.jsonl'
     env = os.environ.copy()
@@ -85,7 +85,8 @@ def run_server(executable, profile, output, mode, mtp, repeat):
     # Bind only a loopback port. The subprocess is the only process this tool stops.
     with socket.socket() as probe:
         probe.bind(('127.0.0.1',0)); port=probe.getsockname()[1]
-    command=[str(executable.resolve()),os.environ['NINFER_WEIGHTS'],'--host','127.0.0.1',
+    # Preserve the .ninfer alias: resolve() would strip the suffix of the mounted file.
+    command=[str(executable.resolve()),str(artifact.absolute()),'--host','127.0.0.1',
              '--port',str(port),'--max-context','4096','--kv-capacity','4096',
              '--max-concurrency','1','--prefill-chunk','128','--kv-dtype','bf16',
              '--device-state-slots','2','--host-state-slots','2','--host-kv-mib','256',
@@ -113,7 +114,7 @@ def run_server(executable, profile, output, mode, mtp, repeat):
                         raise RuntimeError(f'{name}: server exited before readiness; see {log_path}')
                     try:
                         models=request(base,'/v1/models'); break
-                    except (urllib.error.URLError,TimeoutError):
+                    except (urllib.error.URLError,TimeoutError,ConnectionResetError):
                         if time.monotonic()>deadline: raise TimeoutError('server readiness timeout')
                         time.sleep(1)
                 model=models['data'][0]['id']
@@ -168,10 +169,13 @@ def run_server(executable, profile, output, mode, mtp, repeat):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--executable',type=Path,required=True)
+    parser.add_argument('--artifact',type=Path,required=True)
     parser.add_argument('--profile',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--repeats',type=int,default=3)
     args=parser.parse_args()
+    if args.artifact.suffix != '.ninfer' or not args.artifact.is_file():
+        parser.error('--artifact requires an explicit readable .ninfer file')
     if args.repeats<3: parser.error('need three fresh-process observations per arm')
     args.output.mkdir(parents=True,exist_ok=True)
     profile=json.loads(args.profile.read_text())
@@ -181,7 +185,7 @@ def main():
     for repeat in range(args.repeats):
         for mtp in (False,True):
             for mode in (('legacy','device') if repeat%2==0 else ('device','legacy')):
-                row=run_server(args.executable,args.profile,args.output,mode,mtp,repeat)
+                row=run_server(args.executable,args.artifact,args.profile,args.output,mode,mtp,repeat)
                 observations.append(row); atomic_json(args.output/'observations.json',observations)
                 peers=[r for r in observations if r['mtp']==mtp]
                 if any(r['response_signatures']!=peers[0]['response_signatures'] for r in peers):

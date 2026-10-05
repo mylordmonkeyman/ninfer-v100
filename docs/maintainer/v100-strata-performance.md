@@ -469,3 +469,12 @@ This is a short production-path screen using one active request, BF16 KV,
 4096 context, and bounded cache capacity. It does not replace the broader
 concurrency/cancellation/long-context/vision matrix, independent numerical
 qualification, or a default-promotion decision. Hardware results are pending.
+
+Run `37282415209` compiled both server builds but stopped before inference:
+the public Engine requires a `.ninfer` suffix, whereas the validated runner
+mount `/models/qwen3-8b-flash-next` has none. The workflow now checks that exact
+mount is a readable file and gives it an explicit `model.ninfer` symlink in the
+source directory. The harness accepts this alias explicitly without resolving
+away its suffix. Readiness polling also retries connection resets while checking
+for server exit on each iteration. No inference or performance result was
+produced by the failed run.

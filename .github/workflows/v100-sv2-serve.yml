@@ -94,6 +94,9 @@ jobs:
           /usr/local/cuda-12.8/bin/nvcc --version > sv2-serve-results/cuda.txt
           numactl --hardware > sv2-serve-results/numa.txt
           sha256sum sv2-serve-source/sv2-static-profile.json > sv2-serve-results/profile-sha256.txt
+          test -f "$NINFER_WEIGHTS"
+          test -r "$NINFER_WEIGHTS"
+          ln -s "$NINFER_WEIGHTS" sv2-serve-source/model.ninfer
           free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits | tr -d '[:space:]')
           if (( free_mib < 28000 )); then
             echo '::error::V100 lacks test headroom; no unrelated workloads were stopped.'
@@ -110,6 +113,7 @@ jobs:
           set -euo pipefail
           python3 tools/diagnostics/v100_sv2_serve.py \
             --executable build-sv2-serve/apps/ninfer-serve \
+            --artifact sv2-serve-source/model.ninfer \
             --profile sv2-serve-source/sv2-static-profile.json \
             --output sv2-serve-results --repeats 3
           cat sv2-serve-results/report.txt >> "$GITHUB_STEP_SUMMARY"
