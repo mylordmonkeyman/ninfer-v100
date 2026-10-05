@@ -14,6 +14,8 @@ on:
       - 'tests/targets/qwen3_8_flash_next/test_expert_stream.cpp'
       - 'tools/diagnostics/v100_sv3_runtime.py'
       - 'tools/diagnostics/test_v100_sv3_runtime.py'
+      - 'tools/diagnostics/v100_sv3_calibrate.py'
+      - 'tools/diagnostics/test_v100_sv3_calibrate.py'
       - 'docs/maintainer/v100-strata-performance.md'
   workflow_dispatch:
 permissions:
@@ -42,7 +44,8 @@ jobs:
             -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
           cmake --build build-sv3 --target ninfer_qwen3_8_flash_next_expert_stream_test
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
-            tools.diagnostics.test_v100_sv3_runtime
+            tools.diagnostics.test_v100_sv3_runtime \
+            tools.diagnostics.test_v100_sv3_calibrate
   hardware:
     needs: compile
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
@@ -107,6 +110,14 @@ jobs:
           python3 tools/diagnostics/v100_sv3_runtime.py \
             --executable build-sv3/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
             --output sv3-results --positions 32 | tee sv3-results/runtime.log
+      - name: Calibrate CPU and staged-GPU prefill across supported chunk sizes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/diagnostics/v100_sv3_calibrate.py \
+            --executable build-sv3/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            --output sv3-results --repeats 3 \
+            --sizes 128 256 512 1024 2048 | tee sv3-results/calibration.log
       - name: Preserve staging evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

@@ -530,9 +530,23 @@ host, and neither consults nor admits into the persistent cache. Decode remains
 unchanged. Telemetry separately records streamed routes, distinct experts, and
 expert H2D bytes.
 
-The real-model workflow now checks all 48 layers at a bounded 32-token prefill:
+Run `37345994876` passed the real-model integration on all 48 layers at a
+bounded 32-token prefill: all 15,360 routes used the staging ring, CPU/cache
+expert work was zero, and 15,655,747,072 expert H2D bytes exactly matched the
+5,662 distinct layer-local experts. Run `37345994709` simultaneously passed the
+complete SV2 regression matrix.
+
+The workflow next measures fresh-process `cpu-cache` and `stream` arms at 128,
+256, 512, 1024, and 2048 tokens, with three alternating timing observations per
+cell. A separate telemetry observation checks exact route and transfer bytes,
+thermal status, repeated numerical output, and equal KV/state/workspace
+capacity; the staging-ring reservation is reported separately. Persistent
+expert caching is disabled in both calibration arms so this isolates the
+CPU-versus-staged-GPU miss decision. The collector deliberately does not select
+an automatic threshold or change the default.
+
+The real-model integration requires:
 all routes must use the ring, CPU misses/cache hits must remain zero, activation
 D2H is forbidden, and exact expert transfer accounting is required. Hardware
-validation of this integration is pending. It makes no prefill throughput or
-auto-threshold claim; calibration across representative prefill sizes remains
-required before `auto` can be selected or any default can change.
+calibration across representative prefill sizes remains required before `auto`
+can be selected or any default can change.
