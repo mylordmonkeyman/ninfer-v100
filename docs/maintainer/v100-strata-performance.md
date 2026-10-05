@@ -489,3 +489,36 @@ publication/write opportunities for read-only requests and retains their
 selected private source. The same production regression check still requires
 positive reuse on the follow-up; no output, reuse, or MTP gate was relaxed.
 Hardware validation of this lifecycle fix is pending.
+
+Run `37321786662` passed the production screen at `81a61b9b`. All 12 fresh
+processes and 48 HTTP responses passed exact within-arm legacy/device signatures,
+HTTP/Engine accounting, positive prefix/follow-up reuse, complete 3072-expert
+seeding, equal 8,494,252,032-byte cache allocation, and thermal checks. Each MTP
+process drafted 298 tokens and accepted 148 across its four requests. Non-MTP
+cold decode medians were 8.581/9.353 t/s (legacy/device); continuation medians
+8.482/8.871. MTP cold medians were 7.677/8.405; continuation 7.184/8.173.
+These are bounded production-path measurements; MTP itself was slower on this
+short workload, and no default or independent oracle qualification changed.
+Together with the focused route/lease tests and fixed-profile full-prefix
+parity, this satisfies the SV2 opt-in implementation gate for building SV3 on
+its device route layout. Broader production qualification remains separate.
+
+### SV3 bounded expert staging primitive
+
+`FlashNextExpertStream` explicitly owns four canonical device expert slots and
+four pinned slots, a nonblocking transfer stream, bounded activation and grouped
+launch descriptors, and ready/consumed events. It uploads each selected distinct
+expert once, submits groups of up to four routes through the existing canonical
+expert kernels, and writes caller-owned device route destinations. Slot reuse
+waits for the prior consumer; packing/upload of later slots can overlap compute.
+No persistent cache is referenced or evicted. Device/pinned capacity and expert
+transfer bytes are reported. The caller must retain inputs/outputs until finish.
+
+`v100-sv3.yml` compiles and tests multiple ring wraps, 1–5 and 8–2048 route
+sizes, rejected-group cleanup, destination guards, and the unchanged independent
+CPU expert mathematical criterion. This first primitive is not yet integrated
+into MoE/Program memory planning or a production prefill policy. Hardware
+validation is pending; it makes no prefill throughput or overlap-efficiency
+claim. Next integrate ownership/budgeting, reuse existing per-expert grouping,
+persistent hits and pollution controls, then measure the cpu-cache/stream/auto
+choices with explicit calibrated costs before selecting thresholds.

@@ -1,0 +1,39 @@
+#pragma once
+#include "targets/qwen3_8_flash_next/impl/expert_cache.h"
+
+namespace ninfer::targets::qwen3_8_flash_next::detail {
+struct FlashNextStreamRoute {
+    const void* input_bf16;
+    float* output_fp32;
+};
+
+// Explicitly owned, bounded scratch for nonresident prefill groups. No persistent
+// cache admission/eviction. Caller retains input/output until finish() returns.
+class FlashNextExpertStream {
+public:
+    explicit FlashNextExpertStream(unsigned maximum_routes_per_expert);
+    ~FlashNextExpertStream();
+    FlashNextExpertStream(const FlashNextExpertStream&) = delete;
+    FlashNextExpertStream& operator=(const FlashNextExpertStream&) = delete;
+    void submit(const HostNvfp4ExpertPairView& expert,
+                std::span<const FlashNextStreamRoute> routes, cudaStream_t compute);
+    void finish();
+    [[nodiscard]] std::size_t device_bytes() const { return device_bytes_; }
+    [[nodiscard]] std::size_t pinned_bytes() const { return pinned_bytes_; }
+    [[nodiscard]] std::uint64_t submitted_experts() const { return submitted_; }
+    [[nodiscard]] std::uint64_t expert_h2d_bytes() const { return submitted_ * kExpertSlotBytes; }
+private:
+    struct Slot {
+        std::unique_ptr<DeviceBuffer> weights, activations, groups;
+        std::unique_ptr<PinnedHostBuffer> host_weights, host_groups;
+        cudaEvent_t ready = nullptr, consumed = nullptr;
+        bool pending = false;
+    };
+    std::array<Slot,4> slots_;
+    cudaStream_t transfer_ = nullptr;
+    unsigned maximum_routes_, next_ = 0;
+    std::size_t device_bytes_ = 0, pinned_bytes_ = 0;
+    std::uint64_t submitted_ = 0;
+    void cleanup() noexcept;
+};
+} // namespace ninfer::targets::qwen3_8_flash_next::detail
