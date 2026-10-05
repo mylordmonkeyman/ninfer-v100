@@ -16,13 +16,16 @@ from v100_sv1_residency import run, read_logits
 
 MODES = ('legacy', 'device')
 ARMS = ('off', 'lru')
+ORACLE_ARMS = ('off', 'static')
+STATIC_PROFILE = 'sv2-static-profile.json'
 
 
-def invoke(executable, output, name, workload, arm, slots, telemetry=False, oracle=False):
+def invoke(executable, output, name, workload, arm, slots, profile=None, learned=None,
+           telemetry=False, oracle=False):
     old = os.environ.get('NINFER_V100_DEVICE_ROUTE_COMBINE')
     try:
         os.environ['NINFER_V100_DEVICE_ROUTE_COMBINE'] = '1' if name.startswith('device-') else '0'
-        return run(executable, output, name, workload, arm, slots,
+        return run(executable, output, name, workload, arm, slots, profile, learned,
                    telemetry=telemetry, discover=slots == 512, oracle=oracle)
     finally:
         if old is None:
@@ -113,15 +116,19 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     if args.oracle_only:
         screen = json.loads((output/'runtime-report.json').read_text())
+        static_profile = output/STATIC_PROFILE
+        if not static_profile.is_file():
+            raise ValueError('full-prefix cached comparison requires the learned fixed profile')
         head = subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
         if screen['candidate_sha'] != head:
             raise ValueError('full-prefix comparison requires this candidate screen')
         observations, parity = {}, {}
-        for arm in ARMS:
+        for arm in ORACLE_ARMS:
             for mode in MODES:
                 name = f'{mode}-oracle-{arm}'
                 observations[name] = invoke(args.executable, output, name, None,
-                    arm, screen['cache_slots_per_layer'], oracle=True)
+                    arm, screen['cache_slots_per_layer'],
+                    profile=static_profile if arm == 'static' else None, oracle=True)
                 atomic_json(output/'oracle-observations.json', dict(
                     qualified=False, observations=observations, parity=parity))
             parity[arm] = compare_oracle(observations[f'legacy-oracle-{arm}'],
@@ -129,6 +136,7 @@ def main():
             atomic_json(output/'oracle-observations.json', dict(
                 qualified=False, observations=observations, parity=parity))
         lines = ['SV2 unchanged4096 manifest: legacy/device selected metrics and exit status exact.',
+                 'The cached arm uses one identity-bound fixed resident profile so both processes have identical cache provenance.',
                  'Independent oracle thresholds are unchanged; its actual pass/fail is reported below.', '',
                  '| Cache | Mode | Oracle passed | Mean KL | P99 KL | Top-1 |',
                  '|---|---|---:|---:|---:|---:|']
@@ -149,8 +157,11 @@ def main():
 
     diagnostics = {}
     # Discover once on the legacy LRU plan, then hold the exact cache capacity fixed.
+    static_profile = output/STATIC_PROFILE
     legacy_lru = invoke(args.executable, output, 'legacy-diagnostic-lru',
-                        workload, 'lru', 512, telemetry=True)
+                        workload, 'lru', 512, learned=static_profile, telemetry=True)
+    if not static_profile.is_file():
+        raise ValueError('legacy LRU training did not save the fixed comparison profile')
     slots = legacy_lru['startup']['slots_per_layer']
     diagnostics['legacy-lru'] = legacy_lru
     for mode, arm in ((m, a) for m in MODES for a in ARMS if (m, a) != ('legacy', 'lru')):
@@ -231,6 +242,7 @@ def main():
         throughput=throughput,
         limitations=['opt-in path; default unchanged',
                      'single held-out 128-prefill plus 256-decode workload',
+                     'full-prefix cached parity uses the learned fixed resident profile',
                      'MTP, continuation and production server qualification pending'])
     atomic_json(output/'runtime-report.json', report)
     lines = ['SV2 opt-in device route screen; no default promotion.', '',

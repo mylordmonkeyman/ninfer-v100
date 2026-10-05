@@ -4,10 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from v100_sv2_runtime import compare_diagnostics, compare_oracle, ORACLE_PARITY_METRICS
+from v100_sv2_runtime import (compare_diagnostics, compare_oracle,
+                              ORACLE_ARMS, ORACLE_PARITY_METRICS)
 
 
 class RouteReductionOracleTest(unittest.TestCase):
+    def test_cached_oracle_control_is_fixed_residency(self):
+        self.assertEqual(ORACLE_ARMS, ('off', 'static'))
+
     def test_accepted_baseline_failure_is_visible_and_parity_is_strict(self):
         legacy = dict(exit_status=1, independent_oracle_passed=False,
                       metrics={key:1.0 for key in ORACLE_PARITY_METRICS})

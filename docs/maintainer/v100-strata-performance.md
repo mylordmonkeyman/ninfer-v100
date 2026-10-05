@@ -423,3 +423,14 @@ only when the recorded route/cache provenance also differs. Equal provenance
 still requires bitwise output and top-1 identity; all telemetry-off timing
 observations remain exact arithmetic controls. No numerical tolerance or
 independent-oracle threshold was changed.
+
+Run `37258860325` passed compilation, every focused integration case, and the
+held-out screen. Cache-off full-prefix legacy/device metrics were again exact.
+Its adaptive-LRU full-prefix processes independently crossed different
+asynchronous fill boundaries, so their mean KL and other trajectory metrics
+were not an arithmetic control. Full-prefix cached parity now uses one learned,
+artifact-identity-bound profile from the held-out LRU diagnostic and the
+`static` policy in both processes. That holds the resident set fixed while
+still exercising mixed CPU/GPU expert arithmetic. The rerun requires exact
+selected metrics and status with the independent oracle thresholds unchanged;
+adaptive LRU remains the separate throughput screen.
