@@ -123,7 +123,7 @@ def validate_diagnostic(stderr: str, positions: int, mode: str, cached: bool = F
 
     return {
         "layers": LAYERS, "passes": passes,
-        "cache_bytes": layers[0].get("cache", {}).get("cache_bytes", 0),
+        "cache_bytes": (layers[0].get("cache") or {}).get("cache_bytes", 0),
         "resident_routes": sum(row["gpu_hit_routes"] for row in layers),
         "routes": sum(row["routes"] for row in layers),
         "distinct_experts": sum(row["distinct_experts"] for row in layers),

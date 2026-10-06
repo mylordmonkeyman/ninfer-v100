@@ -30,7 +30,7 @@ def diagnostic_rows(mode, positions=2):
     for layer in range(48):
         row = dict(kind="expert_layer", prefill=True, layer=layer,
                    tokens=positions, routes=routes, distinct_experts=5,
-                   gpu_hit_routes=0, cache_result_d2h_bytes=0,
+                   gpu_hit_routes=0, cache=None, cache_result_d2h_bytes=0,
                    routed_sum_h2d_bytes=0)
         if mode == "stream":
             row.update(cpu_miss_routes=0, stream_routes=routes, stream_experts=5,
