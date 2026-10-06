@@ -1,0 +1,79 @@
+name: V100 SV4 Grouped CPU Experts
+on:
+  push:
+    branches: [perf/v100-strata-derived]
+    paths:
+      - '.github/workflows/v100-sv4.yml'
+      - 'src/targets/qwen3_8_flash_next/impl/cpu_expert_*'
+      - 'tests/targets/qwen3_8_flash_next/test_cpu_expert_group.cpp'
+      - 'tests/CMakeLists.txt'
+      - 'docs/maintainer/v100-strata-performance.md'
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 32
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Check workflow and grouped sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, yaml
+          workflow = pathlib.Path('.github/workflows/v100-sv4.yml')
+          yaml.safe_load(workflow.read_text())
+          text = workflow.read_text()
+          assert 'CMAKE_BUILD_PARALLEL_LEVEL: 32' in text
+          build_lines = [line for line in text.splitlines() if 'cmake --build' in line]
+          assert build_lines and all(' -j' not in line for line in build_lines)
+          PY
+          git diff --check
+  hardware:
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[v100:') || contains(github.event.head_commit.message, '[v100:sv4]')
+    needs: checks
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    concurrency:
+      group: v100-sv0-hardware
+      cancel-in-progress: false
+    timeout-minutes: 45
+    env:
+      CUDA_VISIBLE_DEVICES: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          clean: false
+      - name: Build grouped CPU expert test once
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-sv4 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-sv4 --target ninfer_qwen3_8_flash_next_cpu_expert_group_test
+      - name: Compare grouped and single-token AVX2 execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sv4-results
+          git rev-parse HEAD > sv4-results/candidate-sha.txt
+          nvidia-smi -q > sv4-results/gpu.txt
+          /usr/local/cuda-12.8/bin/nvcc --version > sv4-results/cuda.txt
+          build-sv4/tests/ninfer_qwen3_8_flash_next_cpu_expert_group_test \
+            2>&1 | tee sv4-results/grouped.log
+      - name: Preserve SV4 evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-sv4-${{ github.run_id }}-${{ github.run_attempt }}
+          path: sv4-results/
+          retention-days: 30
+          if-no-files-found: warn

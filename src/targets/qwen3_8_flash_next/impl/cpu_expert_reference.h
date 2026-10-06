@@ -10,10 +10,15 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 
 inline constexpr std::size_t kFlashNextExpertHidden = 2'560;
 inline constexpr std::size_t kFlashNextExpertIntermediate = 640;
+inline constexpr std::size_t kFlashNextCpuExpertGroupMax = 4;
 
 struct CpuNvfp4ExpertReferenceScratch {
     std::array<float, kFlashNextExpertHidden> input{};
     std::array<float, kFlashNextExpertIntermediate> intermediate{};
+};
+
+struct CpuNvfp4ExpertGroupScratch {
+    std::array<CpuNvfp4ExpertReferenceScratch, kFlashNextCpuExpertGroupMax> tokens{};
 };
 
 // Correctness-first Phase-10 CPU path. Persistent weights remain in the canonical
@@ -67,5 +72,24 @@ void flash_next_cpu_nvfp4_expert_gate_up_rows_avx2(
 void flash_next_cpu_nvfp4_expert_down_rows_avx2(
     const HostNvfp4ExpertPairView& expert, const CpuNvfp4ExpertReferenceScratch& scratch,
     std::span<float> output, std::size_t begin, std::size_t end);
+
+// Grouped AVX2/FMA execution for 2--4 activations routed to the same expert.
+// Packed weights and scales are decoded once per K16 block, while every token
+// retains the single-token kernel's independent accumulator and reduction order.
+void flash_next_cpu_nvfp4_expert_group_prepare_avx2(
+    const HostNvfp4ExpertPairView& expert,
+    std::span<const std::uint16_t* const> inputs,
+    CpuNvfp4ExpertGroupScratch& scratch);
+void flash_next_cpu_nvfp4_expert_group_gate_up_rows_avx2(
+    const HostNvfp4ExpertPairView& expert, CpuNvfp4ExpertGroupScratch& scratch,
+    std::size_t token_count, std::size_t begin, std::size_t end);
+void flash_next_cpu_nvfp4_expert_group_down_rows_avx2(
+    const HostNvfp4ExpertPairView& expert, const CpuNvfp4ExpertGroupScratch& scratch,
+    std::span<float* const> outputs, std::size_t begin, std::size_t end);
+void flash_next_cpu_nvfp4_expert_group_avx2(
+    const HostNvfp4ExpertPairView& expert,
+    std::span<const std::uint16_t* const> inputs,
+    std::span<float* const> outputs,
+    CpuNvfp4ExpertGroupScratch& scratch);
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

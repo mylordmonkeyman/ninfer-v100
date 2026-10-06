@@ -17,6 +17,16 @@ struct HostExpertTask {
     float* output = nullptr;
 };
 
+// Several routed activations sharing one expert. Width one deliberately remains
+// a HostExpertTask so decode keeps the established single-token kernel.
+struct HostExpertTaskGroup {
+    HostNvfp4ExpertPairView expert{};
+    std::array<const std::uint16_t*, kFlashNextCpuExpertGroupMax> inputs{};
+    std::array<float*, kFlashNextCpuExpertGroupMax> outputs{};
+    std::array<std::uint32_t, kFlashNextCpuExpertGroupMax> route_ids{};
+    std::size_t token_count = 0;
+};
+
 // Persistent expert-level workers shared by serving and routed-miss replay.
 // Outputs retain task order; workers never apply routing weights or change storage.
 class HostExpertWorkerPool {

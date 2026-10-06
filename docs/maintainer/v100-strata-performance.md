@@ -176,6 +176,39 @@ SV7 Volta tensor-core projections/attention; SV8 optional KV tiering only after
 SV1–SV7 measurements. Every feature remains switchable until its numerical,
 resource, and request-level acceptance requirements are met.
 
+## SV3 measured streaming boundary and containment
+
+The final isolated route-cost campaign completed on V100 in run 37424809406.
+With one canonical represented expert already warm in host memory, grouped GPU
+staging had separate timing ranges from the 32-worker CPU expert path at two or
+more routes. This is an isolated synthetic result: it excludes whole-model
+overlap, routing distribution, persistent hits, and request scheduling, and does
+not select an automatic route threshold.
+
+Repeated whole-model cache-off measurements favored CPU execution at 128 and
+256 prefill tokens and streaming at 512 through 2048. With the fixed identity-
+bound 64-slot profile, 512-token ranges overlapped or favored CPU while streaming
+had separate faster ranges at 1024 and 2048. These results support experimental
+cache-off and cached token thresholds of 512 and 1024 respectively for the
+measured workload only.
+
+The strict production response comparison still diverges between CPU and stream
+paths after the same 1,227-token prompt. Bounded same-input samples found finite
+outputs and bit-exact isolated GPU replay, within the existing expert numerical
+criterion, but do not explain or eliminate the autoregressive divergence.
+Streaming therefore remains opt-in, `cpu-cache` remains the default, and no
+general automatic threshold or production gain is claimed.
+
+## SV4 grouped CPU expert primitive
+
+SV4 begins with an independently selectable grouped AVX2/FMA kernel for widths
+2, 3, and 4. Each packed NVFP4 K16 weight block and scale is decoded once and
+applied to independent token accumulators. Every token retains the single-token
+FMA, horizontal reduction, and BF16 intermediate order. Width one continues to
+use the existing kernel. The initial hardware gate requires bit-exact grouped
+versus single-token output for random represented BF16 activations including
+finite extremes before the grouped task is integrated into runtime dispatch.
+
 ## SV1 profile preparation
 
 `tools/diagnostics/v100_expert_profile.py` builds an offline static residency

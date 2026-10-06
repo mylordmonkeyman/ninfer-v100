@@ -209,6 +209,90 @@ float down_row_avx2(const Nvfp4ExpertMatrixView& down, std::int32_t row,
     return hsum256(_mm256_add_ps(acc0, acc1));
 }
 
+__attribute__((target("avx2,fma")))
+void gate_up_row_group_avx2(
+    const Nvfp4ExpertMatrixView& gate_up, std::int32_t row,
+    CpuNvfp4ExpertGroupScratch& scratch, std::size_t token_count) {
+    const float inverse = 1.0F / *gate_up.weight_scale_divisor;
+    const std::int32_t up_row =
+        row + static_cast<std::int32_t>(kFlashNextExpertIntermediate);
+    const std::size_t gate_scale_base = scale_row_base(row, gate_up.columns);
+    const std::size_t up_scale_base = scale_row_base(up_row, gate_up.columns);
+    __m256 gate0[kFlashNextCpuExpertGroupMax];
+    __m256 gate1[kFlashNextCpuExpertGroupMax];
+    __m256 up0[kFlashNextCpuExpertGroupMax];
+    __m256 up1[kFlashNextCpuExpertGroupMax];
+    for (std::size_t token = 0; token < token_count; ++token) {
+        gate0[token] = gate1[token] = up0[token] = up1[token] = _mm256_setzero_ps();
+    }
+    const int groups = gate_up.columns / 16;
+    for (int group = 0; group < groups; ++group) {
+        const float gate_coeff =
+            kScaleTable.values[static_cast<std::uint8_t>(
+                gate_up.scales[scale_byte_offset_from_base(gate_scale_base, group)])] * inverse;
+        const std::byte* gate_codes = gate_up.codes +
+            static_cast<std::size_t>(row) * static_cast<std::size_t>(gate_up.columns / 2) +
+            static_cast<std::size_t>(group) * 8ULL;
+        const DecodedWeights16 gate_w = decode_weights16(gate_codes, gate_coeff);
+        const float up_coeff =
+            kScaleTable.values[static_cast<std::uint8_t>(
+                gate_up.scales[scale_byte_offset_from_base(up_scale_base, group)])] * inverse;
+        const std::byte* up_codes = gate_up.codes +
+            static_cast<std::size_t>(up_row) * static_cast<std::size_t>(gate_up.columns / 2) +
+            static_cast<std::size_t>(group) * 8ULL;
+        const DecodedWeights16 up_w = decode_weights16(up_codes, up_coeff);
+        for (std::size_t token = 0; token < token_count; ++token) {
+            const float* input = scratch.tokens[token].input.data();
+            const __m256 x0 = _mm256_loadu_ps(input + group * 16);
+            const __m256 x1 = _mm256_loadu_ps(input + group * 16 + 8);
+            gate0[token] = _mm256_fmadd_ps(gate_w.lo, x0, gate0[token]);
+            gate1[token] = _mm256_fmadd_ps(gate_w.hi, x1, gate1[token]);
+            up0[token] = _mm256_fmadd_ps(up_w.lo, x0, up0[token]);
+            up1[token] = _mm256_fmadd_ps(up_w.hi, x1, up1[token]);
+        }
+    }
+    for (std::size_t token = 0; token < token_count; ++token) {
+        const float gate = hsum256(_mm256_add_ps(gate0[token], gate1[token]));
+        const float up = hsum256(_mm256_add_ps(up0[token], up1[token]));
+        scratch.tokens[token].intermediate[static_cast<std::size_t>(row)] =
+            round_to_bf16_rne(gate / (1.0F + std::exp(-gate)) * up);
+    }
+}
+
+__attribute__((target("avx2,fma")))
+void down_row_group_avx2(
+    const Nvfp4ExpertMatrixView& down, std::int32_t row,
+    const CpuNvfp4ExpertGroupScratch& scratch, std::span<float* const> outputs) {
+    const float inverse = 1.0F / *down.weight_scale_divisor;
+    const std::size_t scale_base = scale_row_base(row, down.columns);
+    __m256 acc0[kFlashNextCpuExpertGroupMax];
+    __m256 acc1[kFlashNextCpuExpertGroupMax];
+    for (std::size_t token = 0; token < outputs.size(); ++token) {
+        acc0[token] = acc1[token] = _mm256_setzero_ps();
+    }
+    const int groups = down.columns / 16;
+    for (int group = 0; group < groups; ++group) {
+        const float coeff =
+            kScaleTable.values[static_cast<std::uint8_t>(
+                down.scales[scale_byte_offset_from_base(scale_base, group)])] * inverse;
+        const std::byte* packed = down.codes +
+            static_cast<std::size_t>(row) * static_cast<std::size_t>(down.columns / 2) +
+            static_cast<std::size_t>(group) * 8ULL;
+        const DecodedWeights16 weights = decode_weights16(packed, coeff);
+        for (std::size_t token = 0; token < outputs.size(); ++token) {
+            const float* activation = scratch.tokens[token].intermediate.data();
+            acc0[token] = _mm256_fmadd_ps(
+                weights.lo, _mm256_loadu_ps(activation + group * 16), acc0[token]);
+            acc1[token] = _mm256_fmadd_ps(
+                weights.hi, _mm256_loadu_ps(activation + group * 16 + 8), acc1[token]);
+        }
+    }
+    for (std::size_t token = 0; token < outputs.size(); ++token) {
+        outputs[token][static_cast<std::size_t>(row)] =
+            hsum256(_mm256_add_ps(acc0[token], acc1[token]));
+    }
+}
+
 #endif
 
 } // namespace
@@ -281,6 +365,76 @@ void flash_next_cpu_nvfp4_expert_pair_avx2(
     flash_next_cpu_nvfp4_expert_prepare_avx2(expert, input_bf16, scratch);
     flash_next_cpu_nvfp4_expert_gate_up_rows_avx2(expert, scratch, 0, kFlashNextExpertIntermediate);
     flash_next_cpu_nvfp4_expert_down_rows_avx2(expert, scratch, output, 0, kFlashNextExpertHidden);
+}
+
+void flash_next_cpu_nvfp4_expert_group_prepare_avx2(
+    const HostNvfp4ExpertPairView& expert,
+    std::span<const std::uint16_t* const> inputs,
+    CpuNvfp4ExpertGroupScratch& scratch) {
+    if (inputs.size() < 2 || inputs.size() > kFlashNextCpuExpertGroupMax) {
+        throw std::invalid_argument("CPU NVFP4 AVX2: grouped width must be in [2, 4]");
+    }
+    for (std::size_t token = 0; token < inputs.size(); ++token) {
+        if (inputs[token] == nullptr) {
+            throw std::invalid_argument("CPU NVFP4 AVX2: null grouped input");
+        }
+        flash_next_cpu_nvfp4_expert_prepare_avx2(
+            expert, {inputs[token], kFlashNextExpertHidden}, scratch.tokens[token]);
+    }
+}
+
+void flash_next_cpu_nvfp4_expert_group_gate_up_rows_avx2(
+    const HostNvfp4ExpertPairView& expert, CpuNvfp4ExpertGroupScratch& scratch,
+    std::size_t token_count, std::size_t begin, std::size_t end) {
+    if (token_count < 2 || token_count > kFlashNextCpuExpertGroupMax ||
+        begin > end || end > kFlashNextExpertIntermediate) {
+        throw std::invalid_argument("CPU NVFP4 AVX2: invalid grouped gate/up range");
+    }
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+    for (std::size_t row = begin; row < end; ++row) {
+        gate_up_row_group_avx2(expert.gate_up, static_cast<std::int32_t>(row), scratch, token_count);
+    }
+#else
+    (void)expert; (void)scratch; (void)begin; (void)end;
+    throw std::runtime_error("CPU NVFP4 AVX2/FMA backend is unavailable");
+#endif
+}
+
+void flash_next_cpu_nvfp4_expert_group_down_rows_avx2(
+    const HostNvfp4ExpertPairView& expert, const CpuNvfp4ExpertGroupScratch& scratch,
+    std::span<float* const> outputs, std::size_t begin, std::size_t end) {
+    if (outputs.size() < 2 || outputs.size() > kFlashNextCpuExpertGroupMax ||
+        begin > end || end > kFlashNextExpertHidden) {
+        throw std::invalid_argument("CPU NVFP4 AVX2: invalid grouped down range");
+    }
+    for (float* output : outputs) {
+        if (output == nullptr) {
+            throw std::invalid_argument("CPU NVFP4 AVX2: null grouped output");
+        }
+    }
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+    for (std::size_t row = begin; row < end; ++row) {
+        down_row_group_avx2(expert.down, static_cast<std::int32_t>(row), scratch, outputs);
+    }
+#else
+    (void)expert; (void)scratch; (void)begin; (void)end;
+    throw std::runtime_error("CPU NVFP4 AVX2/FMA backend is unavailable");
+#endif
+}
+
+void flash_next_cpu_nvfp4_expert_group_avx2(
+    const HostNvfp4ExpertPairView& expert,
+    std::span<const std::uint16_t* const> inputs,
+    std::span<float* const> outputs,
+    CpuNvfp4ExpertGroupScratch& scratch) {
+    if (inputs.size() != outputs.size()) {
+        throw std::invalid_argument("CPU NVFP4 AVX2: grouped input/output width mismatch");
+    }
+    flash_next_cpu_nvfp4_expert_group_prepare_avx2(expert, inputs, scratch);
+    flash_next_cpu_nvfp4_expert_group_gate_up_rows_avx2(
+        expert, scratch, inputs.size(), 0, kFlashNextExpertIntermediate);
+    flash_next_cpu_nvfp4_expert_group_down_rows_avx2(
+        expert, scratch, outputs, 0, kFlashNextExpertHidden);
 }
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail
