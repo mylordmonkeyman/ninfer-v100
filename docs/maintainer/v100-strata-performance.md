@@ -870,3 +870,32 @@ repeats. A phase-policy test protects decode exclusion, including multi-row
 verification, and runs before production timing in the same incremental build.
 Only this policy's measured prefill/decode behavior may be claimed; concurrent
 qualification and the independent SV3 production blocker remain outstanding.
+
+
+The prefill-only follow-up, run `37479757491` at `ef95d3b7`, passed the
+policy test, twelve fresh servers and 48 exact responses, including prefix
+accounting, equal cache capacity and identical MTP draft/accept counts. It did
+not improve cold prefill: serial/handoff medians were 86.302/85.103 t/s without
+MTP and 82.274/80.797 t/s with MTP. Cold decode was 9.183/8.917 t/s without MTP
+and 7.924/7.905 t/s with MTP. This is correctness evidence for the phase policy,
+not production performance qualification. The isolated 512-token benefit does
+not establish a serving benefit. Handoff remains off by default; the bounded
+SV5 production follow-up is complete without further speculative variants.
+Concurrent-request qualification remains outstanding.
+
+### PLE queued-I/O integration boundary
+
+SV6 must retain the existing artifact mapping ownership while exposing the
+retained Linux file descriptor and absolute code/scale offsets to the PLE
+storage backend. The artifact reader already opens an `O_DIRECT` descriptor
+and supports aligned direct reads; a second pathname-based owner is unnecessary.
+Queue and fallback support must preserve artifact identity and the mapping lease.
+The current synchronous compressed gather runs before metadata upload and
+embedding. Async preparation must own a copy of row indices, and its ticket
+must reclaim unconsumed work on exceptions before slot reuse. The consumption
+wait belongs at the layer-1 PLE injection, after layer 0 has been enqueued,
+with existing transfer/compute ordering preserved. Direct-page requests must
+coalesce duplicates and handle row pieces that cross a 4096-byte boundary;
+unsupported queued/direct I/O falls back to mmap unless strict mode is requested.
+These are implementation boundaries, not completed SV6 qualification. No
+cold/warm TTFT result or queued-I/O implementation is claimed yet.
