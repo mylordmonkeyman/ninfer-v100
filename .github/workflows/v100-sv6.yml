@@ -7,12 +7,14 @@ on:
       - 'src/artifact/materializer.*'
       - 'src/artifact/reader.*'
       - 'src/targets/qwen3_8_flash_next/impl/load/materialized.cpp'
+      - 'src/targets/qwen3_8_flash_next/CMakeLists.txt'
       - 'src/targets/qwen3_8_flash_next/impl/perf_telemetry.h'
       - 'src/targets/qwen3_8_flash_next/impl/ple_*'
       - 'src/targets/qwen3_8_flash_next/impl/text_decode.*'
       - 'src/targets/qwen3_8_flash_next/impl/text_executor.cpp'
       - 'tests/targets/qwen3_8_flash_next/test_ple_pipeline.cpp'
       - 'tests/targets/qwen3_8_flash_next/test_ple_read_batch.cpp'
+      - 'tests/targets/qwen3_8_flash_next/test_ple_direct_io.cpp'
       - 'tests/CMakeLists.txt'
       - 'tests/test_ninfer_artifact_reader.cpp'
       - 'tools/diagnostics/v100_sv6_runtime.py'
@@ -109,6 +111,7 @@ jobs:
           cmake --build build-sv6 --target \
             ninfer_artifact_reader_test \
             ninfer_qwen3_8_flash_next_ple_read_batch_test \
+            ninfer_qwen3_8_flash_next_ple_direct_io_test \
             ninfer_qwen3_8_flash_next_ple_pipeline_test \
             ninfer_qwen3_8_flash_next_vertical_slice_real_test
       - name: Verify artifact lease, async lifetime and exact PLE output
@@ -123,6 +126,8 @@ jobs:
           build-sv6/tests/ninfer_artifact_reader_test 2>&1 | tee sv6-results/reader.log
           build-sv6/tests/ninfer_qwen3_8_flash_next_ple_read_batch_test \
             2>&1 | tee sv6-results/read-batch.log
+          build-sv6/tests/ninfer_qwen3_8_flash_next_ple_direct_io_test \
+            2>&1 | tee sv6-results/direct-io.log
           build-sv6/tests/ninfer_qwen3_8_flash_next_ple_pipeline_test \
             2>&1 | tee sv6-results/ple-pipeline.log
       - name: Compare mapped and direct queued PLE gathering

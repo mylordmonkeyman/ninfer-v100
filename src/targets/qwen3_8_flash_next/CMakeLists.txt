@@ -27,6 +27,7 @@ add_library(ninfer_qwen3_8_flash_next STATIC
   impl/ple_decode.cpp
   impl/ple_decode_kernels.cu
   impl/ple_index.cpp
+  impl/ple_direct_io.cpp
   impl/ple_pipeline.cpp
   impl/ple_table.cpp
   impl/qsa_attention.cpp

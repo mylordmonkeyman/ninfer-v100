@@ -67,8 +67,9 @@ def run(executable: pathlib.Path, output: pathlib.Path, mode: str, positions: in
         if key.startswith("NINFER_V100_PLE_") or key == "NINFER_V100_TELEMETRY":
             env.pop(key)
     env.update({
-        "NINFER_V100_PLE_STORAGE": mode,
+        "NINFER_V100_PLE_IO": mode,
         "NINFER_V100_PLE_QUEUE_DEPTH": "64",
+        "NINFER_V100_PLE_STRICT_DIRECT": "1" if mode == "direct" else "0",
         "NINFER_V100_TELEMETRY": "1" if telemetry else "0",
         "NINFER_PHASE11_PREFILL_PROBE_POSITIONS": str(positions),
         "NINFER_FLASH_NEXT_EXPERT_CACHE": "0",

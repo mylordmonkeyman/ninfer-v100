@@ -1,4 +1,5 @@
 #include "targets/qwen3_8_flash_next/impl/load/materialized.h"
+#include "targets/qwen3_8_flash_next/impl/ple_direct_io.h"
 
 #include "artifact/typed_binding.h"
 #include "core/device.h"
@@ -439,9 +440,7 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
     // touching all 29.8 GiB so their bounded page reads can remove cold-start dependence on that
     // prewarm. Auto may fall back to mmap for an unsupported read; that fallback is correct but
     // deliberately cold and is reported by the SV6 evidence path rather than hidden here.
-    const char* ple_storage = std::getenv("NINFER_V100_PLE_STORAGE");
-    const bool warm_ple = ple_storage == nullptr || ple_storage[0] == '\0' ||
-                          std::string_view(ple_storage) == "mmap";
+    const bool warm_ple = ple_io_policy_from_environment().mode == PleIoMode::Mmap;
     const auto warm_started = std::chrono::steady_clock::now();
     std::size_t host_bytes = 0;
     if (warm_ple) {

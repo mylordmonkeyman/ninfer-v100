@@ -9,9 +9,7 @@
 
 #include <algorithm>
 #include <cstdlib>
-#include <cstring>
 #include <future>
-#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string_view>
@@ -92,101 +90,6 @@ std::size_t ple_direct_queue_depth() {
     return static_cast<std::size_t>(value);
 }
 
-PleGatherPipeline::StorageMode ple_storage_mode() {
-    const char* raw = std::getenv("NINFER_V100_PLE_STORAGE");
-    const std::string_view mode = raw == nullptr ? std::string_view{} : std::string_view(raw);
-    if (mode.empty() || mode == "mmap") { return PleGatherPipeline::StorageMode::Mmap; }
-    if (mode == "auto") { return PleGatherPipeline::StorageMode::Auto; }
-    if (mode == "direct") { return PleGatherPipeline::StorageMode::Direct; }
-    throw std::invalid_argument("NINFER_V100_PLE_STORAGE must be mmap, auto, or direct");
-}
-
-struct PageCopy {
-    std::size_t page_offset = 0;
-    std::size_t destination = 0;
-    std::size_t bytes       = 0;
-};
-
-void add_piece(std::map<std::uint64_t, std::vector<PageCopy>>& pages,
-               std::uint64_t absolute, std::size_t bytes, std::size_t destination) {
-    constexpr std::size_t page = artifact::Reader::direct_io_alignment;
-    while (bytes != 0) {
-        const std::uint64_t page_begin = absolute / page * page;
-        const std::size_t in_page      = static_cast<std::size_t>(absolute - page_begin);
-        const std::size_t amount       = std::min(bytes, page - in_page);
-        pages[page_begin].push_back(PageCopy{in_page, destination, amount});
-        absolute += amount;
-        destination += amount;
-        bytes -= amount;
-    }
-}
-
-struct DirectGatherResult {
-    std::size_t pages = 0;
-    double read_us    = 0.0;
-};
-
-DirectGatherResult gather_direct(const PleTableView& table,
-                   std::span<const std::array<std::int64_t, 16>> rows,
-                   std::span<std::byte> codes, std::span<std::byte> scales,
-                   PlePageBuffer& page_storage, HostWorkerPool& workers,
-                   std::size_t queue_depth) {
-    if (!table.direct_reader || !table.direct_reader.supported()) {
-        throw std::runtime_error("PLE artifact direct I/O is unavailable");
-    }
-    constexpr std::size_t page = artifact::Reader::direct_io_alignment;
-    if (reinterpret_cast<std::uintptr_t>(page_storage.data()) % page != 0 ||
-        page_storage.size() < queue_depth * page) {
-        throw std::runtime_error("PLE direct staging is not page aligned");
-    }
-    std::map<std::uint64_t, std::vector<PageCopy>> pages;
-    for (std::size_t token = 0; token < rows.size(); ++token) {
-        for (std::size_t head = 0; head < 16; ++head) {
-            const std::int64_t global = rows[token][head];
-            if (global < 0) { throw std::out_of_range("PLE row must be non-negative"); }
-            const PleRowAddress address = locate_ple_row(static_cast<std::uint64_t>(global));
-            const PleShardView& shard = table.shards[address.shard];
-            if (address.row >= shard.rows || shard.width != kPleRowWidth ||
-                shard.groups_per_row != kPleRowWidth / 16) {
-                throw std::out_of_range("PLE direct row is outside the shard geometry");
-            }
-            const std::size_t index = token * 16 + head;
-            add_piece(pages, shard.code_absolute_offset + address.row * kPleCodesPerRow,
-                      kPleCodesPerRow, index * kPleCodesPerRow);
-            add_piece(pages, shard.scale_absolute_offset + address.row * kPleScalesPerRow,
-                      kPleScalesPerRow, codes.size() + index * kPleScalesPerRow);
-        }
-    }
-    std::vector<std::pair<std::uint64_t, std::vector<PageCopy>>> ordered(pages.begin(), pages.end());
-    const auto read_started = PerfClock::now();
-    auto* compact = codes.data();
-    for (std::size_t begin = 0; begin < ordered.size(); begin += queue_depth) {
-        const std::size_t count = std::min(queue_depth, ordered.size() - begin);
-        PleReadBatch pending(count);
-        for (std::size_t i = 0; i < count; ++i) {
-            auto* destination = static_cast<std::byte*>(page_storage.data()) + i * page;
-            const std::uint64_t offset = ordered[begin + i].first;
-            pending.add(workers.submit([reader = table.direct_reader, offset, destination] {
-                return reader.read(offset, std::span<std::byte>(destination, page));
-            }));
-        }
-        for (std::size_t i = 0; i < count; ++i) {
-            const std::size_t read = pending.get(i);
-            auto* source = static_cast<const std::byte*>(page_storage.data()) + i * page;
-            for (const PageCopy& copy : ordered[begin + i].second) {
-                if (copy.page_offset + copy.bytes > read) {
-                    throw std::runtime_error("PLE direct read ended before a requested row");
-                }
-                std::byte* destination = copy.destination < codes.size()
-                    ? compact + copy.destination
-                    : scales.data() + (copy.destination - codes.size());
-                std::memcpy(destination, source + copy.page_offset, copy.bytes);
-            }
-        }
-    }
-    return DirectGatherResult{ordered.size(), perf_elapsed_us(read_started)};
-}
-
 } // namespace
 
 PleGatherPipeline::PleGatherPipeline(PleTableView table, DeviceContext& device,
@@ -194,12 +97,12 @@ PleGatherPipeline::PleGatherPipeline(PleTableView table, DeviceContext& device,
                                      std::uint32_t worker_threads)
     : table_(std::move(table)), device_(device), max_tokens_(max_tokens),
       workers_(worker_threads, slot_count * max_tokens),
-      direct_queue_depth_(ple_direct_queue_depth()), storage_mode_(ple_storage_mode()),
+      direct_queue_depth_(ple_direct_queue_depth()), storage_policy_(ple_io_policy_from_environment()),
       fixed_host_buffer_(max_tokens * kPleTokenBytes) {
     if (max_tokens == 0 || slot_count == 0) {
         throw std::invalid_argument("PLE gather pipeline capacity must be nonzero");
     }
-    if (storage_mode_ != StorageMode::Mmap) {
+    if (storage_policy_.mode != PleIoMode::Mmap) {
         direct_workers_ = std::make_unique<HostWorkerPool>(
             std::min<std::uint32_t>(8, static_cast<std::uint32_t>(direct_queue_depth_)),
             direct_queue_depth_);
@@ -280,25 +183,18 @@ PleGatherPipeline::prepare_async(std::span<const std::array<std::int64_t, 16>> g
 
     std::vector<std::array<std::int64_t, 16>> owned(global_rows.begin(), global_rows.end());
     slot.work.push_back(workers_.submit(
-        [this, &slot, owned = std::move(owned), base, codes_bytes, scales_bytes, tokens] {
+        [this, &slot, owned = std::move(owned), base, codes_bytes, scales_bytes] {
             auto codes = std::span<std::byte>(base, codes_bytes);
             auto scales = std::span<std::byte>(base + codes_bytes, scales_bytes);
-            bool direct = storage_mode_ != StorageMode::Mmap;
-            if (direct) {
-                try {
-                    const DirectGatherResult result = gather_direct(
-                        table_, owned, codes, scales, slot.direct_pages,
-                        *direct_workers_, direct_queue_depth_);
-                    slot.storage_backend = "direct";
-                    slot.page_read_us = result.read_us;
-                    slot.coalesced_pages = result.pages;
-                } catch (...) {
-                    if (storage_mode_ == StorageMode::Direct) { throw; }
-                    direct = false;
-                    slot.storage_fallback = true;
-                }
+            const PleIoResult result = gather_ple_rows_storage(
+                table_, owned, codes, scales, slot.direct_pages,
+                direct_workers_.get(), direct_queue_depth_, storage_policy_);
+            slot.storage_backend = result.direct ? "direct" : "mmap";
+            slot.storage_fallback = result.fallback;
+            if (result.direct) {
+                slot.page_read_us = result.read_us;
+                slot.coalesced_pages = result.pages;
             }
-            if (!direct) { gather_ple_rows_compressed(table_, owned, codes, scales); }
         }));
     return ticket;
 }

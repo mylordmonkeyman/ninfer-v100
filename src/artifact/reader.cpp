@@ -288,7 +288,8 @@ public:
 
     bool direct_io_supported() const noexcept {
 #if defined(_WIN32)
-        return true;
+        // The Windows seek/read implementation is serial; queued PLE positional reads are Linux-only.
+        return false;
 #else
         return direct_io_;
 #endif

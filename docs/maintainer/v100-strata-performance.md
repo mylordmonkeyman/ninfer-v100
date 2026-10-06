@@ -904,10 +904,11 @@ cold/warm TTFT result or queued-I/O implementation is claimed yet.
 
 SV6 now exposes an artifact-bound direct reader and absolute PLE code/scale
 offsets without reopening a pathname. The direct reader retains the exact
-artifact implementation and descriptor. `NINFER_V100_PLE_STORAGE=mmap`
-retains the existing mapped gather and full PLE warm; `direct` requires aligned
-reads from that descriptor, while `auto` falls back to the mapped gather if the
-platform cannot satisfy a direct read. Direct and auto skip the multi-gigabyte
+artifact implementation and descriptor. `NINFER_V100_PLE_IO=mmap`
+retains the existing mapped gather and full PLE warm. Both `direct` and `auto`
+attempt aligned descriptor reads and fall back to mmap when they cannot be
+satisfied. Explicit `NINFER_V100_PLE_STRICT_DIRECT=1` with `PLE_IO=direct`
+turns those failures into errors instead of fallback. Direct and auto skip the multi-gigabyte
 mapped warm. `NINFER_V100_PLE_QUEUE_DEPTH` is bounded to 1--256 (default 64).
 
 Root prefill now submits an owning asynchronous gather before embedding and
@@ -946,3 +947,26 @@ produced. The correction uses explicitly aligned reusable host pages for disk
 reads, then scatters into the existing pinned H2D payload. Disk staging itself
 needs no CUDA pinning. The queued-writer drain fix is included in the same
 follow-up so failure recovery cannot race the page buffer's next use.
+
+
+SV6 follow-up run `37501523065` at `a9037e22` passed CUDA compilation,
+reader lease, async lifetime, page-buffer alignment, writer-drain and exact
+BF16 gather tests. All eight fresh-process 512-position observations produced
+identical logits and selected numerical metrics. The direct diagnostic read
+3954 coalesced pages with no fallback for an 819200-byte compressed payload.
+Telemetry-off median prefill elapsed was 14.720/14.397 seconds (mmap/direct),
+with overlapping ranges 14.712--15.641 / 13.971--16.044. Process wall medians
+were 22.126/18.769 seconds. These are bounded integration results; the process
+wall advantage includes avoiding the full mapped startup warm and is not a
+served cold/warm TTFT qualification. Telemetry `gather_us` spans submission to
+consumption, including overlapped model work; it is not storage service time.
+
+The host storage component now uses the specification's canonical
+`NINFER_V100_PLE_IO` flag and a separate explicit strict switch. The backend is
+a bounded worker queue of positional `pread` operations, rather than io_uring.
+A real artifact fixture checks exact compressed bytes over all 512 small-shard
+rows, code/scale page crossings, deduplicated shared pages, the partial EOF
+page, unsupported-reader and short-read fallback, strict errors and immediate
+reuse at queue depths 1, 3, 64 and 256. Invalid shard rows are rejected before
+storage or fallback. mmap remains the storage default. Genuine cold/warm
+serving TTFT remains the next SV6 qualification gate.

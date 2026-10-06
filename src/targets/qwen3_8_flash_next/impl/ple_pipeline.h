@@ -5,6 +5,7 @@
 #include "core/host_worker_pool.h"
 #include "core/tensor.h"
 #include "targets/qwen3_8_flash_next/impl/ple_table.h"
+#include "targets/qwen3_8_flash_next/impl/ple_direct_io.h"
 
 #include <array>
 #include <cstddef>
@@ -17,8 +18,6 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 
 class PleGatherPipeline {
 public:
-    enum class StorageMode : std::uint8_t { Mmap, Auto, Direct };
-
     class Ticket {
     public:
         Ticket() noexcept = default;
@@ -71,7 +70,7 @@ private:
     HostWorkerPool workers_;
     std::unique_ptr<HostWorkerPool> direct_workers_;
     std::size_t direct_queue_depth_ = 0;
-    StorageMode storage_mode_ = StorageMode::Mmap;
+    PleIoPolicy storage_policy_;
     std::size_t next_slot_ = 0;
     PinnedHostBuffer fixed_host_buffer_;
 };
