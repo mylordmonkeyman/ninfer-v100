@@ -87,13 +87,19 @@ jobs:
           set -euo pipefail
           if [ -f sv6-serve-results/runtime.log ] && [ ! -f sv6-serve-results/runtime/report.json ]; then
             echo "::warning::previous SV6 serve run did not complete; preserving its evidence as public annotations (base64)"
+            if [ -s sv6-serve-results/runtime/failure-digest.txt ]; then
+              payload=$(base64 -w0 < sv6-serve-results/runtime/failure-digest.txt)
+              echo "::warning::sv6-serve previous-run failure digest base64=${payload}"
+            fi
             listing=$( { ls -la sv6-serve-results; ls -la sv6-serve-results/runtime; } 2>&1 | base64 -w0)
             echo "::warning::sv6-serve previous-run evidence listing base64=${listing}"
-            payload=$(tail -c 30000 sv6-serve-results/runtime.log | base64 -w0)
-            echo "::warning::sv6-serve previous-run runtime.log tail base64=${payload}"
+            if [ -s sv6-serve-results/runtime.log ]; then
+              payload=$(tail -c 2000 sv6-serve-results/runtime.log | base64 -w0)
+              echo "::warning::sv6-serve previous-run runtime.log tail base64=${payload}"
+            fi
             latest_log=$(ls -t sv6-serve-results/runtime/*.log 2>/dev/null | head -1 || true)
-            if [ -n "${latest_log:-}" ]; then
-              payload=$(tail -c 30000 "$latest_log" | base64 -w0)
+            if [ -n "${latest_log:-}" ] && [ -s "$latest_log" ]; then
+              payload=$(tail -c 2000 "$latest_log" | base64 -w0)
               echo "::warning::sv6-serve previous-run server log $(basename "$latest_log") tail base64=${payload}"
             fi
           fi
@@ -179,10 +185,10 @@ jobs:
           emit_digest() {
             label=$1; file=$2
             [ -f "$file" ] || return 0
-            payload=$(tail -c 30000 "$file" | base64 -w0)
+            payload=$(tail -c 2000 "$file" | base64 -w0)
             echo "::error::sv6-serve ${label} base64=${payload}"
           }
-          python3 tools/diagnostics/v100_sv6_serve.py \
+          python3 -u tools/diagnostics/v100_sv6_serve.py \
             --executable build-sv6/apps/ninfer-serve \
             --artifact sv6-serve-source/model.ninfer \
             --output sv6-serve-results/runtime --repeats 3 \
@@ -190,6 +196,10 @@ jobs:
           status=$?
           if [ "$status" -ne 0 ]; then
             echo "::error::SV6 serve screen failed (exit ${status}); publishing evidence digest as public annotations"
+            if [ -s sv6-serve-results/runtime/failure-digest.txt ]; then
+              payload=$(base64 -w0 < sv6-serve-results/runtime/failure-digest.txt)
+              echo "::error::sv6-serve failure digest base64=${payload}"
+            fi
             latest_log=$(ls -t sv6-serve-results/runtime/*.log 2>/dev/null | head -1 || true)
             {
               echo "## SV6 serve screen failed (exit ${status})"

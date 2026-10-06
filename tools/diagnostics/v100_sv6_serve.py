@@ -11,6 +11,7 @@ import statistics
 import subprocess
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.request
 
@@ -19,6 +20,8 @@ from v100_sv0_benchmark import gpu_snapshot
 
 
 MODES = ("mmap-warm", "mmap-cold", "direct")
+
+CURRENT_SERVER = {"name": "none", "log": None}
 
 
 def request(base, path, payload=None):
@@ -85,6 +88,8 @@ def parse_ple_records(text, mode, telemetry):
 def run_server(executable, artifact, output, mode, repeat, telemetry):
     name = f"{mode}-{'diagnostic' if telemetry else f'timing-{repeat}'}"
     log_path = output / f"{name}.log"
+    CURRENT_SERVER["name"] = name
+    CURRENT_SERVER["log"] = log_path
     request_path = output / f"{name}-requests.jsonl"
     env = os.environ.copy()
     for key in tuple(env):
@@ -184,6 +189,51 @@ def run_server(executable, artifact, output, mode, repeat, telemetry):
            "response_signature": response_signature(response)}
     print(f"{name}: ready={ready_seconds:.3f}s ttft={timings['ttft']:.3f}s", flush=True)
     return row
+def failure_digest(output):
+    """Bounded digest of the in-flight state for the workflow's public annotations."""
+    parts = ["SV6 serve screen failed", f"in-flight server: {CURRENT_SERVER['name']}"]
+    log_path = CURRENT_SERVER["log"]
+    if log_path is not None and log_path.exists():
+        text = log_path.read_text(errors="replace")
+        for line in text.splitlines():
+            if "host_ple_warm" in line or "host_ple_cache" in line:
+                parts.append("startup: " + line)
+        records = [line for line in text.splitlines() if '"kind":"ple_gather"' in line]
+        parts.append(f"ple_gather records: {len(records)}")
+        for record in records[:2]:
+            parts.append("ple: " + record[:400])
+        parts.append("log tail:")
+        parts.extend(line for line in text.splitlines()[-12:])
+    name = CURRENT_SERVER["name"]
+    request_path = output / f"{name}-requests.jsonl"
+    if request_path.exists():
+        for line in request_path.read_text(errors="replace").splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("event") == "request_done":
+                result = row.get("result", {})
+                timings = row.get("timings_seconds", {})
+                parts.append(
+                    "request_done: prompt_tokens={} prefix_cache_hit_tokens={} ttft={} "
+                    "prefill={} total={}".format(
+                        result.get("prompt_tokens"),
+                        result.get("prefix_cache_hit_tokens"),
+                        timings.get("ttft"), timings.get("prefill"), timings.get("total")))
+            elif row.get("event") in ("request_error", "request_rejected"):
+                parts.append("event: " + json.dumps(row)[:400])
+    response_path = output / f"{name}-response.json"
+    if response_path.exists():
+        try:
+            parts.append(
+                "response: " + json.dumps(json.loads(response_path.read_text()))[:400])
+        except (json.JSONDecodeError, OSError):
+            parts.append("response: unparseable")
+    digest = "\n".join(parts)[:2800]
+    (output / "failure-digest.txt").write_text(digest + "\n")
+    return digest
+
 
 
 def main():
@@ -197,6 +247,20 @@ def main():
         parser.error("--artifact requires an explicit readable .ninfer file")
     if args.repeats < 3: parser.error("need at least three fresh-process repetitions")
     args.output.mkdir(parents=True, exist_ok=True)
+    try:
+        return run_screen(args)
+    except Exception as error:
+        traceback_tail = traceback.format_exc().splitlines()
+        digest = failure_digest(args.output)
+        print(f"SV6 serve screen failed: {type(error).__name__}: {error}", flush=True)
+        print("traceback (tail):", flush=True)
+        print("\n".join(traceback_tail[-12:]), flush=True)
+        print("failure digest:", flush=True)
+        print(digest, flush=True)
+        return 1
+
+
+def run_screen(args):
     rows = [run_server(args.executable, args.artifact, args.output, mode, -1, True)
             for mode in MODES]
     for repeat in range(args.repeats):
