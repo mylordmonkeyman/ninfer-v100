@@ -146,6 +146,15 @@ jobs:
             --executable build-sv3/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
             --output sv3-results --repeats 3 \
             --sizes 128 256 512 1024 2048 | tee sv3-results/calibration.log
+      - name: Calibrate fixed resident cache and miss-only staging
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/diagnostics/v100_sv3_calibrate.py \
+            --executable build-sv3/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            --output sv3-results/cached-calibration --repeats 3 \
+            --profile sv3-profile-source/sv2-static-profile.json \
+            --sizes 512 1024 2048 | tee sv3-results/cached-calibration.log
       - name: Preserve staging evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

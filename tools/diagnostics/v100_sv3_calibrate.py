@@ -66,26 +66,41 @@ def parse_json_records(stderr: str) -> list[dict]:
     return records
 
 
-def validate_diagnostic(stderr: str, positions: int, mode: str) -> dict:
+def validate_diagnostic(stderr: str, positions: int, mode: str, cached: bool = False) -> dict:
     records = parse_json_records(stderr)
     layers = [row for row in records if row.get("kind") == "expert_layer" and row.get("prefill")]
     memory = [row for row in records if row.get("kind") == "runtime_memory"]
-    if len(layers) != LAYERS or len(memory) != 1:
+    passes = 2 if cached else 1
+    if len(layers) != LAYERS * passes or len(memory) != 1:
         raise ValueError("diagnostic is missing expert layers or runtime memory")
-    if sorted(row["layer"] for row in layers) != list(range(LAYERS)):
-        raise ValueError("diagnostic expert layers are incomplete or duplicated")
+    for start in range(0, len(layers), LAYERS):
+        if sorted(row["layer"] for row in layers[start:start + LAYERS]) != list(range(LAYERS)):
+            raise ValueError("diagnostic expert layers are incomplete or duplicated")
     routes = positions * ROUTES_PER_TOKEN
     if any(row["tokens"] != positions or row["routes"] != routes for row in layers):
         raise ValueError("diagnostic route shape mismatch")
-    if any(row["gpu_hit_routes"] != 0 for row in layers):
+    if not cached and any(row["gpu_hit_routes"] != 0 for row in layers):
         raise ValueError("calibration unexpectedly used the persistent cache")
     if any(row["cache_result_d2h_bytes"] or row["routed_sum_h2d_bytes"] for row in layers):
         raise ValueError("calibration did not retain SV2 transfer elimination")
 
+    if cached:
+        for row in layers:
+            cache = row.get("cache", {})
+            if any(cache.get(key) != expected for key, expected in (
+                    ("admissions_total", 3072), ("fills_total", 3072),
+                    ("evictions_total", 0), ("leased_experts", 0),
+                    ("ready_experts", 64), ("uploading_experts", 0))):
+                raise ValueError("cached calibration changed the fixed resident set")
+        if not 0 < sum(row["gpu_hit_routes"] for row in layers) < routes * LAYERS * passes:
+            raise ValueError("cached calibration requires mixed hit/miss provenance")
+        for first, second in zip(layers[:LAYERS], layers[LAYERS:]):
+            if any(first[key] != second[key] for key in ("gpu_hit_routes", "frequency")):
+                raise ValueError("cached prefill repeated route provenance changed")
     if mode == "stream":
-        if any(row["stream_routes"] != routes or row["cpu_miss_routes"] != 0 for row in layers):
+        if any(row["stream_routes"] != routes - row["gpu_hit_routes"] or row["cpu_miss_routes"] != 0 for row in layers):
             raise ValueError("stream mode did not stage every route")
-        if any(row["stream_experts"] < 1 or
+        if any((row["stream_experts"] < 1 and row["stream_routes"] > 0) or
                row["stream_expert_h2d_bytes"] != row["stream_experts"] * EXPERT_SLOT_BYTES
                for row in layers):
             raise ValueError("stream expert transfer accounting mismatch")
@@ -96,18 +111,20 @@ def validate_diagnostic(stderr: str, positions: int, mode: str) -> dict:
         if any(row["stream_routes"] != 0 or row["stream_experts"] != 0 or
                row["stream_expert_h2d_bytes"] != 0 for row in layers):
             raise ValueError("CPU control unexpectedly used the staging ring")
-        if any(row["cpu_miss_routes"] != routes for row in layers):
+        if any(row["cpu_miss_routes"] != routes - row["gpu_hit_routes"] for row in layers):
             raise ValueError("CPU control did not execute every route on the host")
         expected_inputs = positions * EXPERT_HIDDEN * 2 + routes * 4
         expected_outputs = routes * EXPERT_HIDDEN * 4
         if any(row["route_input_d2h_bytes"] != expected_inputs or
-               row["cpu_miss_h2d_bytes"] != expected_outputs for row in layers):
+               row["cpu_miss_h2d_bytes"] != row["cpu_miss_routes"] * EXPERT_HIDDEN * 4 for row in layers):
             raise ValueError("CPU control transfer accounting mismatch")
     else:
         raise ValueError(f"unknown prefill policy: {mode}")
 
     return {
-        "layers": len(layers),
+        "layers": LAYERS, "passes": passes,
+        "cache_bytes": layers[0].get("cache", {}).get("cache_bytes", 0),
+        "resident_routes": sum(row["gpu_hit_routes"] for row in layers),
         "routes": sum(row["routes"] for row in layers),
         "distinct_experts": sum(row["distinct_experts"] for row in layers),
         "stream_expert_h2d_bytes": sum(row["stream_expert_h2d_bytes"] for row in layers),
@@ -137,11 +154,12 @@ def equal_capacity(cpu: dict, stream: dict) -> dict:
     return {"equal_fields": list(keys), "stream_runtime_overhead_bytes": overhead}
 
 
-def environment(mode: str, positions: int, telemetry: bool) -> dict:
+def environment(mode: str, positions: int, telemetry: bool, profile: Path | None = None) -> dict:
     env = os.environ.copy()
     for key in tuple(env):
         if (key.startswith("NINFER_PHASE") or key.startswith("NINFER_V100_PREFILL_") or
-                key.startswith("NINFER_FLASH_NEXT_EXPERT_CACHE")):
+                key.startswith("NINFER_FLASH_NEXT_EXPERT_CACHE") or
+                key.startswith("NINFER_V100_EXPERT_")):
             env.pop(key)
     env.update({
         "NINFER_PHASE11_PREFILL_PROBE_POSITIONS": str(positions),
@@ -153,12 +171,17 @@ def environment(mode: str, positions: int, telemetry: bool) -> dict:
         "NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT": "0",
         "NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE": "0",
     })
+    if profile:
+        env.update({"NINFER_FLASH_NEXT_EXPERT_CACHE": "1",
+                    "NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS": "64",
+                    "NINFER_V100_EXPERT_POLICY": "static",
+                    "NINFER_V100_EXPERT_PROFILE": str(profile.resolve())})
     return env
 
 
 def invoke(executable: Path, output: Path, name: str, mode: str,
-           positions: int, telemetry: bool) -> dict:
-    env = environment(mode, positions, telemetry)
+           positions: int, telemetry: bool, profile: Path | None = None) -> dict:
+    env = environment(mode, positions, telemetry, profile)
     snapshots = [gpu_snapshot()]
     done, errors = threading.Event(), []
 
@@ -189,17 +212,25 @@ def invoke(executable: Path, output: Path, name: str, mode: str,
         raise RuntimeError(f"{name}: prefill process or hardware monitor failed")
     if any(not row["thermal_status_observed"] or row["thermal_throttled"] for row in snapshots):
         raise ValueError(f"{name}: thermal status unavailable or throttling observed")
+    if profile:
+        if __package__:
+            from .v100_sv3_runtime import parse_runtime_probe
+        else:
+            from v100_sv3_runtime import parse_runtime_probe
+        probe = parse_runtime_probe(process.stdout, positions, cached=True)
+    else:
+        probe = parse_probe(process.stdout, positions)
     result = {
         "name": name, "mode": mode, "positions": positions, "telemetry": telemetry,
-        "probe": parse_probe(process.stdout, positions),
+        "probe": probe,
     }
     if telemetry:
-        result["diagnostic"] = validate_diagnostic(process.stderr, positions, mode)
+        result["diagnostic"] = validate_diagnostic(process.stderr, positions, mode, cached=bool(profile))
     print(f"{name}: {result['probe']['tokens_per_s']:.3f} tokens/s", flush=True)
     return result
 
 
-def summarize(observations: list[dict], diagnostics: dict, repeats: int) -> dict:
+def summarize(observations: list[dict], diagnostics: dict, repeats: int, cached: bool = False) -> dict:
     rows = []
     for positions in sorted({row["positions"] for row in observations}):
         cells = {}
@@ -224,6 +255,12 @@ def summarize(observations: list[dict], diagnostics: dict, repeats: int) -> dict
         capacity = equal_capacity(
             diagnostics[f"cpu-cache-{positions}"]["diagnostic"]["runtime_memory"],
             diagnostics[f"stream-{positions}"]["diagnostic"]["runtime_memory"])
+        if cached:
+            cpu_bytes = diagnostics[f"cpu-cache-{positions}"]["diagnostic"]["cache_bytes"]
+            stream_bytes = diagnostics[f"stream-{positions}"]["diagnostic"]["cache_bytes"]
+            if cpu_bytes != stream_bytes or cpu_bytes != 64 * LAYERS * EXPERT_SLOT_BYTES:
+                raise ValueError("fixed resident cache capacities differ")
+            capacity["cache_bytes"] = cpu_bytes
         rows.append({
             "positions": positions, "cpu-cache": cells["cpu-cache"], "stream": cells["stream"],
             "median_change_percent": 100 * (cells["stream"]["median"] /
@@ -242,8 +279,10 @@ def summarize(observations: list[dict], diagnostics: dict, repeats: int) -> dict
             "automatic_threshold": None,
             "limitations": [
                 "screening uses the standalone real-model prefill probe, not HTTP serving",
+                "fixed identity-bound 64-slot resident cache in both arms" if cached else
                 "persistent expert cache is disabled in both arms",
-                "stream mode stages every selected expert; persistent-hit coexistence remains pending",
+                "first prefill pass measured; second pass validates repeatability and stable residency" if cached else
+                "stream mode stages every selected expert with cache disabled",
                 "no automatic threshold or default change is made by this evidence collector",
             ]}
 
@@ -252,6 +291,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--executable", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--profile", type=Path, help="fixed identity-bound 64-slot profile")
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--sizes", type=int, nargs="+", default=DEFAULT_SIZES)
     args = parser.parse_args()
@@ -266,7 +306,7 @@ def main() -> int:
     for positions in args.sizes:
         for mode in MODES:
             row = invoke(args.executable, output, f"diagnostic-{mode}-{positions}",
-                         mode, positions, True)
+                         mode, positions, True, args.profile)
             diagnostics[f"{mode}-{positions}"] = row
             atomic_json(output / "diagnostics.json", diagnostics)
 
@@ -277,10 +317,10 @@ def main() -> int:
             for mode in order:
                 observations.append(invoke(
                     args.executable, output, f"timing-{repeat}-{mode}-{positions}",
-                    mode, positions, False))
+                    mode, positions, False, args.profile))
                 atomic_json(output / "timing-observations.json", observations)
 
-    report = summarize(observations, diagnostics, args.repeats)
+    report = summarize(observations, diagnostics, args.repeats, cached=bool(args.profile))
     report["candidate_sha"] = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], text=True).strip()
     atomic_json(output / "calibration.json", report)

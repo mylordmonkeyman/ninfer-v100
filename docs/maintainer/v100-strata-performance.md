@@ -583,3 +583,20 @@ cache-off routes must all use the ring; cached routes must partition into
 Ready hits and streamed misses with zero CPU expert work. Activation D2H is
 forbidden, and exact expert transfer accounting is required. `auto` continues
 to require an explicitly supplied threshold; defaults remain unchanged.
+
+SV3 resident coexistence validation run `37391259007` passed SM70 compilation,
+all independent 0/50/100% resident operator cases at T=1..5,128,2048,
+and the real-model two-pass residency/accounting check with exact repeated
+selected numerical metrics against all-stream. The repeated cache-off calibration
+measured CPU/stream medians 27.446/18.223,34.077/29.320,40.600/48.329,
+43.897/71.497,46.732/107.476 t/s at 128,256,512,1024,2048 tokens.
+This supports the experimental cache-off crossover of 512; defaults stay unchanged.
+
+The next calibration uses the same identity-bound profile and fixed static
+64-slot resident set in both arms at 512,1024,2048 tokens. Three fresh processes
+per arm measure the first prefill; a second pass checks exact numerical and route
+repeatability. Telemetry separately verifies no resident admissions/evictions,
+zero leases after completion, mixed hit/miss partition, miss-only staging/CPU
+transfers, equal cache capacity and separately planned ring overhead.
+The existing independent oracle thresholds remain unchanged; this calibration
+does not claim independent-oracle or production/default qualification.

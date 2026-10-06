@@ -66,6 +66,28 @@ class Sv3CalibrationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "SV2 transfer"):
             MODULE.validate_diagnostic("\n".join(json.dumps(row) for row in rows), 2, "stream")
 
+    def test_fixed_resident_cache_partition_and_pollution(self):
+        for mode in MODULE.MODES:
+            rows = [json.loads(line) for line in diagnostic_rows(mode).splitlines()]
+            for row in rows[1:]:
+                row["gpu_hit_routes"] = 10
+                row["frequency"] = [1] * 20
+                row["cache"] = dict(admissions_total=3072, fills_total=3072,
+                    evictions_total=0, leased_experts=0, ready_experts=64,
+                    uploading_experts=0, cache_bytes=64*48*MODULE.EXPERT_SLOT_BYTES)
+                if mode == "stream":
+                    row["stream_routes"] = 10
+                else:
+                    row["cpu_miss_routes"] = 10
+                    row["cpu_miss_h2d_bytes"] = 10*MODULE.EXPERT_HIDDEN*4
+            rows += copy.deepcopy(rows[1:])
+            text = "\n".join(map(json.dumps, rows))
+            report = MODULE.validate_diagnostic(text, 2, mode, cached=True)
+            self.assertEqual(report["resident_routes"], 960)
+            rows[-1]["cache"]["evictions_total"] = 1
+            with self.assertRaisesRegex(ValueError, "fixed resident set"):
+                MODULE.validate_diagnostic("\n".join(map(json.dumps, rows)), 2, mode, cached=True)
+
     def test_equal_capacity_excludes_separate_ring_cost(self):
         cpu, stream = memory(100), memory(200)
         result = MODULE.equal_capacity(cpu, stream)
