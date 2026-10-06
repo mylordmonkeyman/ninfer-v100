@@ -1,4 +1,5 @@
 #include "artifact/reader.h"
+#include "targets/qwen3_8_flash_next/impl/cpu_expert_pool.h"
 #include "targets/qwen3_8_flash_next/impl/cpu_expert_reference.h"
 
 #include <array>
@@ -106,10 +107,12 @@ int main() {
             inputs[token][column] = float_to_bf16(value);
         }
     }
+    HostExpertWorkerPool pool(4, true);
 
     for (std::size_t width : {2ULL, 3ULL, 4ULL}) {
         std::array<std::array<float, kFlashNextExpertHidden>, kFlashNextCpuExpertGroupMax> single{};
         std::array<std::array<float, kFlashNextExpertHidden>, kFlashNextCpuExpertGroupMax> grouped{};
+        std::array<std::array<float, kFlashNextExpertHidden>, kFlashNextCpuExpertGroupMax> pooled{};
         std::array<const std::uint16_t*, kFlashNextCpuExpertGroupMax> input_ptrs{};
         std::array<float*, kFlashNextCpuExpertGroupMax> output_ptrs{};
 
@@ -127,10 +130,29 @@ int main() {
             expert, {input_ptrs.data(), width}, {output_ptrs.data(), width}, group_scratch);
         const auto group_end = Clock::now();
 
+        std::vector<HostExpertTask> tasks;
+        for (std::size_t token = 0; token < width; ++token) {
+            tasks.push_back(HostExpertTask{
+                .expert = expert,
+                .expert_id = 0,
+                .route_id = static_cast<std::uint32_t>(17 + token),
+                .input = inputs[token].data(),
+                .output = pooled[token].data(),
+            });
+        }
+        const auto pool_stats = pool.run(tasks, true);
+        if (pool_stats.groups != 1 || pool_stats.grouped_pairs != width ||
+            pool_stats.weight_read_bytes != static_cast<std::uint64_t>(expert_bytes)) {
+            std::cerr << "group width " << width << " returned invalid pool accounting\n";
+            return 1;
+        }
+
         for (std::size_t token = 0; token < width; ++token) {
             for (std::size_t row = 0; row < kFlashNextExpertHidden; ++row) {
                 if (!std::isfinite(grouped[token][row]) ||
                     std::bit_cast<std::uint32_t>(grouped[token][row]) !=
+                        std::bit_cast<std::uint32_t>(single[token][row]) ||
+                    std::bit_cast<std::uint32_t>(pooled[token][row]) !=
                         std::bit_cast<std::uint32_t>(single[token][row])) {
                     std::cerr << "group width " << width << " token " << token
                               << " row " << row << " differs: "
@@ -149,6 +171,59 @@ int main() {
                   << ",\"exact\":true}\n";
     }
 
+    // Exercise both whole-group jobs and two-phase row sharding, mixed expert
+    // identities, singleton remainders, original output slots and pool reuse.
+    float alternate_divisor = 16.0F;
+    auto alternate = expert;
+    alternate.gate_up.weight_scale_divisor = &alternate_divisor;
+    alternate.down.weight_scale_divisor = &alternate_divisor;
+    for (unsigned workers : {1U, 4U, 32U}) {
+        HostExpertWorkerPool pool(workers, true);
+        for (unsigned count : {1U, 2U, 3U, 4U, 5U, 17U}) {
+            std::vector<std::array<float, kFlashNextExpertHidden>> expected(count), actual(count);
+            std::vector<HostExpertTask> tasks;
+            for (unsigned i = 0; i < count; ++i) {
+                const auto& view = (i % 5 == 0) ? alternate : expert;
+                CpuNvfp4ExpertReferenceScratch scratch;
+                flash_next_cpu_nvfp4_expert_pair_avx2(
+                    view, inputs[i % 4], expected[i], scratch);
+                tasks.push_back(HostExpertTask{
+                    .expert = view,
+                    .expert_id = i % 5 == 0 ? 1 : 0,
+                    .route_id = i,
+                    .input = inputs[i % 4].data(),
+                    .output = actual[i].data(),
+                });
+            }
+            const auto stats = pool.run(tasks, true);
+            for (unsigned i = 0; i < count; ++i) {
+                if (std::memcmp(actual[i].data(), expected[i].data(), sizeof(actual[i])) != 0) {
+                    throw std::runtime_error("grouped worker pool changed an output slot");
+                }
+            }
+            if (stats.grouped_pairs > count || stats.weight_read_bytes > count * 2'764'808ULL ||
+                (count >= 3 && stats.groups == 0)) {
+                throw std::runtime_error("grouped worker pool accounting mismatch");
+            }
+            // Failure drains all submitted workers; the next valid batch must run.
+            auto invalid = tasks;
+            invalid.back().input = nullptr;
+            bool rejected = false;
+            try {
+                (void)pool.run(invalid, true);
+            } catch (const std::exception&) {
+                rejected = true;
+            }
+            if (!rejected) { throw std::runtime_error("null grouped input accepted"); }
+            (void)pool.run(tasks, true);
+            for (unsigned i = 0; i < count; ++i) {
+                if (std::memcmp(actual[i].data(), expected[i].data(), sizeof(actual[i])) != 0) {
+                    throw std::runtime_error("grouped worker pool recovery changed output");
+                }
+            }
+        }
+    }
+    std::cout << "PASS: grouped worker pool mixed identities, row phases and failure recovery\n";
     std::cout << "PASS: grouped AVX2 widths 2/3/4 preserve single-token output bits\n";
     return 0;
 }

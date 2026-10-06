@@ -67,6 +67,13 @@ bool resolve_shared_fp32_intermediate_diagnostic() {
     return env != nullptr && env[0] != '\0' && std::string_view(env) != "0";
 }
 
+bool resolve_cpu_expert_grouping() {
+    const char* env = std::getenv("NINFER_V100_CPU_EXPERT_GROUP");
+    if (env == nullptr || env[0] == '\0' || std::string_view(env) == "0") { return false; }
+    if (std::string_view(env) == "1") { return true; }
+    throw std::invalid_argument("NINFER_V100_CPU_EXPERT_GROUP must be 0 or 1");
+}
+
 bool resolve_device_route_combine() {
     const char* env = std::getenv("NINFER_V100_DEVICE_ROUTE_COMBINE");
     if (env == nullptr || env[0] == '\0' || std::string_view(env) == "0") return false;
@@ -458,6 +465,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
             cpu.miss_routes.push_back(route_index);
             cpu.tasks.push_back(HostExpertTask{
                 .expert = host_experts.expert(cpu.ids[route_index]),
+                .expert_id = cpu.ids[route_index],
+                .route_id = static_cast<std::uint32_t>(route_index),
                 .input = token_input,
                 .input_fp32 = token_input_fp32,
                 .output = device_route_combine ? nullptr :
@@ -514,9 +523,17 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     const bool serial = cache != nullptr && cache->serial_schedule();
     if (serial) finish_hits();
     const auto cpu_started = measure ? Clock::now() : Clock::time_point{};
+    HostExpertBatchStats cpu_batch;
+    bool grouped_cpu_experts = false;
     if (!stream_experts) {
         try {
-            host_expert_worker_pool().run(cpu.tasks);
+#if defined(NINFER_VOLTA_BUILD)
+            grouped_cpu_experts = tokens > 1 && resolve_cpu_expert_grouping();
+#endif
+            cpu_batch = host_expert_worker_pool().run(cpu.tasks, grouped_cpu_experts);
+            if (telemetry && !grouped_cpu_experts) {
+                cpu_batch.weight_read_bytes = cpu.tasks.size() * kExpertPairBytes;
+            }
         } catch (...) {
             if (!serial) finish_hits();
             throw;
@@ -612,6 +629,9 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         m.gpu_hit_routes = stream_experts ? routed_paths - streamed_route_count :
             routed_paths - cpu.tasks.size();
         m.cpu_miss_routes = cpu.tasks.size();
+        m.cpu_groups = cpu_batch.groups;
+        m.cpu_grouped_pairs = cpu_batch.grouped_pairs;
+        m.cpu_weight_read_bytes = cpu_batch.weight_read_bytes;
         m.stream_routes = streamed_route_count;
         m.stream_experts = streamed_experts;
         m.stream_expert_h2d_bytes = stream_experts ?

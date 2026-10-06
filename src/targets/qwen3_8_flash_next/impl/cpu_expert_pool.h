@@ -12,19 +12,25 @@
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 struct HostExpertTask {
     HostNvfp4ExpertPairView expert{};
+    std::int32_t expert_id = -1;
+    std::uint32_t route_id = 0;
     const std::uint16_t* input = nullptr;
     const float* input_fp32 = nullptr;
     float* output = nullptr;
 };
 
-// Several routed activations sharing one expert. Width one deliberately remains
-// a HostExpertTask so decode keeps the established single-token kernel.
+// Several routed activations sharing one expert. Singleton remainders dispatch
+// the established single-token kernel; only widths 2..4 reuse decoded weights.
 struct HostExpertTaskGroup {
     HostNvfp4ExpertPairView expert{};
     std::array<const std::uint16_t*, kFlashNextCpuExpertGroupMax> inputs{};
     std::array<float*, kFlashNextCpuExpertGroupMax> outputs{};
     std::array<std::uint32_t, kFlashNextCpuExpertGroupMax> route_ids{};
     std::size_t token_count = 0;
+};
+
+struct HostExpertBatchStats {
+    std::uint64_t groups = 0, grouped_pairs = 0, weight_read_bytes = 0;
 };
 
 // Persistent expert-level workers shared by serving and routed-miss replay.
@@ -35,7 +41,7 @@ class HostExpertWorkerPool {
     ~HostExpertWorkerPool();
     HostExpertWorkerPool(const HostExpertWorkerPool&) = delete;
     HostExpertWorkerPool& operator=(const HostExpertWorkerPool&) = delete;
-    void run(std::span<const HostExpertTask> tasks);
+    HostExpertBatchStats run(std::span<const HostExpertTask> tasks, bool group_same_experts = false);
   private:
     void worker_loop();
     void stop_workers() noexcept;
@@ -45,6 +51,11 @@ class HostExpertWorkerPool {
     };
     std::vector<RowJob> row_jobs_;
     std::vector<CpuNvfp4ExpertReferenceScratch> batch_scratch_;
+    void run_grouped(std::span<const HostExpertTask> tasks, HostExpertBatchStats& stats);
+    std::vector<HostExpertTaskGroup> groups_;
+    std::array<std::vector<std::size_t>, 512> group_indices_;
+    std::vector<CpuNvfp4ExpertGroupScratch> group_scratch_;
+    bool grouped_ = false;
     bool row_sharded_ = false;
     bool down_phase_ = false;
     bool avx2_;

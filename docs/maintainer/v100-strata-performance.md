@@ -209,6 +209,23 @@ use the existing kernel. The initial hardware gate requires bit-exact grouped
 versus single-token output for random represented BF16 activations including
 finite extremes before the grouped task is integrated into runtime dispatch.
 
+Run 37433116151 passed that primitive gate on V100. Widths 2, 3, and 4 were
+bit-exact with the single-token AVX2 kernel. Their grouped times were 1,830.85,
+2,298.55, and 2,670.56 microseconds, versus 2,685.92, 4,000.20, and 5,318.56
+microseconds for independent execution. These are isolated primitive timings,
+not whole-model or production throughput.
+
+The next opt-in integration groups same-expert CPU misses inside the existing
+persistent worker pool. Groups retain original route/output slots; widths 2--4
+share packed-weight decode, while singleton remainders use the unchanged
+single-token kernel. `NINFER_V100_CPU_EXPERT_GROUP=1` enables grouping only for
+multi-token Volta execution with the production BF16-input AVX2 profile. Unset
+or `0` preserves existing behavior. Telemetry reports grouped task count,
+grouped route count, and effective compact weight bytes read. The SV4 workflow
+builds the primitive and represented full-model executable in one CMake build
+invocation, then requires exact final BF16 logits and route provenance across
+single and grouped arms before reporting a screening result.
+
 ## SV1 profile preparation
 
 `tools/diagnostics/v100_expert_profile.py` builds an offline static residency

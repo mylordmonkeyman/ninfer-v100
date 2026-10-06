@@ -1708,6 +1708,19 @@ int main() {
             for (std::size_t i = 0; i < candidate.size(); ++i) {
                 candidate[i] = bf16_to_float(candidate_bf16[i]);
             }
+            if (const char* directory = std::getenv("NINFER_V100_SV4_LOGITS");
+                directory && *directory) {
+                fs::create_directories(directory);
+                const auto path =
+                    fs::path(directory) / ("pass" + std::to_string(pass) + ".bf16");
+                std::ofstream file(path, std::ios::binary);
+                file.write(reinterpret_cast<const char*>(candidate_bf16.data()),
+                           static_cast<std::streamsize>(
+                               candidate_bf16.size() * sizeof(std::uint16_t)));
+                if (!file) {
+                    throw std::runtime_error("cannot write SV4 represented prefill logits");
+                }
+            }
             const OracleRecord& record = records[probe_positions - 1];
             const std::vector<float> oracle = load_fp32_logits(record);
             const std::int32_t target_token =

@@ -5,7 +5,12 @@ on:
     paths:
       - '.github/workflows/v100-sv4.yml'
       - 'src/targets/qwen3_8_flash_next/impl/cpu_expert_*'
+      - 'src/targets/qwen3_8_flash_next/impl/moe.*'
+      - 'src/targets/qwen3_8_flash_next/impl/perf_telemetry.h'
       - 'tests/targets/qwen3_8_flash_next/test_cpu_expert_group.cpp'
+      - 'tests/targets/qwen3_8_flash_next/test_vertical_slice_real.cpp'
+      - 'tools/diagnostics/v100_sv4_runtime.py'
+      - 'tools/diagnostics/test_v100_sv4_runtime.py'
       - 'tests/CMakeLists.txt'
       - 'docs/maintainer/v100-strata-performance.md'
   workflow_dispatch:
@@ -34,6 +39,8 @@ jobs:
           build_lines = [line for line in text.splitlines() if 'cmake --build' in line]
           assert build_lines and all(' -j' not in line for line in build_lines)
           PY
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+            -s tools/diagnostics -p 'test_v100*.py'
           git diff --check
   hardware:
     if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[v100:') || contains(github.event.head_commit.message, '[v100:sv4]')
@@ -42,15 +49,40 @@ jobs:
     concurrency:
       group: v100-sv0-hardware
       cancel-in-progress: false
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       CUDA_VISIBLE_DEVICES: '0'
+      NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+      NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+      NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: '32'
+      NINFER_FLASH_NEXT_FP32_HYPER_STATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_CONV: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_READOUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_GATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_MOE_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT_LAYERS_32_47: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_SHARED_INPUT: '0'
+      NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE: '0'
+      NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE: '0'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
           clean: false
-      - name: Build grouped CPU expert test once
+      - name: Build the SV4 candidate once
         shell: bash
         run: |
           set -euo pipefail
@@ -58,7 +90,9 @@ jobs:
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
             -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
             -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-sv4 --target ninfer_qwen3_8_flash_next_cpu_expert_group_test
+          cmake --build build-sv4 --target \
+            ninfer_qwen3_8_flash_next_cpu_expert_group_test \
+            ninfer_qwen3_8_flash_next_vertical_slice_real_test
       - name: Compare grouped and single-token AVX2 execution
         shell: bash
         run: |
@@ -69,6 +103,15 @@ jobs:
           /usr/local/cuda-12.8/bin/nvcc --version > sv4-results/cuda.txt
           build-sv4/tests/ninfer_qwen3_8_flash_next_cpu_expert_group_test \
             2>&1 | tee sv4-results/grouped.log
+      - name: Screen opt-in grouped misses on the represented full model
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/diagnostics/v100_sv4_runtime.py \
+            --executable build-sv4/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            --output sv4-results/runtime --positions 512 --repeats 3 \
+            | tee sv4-results/runtime.log
+          cat sv4-results/runtime/sv4-runtime.txt >> "$GITHUB_STEP_SUMMARY"
       - name: Preserve SV4 evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
