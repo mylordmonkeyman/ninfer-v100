@@ -247,6 +247,9 @@ ninfer_add_test(ninfer_qwen3_8_flash_next_ple_table_test
 ninfer_add_test(ninfer_qwen3_8_flash_next_expert_bank_test
   SOURCES targets/qwen3_8_flash_next/test_expert_bank.cpp
   LIBRARIES ninfer_qwen3_8_flash_next)
+ninfer_add_test(ninfer_qwen3_8_flash_next_route_handoff_test
+  SOURCES targets/qwen3_8_flash_next/test_route_handoff.cu
+  LIBRARIES ninfer_qwen3_8_flash_next)
 ninfer_add_test(ninfer_qwen3_8_flash_next_expert_stream_test
   SOURCES targets/qwen3_8_flash_next/test_expert_stream.cpp
   LIBRARIES ninfer_qwen3_8_flash_next)

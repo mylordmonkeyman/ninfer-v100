@@ -39,7 +39,8 @@ void flash_next_moe(const Tensor& input, const MoeWeights& weights, Tensor& outp
                     WorkspaceArena& workspace, cudaStream_t stream);
 
 // Host-backed main-text MoE: resident routing/shared expert, optional Ready GPU cache hits,
-// AVX2 CPU misses, and ordered FP32 merge. Phase 13 executes hit and miss work serially.
+// AVX2 CPU misses, and ordered FP32 merge. Opt-in route readiness separates
+// CPU scheduling from shared-expert completion; serial synchronization remains the control.
 void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_weights,
                                 const HostNvfp4ExpertLayerView& host_experts, Tensor& output,
                                 WorkspaceArena& workspace, cudaStream_t stream,

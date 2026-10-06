@@ -5,7 +5,8 @@ import unittest
 from test_v100_sv3_calibrate import diagnostic_rows
 from v100_sv3_calibrate import EXPERT_HIDDEN
 
-from v100_sv4_runtime import EXPERT_BYTES, LAYERS, summarize, validate_layers
+from pathlib import Path
+from v100_sv4_runtime import EXPERT_BYTES, LAYERS, environment, summarize, validate_layers, validate_handoff
 
 
 class Sv4RuntimeTest(unittest.TestCase):
@@ -58,6 +59,30 @@ class Sv4RuntimeTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, message):
                 validate_layers("\n".join(map(json.dumps, rows)), 128, True, cached=True)
 
+    def test_handoff_readiness_provenance(self):
+        rows = [dict(kind="expert_layer", prefill=True, route_handoff=True,
+                     route_sequence=i + 1, router_rendezvous_us=2.0) for i in range(96)]
+        report = validate_handoff("\n".join(map(json.dumps, rows)), True)
+        self.assertEqual(report["route_sequence_last"], 96)
+        self.assertEqual(report["router_rendezvous_us"], 192)
+        rows[-1]["route_sequence"] = 1
+        with self.assertRaisesRegex(ValueError, "nonmonotonic"):
+            validate_handoff("\n".join(map(json.dumps, rows)), True)
+        with self.assertRaisesRegex(ValueError, "mode"):
+            validate_handoff("\n".join(map(json.dumps, rows)), False)
+        for row in rows:
+            row.update(route_handoff=False, route_sequence=0)
+        validate_handoff("\n".join(map(json.dumps, rows)), False)
+
+    def test_handoff_screen_keeps_grouping_equal(self):
+        for mode, ready in (("serial", "0"), ("handoff", "1")):
+            env = environment(mode, 512, False, Path("/tmp/logits"), handoff_screen=True)
+            self.assertEqual(env["NINFER_V100_CPU_EXPERT_GROUP"], "1")
+            self.assertEqual(env["NINFER_V100_ROUTE_HANDOFF"], ready)
+            self.assertEqual(env["NINFER_V100_DEVICE_ROUTE_COMBINE"], "1")
+        self.assertEqual(environment("grouped", 512, False, Path("/tmp/logits"))
+                         ["NINFER_V100_ROUTE_HANDOFF"], "0")
+
     def test_single_and_grouped_accounting(self):
         single = validate_layers(self.records(False), 128, False)
         grouped = validate_layers(self.records(True), 128, True)
@@ -82,6 +107,12 @@ class Sv4RuntimeTest(unittest.TestCase):
         report = summarize(observations, diagnostics, 3, cached=True)
         self.assertEqual(report["scope"], "fixed_cache_represented_full_model_prefill")
         self.assertFalse(report["qualified"])
+        handoff_rows = [dict(row, mode="serial" if row["mode"] == "single" else "handoff")
+                        for row in observations]
+        handoff_diags = dict(serial=diagnostics["single"], handoff=diagnostics["grouped"])
+        handoff_report = summarize(handoff_rows, handoff_diags, 3, cached=True, handoff_screen=True)
+        self.assertEqual(handoff_report["milestone"], "SV5")
+        self.assertFalse(handoff_report["qualified"])
         changed = copy.deepcopy(diagnostics)
         changed["grouped"]["diagnostic"]["cached_accounting"]["runtime_memory"]["attention_kv_bytes"] += 1
         with self.assertRaisesRegex(ValueError, "capacity"):

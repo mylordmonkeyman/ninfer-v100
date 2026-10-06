@@ -94,6 +94,8 @@ struct ExpertLayerMeasurement {
     // Actual payload submitted: the baseline downloads the WHOLE route buffer if ANY hit exists.
     std::uint64_t cache_result_d2h_bytes = 0, routed_sum_h2d_bytes = 0;
     std::uint64_t route_input_d2h_bytes = 0, cpu_miss_h2d_bytes = 0;
+    bool route_handoff = false;
+    std::uint64_t route_sequence = 0;
     double router_rendezvous_us = 0, cpu_branch_us = 0, gpu_hit_window_us = 0;
     double cache_result_d2h_us = 0, routed_sum_h2d_us = 0, cpu_miss_h2d_us = 0;
     double merge_wait_us = 0, branch_wall_us = 0, overlap_lower_bound_us = 0;
@@ -123,6 +125,8 @@ struct ExpertLayerMeasurement {
             << ",\"routed_sum_h2d_bytes\":" << routed_sum_h2d_bytes
             << ",\"route_input_d2h_bytes\":" << route_input_d2h_bytes
             << ",\"cpu_miss_h2d_bytes\":" << cpu_miss_h2d_bytes
+            << ",\"route_handoff\":" << (route_handoff ? "true" : "false")
+            << ",\"route_sequence\":" << route_sequence
             << ",\"router_rendezvous_us\":" << router_rendezvous_us
             << ",\"cpu_branch_us\":" << cpu_branch_us
             << ",\"gpu_hit_window_us\":";

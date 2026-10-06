@@ -76,10 +76,11 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
     for key in tuple(env):
         if (key.startswith('NINFER_PHASE') or key.startswith('NINFER_V100_EXPERT_') or
                 key.startswith('NINFER_V100_PREFILL_') or
-                key.startswith('NINFER_V100_CPU_EXPERT_GROUP')):
+                key.startswith('NINFER_V100_CPU_EXPERT_GROUP') or
+                key.startswith('NINFER_V100_ROUTE_HANDOFF')):
             env.pop(key)
     large_prefill = prefill_screen or cpu_group_screen
-    env.update(NINFER_V100_DEVICE_ROUTE_COMBINE='1' if large_prefill or mode == 'device' else '0',
+    env.update(NINFER_V100_ROUTE_HANDOFF='0',NINFER_V100_DEVICE_ROUTE_COMBINE='1' if large_prefill or mode == 'device' else '0',
                NINFER_V100_PREFILL_EXPERT_POLICY=mode if prefill_screen else 'cpu-cache',
                NINFER_V100_CPU_EXPERT_GROUP='1' if cpu_group_screen and mode == 'grouped' else '0',
                NINFER_V100_EXPERT_PROFILE=str(profile.resolve()),NINFER_V100_EXPERT_POLICY='static',

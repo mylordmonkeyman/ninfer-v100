@@ -1,6 +1,7 @@
 #include "targets/qwen3_8_flash_next/impl/moe.h"
 #include "targets/qwen3_8_flash_next/impl/expert_cache.h"
 #include "targets/qwen3_8_flash_next/impl/expert_stream.h"
+#include "targets/qwen3_8_flash_next/impl/route_handoff.h"
 #include "targets/qwen3_8_flash_next/impl/stream_diagnostics.h"
 
 #include "core/layout.h"
@@ -74,6 +75,13 @@ bool resolve_cpu_expert_grouping() {
     throw std::invalid_argument("NINFER_V100_CPU_EXPERT_GROUP must be 0 or 1");
 }
 
+bool resolve_route_handoff() {
+    const char* env = std::getenv("NINFER_V100_ROUTE_HANDOFF");
+    if (env == nullptr || env[0] == '\0' || std::string_view(env) == "0") return false;
+    if (std::string_view(env) == "1") return true;
+    throw std::invalid_argument("NINFER_V100_ROUTE_HANDOFF must be 0 or 1");
+}
+
 bool resolve_device_route_combine() {
     const char* env = std::getenv("NINFER_V100_DEVICE_ROUTE_COMBINE");
     if (env == nullptr || env[0] == '\0' || std::string_view(env) == "0") return false;
@@ -104,6 +112,21 @@ HostExpertWorkerPool& host_expert_worker_pool() {
     return pool;
 }
 
+struct RouteHandoffDrain {
+    FlashNextRouteHandoff* handoff;
+    cudaStream_t compute;
+    int exceptions = std::uncaught_exceptions();
+    ~RouteHandoffDrain() {
+        if (handoff) {
+            handoff->drain();
+            // An early failure can leave shared kernels using the workspace.
+            // Drain them before its scope is restored; successful work keeps
+            // the normal ordered merge and asynchronous compute behavior.
+            if (std::uncaught_exceptions() > exceptions) cudaStreamSynchronize(compute);
+        }
+    }
+};
+
 struct HostMoeTransferTiming {
     cudaEvent_t start = nullptr, stop = nullptr;
     HostMoeTransferTiming() {
@@ -114,6 +137,7 @@ struct HostMoeTransferTiming {
     ~HostMoeTransferTiming() { cudaEventDestroy(start); cudaEventDestroy(stop); }
 };
 struct HostMoeCpuBuffers {
+    std::unique_ptr<FlashNextRouteHandoff> route_handoff;
     std::unique_ptr<HostMoeTransferTiming> transfer_timing;
     std::vector<std::uint16_t> input;
     std::vector<float> input_fp32;
@@ -317,8 +341,41 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
             "shared FP32-intermediate diagnostic requires the production BF16 shared input");
     }
 
+    const std::size_t input_words =
+        static_cast<std::size_t>(tokens) * kFlashNextExpertHidden;
+    const std::size_t routed_paths = static_cast<std::size_t>(tokens) * 10ULL;
+#if defined(NINFER_VOLTA_BUILD)
+    const bool device_route_combine = resolve_device_route_combine() &&
+        !use_routed_expert_input_fp32 && !resolve_fp32_intermediate_diagnostic();
+    const bool route_handoff = resolve_route_handoff();
+#else
+    const bool device_route_combine = false;
+    const bool route_handoff = false;
+#endif
+    const bool stream_experts = prefill && expert_stream != nullptr;
+    if (route_handoff && (!device_route_combine || stream_experts)) {
+        throw std::invalid_argument(
+            "route handoff requires device combine and BF16 CPU-cache expert execution");
+    }
+    HostMoeCpuBuffers& cpu = s_host_moe_buffers;
+    if (route_handoff) {
+        if (!cpu.route_handoff) {
+            cudaStreamCaptureStatus capture;
+            CUDA_CHECK(cudaStreamIsCapturing(stream, &capture));
+            if (capture != cudaStreamCaptureStatusNone) {
+                throw std::invalid_argument("route handoff requires eager host-backed execution");
+            }
+            cpu.route_handoff = std::make_unique<FlashNextRouteHandoff>();
+        }
+        // Growth occurs before router/shared work, never while a copy owns storage.
+        cpu.route_handoff->prepare(input_words, routed_paths, stream);
+        // cudaHostAlloc may synchronize: reserve the maximum miss-output
+        // payload here so growing it cannot reintroduce the shared-work wait.
+        cpu.ensure_pinned_pair_outputs(routed_paths * kFlashNextExpertHidden);
+    }
     const auto scope = workspace.scope();
     FlashNextMoeWorkspace scratch = allocate_flash_next_moe_workspace(workspace, tokens);
+    const RouteHandoffDrain route_drain{route_handoff ? cpu.route_handoff.get() : nullptr, stream};
 
 #if defined(NINFER_VOLTA_BUILD)
     if (router_input_fp32 != nullptr && router_input_fp32->data != nullptr) {
@@ -333,6 +390,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                          scratch.scores, scratch.ids, scratch.alpha, scratch.shared_scale,
                          stream);
     }
+    const std::uint64_t route_ticket = route_handoff ?
+        cpu.route_handoff->submit(input.data, scratch.ids.data, stream) : 0;
     stage_ledger_record(stream, FlashNextStageId::MoE_Router);
     if (emit) {
         emit("moe_expert_input", input);
@@ -352,24 +411,13 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         use_shared_expert_input_fp32 ? shared_expert_input_fp32 : nullptr,
         use_shared_fp32_intermediate);
 
-    const std::size_t input_words =
-        static_cast<std::size_t>(tokens) * kFlashNextExpertHidden;
-    const std::size_t routed_paths = static_cast<std::size_t>(tokens) * 10ULL;
-#if defined(NINFER_VOLTA_BUILD)
-    const bool device_route_combine = resolve_device_route_combine() &&
-        !use_routed_expert_input_fp32 && !resolve_fp32_intermediate_diagnostic();
-#else
-    const bool device_route_combine = false;
-#endif
-    const bool stream_experts = prefill && expert_stream != nullptr;
     if (stream_experts && !device_route_combine) {
         throw std::invalid_argument(
             "Flash-Next prefill expert streaming requires device route combine");
     }
-    HostMoeCpuBuffers& cpu = s_host_moe_buffers;
     if (use_routed_expert_input_fp32) {
         cpu.input_fp32.resize(input_words);
-    } else if (!stream_experts) {
+    } else if (!stream_experts && !route_handoff) {
         cpu.input.resize(input_words);
     }
     cpu.ids.resize(routed_paths);
@@ -388,24 +436,32 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
 
     const bool telemetry = v100_perf_telemetry_enabled();
     const auto rendezvous_started = telemetry ? PerfClock::now() : PerfClock::time_point{};
-    if (use_routed_expert_input_fp32) {
-        CUDA_CHECK(cudaMemcpyAsync(
-            cpu.input_fp32.data(), routed_expert_input_fp32->data,
-            input_words * sizeof(float), cudaMemcpyDeviceToHost, stream));
-    } else if (!stream_experts) {
-        CUDA_CHECK(cudaMemcpyAsync(cpu.input.data(), input.data,
-                                   input_words * sizeof(std::uint16_t),
+    const std::uint16_t* host_input = cpu.input.data();
+    if (route_handoff) {
+        cpu.route_handoff->wait(route_ticket);
+        host_input = cpu.route_handoff->input(route_ticket).data();
+        const auto ids = cpu.route_handoff->ids(route_ticket);
+        std::copy(ids.begin(), ids.end(), cpu.ids.begin());
+    } else {
+        if (use_routed_expert_input_fp32) {
+            CUDA_CHECK(cudaMemcpyAsync(
+                cpu.input_fp32.data(), routed_expert_input_fp32->data,
+                input_words * sizeof(float), cudaMemcpyDeviceToHost, stream));
+        } else if (!stream_experts) {
+            CUDA_CHECK(cudaMemcpyAsync(cpu.input.data(), input.data,
+                                       input_words * sizeof(std::uint16_t),
+                                       cudaMemcpyDeviceToHost, stream));
+        }
+        CUDA_CHECK(cudaMemcpyAsync(cpu.ids.data(), scratch.ids.data,
+                                   routed_paths * sizeof(std::int32_t),
                                    cudaMemcpyDeviceToHost, stream));
+        if (!device_route_combine) {
+            CUDA_CHECK(cudaMemcpyAsync(cpu.alpha.data(), scratch.alpha.data,
+                                       routed_paths * sizeof(float),
+                                       cudaMemcpyDeviceToHost, stream));
+        }
+        CUDA_CHECK(cudaStreamSynchronize(stream));
     }
-    CUDA_CHECK(cudaMemcpyAsync(cpu.ids.data(), scratch.ids.data,
-                               routed_paths * sizeof(std::int32_t),
-                               cudaMemcpyDeviceToHost, stream));
-    if (!device_route_combine) {
-        CUDA_CHECK(cudaMemcpyAsync(cpu.alpha.data(), scratch.alpha.data,
-                                   routed_paths * sizeof(float),
-                                   cudaMemcpyDeviceToHost, stream));
-    }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
 
     if (cache) cache->begin_layer(prefill);
     const double rendezvous_us = telemetry ? perf_elapsed_us(rendezvous_started) : 0;
@@ -424,7 +480,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
             static_cast<std::size_t>(token) * kFlashNextExpertHidden;
         const std::uint16_t* token_input =
             use_routed_expert_input_fp32 || stream_experts ? nullptr :
-                cpu.input.data() + token_offset;
+                host_input + token_offset;
         const float* token_input_fp32 =
             use_routed_expert_input_fp32 ? cpu.input_fp32.data() + token_offset : nullptr;
         for (std::int32_t path = 0; path < 10; ++path) {
@@ -645,6 +701,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         m.route_input_d2h_bytes =
             (stream_experts ? 0 : input_words*(use_routed_expert_input_fp32 ? sizeof(float) : sizeof(std::uint16_t)))
             + routed_paths*(sizeof(std::int32_t)+(device_route_combine?0:sizeof(float)));
+        m.route_handoff = route_handoff;
+        m.route_sequence = route_ticket;
         m.router_rendezvous_us = rendezvous_us;
         m.cpu_branch_us = std::chrono::duration<double, std::micro>(cpu_finished-cpu_started).count();
         m.gpu_hit_window_us = gpu_us;

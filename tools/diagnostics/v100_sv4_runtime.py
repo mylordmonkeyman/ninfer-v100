@@ -25,11 +25,12 @@ MODES = ("single", "grouped")
 
 
 def environment(mode: str, positions: int, telemetry: bool, logits: Path,
-                profile: Path | None = None) -> dict:
+                profile: Path | None = None, handoff_screen: bool = False) -> dict:
     env = os.environ.copy()
     for key in tuple(env):
         if (key.startswith("NINFER_PHASE") or key.startswith("NINFER_V100_PREFILL_") or
                 key.startswith("NINFER_V100_CPU_EXPERT_GROUP") or
+                key.startswith("NINFER_V100_ROUTE_HANDOFF") or
                 key.startswith("NINFER_FLASH_NEXT_EXPERT_CACHE") or
                 key.startswith("NINFER_V100_EXPERT_")):
             env.pop(key)
@@ -37,7 +38,8 @@ def environment(mode: str, positions: int, telemetry: bool, logits: Path,
         "NINFER_PHASE11_PREFILL_PROBE_POSITIONS": str(positions),
         "NINFER_V100_PREFILL_EXPERT_POLICY": "cpu-cache",
         "NINFER_V100_DEVICE_ROUTE_COMBINE": "1",
-        "NINFER_V100_CPU_EXPERT_GROUP": "1" if mode == "grouped" else "0",
+        "NINFER_V100_CPU_EXPERT_GROUP": "1" if handoff_screen or mode == "grouped" else "0",
+        "NINFER_V100_ROUTE_HANDOFF": "1" if handoff_screen and mode == "handoff" else "0",
         "NINFER_V100_TELEMETRY": "1" if telemetry else "0",
         "NINFER_FLASH_NEXT_EXPERT_CACHE": "0",
         "NINFER_FLASH_NEXT_STAGE_LEDGER": "0",
@@ -97,11 +99,28 @@ def validate_layers(stderr: str, positions: int, grouped: bool, cached: bool = F
     }
 
 
+def validate_handoff(stderr: str, enabled: bool) -> dict:
+    rows = [row for row in parse_json_records(stderr)
+            if row.get("kind") == "expert_layer" and row.get("prefill")]
+    sequences = [row.get("route_sequence") for row in rows]
+    if not rows or any(row.get("route_handoff") is not enabled for row in rows):
+        raise ValueError("route handoff mode was not exercised")
+    if enabled:
+        if (any(not isinstance(value, int) or value <= 0 for value in sequences) or
+                any(a >= b for a, b in zip(sequences, sequences[1:]))):
+            raise ValueError("stale or nonmonotonic route handoff sequence")
+    elif any(value != 0 for value in sequences):
+        raise ValueError("serial control unexpectedly used route handoff")
+    return dict(route_handoff=enabled, route_sequence_first=sequences[0],
+                route_sequence_last=sequences[-1],
+                router_rendezvous_us=sum(row["router_rendezvous_us"] for row in rows))
+
+
 def invoke(executable: Path, output: Path, name: str, mode: str,
-           positions: int, telemetry: bool, profile: Path | None = None) -> dict:
+           positions: int, telemetry: bool, profile: Path | None = None, handoff_screen: bool = False) -> dict:
     logits = output / f"{name}-logits"
     logits.mkdir(parents=True, exist_ok=True)
-    env = environment(mode, positions, telemetry, logits, profile)
+    env = environment(mode, positions, telemetry, logits, profile, handoff_screen)
     snapshots, errors, done = [gpu_snapshot()], [], threading.Event()
 
     def monitor():
@@ -152,13 +171,18 @@ def invoke(executable: Path, output: Path, name: str, mode: str,
     }
     if telemetry:
         result["diagnostic"] = validate_layers(
-            process.stderr, positions, mode == "grouped", cached=bool(profile))
+            process.stderr, positions, mode != "single", cached=bool(profile))
+        if handoff_screen:
+            result["diagnostic"].update(validate_handoff(process.stderr, mode == "handoff"))
     return result
 
 
-def summarize(observations: list[dict], diagnostics: dict, repeats: int, cached: bool = False) -> dict:
+def summarize(observations: list[dict], diagnostics: dict, repeats: int, cached: bool = False,
+              handoff_screen: bool = False) -> dict:
+    modes = ("serial", "handoff") if handoff_screen else MODES
+    control, candidate = modes
     cells = {}
-    for mode in MODES:
+    for mode in modes:
         selected = [row for row in observations if row["mode"] == mode]
         if len(selected) != repeats:
             raise ValueError("missing SV4 timing observations")
@@ -177,28 +201,29 @@ def summarize(observations: list[dict], diagnostics: dict, repeats: int, cached:
                            for row in selected),
                        "numerical": numerical[0],
                        "logits_sha256": selected[0]["logits_sha256"]}
-    if cells["single"]["logits_sha256"] != cells["grouped"]["logits_sha256"]:
-        raise ValueError("grouped CPU experts changed final BF16 logits")
-    if diagnostics["single"]["diagnostic"]["provenance"] != \
-            diagnostics["grouped"]["diagnostic"]["provenance"]:
-        raise ValueError("grouped CPU experts changed route provenance")
+    if cells[control]["logits_sha256"] != cells[candidate]["logits_sha256"]:
+        raise ValueError("expert scheduling changed final BF16 logits")
+    if diagnostics[control]["diagnostic"]["provenance"] != \
+            diagnostics[candidate]["diagnostic"]["provenance"]:
+        raise ValueError("expert scheduling changed route provenance")
     if cached:
-        first = diagnostics["single"]["diagnostic"]["cached_accounting"]
-        second = diagnostics["grouped"]["diagnostic"]["cached_accounting"]
+        first = diagnostics[control]["diagnostic"]["cached_accounting"]
+        second = diagnostics[candidate]["diagnostic"]["cached_accounting"]
         memory_bytes = lambda row: {key: value for key, value in row.items() if key.endswith("_bytes")}
         if (first["cache_bytes"] != second["cache_bytes"] or
                 memory_bytes(first["runtime_memory"]) != memory_bytes(second["runtime_memory"])):
             raise ValueError("SV4 cached runtime capacity differs between arms")
-    for mode in MODES:
+    for mode in modes:
         if diagnostics[mode]["logits_sha256"] != cells[mode]["logits_sha256"]:
             raise ValueError("diagnostic and uninstrumented BF16 logits differ")
         cells[mode].pop("logits_sha256")
     return {
-        "schema": 1, "milestone": "SV4", "qualified": False,
-        "scope": "fixed_cache_represented_full_model_prefill" if cached else "cache_off_represented_full_model_prefill",
-        "repeats": repeats, "single": cells["single"], "grouped": cells["grouped"],
-        "median_change_percent": 100 * (cells["grouped"]["median"] /
-                                          cells["single"]["median"] - 1),
+        "schema": 1, "milestone": "SV5" if handoff_screen else "SV4", "qualified": False,
+        "scope": ("route_ready_represented_full_model_prefill" if handoff_screen else
+                  ("fixed_cache_represented_full_model_prefill" if cached else "cache_off_represented_full_model_prefill")),
+        "repeats": repeats, control: cells[control], candidate: cells[candidate],
+        "median_change_percent": 100 * (cells[candidate]["median"] /
+                                          cells[control]["median"] - 1),
         "diagnostics": {mode: {key: value for key, value in row["diagnostic"].items()
                                 if key != "provenance"}
                         for mode, row in diagnostics.items()},
@@ -207,7 +232,8 @@ def summarize(observations: list[dict], diagnostics: dict, repeats: int, cached:
             "standalone represented prefill probe, not production HTTP serving or MTP",
             "fixed static64 residency with mixed GPU hits and CPU misses" if cached else
             "persistent expert cache disabled to exercise all CPU misses",
-            "grouping remains opt-in pending cached, decode-batch, MTP, and production gates",
+            ("route handoff remains opt-in; eager CPU-cache/device combine only, no production qualification"
+             if handoff_screen else "grouping remains opt-in pending cached, decode-batch, MTP, and production gates"),
         ],
     }
 
@@ -219,38 +245,43 @@ def main() -> int:
     parser.add_argument("--positions", type=int, default=512)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--profile", type=Path, help="validated identity-bound static64 residency profile")
+    parser.add_argument("--route-handoff-screen", action="store_true",
+                        help="compare serial/route-ready with grouping enabled in both arms")
     args = parser.parse_args()
+    modes = ("serial", "handoff") if args.route_handoff_screen else MODES
+    milestone = "SV5" if args.route_handoff_screen else "SV4"
     if args.positions < 2 or args.positions > 2048 or args.repeats < 3:
         parser.error("positions must be in [2, 2048] and repeats at least 3")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     diagnostics = {mode: invoke(args.executable, output, f"diagnostic-{mode}",
-                                mode, args.positions, True, args.profile) for mode in MODES}
+                                mode, args.positions, True, args.profile, args.route_handoff_screen) for mode in modes}
     observations = []
     for repeat in range(args.repeats):
-        order = MODES if repeat % 2 == 0 else tuple(reversed(MODES))
+        order = modes if repeat % 2 == 0 else tuple(reversed(modes))
         for mode in order:
             observations.append(invoke(args.executable, output,
                                        f"timing-{repeat}-{mode}", mode,
-                                       args.positions, False, args.profile))
-    report = summarize(observations, diagnostics, args.repeats, cached=bool(args.profile))
+                                       args.positions, False, args.profile, args.route_handoff_screen))
+    report = summarize(observations, diagnostics, args.repeats, cached=bool(args.profile),
+                       handoff_screen=args.route_handoff_screen)
     report["candidate_sha"] = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], text=True).strip()
-    atomic_json(output / "sv4-runtime.json", report)
+    atomic_json(output / f"{milestone.lower()}-runtime.json", report)
     lines = [
-        "SV4 grouped CPU expert screen; opt-in only.", "",
+        f"{milestone} expert scheduling screen; opt-in only.", "",
         "| Mode | Prefill t/s median (range) | Expert pairs/s | Effective weight reads | CPU branch wall |",
         "|---|---:|---:|---:|---:|",
     ]
-    for mode in MODES:
+    for mode in modes:
         cell, diag = report[mode], report["diagnostics"][mode]
         lines.append(f"| {mode} | {cell['median']:.3f} ({cell['minimum']:.3f}–{cell['maximum']:.3f}) | "
                      f"{cell['expert_pairs_per_second']:.1f} | "
                      f"{diag['effective_weight_read_bytes']} B | {diag['cpu_branch_wall_us']:.1f} us |")
-    lines += ["", f"Grouped median change: {report['median_change_percent']:+.2f}%.",
-              "Grouped and single final BF16 logits and route provenance are exact.",
+    lines += ["", f"Candidate median change: {report['median_change_percent']:+.2f}%.",
+              "Both arms retain exact final BF16 logits and route provenance.",
               "No default change or production claim."]
-    (output / "sv4-runtime.txt").write_text("\n".join(lines) + "\n")
+    (output / f"{milestone.lower()}-runtime.txt").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
     return 0
 

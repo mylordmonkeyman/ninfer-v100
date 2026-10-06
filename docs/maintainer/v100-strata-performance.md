@@ -731,7 +731,7 @@ To avoid simultaneous pending hardware jobs replacing each other in the shared
 V100 concurrency group, a push commit can select one hardware campaign with
 `[v100:sv0]`, `[v100:sv1]`, `[v100:sv2]`, `[v100:sv2-serve]`,
 `[v100:sv3]`, `[v100:sv3-serve]`, `[v100:sv3-compare]`, `[v100:sv4]`, or
-`[v100:sv4-serve]` in its message.
+`[v100:sv4-serve]`, or `[v100:sv5]` in its message.
 Other triggered workflows still run host checks but skip hardware. Untagged
 pushes and manual dispatches retain their prior behavior. Select one campaign
 and inspect its evidence before launching the next; do not publish over healthy
@@ -792,3 +792,40 @@ weights, router, numerical tolerances or defaults. A sparse-reuse pool test
 covers one width-four group among singletons around the 32-worker boundary.
 Production A/B is required to determine whether this removes the observed MTP
 regression; an improvement is not assumed from the scheduling change.
+
+
+SV4 sparse scheduling run `37471065735` at `205bd5dc` passed all twelve
+processes/48 responses with exact output, prefix replay and identical MTP
+counts (74/75 drafted, 38/37 accepted per request). Cold grouped MTP decode
+recovered to 7.972 t/s versus 8.317 for single-token control (prior grouped
+6.594). This fixes most of the measured loss, but does not establish a decode
+speedup or default qualification. Non-MTP cold prefill was 53.336/84.199 t/s
+and MTP cold prefill 53.760/83.231. Concurrent decode remains outstanding.
+
+SV5 introduces opt-in `NINFER_V100_ROUTE_HANDOFF=1` for eager Volta BF16 CPU
+experts with device route combine. A persistent nonblocking control stream
+waits on an event recorded immediately after routing, copies activations and
+IDs into persistent pinned buffers, and publishes readiness through a blocking
+completion event. The host yields while waiting for that event and schedules
+misses without synchronizing unrelated shared-expert work. Sequence tickets
+reject stale completion/data; a scope guard drains transfers on exceptions,
+and growth occurs before submission. The maximum CPU miss-output pinned
+capacity is reserved before routing as well, preventing allocation from
+reintroducing a shared-work wait (at 512 tokens, input/IDs/output capacities
+are about 2.5/0.02/50 MiB). Alpha and resident outputs remain on the
+compute stream, and ordered final combine is unchanged. Unset/zero retains the
+original synchronization A/B control. FP32-input diagnostics and staged GPU
+prefill are explicitly excluded from this first handoff mode. Host-backed graph
+capture remains unsupported and is rejected before storage/capture mutation;
+no stack resource is captured. Events/buffers outlive asynchronous consumers.
+
+The selected SV5 campaign builds the focused readiness/lifetime test and real
+model in one invocation using the existing incremental `build-sv4` directory.
+The focused test holds later GPU work open and requires route data readiness
+first, exact payloads, growth/reuse, stale-ticket rejection and error draining.
+The fixed-static64 512-token full-model comparison keeps grouping enabled in
+both arms, requires exact repeated BF16 logits, route/cache/transfer provenance
+and memory capacity, and measures three fresh telemetry-off processes per arm
+in alternating order. It also validates monotonic route-ready sequences.
+This is screening only; production decode/MTP qualification and default
+promotion require later evidence. SV3's strict response blocker is unchanged.
