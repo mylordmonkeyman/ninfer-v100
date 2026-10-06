@@ -23,42 +23,25 @@ permissions:
 env:
   CMAKE_BUILD_PARALLEL_LEVEL: 32
 jobs:
-  compile:
+  checks:
     runs-on: ubuntu-24.04
-    container:
-      image: nvidia/cuda:12.8.1-devel-ubuntu24.04
-    timeout-minutes: 60
+    timeout-minutes: 10
     steps:
-      - name: Install build tools
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates python3 python3-pip pkg-config
-          python3 -m pip install --break-system-packages 'cmake>=3.28,<4' ninja
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Build SM70 instrumentation and correctness targets
+      - name: Run host diagnostic checks
         run: |
-          cmake -S . -B build-sv0 -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
-            -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-sv0 --target \
-            ninfer_qwen3_8_flash_next_perf_telemetry_test \
-            ninfer_qwen3_8_flash_next_expert_heat_test \
-            ninfer_qwen3_8_flash_next_expert_profile_test \
-            ninfer_qwen3_8_flash_next_expert_cache_test \
-            ninfer_qwen3_8_flash_next_moe_test \
-            ninfer_qwen3_8_flash_next_ple_pipeline_test \
-            ninfer_qwen3_8_flash_next_text_decode_test \
-            ninfer_qwen3_8_flash_next_text_executor_test \
-            ninfer_qwen3_8_flash_next_vertical_slice_real_test \
-            ninfer_selected_block_attention_test
-      - name: Run host JSON and reporting checks
-        run: |
-          ctest --test-dir build-sv0 --output-on-failure -R '^ninfer_qwen3_8_flash_next_(perf_telemetry|expert_heat|expert_profile)_test$'
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/diagnostics -p 'test_v100*.py'
+      - name: Run host telemetry and profile checks
+        run: |
+          for test in perf_telemetry expert_heat expert_profile; do
+            g++ -std=c++20 -O2 -DNDEBUG -Isrc -Ithird_party \
+              "tests/targets/qwen3_8_flash_next/test_${test}.cpp" -o "/tmp/sv0-${test}"
+            "/tmp/sv0-${test}"
+          done
   hardware:
-    needs: compile
+    needs: checks
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:
       group: v100-sv0-hardware

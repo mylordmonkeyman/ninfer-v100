@@ -617,3 +617,19 @@ prefix/continuation replay, MTP drafting, exact greedy response accounting,
 equal cache capacity and thermal checks. It records cold prefill throughput
 and decode throughput separately. The existing SV2 production regression
 continues to exercise legacy/device modes through the same driver.
+
+Production large-prefill run `37402261711` reached eight HTTP requests across
+the first cpu-cache and stream processes. Both passed prefix reuse and exact
+within-process replay, but their greedy responses differed after the same
+1227-token cold prompt. The strict cross-path response gate failed; this run
+does not qualify production streaming or establish a production speedup.
+The staging and cached-calibration regression `37402261650` passed; the SV2
+production regression hardware job was canceled and supplies no new evidence.
+
+The active SV0–SV3 workflows now run lightweight Python checks on the hosted
+runner and compile CUDA targets only on the V100 runner. SV0 also runs its
+small independent host C++ checks without configuring a CUDA build. This
+removes the previous hosted/self-hosted duplicate candidate compilation and
+retains the runner's incremental build directories. SV0's frozen baseline and
+candidate remain distinct necessary builds. All CMake builds retain the
+user's 32-job environment setting.
