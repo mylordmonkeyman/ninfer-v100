@@ -633,3 +633,35 @@ removes the previous hosted/self-hosted duplicate candidate compilation and
 retains the runner's incremental build directories. SV0's frozen baseline and
 candidate remain distinct necessary builds. All CMake builds retain the
 user's 32-job environment setting.
+
+
+Current-head SV2 production regression `37407560849` passed all 12 fresh
+servers/48 HTTP requests and the strict replay/cross-path response gates after
+the single-build workflow change. Non-MTP cold legacy/device decode medians
+were 8.379/9.139 t/s; cold prefill medians were 30.880/44.690 t/s. These remain
+scoped fixed-cache, short-context measurements, without default promotion.
+
+The unresolved SV3 production response difference is now investigated with a
+bounded same-input diagnostic (`v100-sv3-compare.yml`). With
+`NINFER_V100_STREAM_COMPARE=1`, large streamed prefill samples eight
+nonresident expert IDs spread across each layer's active list and early/late
+routes within those experts. It reads the original GPU route output, replays
+the same represented activation and weights through an isolated one-route
+staging ring, and computes scalar/AVX2 CPU precision-profile controls. It
+reports exact GPU replay differences, finite values, NRMSE/cosine and maximum
+error. It never replaces an output or changes routing; diagnostic timing is
+not throughput evidence. The existing focused CPU-profile criterion is
+reported without relaxation, and remains supplementary to independent operator
+and Phase11 mathematical-oracle checks. Eight samples per layer cannot exclude
+unsampled corruption. No cause or production streaming qualification is claimed
+before the hardware evidence is available. The failed response gate remains intact.
+
+To avoid simultaneous pending hardware jobs replacing each other in the shared
+V100 concurrency group, a push commit can select one hardware campaign with
+`[v100:sv0]`, `[v100:sv1]`, `[v100:sv2]`, `[v100:sv2-serve]`,
+`[v100:sv3]`, `[v100:sv3-serve]`, or `[v100:sv3-compare]` in its message.
+Other triggered workflows still run host checks but skip hardware. Untagged
+pushes and manual dispatches retain their prior behavior. Select one campaign
+and inspect its evidence before launching the next; do not publish over healthy
+active same-head work. CUDA builds retain their incremental directories and
+32-job environment setting.

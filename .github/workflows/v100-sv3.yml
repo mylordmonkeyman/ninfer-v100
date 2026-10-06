@@ -36,6 +36,7 @@ jobs:
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/diagnostics -p 'test_v100*.py'
   hardware:
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[v100:') || contains(github.event.head_commit.message, '[v100:sv3]')
     needs: checks
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:

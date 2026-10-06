@@ -1,13 +1,12 @@
-name: V100 SV3 Production Cached Prefill
+name: V100 SV3 Same Input Stream Diagnostic
 on:
   push:
     branches: [perf/v100-strata-derived]
     paths:
-      - '.github/workflows/v100-sv3-serve.yml'
-      - 'tools/diagnostics/v100_sv2_serve.py'
-      - 'tools/diagnostics/test_v100_sv2_serve.py'
-      - 'src/targets/qwen3_8_flash_next/impl/program.cpp'
-      - 'src/targets/qwen3_8_flash_next/impl/moe.cpp'
+      - '.github/workflows/v100-sv3-compare.yml'
+      - 'src/targets/qwen3_8_flash_next/impl/stream_diagnostics.h'
+      - 'tools/diagnostics/v100_sv3_compare.py'
+      - 'tools/diagnostics/test_v100_sv3_compare.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -26,7 +25,7 @@ jobs:
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/diagnostics -p 'test_v100*.py'
   hardware:
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[v100:') || contains(github.event.head_commit.message, '[v100:sv3-serve]')
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[v100:') || contains(github.event.head_commit.message, '[v100:sv3-compare]')
     needs: checks
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:
@@ -67,28 +66,28 @@ jobs:
           clean: false
       - name: Prepare bounded evidence directories
         run: |
-          mkdir -p sv3-serve-results sv3-serve-source
-          find sv3-serve-results -mindepth 1 -delete
-          find sv3-serve-source -mindepth 1 -delete
+          mkdir -p sv3-compare-results sv3-compare-source
+          find sv3-compare-results -mindepth 1 -delete
+          find sv3-compare-source -mindepth 1 -delete
       - name: Download fixed profile from successful SV2 validation
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: v100-sv2-37270512213-1
           run-id: 37270512213
           github-token: ${{ github.token }}
-          path: sv3-serve-source
+          path: sv3-compare-source
       - name: Build server and check V100 headroom
         shell: bash
         run: |
           set -euo pipefail
-          git rev-parse HEAD > sv3-serve-results/candidate-sha.txt
-          nvidia-smi -q > sv3-serve-results/gpu.txt
-          /usr/local/cuda-12.8/bin/nvcc --version > sv3-serve-results/cuda.txt
-          numactl --hardware > sv3-serve-results/numa.txt
-          sha256sum sv3-serve-source/sv2-static-profile.json > sv3-serve-results/profile-sha256.txt
+          git rev-parse HEAD > sv3-compare-results/candidate-sha.txt
+          nvidia-smi -q > sv3-compare-results/gpu.txt
+          /usr/local/cuda-12.8/bin/nvcc --version > sv3-compare-results/cuda.txt
+          numactl --hardware > sv3-compare-results/numa.txt
+          sha256sum sv3-compare-source/sv2-static-profile.json > sv3-compare-results/profile-sha256.txt
           test -f "$NINFER_WEIGHTS"
           test -r "$NINFER_WEIGHTS"
-          ln -s "$NINFER_WEIGHTS" sv3-serve-source/model.ninfer
+          ln -s "$NINFER_WEIGHTS" sv3-compare-source/model.ninfer
           free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits | tr -d '[:space:]')
           if (( free_mib < 28000 )); then
             echo '::error::V100 lacks test headroom; no unrelated workloads were stopped.'
@@ -99,21 +98,21 @@ jobs:
             -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
             -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
           cmake --build build-sv3-serve --target ninfer-serve
-      - name: Screen production HTTP prefix replay continuation and MTP
+      - name: Compare sampled real streamed routes without changing output
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/diagnostics/v100_sv2_serve.py \
+          python3 tools/diagnostics/v100_sv3_compare.py \
             --executable build-sv3-serve/apps/ninfer-serve \
-            --artifact sv3-serve-source/model.ninfer \
-            --profile sv3-serve-source/sv2-static-profile.json \
-            --output sv3-serve-results --repeats 3 --prefill-screen
-          cat sv3-serve-results/report.txt >> "$GITHUB_STEP_SUMMARY"
+            --artifact sv3-compare-source/model.ninfer \
+            --profile sv3-compare-source/sv2-static-profile.json \
+            --output sv3-compare-results
+          cat sv3-compare-results/report.txt >> "$GITHUB_STEP_SUMMARY"
       - name: Preserve production evidence including failures
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: v100-sv3-serve-${{ github.run_id }}-${{ github.run_attempt }}
-          path: sv3-serve-results/
+          name: v100-sv3-compare-${{ github.run_id }}-${{ github.run_attempt }}
+          path: sv3-compare-results/
           retention-days: 30
           if-no-files-found: warn

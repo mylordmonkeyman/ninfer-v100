@@ -1,6 +1,7 @@
 #include "targets/qwen3_8_flash_next/impl/moe.h"
 #include "targets/qwen3_8_flash_next/impl/expert_cache.h"
 #include "targets/qwen3_8_flash_next/impl/expert_stream.h"
+#include "targets/qwen3_8_flash_next/impl/stream_diagnostics.h"
 
 #include "core/layout.h"
 #include "targets/qwen3_8_flash_next/impl/cpu_expert_pool.h"
@@ -523,6 +524,9 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     }
     const auto cpu_finished = measure ? Clock::now() : Clock::time_point{};
     if (!serial) finish_hits();
+    if (stream_experts && tokens >= 1024 && stream_diagnostics_enabled()) {
+        compare_streamed_routes(layer, tokens, host_experts, streamed_routes, stream);
+    }
     const double branch_wall_us = measure ? perf_elapsed_us(branch_started) : 0;
     if (measure && cache) cache->record_schedule(
         std::chrono::duration<double, std::micro>(cpu_finished-cpu_started).count(),
