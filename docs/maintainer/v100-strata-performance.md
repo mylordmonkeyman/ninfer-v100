@@ -928,6 +928,29 @@ screen (`qualified=false`), not served cold/warm TTFT or concurrent-filesystem
 qualification. The mmap arm measures the established mapped/prewarmed behavior;
 the direct arm measures bounded descriptor reads. No storage default changes.
 
+Run `37503432222` at `ca2cb29b` passed the canonical-policy, real-artifact
+fixture, reader lifetime, async-drain, exact PLE output and real-model checks.
+All eight mmap/direct output files had the same SHA-256. Strict direct gathered
+the 819,200-byte compact payload from 3,954 coalesced pages without fallback;
+the isolated page-read service time was 61.527 ms. Three fresh-process
+prefill medians were 14.931 seconds for mmap and 14.068 seconds for direct,
+with overlapping ranges. Process-wall medians were 22.257 and 18.417 seconds,
+but include mmap's complete PLE startup warm. This remains `qualified=false`:
+it is not a served cold/warm TTFT comparison.
+
+The next bounded campaign adds diagnostic-only file-specific cache control.
+For the cold mmap cell, the retained artifact mapping is discarded with
+`madvise(MADV_DONTNEED)` and only the PLE file ranges are advised with
+`POSIX_FADV_DONTNEED`; `mincore` must then report zero resident PLE pages.
+The warm mmap cell must report every PLE page resident after the established
+prewarm. Strict direct bypasses page cache and must not fall back. Each cell
+runs one large, prefix-read-only HTTP request in fresh server processes,
+records engine TTFT separately from server-ready time, and requires exact
+greedy responses and compressed-byte accounting. It never uses global
+`drop_caches` and refuses to call a file-cold result valid if another process
+keeps those PLE pages resident. This is still bounded screening rather than
+concurrent or alternate-filesystem qualification, and mmap remains default.
+
 
 Queued page-read batches must drain every outstanding writer on any read,
 submission or scatter failure before fallback or staging-buffer reuse. A

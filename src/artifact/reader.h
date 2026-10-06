@@ -162,6 +162,11 @@ struct ArtifactIdentity {
     bool operator==(const ArtifactIdentity&) const = default;
 };
 
+struct CacheResidency {
+    std::size_t total_pages = 0;
+    std::size_t resident_pages = 0;
+};
+
 // Copyable ownership of the artifact file and its aligned direct-I/O descriptor.  Target-side
 // mapped views use this instead of reopening a pathname, so asynchronous reads remain bound to
 // the exact inode that supplied the validated artifact mapping.
@@ -172,18 +177,27 @@ public:
     [[nodiscard]] explicit operator bool() const noexcept { return owner_ != nullptr; }
     [[nodiscard]] bool supported() const noexcept;
     std::size_t read(std::uint64_t absolute_offset, std::span<std::byte> destination) const;
+    void evict_file_cache(std::uint64_t absolute_offset, std::size_t bytes) const;
+    [[nodiscard]] CacheResidency cache_residency(std::uint64_t absolute_offset,
+                                                 std::size_t bytes) const;
 
 private:
     friend class Reader;
     using ReadFn = std::size_t (*)(const void*, std::uint64_t, std::span<std::byte>);
     using SupportedFn = bool (*)(const void*) noexcept;
+    using EvictFn = void (*)(const void*, std::uint64_t, std::size_t);
+    using ResidencyFn = CacheResidency (*)(const void*, std::uint64_t, std::size_t);
 
-    DirectReader(std::shared_ptr<const void> owner, ReadFn read, SupportedFn supported) noexcept
-        : owner_(std::move(owner)), read_(read), supported_(supported) {}
+    DirectReader(std::shared_ptr<const void> owner, ReadFn read, SupportedFn supported,
+                 EvictFn evict, ResidencyFn residency) noexcept
+        : owner_(std::move(owner)), read_(read), supported_(supported), evict_(evict),
+          residency_(residency) {}
 
     std::shared_ptr<const void> owner_;
     ReadFn read_ = nullptr;
     SupportedFn supported_ = nullptr;
+    EvictFn evict_ = nullptr;
+    ResidencyFn residency_ = nullptr;
 };
 
 class Reader {

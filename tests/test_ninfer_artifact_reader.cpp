@@ -234,6 +234,9 @@ void test_direct_reader_lease() {
     {
         Reader reader(fixture.path);
         direct = reader.direct_reader();
+        const auto payload = reader.payload(reader.objects().front());
+        volatile std::byte mapped_byte = payload.data.front();
+        (void)mapped_byte;
     }
     constexpr std::size_t page = Reader::direct_io_alignment;
     void* allocation = std::aligned_alloc(page, page);
@@ -245,6 +248,15 @@ void test_direct_reader_lease() {
         bytes[2] != std::byte{1} || bytes[256] != std::byte{2}) {
         throw std::runtime_error("artifact direct-reader lease did not retain exact file access");
     }
+#if !defined(_WIN32)
+    const auto before = direct.cache_residency(4096, page);
+    direct.evict_file_cache(4096, page);
+    const auto after = direct.cache_residency(4096, page);
+    if (before.total_pages != 1 || before.resident_pages != 1 || after.total_pages != 1 ||
+        after.resident_pages > before.resident_pages) {
+        throw std::runtime_error("artifact file-specific cache control reported invalid residency");
+    }
+#endif
 }
 
 void test_common_validation() {

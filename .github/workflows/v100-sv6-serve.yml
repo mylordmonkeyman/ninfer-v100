@@ -1,0 +1,128 @@
+name: V100 SV6 Production PLE TTFT
+on:
+  push:
+    branches: [perf/v100-strata-derived]
+    paths:
+      - '.github/workflows/v100-sv6-serve.yml'
+      - 'src/artifact/reader.*'
+      - 'src/targets/qwen3_8_flash_next/impl/load/materialized.cpp'
+      - 'src/targets/qwen3_8_flash_next/impl/ple_*'
+      - 'tests/test_ninfer_artifact_reader.cpp'
+      - 'tools/diagnostics/v100_sv6_serve.py'
+      - 'tools/diagnostics/test_v100_sv6_serve.py'
+      - 'docs/maintainer/v100-strata-performance.md'
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 32
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Check TTFT workflow and diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, yaml
+          path = pathlib.Path('.github/workflows/v100-sv6-serve.yml')
+          yaml.safe_load(path.read_text())
+          text = path.read_text()
+          assert 'CMAKE_BUILD_PARALLEL_LEVEL: 32' in text
+          builds = [line for line in text.splitlines()
+                    if line.strip().startswith('cmake --build')]
+          assert len(builds) == 1 and all(' -j' not in line for line in builds)
+          PY
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+            -s tools/diagnostics -p 'test_v100*.py'
+          git diff --check
+  hardware:
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[v100:') || contains(github.event.head_commit.message, '[v100:sv6-serve]')
+    needs: checks
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    concurrency:
+      group: v100-sv0-hardware
+      cancel-in-progress: false
+    timeout-minutes: 120
+    env:
+      CUDA_VISIBLE_DEVICES: '0'
+      NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+      NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: '32'
+      NINFER_FLASH_NEXT_FP32_HYPER_STATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_CONV: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_READOUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_GATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_MOE_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT_LAYERS_32_47: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_SHARED_INPUT: '0'
+      NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE: '0'
+      NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          clean: false
+      - name: Prepare exact model alias and evidence directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sv6-serve-results sv6-serve-source
+          find sv6-serve-results -mindepth 1 -delete
+          find sv6-serve-source -mindepth 1 -delete
+          test -f "$NINFER_WEIGHTS"
+          test -r "$NINFER_WEIGHTS"
+          ln -s "$NINFER_WEIGHTS" sv6-serve-source/model.ninfer
+          git rev-parse HEAD > sv6-serve-results/candidate-sha.txt
+          nvidia-smi -q > sv6-serve-results/gpu.txt
+          /usr/local/cuda-12.8/bin/nvcc --version > sv6-serve-results/cuda.txt
+          free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits | tr -d '[:space:]')
+          if (( free_mib < 28000 )); then
+            echo '::error::V100 lacks SV6 server-test headroom; no unrelated workloads were stopped.'
+            exit 1
+          fi
+      - name: Build server and cache-control test once
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-sv6 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-sv6 --target ninfer-serve ninfer_artifact_reader_test
+          build-sv6/tests/ninfer_artifact_reader_test 2>&1 | tee sv6-serve-results/reader.log
+      - name: Measure verified warm mmap, file-cold mmap and strict direct TTFT
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/diagnostics/v100_sv6_serve.py \
+            --executable build-sv6/apps/ninfer-serve \
+            --artifact sv6-serve-source/model.ninfer \
+            --output sv6-serve-results/runtime --repeats 3 \
+            | tee sv6-serve-results/runtime.log
+          cat sv6-serve-results/runtime/sv6-serve.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve SV6 production evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-sv6-serve-${{ github.run_id }}-${{ github.run_attempt }}
+          path: sv6-serve-results/
+          retention-days: 30
+          if-no-files-found: warn

@@ -340,7 +340,63 @@ public:
 #endif
     }
 
+    void evict_file_cache(std::uint64_t absolute_offset, std::size_t bytes) const {
+#if defined(_WIN32)
+        (void)absolute_offset;
+        (void)bytes;
+        throw ArtifactError("artifact cache eviction is Linux-only");
+#else
+        const auto [begin, length] = aligned_range(absolute_offset, bytes);
+        if (length == 0) { return; }
+        void* address = const_cast<std::byte*>(data_ + begin);
+        if (::madvise(address, length, MADV_DONTNEED) != 0) {
+            throw std::system_error(errno, std::generic_category(), "madvise artifact cache");
+        }
+        const int error = ::posix_fadvise(fd_, static_cast<off_t>(begin),
+                                          static_cast<off_t>(length), POSIX_FADV_DONTNEED);
+        if (error != 0) {
+            throw std::system_error(error, std::generic_category(), "posix_fadvise artifact cache");
+        }
+#endif
+    }
+
+    CacheResidency cache_residency(std::uint64_t absolute_offset, std::size_t bytes) const {
+#if defined(_WIN32)
+        (void)absolute_offset;
+        (void)bytes;
+        throw ArtifactError("artifact cache residency is Linux-only");
+#else
+        const auto [begin, length] = aligned_range(absolute_offset, bytes);
+        if (length == 0) { return {}; }
+        constexpr std::size_t page = Reader::direct_io_alignment;
+        std::vector<unsigned char> residency(length / page + (length % page != 0));
+        if (::mincore(const_cast<std::byte*>(data_ + begin), length, residency.data()) != 0) {
+            throw std::system_error(errno, std::generic_category(), "mincore artifact cache");
+        }
+        return CacheResidency{
+            residency.size(),
+            static_cast<std::size_t>(std::count_if(residency.begin(), residency.end(),
+                                                   [](unsigned char value) { return value & 1U; }))};
+#endif
+    }
+
 private:
+#if !defined(_WIN32)
+    std::pair<std::size_t, std::size_t> aligned_range(std::uint64_t absolute_offset,
+                                                      std::size_t bytes) const {
+        constexpr std::size_t page = Reader::direct_io_alignment;
+        if (absolute_offset > size_ || bytes > size_ - static_cast<std::size_t>(absolute_offset)) {
+            throw ArtifactError("artifact cache range is outside the file");
+        }
+        const std::size_t offset = static_cast<std::size_t>(absolute_offset);
+        const std::size_t begin = offset / page * page;
+        const std::size_t requested_end = offset + bytes;
+        const std::size_t end = requested_end > size_ - std::min(size_, page - 1)
+            ? size_
+            : (requested_end + page - 1) / page * page;
+        return {begin, end - begin};
+    }
+#endif
 #if defined(_WIN32)
     HANDLE fd_ = INVALID_HANDLE_VALUE;
 #else
@@ -502,6 +558,19 @@ bool DirectReader::supported() const noexcept {
     return owner_ != nullptr && supported_ != nullptr && supported_(owner_.get());
 }
 
+void DirectReader::evict_file_cache(std::uint64_t absolute_offset, std::size_t bytes) const {
+    if (owner_ == nullptr || evict_ == nullptr) { throw ArtifactError("artifact direct reader is empty"); }
+    evict_(owner_.get(), absolute_offset, bytes);
+}
+
+CacheResidency DirectReader::cache_residency(std::uint64_t absolute_offset,
+                                             std::size_t bytes) const {
+    if (owner_ == nullptr || residency_ == nullptr) {
+        throw ArtifactError("artifact direct reader is empty");
+    }
+    return residency_(owner_.get(), absolute_offset, bytes);
+}
+
 DirectReader Reader::direct_reader() const noexcept {
     return DirectReader(
         std::static_pointer_cast<const void>(impl_),
@@ -510,6 +579,12 @@ DirectReader Reader::direct_reader() const noexcept {
         },
         [](const void* owner) noexcept {
             return static_cast<const Impl*>(owner)->file.direct_io_supported();
+        },
+        [](const void* owner, std::uint64_t offset, std::size_t bytes) {
+            static_cast<const Impl*>(owner)->file.evict_file_cache(offset, bytes);
+        },
+        [](const void* owner, std::uint64_t offset, std::size_t bytes) {
+            return static_cast<const Impl*>(owner)->file.cache_residency(offset, bytes);
         });
 }
 

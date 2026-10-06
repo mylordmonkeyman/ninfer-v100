@@ -454,6 +454,43 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
                  warm_ple ? "mmap" : "skipped", host_bytes,
                  std::chrono::duration<double, std::milli>(
                      std::chrono::steady_clock::now() - warm_started).count());
+    const char* cache_raw = std::getenv("NINFER_V100_PLE_DIAGNOSTIC_CACHE");
+    const std::string_view cache_mode = cache_raw ? std::string_view(cache_raw) : std::string_view{};
+    if (!cache_mode.empty()) {
+        if (cache_mode != "warm" && cache_mode != "cold") {
+            throw std::invalid_argument(
+                "NINFER_V100_PLE_DIAGNOSTIC_CACHE must be warm or cold");
+        }
+        if (cache_mode == "cold" && !warm_ple) {
+            throw std::invalid_argument("cold PLE cache control requires NINFER_V100_PLE_IO=mmap");
+        }
+        for (const auto& shard : text.ple.table.shards) {
+            const std::size_t bytes = static_cast<std::size_t>(
+                shard.scale_absolute_offset - shard.code_absolute_offset) + shard.scales.size();
+            if (cache_mode == "cold") {
+                text.ple.table.direct_reader.evict_file_cache(shard.code_absolute_offset, bytes);
+            }
+        }
+        artifact::CacheResidency total{};
+        for (const auto& shard : text.ple.table.shards) {
+            const std::size_t bytes = static_cast<std::size_t>(
+                shard.scale_absolute_offset - shard.code_absolute_offset) + shard.scales.size();
+            const auto residency = text.ple.table.direct_reader.cache_residency(
+                shard.code_absolute_offset, bytes);
+            total.total_pages += residency.total_pages;
+            total.resident_pages += residency.resident_pages;
+        }
+        std::fprintf(stderr,
+                     "flash_next host_ple_cache mode=%.*s total_pages=%zu resident_pages=%zu\n",
+                     static_cast<int>(cache_mode.size()), cache_mode.data(), total.total_pages,
+                     total.resident_pages);
+        if (cache_mode == "cold" && total.resident_pages != 0) {
+            throw std::runtime_error("file-specific PLE cache eviction left resident pages");
+        }
+        if (cache_mode == "warm" && total.resident_pages != total.total_pages) {
+            throw std::runtime_error("PLE warm control did not establish full residency");
+        }
+    }
     if (v100_perf_telemetry_enabled()) {
         std::ostringstream out;
         out << "{\"sv\":0,\"schema\":1,\"kind\":\"model_memory\",\"artifact_arena_bytes\":"
