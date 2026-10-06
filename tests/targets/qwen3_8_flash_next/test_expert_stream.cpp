@@ -13,6 +13,7 @@
 #include <span>
 #include <stdexcept>
 #include <string_view>
+#include <syncstream>
 #include <vector>
 using namespace ninfer;
 using namespace ninfer::targets::qwen3_8_flash_next::detail;
@@ -63,13 +64,13 @@ void run_cost_calibration(DeviceContext& device,
         double cpu_us=0,gpu_us=0;
         if(sample%2) {gpu_us=gpu(count);cpu_us=cpu(count);}
         else {cpu_us=cpu(count);gpu_us=gpu(count);}
-        std::cout<<"sv3.cost={\"routes\":"<<count
-                 <<",\"sample\":"<<sample
-                 <<",\"cpu_us\":"<<cpu_us
-                 <<",\"gpu_us\":"<<gpu_us
-                 <<",\"expert_h2d_bytes\":"<<kExpertSlotBytes
-                 <<",\"cpu_result_h2d_bytes\":"<<std::size_t(count)*2560*sizeof(float)
-                 <<"}\n";
+        std::osyncstream(std::cout)<<"sv3.cost={\"routes\":"<<count
+            <<",\"sample\":"<<sample
+            <<",\"cpu_us\":"<<cpu_us
+            <<",\"gpu_us\":"<<gpu_us
+            <<",\"expert_h2d_bytes\":"<<kExpertSlotBytes
+            <<",\"cpu_result_h2d_bytes\":"<<std::size_t(count)*2560*sizeof(float)
+            <<"}\n";
     }
 }
 int main() { try {
