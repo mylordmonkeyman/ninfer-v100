@@ -8,12 +8,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <random>
 #include <span>
 #include <stdexcept>
 #include <string_view>
-#include <syncstream>
 #include <vector>
 using namespace ninfer;
 using namespace ninfer::targets::qwen3_8_flash_next::detail;
@@ -26,6 +26,11 @@ void run_cost_calibration(DeviceContext& device,
     if(!enabled || !*enabled || std::string_view(enabled)=="0") return;
     if(std::string_view(enabled)!="1")
         throw std::invalid_argument("NINFER_V100_SV3_COST must be 0 or 1");
+    const char* output_path=std::getenv("NINFER_V100_SV3_COST_OUTPUT");
+    if(!output_path || !*output_path)
+        throw std::invalid_argument("NINFER_V100_SV3_COST_OUTPUT is required");
+    std::ofstream records(output_path,std::ios::trunc);
+    if(!records) throw std::runtime_error("failed to open SV3 cost record output");
     constexpr std::array<unsigned,7> counts{1,2,4,8,16,32,64};
     constexpr unsigned repeats=7;
     // Use the production CPU worker shape and the same canonical represented
@@ -64,7 +69,7 @@ void run_cost_calibration(DeviceContext& device,
         double cpu_us=0,gpu_us=0;
         if(sample%2) {gpu_us=gpu(count);cpu_us=cpu(count);}
         else {cpu_us=cpu(count);gpu_us=gpu(count);}
-        std::osyncstream(std::cout)<<"sv3.cost={\"routes\":"<<count
+        records<<"sv3.cost={\"routes\":"<<count
             <<",\"sample\":"<<sample
             <<",\"cpu_us\":"<<cpu_us
             <<",\"gpu_us\":"<<gpu_us
@@ -72,6 +77,8 @@ void run_cost_calibration(DeviceContext& device,
             <<",\"cpu_result_h2d_bytes\":"<<std::size_t(count)*2560*sizeof(float)
             <<"}\n";
     }
+    records.close();
+    if(!records) throw std::runtime_error("failed to write SV3 cost records");
 }
 int main() { try {
     int devices=0; if(cudaGetDeviceCount(&devices)!=cudaSuccess || !devices) return 77;

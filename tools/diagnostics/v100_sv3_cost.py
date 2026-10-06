@@ -55,12 +55,15 @@ def main() -> None:
     parser.add_argument("--output",type=Path,required=True)
     args=parser.parse_args()
     args.output.mkdir(parents=True,exist_ok=True)
+    records_path=(args.output/"cost-records.jsonl").resolve()
     env=os.environ.copy();env["NINFER_V100_SV3_COST"]="1"
+    env["NINFER_V100_SV3_COST_OUTPUT"]=str(records_path)
     process=subprocess.run([str(args.executable.resolve())],env=env,text=True,
                            stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=1800)
     (args.output/"cost.log").write_text(process.stdout)
     if process.returncode: raise RuntimeError("SV3 cost executable failed")
-    report=collect(process.stdout)
+    if not records_path.is_file(): raise RuntimeError("SV3 cost records missing")
+    report=collect(records_path.read_text())
     (args.output/"cost.json").write_text(json.dumps(report,indent=2)+"\n")
     lines=["SV3 isolated canonical per-expert cost; no policy promotion.","",
            "| Routes | CPU median us (range) | GPU median us (range) | GPU change |",
