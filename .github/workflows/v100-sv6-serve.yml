@@ -118,7 +118,11 @@ jobs:
           /usr/local/cuda-12.8/bin/nvcc --version > sv6-serve-results/cuda.txt
           free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits | tr -d '[:space:]')
           if (( free_mib < 28000 )); then
-            echo '::error::V100 lacks SV6 server-test headroom; no unrelated workloads were stopped.'
+            echo "::error::V100 lacks SV6 server-test headroom (${free_mib} MiB free < 28000 MiB); no unrelated workloads were stopped."
+            occupants=$(nvidia-smi --id=0 --query-compute-apps=pid,process_name,used_memory --format=csv 2>/dev/null | head -20 | tr '\n' ';')
+            if [ -n "$occupants" ]; then
+              echo "::error::sv6-serve V100 compute apps: ${occupants}"
+            fi
             exit 1
           fi
       - name: Build server and cache-control test once
