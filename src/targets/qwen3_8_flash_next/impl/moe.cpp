@@ -2,6 +2,7 @@
 #include "targets/qwen3_8_flash_next/impl/expert_cache.h"
 #include "targets/qwen3_8_flash_next/impl/expert_stream.h"
 #include "targets/qwen3_8_flash_next/impl/route_handoff.h"
+#include "targets/qwen3_8_flash_next/impl/route_handoff_policy.h"
 #include "targets/qwen3_8_flash_next/impl/stream_diagnostics.h"
 
 #include "core/layout.h"
@@ -75,11 +76,9 @@ bool resolve_cpu_expert_grouping() {
     throw std::invalid_argument("NINFER_V100_CPU_EXPERT_GROUP must be 0 or 1");
 }
 
-bool resolve_route_handoff() {
+bool resolve_route_handoff(bool prefill) {
     const char* env = std::getenv("NINFER_V100_ROUTE_HANDOFF");
-    if (env == nullptr || env[0] == '\0' || std::string_view(env) == "0") return false;
-    if (std::string_view(env) == "1") return true;
-    throw std::invalid_argument("NINFER_V100_ROUTE_HANDOFF must be 0 or 1");
+    return route_handoff_enabled(env ? std::string_view(env) : std::string_view{}, prefill);
 }
 
 bool resolve_device_route_combine() {
@@ -347,7 +346,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
 #if defined(NINFER_VOLTA_BUILD)
     const bool device_route_combine = resolve_device_route_combine() &&
         !use_routed_expert_input_fp32 && !resolve_fp32_intermediate_diagnostic();
-    const bool route_handoff = resolve_route_handoff();
+    const bool route_handoff = resolve_route_handoff(prefill);
 #else
     const bool device_route_combine = false;
     const bool route_handoff = false;

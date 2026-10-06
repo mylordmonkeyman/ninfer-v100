@@ -1,8 +1,17 @@
 #include "targets/qwen3_8_flash_next/impl/perf_telemetry.h"
+#include "targets/qwen3_8_flash_next/impl/route_handoff_policy.h"
 #include <iostream>
 
 using namespace ninfer::targets::qwen3_8_flash_next::detail;
 int main() {
+    for (bool prefill : {false, true}) {
+        if (route_handoff_enabled("", prefill) || route_handoff_enabled("0", prefill) ||
+            !route_handoff_enabled("1", prefill) ||
+            route_handoff_enabled("prefill", prefill) != prefill) return 1;
+    }
+    try { (void)route_handoff_enabled("invalid", false); return 1; }
+    catch (const std::invalid_argument&) {}
+
     const std::array<std::int32_t, 10> ids{0, 0, 1, 2, 3, 511, 511, 511, 4, 4};
     ExpertRouteHistogram histogram(ids);
     if (histogram.distinct != 6 || histogram.routes != 10 || histogram.frequency[511] != 3)

@@ -850,3 +850,23 @@ Timings use telemetry off and three alternating repeats. Decode/MTP throughput
 must be evaluated separately from prefill; event overhead at small batches
 could offset earlier readiness. No default promotion is implied, and concurrent
 multi-request qualification remains outstanding.
+
+
+SV5 production run `37476808637` at `35ec3f7b` passed twelve fresh servers,
+48 exact HTTP responses, prefix replay, equal cache capacity and identical
+MTP draft/accept counts. All-phase handoff improved non-MTP cold prefill from
+81.386 to 85.627 t/s, but decode fell from 9.079 to 8.447 t/s. MTP cold decode
+was 7.981/7.687 t/s and cold prefill 80.839/76.285 t/s; the candidate's MTP
+prefill range was wide (76.030--92.188). No all-phase performance qualification
+or default promotion is supported by this result.
+
+The bounded follow-up adds `NINFER_V100_ROUTE_HANDOFF=prefill`: phase-marked
+prefill uses early readiness, while decode and MTP target verification retain
+the serial control irrespective of their row count. Existing zero/unset and
+explicit `1` all-phase experiments retain their meanings. No row-count cutoff
+or default policy is inferred. The production comparison keeps grouping fixed
+in both arms and tests the prefill-only candidate with three fresh alternating
+repeats. A phase-policy test protects decode exclusion, including multi-row
+verification, and runs before production timing in the same incremental build.
+Only this policy's measured prefill/decode behavior may be claimed; concurrent
+qualification and the independent SV3 production blocker remain outstanding.

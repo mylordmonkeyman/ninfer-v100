@@ -78,7 +78,8 @@ def validate_handoff_peers(peers):
 
 
 def run_server(executable, artifact, profile, output, mode, mtp, repeat,
-               prefill_screen=False, cpu_group_screen=False, route_handoff_screen=False):
+               prefill_screen=False, cpu_group_screen=False, route_handoff_screen=False,
+               route_handoff_policy="all"):
     name = f'{mode}-mtp{int(mtp)}-{repeat}'
     log_path, request_path = output/f'{name}.log', output/f'{name}-requests.jsonl'
     env = os.environ.copy()
@@ -89,7 +90,8 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                 key.startswith('NINFER_V100_ROUTE_HANDOFF')):
             env.pop(key)
     large_prefill = prefill_screen or cpu_group_screen or route_handoff_screen
-    env.update(NINFER_V100_ROUTE_HANDOFF='1' if route_handoff_screen and mode == 'handoff' else '0',
+    env.update(NINFER_V100_ROUTE_HANDOFF=('prefill' if route_handoff_policy == 'prefill' else '1')
+               if route_handoff_screen and mode == 'handoff' else '0',
                NINFER_V100_DEVICE_ROUTE_COMBINE='1' if large_prefill or mode == 'device' else '0',
                NINFER_V100_PREFILL_EXPERT_POLICY=mode if prefill_screen else 'cpu-cache',
                NINFER_V100_CPU_EXPERT_GROUP='1' if route_handoff_screen or (cpu_group_screen and mode == 'grouped') else '0',
@@ -197,6 +199,8 @@ def main():
                         help='compare fixed-cache single/grouped CPU misses in production')
     parser.add_argument('--route-handoff-screen',action='store_true',
                         help='compare serial/route-ready with grouping enabled in both arms')
+    parser.add_argument('--route-handoff-policy',choices=('all','prefill'),default='all',
+                        help='phase eligibility for the route-ready candidate; serial control remains off')
     parser.add_argument('--repeats',type=int,default=3)
     args=parser.parse_args()
     if args.artifact.suffix != '.ninfer' or not args.artifact.is_file():
@@ -219,7 +223,8 @@ def main():
         for mtp in (False,True):
             for mode in (modes if repeat%2==0 else tuple(reversed(modes))):
                 row=run_server(args.executable,args.artifact,args.profile,args.output,mode,mtp,
-                               repeat,args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen)
+                               repeat,args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,
+                               args.route_handoff_policy)
                 observations.append(row); atomic_json(args.output/'observations.json',observations)
                 peers=[r for r in observations if r['mtp']==mtp]
                 if any(r['response_signatures']!=peers[0]['response_signatures'] for r in peers):
@@ -251,6 +256,7 @@ def main():
             ('production_http_prefill_prefix_mtp_screen' if args.prefill_screen else
              'production_http_prefix_mtp_screen')))
     report=dict(schema=1,milestone=milestone,scope=scope,qualified=False,
+                route_handoff_policy=args.route_handoff_policy if args.route_handoff_screen else None,
                 candidate_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),results=results,
                 exact_compared_responses=True,limitations=[
                     'fixed 64 slots per layer, BF16 KV, one active request, short 4096 context',

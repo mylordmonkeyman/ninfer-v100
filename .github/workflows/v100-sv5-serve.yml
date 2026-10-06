@@ -7,6 +7,8 @@ on:
       - 'tools/diagnostics/v100_sv2_serve.py'
       - 'tools/diagnostics/test_v100_sv2_serve.py'
       - 'src/targets/qwen3_8_flash_next/impl/route_handoff.h'
+      - 'src/targets/qwen3_8_flash_next/impl/route_handoff_policy.h'
+      - 'tests/targets/qwen3_8_flash_next/test_perf_telemetry.cpp'
       - 'src/targets/qwen3_8_flash_next/impl/moe.*'
       - 'src/targets/qwen3_8_flash_next/impl/perf_telemetry.h'
       - 'docs/maintainer/v100-strata-performance.md'
@@ -105,8 +107,11 @@ jobs:
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
             -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
             -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-sv4-serve --target ninfer-serve
-      - name: Compare serial and route-ready scheduling through HTTP and MTP
+          cmake --build build-sv4-serve --target ninfer-serve \
+            ninfer_qwen3_8_flash_next_perf_telemetry_test
+          build-sv4-serve/tests/ninfer_qwen3_8_flash_next_perf_telemetry_test \
+            > sv5-serve-results/policy-telemetry.log
+      - name: Compare serial and prefill-only route handoff through HTTP and MTP
         shell: bash
         run: |
           set -euo pipefail
@@ -114,7 +119,8 @@ jobs:
             --executable build-sv4-serve/apps/ninfer-serve \
             --artifact sv5-serve-source/model.ninfer \
             --profile sv5-serve-source/sv2-static-profile.json \
-            --output sv5-serve-results --repeats 3 --route-handoff-screen
+            --output sv5-serve-results --repeats 3 --route-handoff-screen \
+            --route-handoff-policy prefill
           cat sv5-serve-results/report.txt >> "$GITHUB_STEP_SUMMARY"
       - name: Preserve production evidence including failures
         if: always()

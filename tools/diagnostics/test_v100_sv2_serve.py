@@ -60,7 +60,8 @@ class ProductionEvidenceTest(unittest.TestCase):
                 validate_handoff_peers(changed)
 
     def test_handoff_screen_isolates_route_readiness(self):
-        for mode, flag in (('serial', '0'), ('handoff', '1')):
+        for mode, policy, flag in (('serial', 'all', '0'), ('handoff', 'all', '1'),
+                                   ('serial', 'prefill', '0'), ('handoff', 'prefill', 'prefill')):
             with tempfile.TemporaryDirectory() as directory, \
                     mock.patch('v100_sv2_serve.gpu_snapshot', return_value={
                         'thermal_status_observed': True, 'thermal_throttled': False}), \
@@ -73,7 +74,7 @@ class ProductionEvidenceTest(unittest.TestCase):
                 output = Path(directory)
                 with self.assertRaisesRegex(RuntimeError, 'stop'):
                     run_server(Path('/bin/true'), output/'model.ninfer', output/'profile.json',
-                               output, mode, True, 0, route_handoff_screen=True)
+                               output, mode, True, 0, route_handoff_screen=True, route_handoff_policy=policy)
                 environment = popen.call_args.kwargs['env']
                 self.assertEqual(environment['NINFER_V100_ROUTE_HANDOFF'], flag)
                 self.assertEqual(environment['NINFER_V100_CPU_EXPERT_GROUP'], '1')
