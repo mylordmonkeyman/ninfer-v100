@@ -55,6 +55,7 @@ class HostExpertWorkerPool {
     std::vector<HostExpertTaskGroup> groups_;
     std::array<std::vector<std::size_t>, 512> group_indices_;
     std::vector<CpuNvfp4ExpertGroupScratch> group_scratch_;
+    std::vector<std::size_t> group_shards_;
     bool grouped_ = false;
     bool row_sharded_ = false;
     bool down_phase_ = false;

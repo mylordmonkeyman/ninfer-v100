@@ -158,6 +158,24 @@ void HostExpertWorkerPool::run_grouped(std::span<const HostExpertTask> tasks,
         execute_jobs(groups_.size());
         return;
     }
+    // A width-four group performs four independent dot products per row.
+    // Equal shards per group leave those jobs on the critical path while
+    // singleton workers idle, especially in MTP verification batches. Split
+    // the available worker budget by routed rows rather than expert count.
+    group_shards_.assign(groups_.size(), 1);
+    for (std::size_t jobs = groups_.size(); jobs < workers_.size(); ++jobs) {
+        std::size_t selected = groups_.size();
+        for (std::size_t i = 0; i < groups_.size(); ++i) {
+            if (group_shards_[i] == 8) { continue; }
+            if (selected == groups_.size() ||
+                groups_[i].token_count * group_shards_[selected] >
+                    groups_[selected].token_count * group_shards_[i]) {
+                selected = i;
+            }
+        }
+        if (selected == groups_.size()) { break; }
+        ++group_shards_[selected];
+    }
     group_scratch_.resize(groups_.size());
     row_jobs_.clear();
     for (std::size_t i = 0; i < groups_.size(); ++i) {
@@ -170,8 +188,7 @@ void HostExpertWorkerPool::run_grouped(std::span<const HostExpertTask> tasks,
             flash_next_cpu_nvfp4_expert_group_prepare_avx2(
                 group.expert, {group.inputs.data(), group.token_count}, group_scratch_[i]);
         }
-        const auto shards = std::min<std::size_t>(
-            8, workers_.size() / groups_.size() + (i < workers_.size() % groups_.size()));
+        const auto shards = group_shards_[i];
         for (std::size_t shard = 0; shard < shards; ++shard) {
             row_jobs_.push_back({i, shard, shards});
         }

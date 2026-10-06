@@ -8,6 +8,7 @@ on:
       - 'tools/diagnostics/test_v100_sv2_serve.py'
       - 'src/targets/qwen3_8_flash_next/impl/cpu_expert_*'
       - 'src/targets/qwen3_8_flash_next/impl/moe.*'
+      - 'tests/targets/qwen3_8_flash_next/test_cpu_expert_group.cpp'
       - 'docs/maintainer/v100-strata-performance.md'
   workflow_dispatch:
 permissions:
@@ -104,7 +105,14 @@ jobs:
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
             -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
             -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-sv4-serve --target ninfer-serve
+          cmake --build build-sv4-serve --target ninfer-serve \
+            ninfer_qwen3_8_flash_next_cpu_expert_group_test
+      - name: Check grouped pool sparse batches before production timing
+        shell: bash
+        run: |
+          set -euo pipefail
+          build-sv4-serve/tests/ninfer_qwen3_8_flash_next_cpu_expert_group_test \
+            2>&1 | tee sv4-serve-results/grouped-pool.log
       - name: Screen grouped CPU misses through production HTTP and MTP
         shell: bash
         run: |

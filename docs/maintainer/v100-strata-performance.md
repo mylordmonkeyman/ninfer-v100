@@ -773,3 +773,22 @@ continuation replay, and actual MTP drafting. It uses twelve fresh single-owner
 server processes and requires exact cross-arm greedy responses. This exercises
 the production request lifecycle and MTP but not concurrent multi-request decode;
 grouping remains opt-in and no default promotion is implied.
+
+
+SV4 production run `37464349469` at `8c46fe65` passed twelve fresh server
+processes and all 48 HTTP responses, with exact cross-arm greedy output,
+prefix/continuation replay, real MTP drafting and equal fixed cache capacity.
+Cold non-MTP prefill medians were 52.973/85.059 t/s (single/grouped); decode
+medians were 9.345/9.129 t/s. With MTP, cold prefill was 52.075/82.230 t/s,
+but decode regressed from 8.501 to 6.594 t/s. Grouping is therefore not
+qualified for default MTP use despite its prefill gain and exactness.
+
+The follow-up targets small-batch load imbalance: row-sharded grouped work
+previously assigned equal shards to every expert group despite widths 1--4.
+The candidate allocates the existing bounded worker budget by token rows,
+giving wider groups more shards while retaining the eight-shard cap and
+exact per-token accumulation. It does not change grouping eligibility,
+weights, router, numerical tolerances or defaults. A sparse-reuse pool test
+covers one width-four group among singletons around the 32-worker boundary.
+Production A/B is required to determine whether this removes the observed MTP
+regression; an improvement is not assumed from the scheduling change.

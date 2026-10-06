@@ -223,6 +223,36 @@ int main() {
             }
         }
     }
+    // MTP-like sparse reuse: one width-four expert among independent
+    // singletons. Exercise balanced row phases and whole-group dispatch on
+    // either side of the 32-worker budget, with stable original output slots.
+    for (unsigned count : {28U, 35U, 40U}) {
+        HostExpertWorkerPool sparse_pool(32, true);
+        std::vector<std::array<float, kFlashNextExpertHidden>> expected(count), actual(count);
+        std::vector<HostExpertTask> tasks;
+        for (unsigned i = 0; i < count; ++i) {
+            const auto& view = i < 4 ? expert : alternate;
+            CpuNvfp4ExpertReferenceScratch scratch;
+            flash_next_cpu_nvfp4_expert_pair_avx2(view, inputs[i % 4], expected[i], scratch);
+            tasks.push_back(HostExpertTask{
+                .expert = view, .expert_id = static_cast<std::int32_t>(i < 4 ? 0 : i),
+                .route_id = count - i, .input = inputs[i % 4].data(),
+                .output = actual[i].data(),
+            });
+        }
+        for (unsigned repeat = 0; repeat < 3; ++repeat) {
+            const auto stats = sparse_pool.run(tasks, true);
+            if (stats.groups != 1 || stats.grouped_pairs != 4 ||
+                stats.weight_read_bytes != (count - 3) * 2'764'808ULL) {
+                throw std::runtime_error("sparse grouped worker accounting mismatch");
+            }
+            for (unsigned i = 0; i < count; ++i) {
+                if (std::memcmp(actual[i].data(), expected[i].data(), sizeof(actual[i])) != 0) {
+                    throw std::runtime_error("sparse grouped row schedule changed output bits");
+                }
+            }
+        }
+    }
     std::cout << "PASS: grouped worker pool mixed identities, row phases and failure recovery\n";
     std::cout << "PASS: grouped AVX2 widths 2/3/4 preserve single-token output bits\n";
     return 0;
