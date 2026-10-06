@@ -19,6 +19,15 @@ class ProductionEvidenceTest(unittest.TestCase):
             responses.append(response);events.append(event)
         return events,responses
 
+    def test_large_prefill_screen_requires_actual_prompt_extent(self):
+        events,responses=self.fixtures(False)
+        with self.assertRaisesRegex(ValueError, 'large prefill chunk'):
+            validate_events(events,responses,False,True)
+        for event,response in zip(events,responses):
+            event['result']['prompt_tokens']=1536
+            response['usage']['prompt_tokens']=1536
+        self.assertEqual(len(validate_events(events,responses,False,True)),4)
+
     def test_real_drafting_reuse_and_replay_required(self):
         events,responses=self.fixtures()
         self.assertEqual(len(validate_events(events,responses,True)),4)

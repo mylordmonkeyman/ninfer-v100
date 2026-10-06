@@ -600,3 +600,20 @@ zero leases after completion, mixed hit/miss partition, miss-only staging/CPU
 transfers, equal cache capacity and separately planned ring overhead.
 The existing independent oracle thresholds remain unchanged; this calibration
 does not claim independent-oracle or production/default qualification.
+
+Fixed-cache SV3 calibration run `37397409904` passed all hardware steps,
+including three fresh processes per arm and stable 64-slot identity-bound
+resident sets. CPU/stream median prefill t/s at 512,1024,2048 were
+50.652/50.423,58.857/72.267,66.320/94.955. The 512-token ranges overlap;
+1024 and 2048 favor streaming with separate ranges (+22.78%,+43.18%).
+This suggests an experimental cached token crossover of 1024 for this workload,
+not a universal per-expert cost policy or default promotion.
+
+`v100-sv3-serve.yml` uses the shared production HTTP driver with
+`--prefill-screen` to compare cpu-cache and stream with device route combine
+in both arms, a fixed 64-slot profile, and an actual 1024..2048-token cold
+prompt in one supported 2048-token chunk. It retains the three fresh processes,
+prefix/continuation replay, MTP drafting, exact greedy response accounting,
+equal cache capacity and thermal checks. It records cold prefill throughput
+and decode throughput separately. The existing SV2 production regression
+continues to exercise legacy/device modes through the same driver.
