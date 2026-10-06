@@ -80,6 +80,23 @@ jobs:
         with:
           persist-credentials: false
           clean: false
+      - name: Digest previous incomplete SV6 serve evidence if present
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f sv6-serve-results/runtime.log ] && [ ! -f sv6-serve-results/runtime/report.json ]; then
+            echo "::warning::previous SV6 serve run did not complete; preserving its evidence as public annotations (base64)"
+            listing=$( { ls -la sv6-serve-results; ls -la sv6-serve-results/runtime; } 2>&1 | base64 -w0)
+            echo "::warning::sv6-serve previous-run evidence listing base64=${listing}"
+            payload=$(tail -c 30000 sv6-serve-results/runtime.log | base64 -w0)
+            echo "::warning::sv6-serve previous-run runtime.log tail base64=${payload}"
+            latest_log=$(ls -t sv6-serve-results/runtime/*.log 2>/dev/null | head -1 || true)
+            if [ -n "${latest_log:-}" ]; then
+              payload=$(tail -c 30000 "$latest_log" | base64 -w0)
+              echo "::warning::sv6-serve previous-run server log $(basename "$latest_log") tail base64=${payload}"
+            fi
+          fi
       - name: Prepare exact model alias and evidence directory
         shell: bash
         run: |
@@ -111,12 +128,48 @@ jobs:
       - name: Measure verified warm mmap, file-cold mmap and strict direct TTFT
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          emit_digest() {
+            label=$1; file=$2
+            [ -f "$file" ] || return 0
+            payload=$(tail -c 30000 "$file" | base64 -w0)
+            echo "::error::sv6-serve ${label} base64=${payload}"
+          }
           python3 tools/diagnostics/v100_sv6_serve.py \
             --executable build-sv6/apps/ninfer-serve \
             --artifact sv6-serve-source/model.ninfer \
             --output sv6-serve-results/runtime --repeats 3 \
             | tee sv6-serve-results/runtime.log
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::SV6 serve screen failed (exit ${status}); publishing evidence digest as public annotations"
+            latest_log=$(ls -t sv6-serve-results/runtime/*.log 2>/dev/null | head -1 || true)
+            {
+              echo "## SV6 serve screen failed (exit ${status})"
+              echo ""
+              echo '<details open><summary>harness runtime log (tail)</summary>'
+              echo ""
+              echo '```'
+              tail -c 48000 sv6-serve-results/runtime.log 2>/dev/null || true
+              echo '```'
+              echo ""
+              echo '</details>'
+              if [ -n "${latest_log:-}" ]; then
+                echo "<details open><summary>server log: $(basename "$latest_log") (tail)</summary>"
+                echo ""
+                echo '```'
+                tail -c 48000 "$latest_log" 2>/dev/null || true
+                echo '```'
+                echo ""
+                echo '</details>'
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+            emit_digest "runtime.log tail" "sv6-serve-results/runtime.log"
+            if [ -n "${latest_log:-}" ]; then
+              emit_digest "server log $(basename "$latest_log") tail" "$latest_log"
+            fi
+            exit "$status"
+          fi
           cat sv6-serve-results/runtime/sv6-serve.txt >> "$GITHUB_STEP_SUMMARY"
       - name: Preserve SV6 production evidence
         if: always()
