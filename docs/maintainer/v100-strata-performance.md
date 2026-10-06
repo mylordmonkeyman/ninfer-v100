@@ -731,7 +731,7 @@ To avoid simultaneous pending hardware jobs replacing each other in the shared
 V100 concurrency group, a push commit can select one hardware campaign with
 `[v100:sv0]`, `[v100:sv1]`, `[v100:sv2]`, `[v100:sv2-serve]`,
 `[v100:sv3]`, `[v100:sv3-serve]`, `[v100:sv3-compare]`, `[v100:sv4]`, or
-`[v100:sv4-serve]`, or `[v100:sv5]` in its message.
+`[v100:sv4-serve]`, `[v100:sv5]`, or `[v100:sv5-serve]` in its message.
 Other triggered workflows still run host checks but skip hardware. Untagged
 pushes and manual dispatches retain their prior behavior. Select one campaign
 and inspect its evidence before launching the next; do not publish over healthy
@@ -829,3 +829,24 @@ and memory capacity, and measures three fresh telemetry-off processes per arm
 in alternating order. It also validates monotonic route-ready sequences.
 This is screening only; production decode/MTP qualification and default
 promotion require later evidence. SV3's strict response blocker is unchanged.
+
+
+SV5 run `37474832532` at `5b3ae850` passed CUDA compilation, the focused
+readiness/lifetime test and the fixed-static64 full-model screen. Across three
+fresh telemetry-off processes, serial/handoff median prefill was 81.365/85.115
+t/s (+4.61%), with ranges 78.337--82.726 and 83.502--85.318. Final BF16 logits,
+204,820 GPU hits, 286,700 CPU misses, cache/transfer accounting and device memory
+capacity were exact between arms. All 96 diagnostic handoff sequences advanced
+from 1 through 96; serial sequences were zero. This is represented 512-token
+prefill evidence only. The focused test proved readiness before later GPU work
+completed, independently of the throughput result.
+
+The next SV5 production campaign retains the existing incremental server build
+and compares serial/route-ready with grouping enabled in both arms. Twelve
+fresh servers perform 48 HTTP requests covering cold large prefill, prefix
+replay, continuation and MTP. Exact responses, fixed cache capacity, thermal
+validity and identical per-request MTP draft/accept counts are required.
+Timings use telemetry off and three alternating repeats. Decode/MTP throughput
+must be evaluated separately from prefill; event overhead at small batches
+could offset earlier readiness. No default promotion is implied, and concurrent
+multi-request qualification remains outstanding.

@@ -68,8 +68,17 @@ def validate_events(events, responses, mtp, large_prefill=False):
     return done
 
 
+def validate_handoff_peers(peers):
+    # A scheduling change must retain speculation behavior, not just final text.
+    counts = [tuple((event['speculative']['drafted_tokens'],
+                     event['speculative']['accepted_tokens']) for event in row['requests'])
+              for row in peers]
+    if any(value != counts[0] for value in counts):
+        raise ValueError('route handoff changed MTP draft/accept counts')
+
+
 def run_server(executable, artifact, profile, output, mode, mtp, repeat,
-               prefill_screen=False, cpu_group_screen=False):
+               prefill_screen=False, cpu_group_screen=False, route_handoff_screen=False):
     name = f'{mode}-mtp{int(mtp)}-{repeat}'
     log_path, request_path = output/f'{name}.log', output/f'{name}-requests.jsonl'
     env = os.environ.copy()
@@ -79,10 +88,11 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                 key.startswith('NINFER_V100_CPU_EXPERT_GROUP') or
                 key.startswith('NINFER_V100_ROUTE_HANDOFF')):
             env.pop(key)
-    large_prefill = prefill_screen or cpu_group_screen
-    env.update(NINFER_V100_ROUTE_HANDOFF='0',NINFER_V100_DEVICE_ROUTE_COMBINE='1' if large_prefill or mode == 'device' else '0',
+    large_prefill = prefill_screen or cpu_group_screen or route_handoff_screen
+    env.update(NINFER_V100_ROUTE_HANDOFF='1' if route_handoff_screen and mode == 'handoff' else '0',
+               NINFER_V100_DEVICE_ROUTE_COMBINE='1' if large_prefill or mode == 'device' else '0',
                NINFER_V100_PREFILL_EXPERT_POLICY=mode if prefill_screen else 'cpu-cache',
-               NINFER_V100_CPU_EXPERT_GROUP='1' if cpu_group_screen and mode == 'grouped' else '0',
+               NINFER_V100_CPU_EXPERT_GROUP='1' if route_handoff_screen or (cpu_group_screen and mode == 'grouped') else '0',
                NINFER_V100_EXPERT_PROFILE=str(profile.resolve()),NINFER_V100_EXPERT_POLICY='static',
                NINFER_FLASH_NEXT_EXPERT_CACHE='1',NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS='64',
                NINFER_FLASH_NEXT_EXPERT_CACHE_SERIAL='0',NINFER_FLASH_NEXT_EXPERT_CACHE_PREFILL='1',
@@ -185,18 +195,22 @@ def main():
                         help='compare fixed-cache cpu-cache/stream with a large production prompt')
     parser.add_argument('--cpu-group-screen',action='store_true',
                         help='compare fixed-cache single/grouped CPU misses in production')
+    parser.add_argument('--route-handoff-screen',action='store_true',
+                        help='compare serial/route-ready with grouping enabled in both arms')
     parser.add_argument('--repeats',type=int,default=3)
     args=parser.parse_args()
     if args.artifact.suffix != '.ninfer' or not args.artifact.is_file():
         parser.error('--artifact requires an explicit readable .ninfer file')
-    if args.prefill_screen and args.cpu_group_screen:
-        parser.error('--prefill-screen and --cpu-group-screen are mutually exclusive')
+    if sum((args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen)) > 1:
+        parser.error('performance screen flags are mutually exclusive')
     if args.repeats<3: parser.error('need three fresh-process observations per arm')
     args.output.mkdir(parents=True,exist_ok=True)
     profile=json.loads(args.profile.read_text())
     if profile['magic']!='NINFER_V100_EXPERT_PROFILE' or profile['version']!=2:
         raise ValueError('need identity-bound fixed profile')
-    if args.cpu_group_screen:
+    if args.route_handoff_screen:
+        modes=('serial','handoff')
+    elif args.cpu_group_screen:
         modes=('single','grouped')
     else:
         modes=('cpu-cache','stream') if args.prefill_screen else ('legacy','device')
@@ -205,11 +219,13 @@ def main():
         for mtp in (False,True):
             for mode in (modes if repeat%2==0 else tuple(reversed(modes))):
                 row=run_server(args.executable,args.artifact,args.profile,args.output,mode,mtp,
-                               repeat,args.prefill_screen,args.cpu_group_screen)
+                               repeat,args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen)
                 observations.append(row); atomic_json(args.output/'observations.json',observations)
                 peers=[r for r in observations if r['mtp']==mtp]
                 if any(r['response_signatures']!=peers[0]['response_signatures'] for r in peers):
                     raise ValueError('cross-path greedy production response or finish accounting differs')
+                if args.route_handoff_screen:
+                    validate_handoff_peers(peers)
                 if len({r['cache_bytes'] for r in peers})!=1:
                     raise ValueError('production cache capacity differs between paths')
     results=[]
@@ -228,10 +244,12 @@ def main():
                     prefill_tokens_per_s_median=statistics.median(prefill),
                     fresh_prompt_tokens=fresh,decode_tokens_per_s_median=statistics.median(values),
                     minimum=min(values),maximum=max(values),process_observations=len(rows)))
-    milestone='SV4' if args.cpu_group_screen else ('SV3' if args.prefill_screen else 'SV2')
-    scope=('production_http_grouped_cpu_prefix_mtp_screen' if args.cpu_group_screen else
-           ('production_http_prefill_prefix_mtp_screen' if args.prefill_screen else
-            'production_http_prefix_mtp_screen'))
+    milestone=('SV5' if args.route_handoff_screen else
+               ('SV4' if args.cpu_group_screen else ('SV3' if args.prefill_screen else 'SV2')))
+    scope=('production_http_route_handoff_prefix_mtp_screen' if args.route_handoff_screen else
+           ('production_http_grouped_cpu_prefix_mtp_screen' if args.cpu_group_screen else
+            ('production_http_prefill_prefix_mtp_screen' if args.prefill_screen else
+             'production_http_prefix_mtp_screen')))
     report=dict(schema=1,milestone=milestone,scope=scope,qualified=False,
                 candidate_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),results=results,
                 exact_compared_responses=True,limitations=[
@@ -240,7 +258,9 @@ def main():
                     'MTP drafting required; acceptance counts retained, no minimum acceptance coefficient imposed',
                     'no independent oracle thresholds changed; accepted baseline numerical failure remains separate'] +
                     (['grouped CPU experts remain opt-in; no concurrent-request matrix in this screen']
-                     if args.cpu_group_screen else []))
+                     if args.cpu_group_screen else []) +
+                    (['route handoff remains opt-in; both arms use grouped CPU experts; no concurrent-request matrix']
+                     if args.route_handoff_screen else []))
     atomic_json(args.output/'report.json',report)
     lines=['Production HTTP prefill/prefix/MTP screen; defaults unchanged.','',
            '| Mode | MTP | Request | Prefill t/s median | Decode t/s median (range) |','|---|---|---|---:|---:|']

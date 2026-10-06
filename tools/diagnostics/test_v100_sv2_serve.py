@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
-from v100_sv2_serve import run_server, validate_events
+from v100_sv2_serve import run_server, validate_events, validate_handoff_peers
 
 
 class ProductionEvidenceTest(unittest.TestCase):
@@ -46,6 +46,42 @@ class ProductionEvidenceTest(unittest.TestCase):
         with self.assertRaises(ValueError): validate_events(events+[{'event':'request_error'}],responses,True)
         events,responses=self.fixtures(False)
         self.assertEqual(len(validate_events(events,responses,False)),4)
+
+    def test_handoff_preserves_speculation_counts(self):
+        events, _ = self.fixtures()
+        for event in events:
+            event['speculative']['accepted_tokens'] = 12
+        peers = [dict(requests=events), dict(requests=copy.deepcopy(events))]
+        validate_handoff_peers(peers)
+        for key in ('drafted_tokens', 'accepted_tokens'):
+            changed = copy.deepcopy(peers)
+            changed[1]['requests'][2]['speculative'][key] += 1
+            with self.assertRaisesRegex(ValueError, 'draft/accept'):
+                validate_handoff_peers(changed)
+
+    def test_handoff_screen_isolates_route_readiness(self):
+        for mode, flag in (('serial', '0'), ('handoff', '1')):
+            with tempfile.TemporaryDirectory() as directory, \
+                    mock.patch('v100_sv2_serve.gpu_snapshot', return_value={
+                        'thermal_status_observed': True, 'thermal_throttled': False}), \
+                    mock.patch('v100_sv2_serve.subprocess.Popen') as popen, \
+                    mock.patch('v100_sv2_serve.request') as request_call:
+                process = popen.return_value
+                process.poll.return_value = None
+                process.wait.return_value = 0
+                request_call.side_effect = [{'data': [{'id': 'model'}]}, RuntimeError('stop')]
+                output = Path(directory)
+                with self.assertRaisesRegex(RuntimeError, 'stop'):
+                    run_server(Path('/bin/true'), output/'model.ninfer', output/'profile.json',
+                               output, mode, True, 0, route_handoff_screen=True)
+                environment = popen.call_args.kwargs['env']
+                self.assertEqual(environment['NINFER_V100_ROUTE_HANDOFF'], flag)
+                self.assertEqual(environment['NINFER_V100_CPU_EXPERT_GROUP'], '1')
+                self.assertEqual(environment['NINFER_V100_DEVICE_ROUTE_COMBINE'], '1')
+                self.assertEqual(environment['NINFER_V100_PREFILL_EXPERT_POLICY'], 'cpu-cache')
+                command = popen.call_args.args[0]
+                self.assertIn('--no-cuda-graph', command)
+                self.assertIn('mtp', command)
 
     def test_group_screen_selects_only_the_grouping_environment(self):
         with tempfile.TemporaryDirectory() as directory, \
