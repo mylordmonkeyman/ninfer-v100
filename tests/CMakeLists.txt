@@ -90,6 +90,9 @@ set_tests_properties(ninfer_selected_block_attention_prefill_test PROPERTIES SKI
 ninfer_add_test(ninfer_artifact_reader_test
   SOURCES test_ninfer_artifact_reader.cpp
   LIBRARIES ninfer_artifact)
+ninfer_add_test(ninfer_qwen3_8_flash_next_ple_read_batch_test
+  SOURCES targets/qwen3_8_flash_next/test_ple_read_batch.cpp
+  LIBRARIES Threads::Threads)
 ninfer_add_test(ninfer_artifact_materialization_test
   SOURCES test_artifact_materialization.cpp
   LIBRARIES ninfer_artifact)

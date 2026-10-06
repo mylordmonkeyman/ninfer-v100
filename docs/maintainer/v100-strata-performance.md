@@ -926,3 +926,23 @@ and three fresh-process timing repetitions per arm. This remains an integration
 screen (`qualified=false`), not served cold/warm TTFT or concurrent-filesystem
 qualification. The mmap arm measures the established mapped/prewarmed behavior;
 the direct arm measures bounded descriptor reads. No storage default changes.
+
+
+Queued page-read batches must drain every outstanding writer on any read,
+submission or scatter failure before fallback or staging-buffer reuse. A
+packaged-task future alone does not provide that lifetime guarantee. The
+focused host test holds a later page writer in flight, fails the first read,
+and verifies recovery waits for that writer while preserving the original
+error. Async preparation reserves future storage before taking slot ownership
+and uses its ticket to reclaim the slot on allocation/submission failure.
+Direct planning validates shard geometry before constructing file ranges.
+
+
+Initial SV6 run `37500235600` at `47ca47fc` built successfully and passed the
+artifact reader and exact BF16 async-gather tests through 2048 tokens. The
+real-model direct arm stopped at layer 1 because CUDA pinned allocation did
+not supply a 4096-byte-aligned page address. No direct performance result was
+produced. The correction uses explicitly aligned reusable host pages for disk
+reads, then scatters into the existing pinned H2D payload. Disk staging itself
+needs no CUDA pinning. The queued-writer drain fix is included in the same
+follow-up so failure recovery cannot race the page buffer's next use.

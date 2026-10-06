@@ -1,4 +1,5 @@
 #include "targets/qwen3_8_flash_next/impl/ple_pipeline.h"
+#include "targets/qwen3_8_flash_next/impl/ple_read_batch.h"
 
 #include "core/arena.h"
 #include "targets/qwen3_8_flash_next/impl/perf_telemetry.h"
@@ -37,7 +38,7 @@ struct PleGatherPipeline::Slot {
           completion(device), ordering(device) {}
 
     PinnedHostBuffer buffer;
-    PinnedHostBuffer direct_pages;
+    PlePageBuffer direct_pages;
     DeviceBuffer device_compressed;
     CudaCompletionEvent completion;
     // Orders the H2D copy after everything already enqueued on the compute stream: the startup
@@ -128,7 +129,7 @@ struct DirectGatherResult {
 DirectGatherResult gather_direct(const PleTableView& table,
                    std::span<const std::array<std::int64_t, 16>> rows,
                    std::span<std::byte> codes, std::span<std::byte> scales,
-                   PinnedHostBuffer& page_storage, HostWorkerPool& workers,
+                   PlePageBuffer& page_storage, HostWorkerPool& workers,
                    std::size_t queue_depth) {
     if (!table.direct_reader || !table.direct_reader.supported()) {
         throw std::runtime_error("PLE artifact direct I/O is unavailable");
@@ -145,6 +146,10 @@ DirectGatherResult gather_direct(const PleTableView& table,
             if (global < 0) { throw std::out_of_range("PLE row must be non-negative"); }
             const PleRowAddress address = locate_ple_row(static_cast<std::uint64_t>(global));
             const PleShardView& shard = table.shards[address.shard];
+            if (address.row >= shard.rows || shard.width != kPleRowWidth ||
+                shard.groups_per_row != kPleRowWidth / 16) {
+                throw std::out_of_range("PLE direct row is outside the shard geometry");
+            }
             const std::size_t index = token * 16 + head;
             add_piece(pages, shard.code_absolute_offset + address.row * kPleCodesPerRow,
                       kPleCodesPerRow, index * kPleCodesPerRow);
@@ -157,17 +162,16 @@ DirectGatherResult gather_direct(const PleTableView& table,
     auto* compact = codes.data();
     for (std::size_t begin = 0; begin < ordered.size(); begin += queue_depth) {
         const std::size_t count = std::min(queue_depth, ordered.size() - begin);
-        std::vector<std::future<std::size_t>> pending;
-        pending.reserve(count);
+        PleReadBatch pending(count);
         for (std::size_t i = 0; i < count; ++i) {
             auto* destination = static_cast<std::byte*>(page_storage.data()) + i * page;
             const std::uint64_t offset = ordered[begin + i].first;
-            pending.push_back(workers.submit([reader = table.direct_reader, offset, destination] {
+            pending.add(workers.submit([reader = table.direct_reader, offset, destination] {
                 return reader.read(offset, std::span<std::byte>(destination, page));
             }));
         }
         for (std::size_t i = 0; i < count; ++i) {
-            const std::size_t read = pending[i].get();
+            const std::size_t read = pending.get(i);
             auto* source = static_cast<const std::byte*>(page_storage.data()) + i * page;
             for (const PageCopy& copy : ordered[begin + i].second) {
                 if (copy.page_offset + copy.bytes > read) {
@@ -257,9 +261,11 @@ PleGatherPipeline::prepare_async(std::span<const std::array<std::int64_t, 16>> g
     }
     const std::size_t slot_index = acquire_slot();
     Slot& slot                   = *slots_[slot_index];
+    slot.work.clear();
+    slot.work.reserve(1); // Any allocation failure leaves the acquired slot idle.
     slot.state                   = SlotState::Gathering;
     ++slot.generation;
-    slot.work.clear();
+    Ticket ticket(this, slot_index, slot.generation, global_rows.size());
     slot.telemetry = v100_perf_telemetry_enabled();
     slot.gather_started = slot.telemetry ? PerfClock::now() : PerfClock::time_point{};
     slot.storage_backend = "mmap";
@@ -294,7 +300,7 @@ PleGatherPipeline::prepare_async(std::span<const std::array<std::int64_t, 16>> g
             }
             if (!direct) { gather_ple_rows_compressed(table_, owned, codes, scales); }
         }));
-    return Ticket(this, slot_index, slot.generation, tokens);
+    return ticket;
 }
 
 void PleGatherPipeline::abandon(Ticket& ticket) noexcept {
