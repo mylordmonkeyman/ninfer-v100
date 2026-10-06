@@ -736,3 +736,23 @@ pushes and manual dispatches retain their prior behavior. Select one campaign
 and inspect its evidence before launching the next; do not publish over healthy
 active same-head work. CUDA builds retain their incremental directories and
 32-job environment setting.
+
+
+SV4 integration run `37458763132` at `382f9a0c` passed the grouped primitive,
+persistent-pool tests and represented 512-token cache-off full-model screen on
+V100 PCIe 32GB with CUDA 12.8 and 32 CPU workers. Three fresh uninstrumented
+processes per arm, in alternating order, gave median prefill 38.985 t/s for
+single-token CPU experts and 66.573 t/s for grouped misses (+70.77%). Final
+BF16 logits and route provenance matched exactly. Diagnostic logical weight
+reads fell from 679,479,214,080 to 187,769,170,512 bytes; these are accounting
+estimates, not measured physical traffic. This is opt-in prefill screening,
+not production serving, MTP or default qualification.
+
+The next selected SV4 screen uses the existing identity-bound static64 profile,
+with GPU resident hits and grouped CPU misses at 512 tokens. Both fresh passes
+must retain exact logits and routing, fixed admissions without eviction or
+leases, SV2 transfer elimination, and equal device memory capacity between
+arms. Three fresh telemetry-off timing processes per arm alternate order.
+The incremental build is reused; one hardware campaign is selected. Small
+batch/decode, MTP and production gates remain outstanding. SV3's separate
+strict production response failure remains unresolved and unchanged.

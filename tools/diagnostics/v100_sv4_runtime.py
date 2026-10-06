@@ -12,10 +12,10 @@ import threading
 
 if __package__:
     from .v100_sv0_benchmark import gpu_snapshot
-    from .v100_sv3_calibrate import atomic_json, parse_probe, parse_json_records
+    from .v100_sv3_calibrate import atomic_json, parse_probe, parse_json_records, validate_diagnostic
 else:
     from v100_sv0_benchmark import gpu_snapshot
-    from v100_sv3_calibrate import atomic_json, parse_probe, parse_json_records
+    from v100_sv3_calibrate import atomic_json, parse_probe, parse_json_records, validate_diagnostic
 
 
 LAYERS = 48
@@ -24,12 +24,14 @@ EXPERT_BYTES = 2_764_808
 MODES = ("single", "grouped")
 
 
-def environment(mode: str, positions: int, telemetry: bool, logits: Path) -> dict:
+def environment(mode: str, positions: int, telemetry: bool, logits: Path,
+                profile: Path | None = None) -> dict:
     env = os.environ.copy()
     for key in tuple(env):
         if (key.startswith("NINFER_PHASE") or key.startswith("NINFER_V100_PREFILL_") or
                 key.startswith("NINFER_V100_CPU_EXPERT_GROUP") or
-                key.startswith("NINFER_FLASH_NEXT_EXPERT_CACHE")):
+                key.startswith("NINFER_FLASH_NEXT_EXPERT_CACHE") or
+                key.startswith("NINFER_V100_EXPERT_")):
             env.pop(key)
     env.update({
         "NINFER_PHASE11_PREFILL_PROBE_POSITIONS": str(positions),
@@ -43,51 +45,63 @@ def environment(mode: str, positions: int, telemetry: bool, logits: Path) -> dic
         "NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE": "0",
         "NINFER_V100_SV4_LOGITS": str(logits),
     })
+    if profile:
+        env.update({"NINFER_FLASH_NEXT_EXPERT_CACHE": "1",
+                    "NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS": "64",
+                    "NINFER_V100_EXPERT_POLICY": "static",
+                    "NINFER_V100_EXPERT_PROFILE": str(profile.resolve())})
     return env
 
 
-def validate_layers(stderr: str, positions: int, grouped: bool) -> dict:
+def validate_layers(stderr: str, positions: int, grouped: bool, cached: bool = False) -> dict:
     rows = [row for row in parse_json_records(stderr)
             if row.get("kind") == "expert_layer" and row.get("prefill")]
-    if len(rows) != LAYERS or sorted(row["layer"] for row in rows) != list(range(LAYERS)):
+    passes = 2 if cached else 1
+    if len(rows) != LAYERS * passes or any(
+            sorted(row["layer"] for row in rows[start:start + LAYERS]) != list(range(LAYERS))
+            for start in range(0, len(rows), LAYERS)):
         raise ValueError("SV4 diagnostic is missing full-model expert layers")
+    cached_accounting = validate_diagnostic(stderr, positions, "cpu-cache", cached=True) if cached else None
     routes = positions * ROUTES_PER_TOKEN
     if any(row["tokens"] != positions or row["routes"] != routes or
-           row["cpu_miss_routes"] != routes or row["gpu_hit_routes"] != 0
-           for row in rows):
+           row["cpu_miss_routes"] + row["gpu_hit_routes"] != routes or
+           (not cached and row["gpu_hit_routes"] != 0) for row in rows):
         raise ValueError("SV4 diagnostic route accounting mismatch")
     if any(row["stream_routes"] or row["cache_result_d2h_bytes"] or
            row["routed_sum_h2d_bytes"] for row in rows):
         raise ValueError("SV4 diagnostic used a non-CPU expert route")
     if grouped:
         if any(row["cpu_groups"] < 1 or row["cpu_grouped_pairs"] < 2 or
-               row["cpu_grouped_pairs"] > routes for row in rows):
+               row["cpu_grouped_pairs"] > row["cpu_miss_routes"] for row in rows):
             raise ValueError("SV4 grouped diagnostic did not group repeated experts")
-        if any(not 0 < row["cpu_weight_read_bytes"] < routes * EXPERT_BYTES
+        if any(not 0 < row["cpu_weight_read_bytes"] < row["cpu_miss_routes"] * EXPERT_BYTES
                for row in rows):
             raise ValueError("SV4 grouped effective weight reads were not reduced")
     elif any(row["cpu_groups"] or row["cpu_grouped_pairs"] or
-             row["cpu_weight_read_bytes"] != routes * EXPERT_BYTES for row in rows):
+             row["cpu_weight_read_bytes"] != row["cpu_miss_routes"] * EXPERT_BYTES for row in rows):
         raise ValueError("SV4 single-token control has invalid grouping accounting")
     wall_us = sum(row["cpu_branch_us"] for row in rows)
     weight_bytes = sum(row["cpu_weight_read_bytes"] for row in rows)
     return {
-        "layers": len(rows),
+        "layers": LAYERS, "passes": passes,
+        "cached_accounting": cached_accounting,
+        "cpu_miss_routes": sum(row["cpu_miss_routes"] for row in rows),
+        "gpu_hit_routes": sum(row["gpu_hit_routes"] for row in rows),
         "routes": sum(row["routes"] for row in rows),
         "groups": sum(row["cpu_groups"] for row in rows),
         "grouped_pairs": sum(row["cpu_grouped_pairs"] for row in rows),
         "effective_weight_read_bytes": weight_bytes,
         "cpu_branch_wall_us": wall_us,
         "effective_weight_read_gbps": weight_bytes / wall_us / 1.0e3,
-        "provenance": [(row["layer"], tuple(row["frequency"])) for row in rows],
+        "provenance": [(row["layer"], row["gpu_hit_routes"], tuple(row["frequency"])) for row in rows],
     }
 
 
 def invoke(executable: Path, output: Path, name: str, mode: str,
-           positions: int, telemetry: bool) -> dict:
+           positions: int, telemetry: bool, profile: Path | None = None) -> dict:
     logits = output / f"{name}-logits"
     logits.mkdir(parents=True, exist_ok=True)
-    env = environment(mode, positions, telemetry, logits)
+    env = environment(mode, positions, telemetry, logits, profile)
     snapshots, errors, done = [gpu_snapshot()], [], threading.Event()
 
     def monitor():
@@ -119,18 +133,30 @@ def invoke(executable: Path, output: Path, name: str, mode: str,
     if any(not row["thermal_status_observed"] or row["thermal_throttled"]
            for row in snapshots):
         raise ValueError(f"{name}: thermal status unavailable or throttling observed")
+    if profile:
+        if __package__:
+            from .v100_sv3_runtime import parse_runtime_probe
+        else:
+            from v100_sv3_runtime import parse_runtime_probe
+        probe = parse_runtime_probe(process.stdout, positions, cached=True)
+    else:
+        probe = parse_probe(process.stdout, positions)
+    payload = (logits / "pass0.bf16").read_bytes()
+    if not payload or len(payload) % 2:
+        raise ValueError("missing or incomplete represented BF16 logits")
+    if profile and payload != (logits / "pass1.bf16").read_bytes():
+        raise ValueError("fixed-cache replay changed represented BF16 logits")
     result = {
-        "name": name, "mode": mode, "probe": parse_probe(process.stdout, positions),
-        "logits_sha256": hashlib.sha256(
-            (logits / "pass0.bf16").read_bytes()).hexdigest(),
+        "name": name, "mode": mode, "probe": probe,
+        "logits_sha256": hashlib.sha256(payload).hexdigest(),
     }
     if telemetry:
         result["diagnostic"] = validate_layers(
-            process.stderr, positions, mode == "grouped")
+            process.stderr, positions, mode == "grouped", cached=bool(profile))
     return result
 
 
-def summarize(observations: list[dict], diagnostics: dict, repeats: int) -> dict:
+def summarize(observations: list[dict], diagnostics: dict, repeats: int, cached: bool = False) -> dict:
     cells = {}
     for mode in MODES:
         selected = [row for row in observations if row["mode"] == mode]
@@ -156,11 +182,20 @@ def summarize(observations: list[dict], diagnostics: dict, repeats: int) -> dict
     if diagnostics["single"]["diagnostic"]["provenance"] != \
             diagnostics["grouped"]["diagnostic"]["provenance"]:
         raise ValueError("grouped CPU experts changed route provenance")
+    if cached:
+        first = diagnostics["single"]["diagnostic"]["cached_accounting"]
+        second = diagnostics["grouped"]["diagnostic"]["cached_accounting"]
+        memory_bytes = lambda row: {key: value for key, value in row.items() if key.endswith("_bytes")}
+        if (first["cache_bytes"] != second["cache_bytes"] or
+                memory_bytes(first["runtime_memory"]) != memory_bytes(second["runtime_memory"])):
+            raise ValueError("SV4 cached runtime capacity differs between arms")
     for mode in MODES:
+        if diagnostics[mode]["logits_sha256"] != cells[mode]["logits_sha256"]:
+            raise ValueError("diagnostic and uninstrumented BF16 logits differ")
         cells[mode].pop("logits_sha256")
     return {
         "schema": 1, "milestone": "SV4", "qualified": False,
-        "scope": "cache_off_represented_full_model_prefill",
+        "scope": "fixed_cache_represented_full_model_prefill" if cached else "cache_off_represented_full_model_prefill",
         "repeats": repeats, "single": cells["single"], "grouped": cells["grouped"],
         "median_change_percent": 100 * (cells["grouped"]["median"] /
                                           cells["single"]["median"] - 1),
@@ -170,6 +205,7 @@ def summarize(observations: list[dict], diagnostics: dict, repeats: int) -> dict
         "default_enabled": False,
         "limitations": [
             "standalone represented prefill probe, not production HTTP serving or MTP",
+            "fixed static64 residency with mixed GPU hits and CPU misses" if cached else
             "persistent expert cache disabled to exercise all CPU misses",
             "grouping remains opt-in pending cached, decode-batch, MTP, and production gates",
         ],
@@ -182,21 +218,22 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--positions", type=int, default=512)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--profile", type=Path, help="validated identity-bound static64 residency profile")
     args = parser.parse_args()
     if args.positions < 2 or args.positions > 2048 or args.repeats < 3:
         parser.error("positions must be in [2, 2048] and repeats at least 3")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     diagnostics = {mode: invoke(args.executable, output, f"diagnostic-{mode}",
-                                mode, args.positions, True) for mode in MODES}
+                                mode, args.positions, True, args.profile) for mode in MODES}
     observations = []
     for repeat in range(args.repeats):
         order = MODES if repeat % 2 == 0 else tuple(reversed(MODES))
         for mode in order:
             observations.append(invoke(args.executable, output,
                                        f"timing-{repeat}-{mode}", mode,
-                                       args.positions, False))
-    report = summarize(observations, diagnostics, args.repeats)
+                                       args.positions, False, args.profile))
+    report = summarize(observations, diagnostics, args.repeats, cached=bool(args.profile))
     report["candidate_sha"] = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], text=True).strip()
     atomic_json(output / "sv4-runtime.json", report)

@@ -1,4 +1,9 @@
+import copy
+import json
 import unittest
+
+from test_v100_sv3_calibrate import diagnostic_rows
+from v100_sv3_calibrate import EXPERT_HIDDEN
 
 from v100_sv4_runtime import EXPERT_BYTES, LAYERS, summarize, validate_layers
 
@@ -19,6 +24,40 @@ class Sv4RuntimeTest(unittest.TestCase):
             rows.append(row)
         return "\n".join(__import__("json").dumps(row) for row in rows)
 
+    def cached_rows(self, grouped):
+        rows = [json.loads(line) for line in diagnostic_rows("cpu-cache", 128).splitlines()]
+        for row in rows[1:]:
+            row.update(gpu_hit_routes=640, cpu_miss_routes=640,
+                       cpu_miss_h2d_bytes=640 * EXPERT_HIDDEN * 4,
+                       frequency=[0] * 512, cpu_branch_us=1000.0,
+                       cpu_groups=160 if grouped else 0,
+                       cpu_grouped_pairs=640 if grouped else 0,
+                       cpu_weight_read_bytes=(160 if grouped else 640) * EXPERT_BYTES,
+                       cache=dict(admissions_total=3072, fills_total=3072,
+                                  evictions_total=0, leased_experts=0, ready_experts=64,
+                                  uploading_experts=0, cache_bytes=64 * 48 * EXPERT_BYTES))
+        return rows + copy.deepcopy(rows[1:])
+
+    def test_cached_mixed_routes_and_weight_reads(self):
+        reports = [validate_layers("\n".join(map(json.dumps, self.cached_rows(grouped))),
+                                   128, grouped, cached=True) for grouped in (False, True)]
+        self.assertEqual(reports[0]["passes"], 2)
+        self.assertEqual(reports[0]["gpu_hit_routes"], 640 * 96)
+        self.assertEqual(reports[0]["provenance"], reports[1]["provenance"])
+        self.assertEqual(reports[1]["effective_weight_read_bytes"] * 4,
+                         reports[0]["effective_weight_read_bytes"])
+
+    def test_cached_rejects_pollution_and_replay_routing_changes(self):
+        for field, value, message in (("evictions_total", 1, "fixed resident set"),
+                                      ("gpu_hit_routes", 639, "provenance")):
+            rows = self.cached_rows(True)
+            if field == "evictions_total":
+                rows[-1]["cache"][field] = value
+            else:
+                rows[-1][field] = value
+            with self.assertRaisesRegex(ValueError, message):
+                validate_layers("\n".join(map(json.dumps, rows)), 128, True, cached=True)
+
     def test_single_and_grouped_accounting(self):
         single = validate_layers(self.records(False), 128, False)
         grouped = validate_layers(self.records(True), 128, True)
@@ -30,6 +69,27 @@ class Sv4RuntimeTest(unittest.TestCase):
     def test_rejects_false_grouping(self):
         with self.assertRaises(ValueError):
             validate_layers(self.records(False), 128, True)
+
+    def test_cached_summary_rejects_capacity_or_diagnostic_changes(self):
+        probe = dict(candidate_top1=1, oracle_top1=2, kl=0.1,
+                     relative_nll_delta=0.2, max_logit_error=0.3,
+                     tokens_per_s=10.0, expert_pairs=480, elapsed_s=1.0)
+        observations = [dict(mode=mode, probe=probe, logits_sha256="same")
+                        for mode in ("single", "grouped") for _ in range(3)]
+        diagnostics = {mode: dict(logits_sha256="same", diagnostic=validate_layers(
+            "\n".join(map(json.dumps, self.cached_rows(mode == "grouped"))),
+            128, mode == "grouped", cached=True)) for mode in ("single", "grouped")}
+        report = summarize(observations, diagnostics, 3, cached=True)
+        self.assertEqual(report["scope"], "fixed_cache_represented_full_model_prefill")
+        self.assertFalse(report["qualified"])
+        changed = copy.deepcopy(diagnostics)
+        changed["grouped"]["diagnostic"]["cached_accounting"]["runtime_memory"]["attention_kv_bytes"] += 1
+        with self.assertRaisesRegex(ValueError, "capacity"):
+            summarize(observations, changed, 3, cached=True)
+        changed = copy.deepcopy(diagnostics)
+        changed["grouped"]["logits_sha256"] = "different"
+        with self.assertRaisesRegex(ValueError, "uninstrumented"):
+            summarize(observations, changed, 3, cached=True)
 
     def test_summary_requires_exact_cross_arm_logits(self):
         probe = {"candidate_top1": 1, "oracle_top1": 2, "kl": 0.1,
