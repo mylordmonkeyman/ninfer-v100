@@ -17,6 +17,8 @@ on:
       - 'tools/diagnostics/test_v100_sv3_runtime.py'
       - 'tools/diagnostics/v100_sv3_calibrate.py'
       - 'tools/diagnostics/test_v100_sv3_calibrate.py'
+      - 'tools/diagnostics/v100_sv3_cost.py'
+      - 'tools/diagnostics/test_v100_sv3_cost.py'
       - 'docs/maintainer/v100-strata-performance.md'
   workflow_dispatch:
 permissions:
@@ -107,6 +109,14 @@ jobs:
           python3 tools/diagnostics/v100_sv3_runtime.py \
             --executable build-sv3/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
             --output sv3-results --positions 32 | tee sv3-results/runtime.log
+      - name: Calibrate isolated per-expert CPU and staged-GPU costs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/diagnostics/v100_sv3_cost.py \
+            --executable build-sv3/tests/ninfer_qwen3_8_flash_next_expert_stream_test \
+            --output sv3-results
+          cat sv3-results/cost.txt >> "$GITHUB_STEP_SUMMARY"
       - name: Check resident hits and ephemeral misses on the real model
         shell: bash
         run: |

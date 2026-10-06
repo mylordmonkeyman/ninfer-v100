@@ -656,6 +656,27 @@ and Phase11 mathematical-oracle checks. Eight samples per layer cannot exclude
 unsampled corruption. No cause or production streaming qualification is claimed
 before the hardware evidence is available. The failed response gate remains intact.
 
+Same-input diagnostic run `37415223669` passed all 384 bounded samples (eight
+per routed layer). Isolated GPU staging replay was bit exact; all sampled
+outputs were finite. Against the scalar CPU profile, the maximum NRMSE was
+0.000599579, minimum cosine was 0.999999822, and maximum absolute error was
+0.000051875. The AVX2-reference and GPU-AVX2 maximum NRMSE values were
+0.000599575 and 0.000298541. No sample failed the existing 0.002/0.99999
+focused criterion. This rules out sampled staging/replay instability, but it
+does not prove why autoregressive production responses diverged and cannot
+exclude an unsampled fault. The strict production response gate remains
+failed and unchanged.
+
+The next SV3 campaign measures the specification's bounded per-expert route
+costs at 1,2,4,8,16,32,64 routes. It alternates seven warm samples per point
+using the production 32-worker CPU expert path plus result H2D versus staging
+host packing, one expert H2D and grouped GPU execution. The fixture is the
+canonical synthetic represented expert used by the independent stream tests;
+shared route/control transfers, layer overlap and whole-model effects are
+outside this measurement. The collector may report a separate-range observed
+crossover, but always leaves the runtime route threshold unset and
+unqualified. It does not alter `auto`, the default, or any oracle threshold.
+
 To avoid simultaneous pending hardware jobs replacing each other in the shared
 V100 concurrency group, a push commit can select one hardware campaign with
 `[v100:sv0]`, `[v100:sv1]`, `[v100:sv2]`, `[v100:sv2-serve]`,

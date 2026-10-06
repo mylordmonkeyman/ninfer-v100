@@ -1,17 +1,77 @@
 #include "targets/qwen3_8_flash_next/impl/expert_stream.h"
 #include "targets/qwen3_8_flash_next/impl/cpu_expert_reference.h"
+#include "targets/qwen3_8_flash_next/impl/cpu_expert_pool.h"
 #include "core/device.h"
 #include "ninfer/ops/expert_route_combine.h"
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <random>
+#include <span>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 using namespace ninfer;
 using namespace ninfer::targets::qwen3_8_flash_next::detail;
 void require(bool x,const char* s) { if(!x) throw std::runtime_error(s); }
+void run_cost_calibration(DeviceContext& device,
+    const HostNvfp4ExpertPairView& expert,
+    const std::vector<std::uint16_t>& host_input,
+    const DeviceBuffer& device_input) {
+    const char* enabled=std::getenv("NINFER_V100_SV3_COST");
+    if(!enabled || !*enabled || std::string_view(enabled)=="0") return;
+    if(std::string_view(enabled)!="1")
+        throw std::invalid_argument("NINFER_V100_SV3_COST must be 0 or 1");
+    constexpr std::array<unsigned,7> counts{1,2,4,8,16,32,64};
+    constexpr unsigned repeats=7;
+    // Use the production CPU worker shape and the same canonical represented
+    // expert fixture as the independent stream correctness cases below.
+    HostExpertWorkerPool workers(32,true,false);
+    PinnedHostBuffer cpu_output(std::size_t(counts.back())*2560*sizeof(float));
+    DeviceBuffer cpu_device(std::size_t(counts.back())*2560*sizeof(float));
+    DeviceBuffer gpu_output(std::size_t(counts.back())*2560*sizeof(float));
+    FlashNextExpertStream stream(counts.back());
+    std::vector<HostExpertTask> tasks(counts.back());
+    std::vector<FlashNextStreamRoute> routes(counts.back());
+    for(unsigned i=0;i<counts.back();++i) {
+        tasks[i]={expert,host_input.data(),nullptr,
+            static_cast<float*>(cpu_output.data())+std::size_t(i)*2560};
+        routes[i]={device_input.p,
+            static_cast<float*>(gpu_output.p)+std::size_t(i)*2560};
+    }
+    const auto cpu=[&](unsigned count) {
+        const auto started=std::chrono::steady_clock::now();
+        workers.run(std::span(tasks.data(),count));
+        CUDA_CHECK(cudaMemcpyAsync(cpu_device.p,cpu_output.data(),
+            std::size_t(count)*2560*sizeof(float),cudaMemcpyHostToDevice,device.stream));
+        CUDA_CHECK(cudaStreamSynchronize(device.stream));
+        return std::chrono::duration<double,std::micro>(
+            std::chrono::steady_clock::now()-started).count();
+    };
+    const auto gpu=[&](unsigned count) {
+        const auto started=std::chrono::steady_clock::now();
+        stream.submit(expert,std::span(routes.data(),count),device.stream);
+        stream.finish();
+        return std::chrono::duration<double,std::micro>(
+            std::chrono::steady_clock::now()-started).count();
+    };
+    cpu(counts.back());gpu(counts.back());
+    for(unsigned count:counts) for(unsigned sample=0;sample<repeats;++sample) {
+        double cpu_us=0,gpu_us=0;
+        if(sample%2) {gpu_us=gpu(count);cpu_us=cpu(count);}
+        else {cpu_us=cpu(count);gpu_us=gpu(count);}
+        std::cout<<"sv3.cost={\"routes\":"<<count
+                 <<",\"sample\":"<<sample
+                 <<",\"cpu_us\":"<<cpu_us
+                 <<",\"gpu_us\":"<<gpu_us
+                 <<",\"expert_h2d_bytes\":"<<kExpertSlotBytes
+                 <<",\"cpu_result_h2d_bytes\":"<<std::size_t(count)*2560*sizeof(float)
+                 <<"}\n";
+    }
+}
 int main() { try {
     int devices=0; if(cudaGetDeviceCount(&devices)!=cudaSuccess || !devices) return 77;
     DeviceContext device;
@@ -35,6 +95,7 @@ int main() { try {
         flash_next_cpu_nvfp4_expert_pair_reference(layer.expert(i),input,reference[i],scratch);
     }
     DeviceBuffer d_input(input.size()*2); d_input.copy_from_host(input.data(),input.size()*2);
+    run_cost_calibration(device,layer.expert(0),input,d_input);
     const std::array<unsigned,11> counts{1,2,3,4,5,8,16,17,128,256,2048};
     std::size_t total=0;for(auto n:counts)total+=n;
     std::vector<float> actual(total*2560+16);
