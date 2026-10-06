@@ -993,3 +993,28 @@ page, unsupported-reader and short-read fallback, strict errors and immediate
 reuse at queue depths 1, 3, 64 and 256. Invalid shard rows are rejected before
 storage or fallback. mmap remains the storage default. Genuine cold/warm
 serving TTFT remains the next SV6 qualification gate.
+
+### SV6 serve screen evidence and failure digest
+
+The production HTTP cold/warm TTFT screen
+(`tools/diagnostics/v100_sv6_serve.py`, workflow
+`.github/workflows/v100-sv6-serve.yml`) previously failed with no visible
+exception: the harness stdout was block-buffered through `tee`, and the
+failure raised inside `run_server`'s post-response validation, before the
+harness's first line of output. The harness now runs unbuffered and writes a
+bounded failure digest
+(`sv6-serve-results/runtime/failure-digest.txt`) on any screen failure: the
+in-flight server name, the `host_ple_warm`/`host_ple_cache` startup lines, the
+`ple_gather` record count and samples, the server-log tail, the `request_done`
+engine fields (prompt tokens, prefix-cache hits, ttft/prefill/total), error
+events, and the HTTP response. The workflow publishes the digest as the first
+failure annotation of the failed run and of the next run's previous-evidence
+step, keeping each annotation within the public annotation limit.
+
+The runner's GPU reservation unloads the agent's llama-swap models and then
+requires at least 28 GiB of free VRAM on GPU 0 for 15 minutes. Reservations
+failed repeatedly while the agent model was still serving: the V100 headroom
+never appeared within the budget. Trigger the SV6 screen only after the agent
+host has unloaded its own llama-swap models from the agent host (llama-swap
+port 9292), and keep the agent silent while the run is active so the model is
+not reloaded into the V100 mid-screen.
