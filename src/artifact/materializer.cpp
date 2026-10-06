@@ -90,6 +90,13 @@ std::span<const std::byte> MaterializedArtifact::mapped_tensor_bytes(ObjectHandl
     return objects_[handle.index].mapped;
 }
 
+std::uint64_t MaterializedArtifact::mapped_tensor_absolute_offset(ObjectHandle handle) const {
+    if (handle.index >= objects_.size() || objects_[handle.index].mapped.empty()) {
+        throw ArtifactError("object handle does not name a mapped tensor");
+    }
+    return objects_[handle.index].mapped_absolute_offset;
+}
+
 std::vector<std::byte> MaterializedArtifact::take_resource_bytes(ObjectHandle handle) {
     if (handle.index >= objects_.size() || objects_[handle.index].resource.empty()) {
         throw ArtifactError("object handle does not name a materialized resource");
@@ -136,10 +143,15 @@ MaterializedArtifact materialize(const Reader& reader, const MaterializationPlan
             checked_add(out.stats_.file_bytes, resource.size(), "artifact read bytes overflow u64");
     }
 
-    if (!plan.mapped_tensor_objects.empty()) { out.mapping_lease_ = reader.mapping_lease(); }
+    if (!plan.mapped_tensor_objects.empty()) {
+        out.mapping_lease_ = reader.mapping_lease();
+        out.direct_reader_ = reader.direct_reader();
+    }
     for (const MappedTensorMaterialization& placement : plan.mapped_tensor_objects) {
         const PayloadSpan payload = reader.payload(reader.objects().at(placement.object.index));
-        out.objects_.at(placement.object.index).mapped = payload.data;
+        auto& storage = out.objects_.at(placement.object.index);
+        storage.mapped = payload.data;
+        storage.mapped_absolute_offset = payload.absolute_offset;
         out.stats_.mapped_tensor_bytes =
             checked_add(out.stats_.mapped_tensor_bytes, payload.data.size(),
                         "mapped artifact tensor byte count overflows u64");

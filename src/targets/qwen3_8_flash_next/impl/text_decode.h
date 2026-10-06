@@ -56,6 +56,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                                    const FlashNextDecodeStateSink* sink = nullptr,
                                    bool use_qsa_prefill_mma            = false,
                                    Tensor* out_hyper_hidden            = nullptr,
-                                   const Tensor* mtp_token_ids         = nullptr);
+                                   const Tensor* mtp_token_ids         = nullptr,
+                                   const std::function<void()>& before_ple = {});
 
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

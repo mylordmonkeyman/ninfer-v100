@@ -111,9 +111,12 @@ int main() {
             }
         }
 
-        // Host prepare timing
+        // Async prepare owns its row-address input. Mutating the caller's vector immediately after
+        // submission must not change the gathered rows.
+        const auto expected_indices = chunk_indices;
         auto t0 = std::chrono::high_resolution_clock::now();
-        auto ticket = pipeline.prepare(chunk_indices);
+        auto ticket = pipeline.prepare_async(chunk_indices);
+        for (auto& token : chunk_indices) { token.fill(0); }
         auto t1 = std::chrono::high_resolution_clock::now();
         double host_prep_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
 
@@ -133,7 +136,7 @@ int main() {
 
         for (std::size_t t = 0; t < T; ++t) {
             std::array<std::uint16_t, 2560> cpu_expected{};
-            gather_ple_rows_bf16(table, chunk_indices[t], cpu_expected);
+            gather_ple_rows_bf16(table, expected_indices[t], cpu_expected);
             for (std::size_t i = 0; i < 2560; ++i) {
                 const std::size_t idx = t * 2560 + i;
                 const std::uint16_t act = gpu_actual[idx];
@@ -168,7 +171,35 @@ int main() {
                   << " elements (base_sq=" << base_sq << ", host_prep=" << host_prep_us << " us)\n";
     }
 
+    // 3. A failed or simply abandoned async ticket must drain its work and release a one-slot
+    // pipeline for reuse. The exception belongs to the abandoned request and cannot poison the
+    // next valid request.
+    {
+        PleGatherPipeline pipeline(table, device, 1, 1, 1);
+        std::array<std::array<std::int64_t, 16>, 1> invalid{};
+        invalid[0].fill(-1);
+        { auto abandoned = pipeline.prepare_async(invalid); }
+
+        std::array<std::array<std::int64_t, 16>, 1> valid{};
+        for (std::size_t head = 0; head < 16; ++head) {
+            valid[0][head] = static_cast<std::int64_t>(head % rows);
+        }
+        auto ticket = pipeline.prepare_async(valid);
+        ninfer::DeviceBuffer output(2560 * sizeof(std::uint16_t));
+        ninfer::Tensor tensor(output.p, ninfer::DType::BF16, {2560, 1});
+        pipeline.enqueue_copy(std::move(ticket), tensor);
+        device.synchronize();
+        std::array<std::uint16_t, 2560> actual{};
+        std::array<std::uint16_t, 2560> expected{};
+        output.copy_to_host(actual.data(), actual.size() * sizeof(std::uint16_t));
+        gather_ple_rows_bf16(table, valid[0], expected);
+        if (actual != expected) {
+            std::cerr << "FAIL: abandoned async PLE gather poisoned slot reuse\n";
+            return 1;
+        }
+        std::cout << "PASS: abandoned async PLE gather drained and released its slot\n";
+    }
+
     std::cout << "PASS: test_ple_pipeline\n";
     return 0;
 }
-

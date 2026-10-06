@@ -1,5 +1,7 @@
 #pragma once
 
+#include "artifact/reader.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <array>
@@ -25,15 +27,19 @@ struct PleShardView {
     std::uint64_t rows;
     std::uint64_t width;
     std::uint64_t groups_per_row;
+    std::uint64_t code_absolute_offset = 0;
+    std::uint64_t scale_absolute_offset = 0;
 };
 
 struct PleTableView {
     std::array<PleShardView, kPleShardCount> shards;
+    artifact::DirectReader direct_reader;
 };
 
 [[nodiscard]] PleShardView make_ple_shard_view(std::span<const std::byte> encoded,
                                                std::uint64_t rows  = kPleRowsPerShard,
-                                               std::uint64_t width = kPleRowWidth);
+                                               std::uint64_t width = kPleRowWidth,
+                                               std::uint64_t absolute_offset = 0);
 
 // Independent scalar oracle for U4Z8 group-16 with FP16 multipliers.
 void dequantize_ple_row(const PleShardView& shard, std::uint64_t row, std::span<float> output);

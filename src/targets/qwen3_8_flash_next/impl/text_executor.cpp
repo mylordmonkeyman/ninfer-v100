@@ -688,7 +688,7 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
             chunk_ple_indices[t] = ple_indices(ple_metadata_, temp_history, token_ids[t]);
             temp_history.commit(token_ids[t]);
         }
-        auto ticket = ple_pipeline_.prepare(std::span(chunk_ple_indices));
+        auto ticket = ple_pipeline_.prepare_async(std::span(chunk_ple_indices));
         // Staging comes from the workspace through the same layout the capacity estimate uses.
         FlashNextPrefillChunkStaging staging = allocate_flash_next_prefill_chunk_staging(
             alloc_.workspace(), static_cast<std::int32_t>(num_tokens));
@@ -697,7 +697,6 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
         Tensor& dev_token_indices   = staging.token_indices;
         Tensor& dev_mrope_positions = staging.mrope_positions;
         Tensor& embedding           = staging.embedding;
-        ple_pipeline_.enqueue_copy(std::move(ticket), gathered_ple);
 
         // 2. Upload chunk input metadata to the staging tensors
         std::vector<std::int32_t> host_indices(num_tokens);
@@ -772,7 +771,8 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
             gathered_ple, static_cast<std::int32_t>(alloc_.plan().maximum_blocks),
             first_token_index, alloc_.state_view(), alloc_.workspace(), final_hidden, logits,
             device_.stream, effective_sink, alloc_.plan().config.use_qsa_prefill_mma,
-            &hyper_hidden, visual_embeddings != nullptr ? &dev_token_ids : nullptr);
+            &hyper_hidden, visual_embeddings != nullptr ? &dev_token_ids : nullptr,
+            [&] { ple_pipeline_.enqueue_copy(std::move(ticket), gathered_ple); });
 
         finish_perf_projections();
         round_in_flight_ = true;

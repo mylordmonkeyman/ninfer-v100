@@ -231,7 +231,11 @@ public:
         data_ = static_cast<const std::byte*>(mapping);
         size_ = size;
 #else
-        const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECT);
+        int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECT);
+        if (fd < 0 && (errno == EINVAL || errno == EOPNOTSUPP || errno == ENOTSUP)) {
+            fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+            direct_io_ = false;
+        }
         if (fd < 0) {
             throw std::system_error(errno, std::generic_category(), "open " + path.string());
         }
@@ -281,6 +285,14 @@ public:
     const std::byte* data() const noexcept { return data_; }
 
     std::size_t size() const noexcept { return size_; }
+
+    bool direct_io_supported() const noexcept {
+#if defined(_WIN32)
+        return true;
+#else
+        return direct_io_;
+#endif
+    }
 
     std::size_t read_direct(std::uint64_t absolute_offset, std::span<std::byte> destination) const {
         constexpr std::size_t alignment = Reader::direct_io_alignment;
@@ -332,6 +344,7 @@ private:
     HANDLE fd_ = INVALID_HANDLE_VALUE;
 #else
     int fd_    = -1;
+    bool direct_io_ = true;
 #endif
     const std::byte* data_ = nullptr;
     std::size_t size_      = 0;
@@ -476,6 +489,27 @@ PayloadSpan Reader::payload(std::string_view name) const {
 std::size_t Reader::read_direct(std::uint64_t absolute_offset,
                                 std::span<std::byte> destination) const {
     return impl_->file.read_direct(absolute_offset, destination);
+}
+
+std::size_t DirectReader::read(std::uint64_t absolute_offset,
+                               std::span<std::byte> destination) const {
+    if (owner_ == nullptr || read_ == nullptr) { throw ArtifactError("artifact direct reader is empty"); }
+    return read_(owner_.get(), absolute_offset, destination);
+}
+
+bool DirectReader::supported() const noexcept {
+    return owner_ != nullptr && supported_ != nullptr && supported_(owner_.get());
+}
+
+DirectReader Reader::direct_reader() const noexcept {
+    return DirectReader(
+        std::static_pointer_cast<const void>(impl_),
+        [](const void* owner, std::uint64_t offset, std::span<std::byte> destination) {
+            return static_cast<const Impl*>(owner)->file.read_direct(offset, destination);
+        },
+        [](const void* owner) noexcept {
+            return static_cast<const Impl*>(owner)->file.direct_io_supported();
+        });
 }
 
 std::shared_ptr<const void> Reader::mapping_lease() const noexcept {

@@ -38,6 +38,8 @@ public:
     void* device_data(ObjectHandle handle) const;
     std::span<const std::byte> resource_bytes(ObjectHandle handle) const;
     std::span<const std::byte> mapped_tensor_bytes(ObjectHandle handle) const;
+    std::uint64_t mapped_tensor_absolute_offset(ObjectHandle handle) const;
+    DirectReader direct_reader() const noexcept { return direct_reader_; }
     std::vector<std::byte> take_resource_bytes(ObjectHandle handle);
 
     const MaterializationStats& stats() const noexcept { return stats_; }
@@ -52,10 +54,12 @@ private:
         void* device = nullptr;
         std::vector<std::byte> resource;
         std::span<const std::byte> mapped;
+        std::uint64_t mapped_absolute_offset = 0;
     };
 
     std::unique_ptr<DeviceArena> device_arena_;
     std::shared_ptr<const void> mapping_lease_;
+    DirectReader direct_reader_;
     std::vector<ObjectStorage> objects_;
     MaterializationStats stats_;
 };

@@ -4,6 +4,7 @@
 #include <nlohmann/json.hpp>
 
 #include <array>
+#include <cstdlib>
 #include <cstdint>
 #include <iostream>
 #include <span>
@@ -227,6 +228,25 @@ void test_normative_fixture() {
     }
 }
 
+void test_direct_reader_lease() {
+    auto fixture = write_fixture(normative_directory(), "direct_lease");
+    ninfer::artifact::DirectReader direct;
+    {
+        Reader reader(fixture.path);
+        direct = reader.direct_reader();
+    }
+    constexpr std::size_t page = Reader::direct_io_alignment;
+    void* allocation = std::aligned_alloc(page, page);
+    if (allocation == nullptr) { throw std::bad_alloc(); }
+    std::unique_ptr<void, decltype(&std::free)> storage(allocation, &std::free);
+    auto bytes = std::span<std::byte>(static_cast<std::byte*>(storage.get()), page);
+    const std::size_t read = direct.read(4096, bytes);
+    if (read != page || bytes[0] != std::byte{1} || bytes[1] != std::byte{1} ||
+        bytes[2] != std::byte{1} || bytes[256] != std::byte{2}) {
+        throw std::runtime_error("artifact direct-reader lease did not retain exact file access");
+    }
+}
+
 void test_common_validation() {
     {
         auto directory                   = normative_directory();
@@ -256,6 +276,7 @@ int main(int argc, char** argv) {
         if (argc > 2) { throw std::runtime_error("usage: ninfer_artifact_reader_test [artifact]"); }
         test_registered_sizes();
         test_normative_fixture();
+        test_direct_reader_lease();
         test_common_validation();
         if (argc == 2) {
             Reader reader(argv[1]);

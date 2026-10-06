@@ -899,3 +899,30 @@ coalesce duplicates and handle row pieces that cross a 4096-byte boundary;
 unsupported queued/direct I/O falls back to mmap unless strict mode is requested.
 These are implementation boundaries, not completed SV6 qualification. No
 cold/warm TTFT result or queued-I/O implementation is claimed yet.
+
+## SV6 queued PLE storage
+
+SV6 now exposes an artifact-bound direct reader and absolute PLE code/scale
+offsets without reopening a pathname. The direct reader retains the exact
+artifact implementation and descriptor. `NINFER_V100_PLE_STORAGE=mmap`
+retains the existing mapped gather and full PLE warm; `direct` requires aligned
+reads from that descriptor, while `auto` falls back to the mapped gather if the
+platform cannot satisfy a direct read. Direct and auto skip the multi-gigabyte
+mapped warm. `NINFER_V100_PLE_QUEUE_DEPTH` is bounded to 1--256 (default 64).
+
+Root prefill now submits an owning asynchronous gather before embedding and
+waits only at the layer-1 PLE consumption boundary, after layer 0 has been
+enqueued. Direct gathering sorts and deduplicates 4096-byte pages, handles
+code/scale pieces crossing page boundaries, performs bounded aligned reads,
+and scatters only the exact compressed bytes into the existing compact pinned
+layout. Existing copy/dequant/compute event ordering is unchanged. Tickets are
+move-only and drain abandoned or failed preparation before a slot can be
+reused; caller row-index storage is copied at submission.
+
+The first SV6 campaign compares mmap and strict direct storage at a represented
+512-position prefill. It requires exact logits and selected numerical metrics,
+exact compressed-byte accounting, no direct fallback, complete PLE telemetry,
+and three fresh-process timing repetitions per arm. This remains an integration
+screen (`qualified=false`), not served cold/warm TTFT or concurrent-filesystem
+qualification. The mmap arm measures the established mapped/prewarmed behavior;
+the direct arm measures bounded descriptor reads. No storage default changes.

@@ -71,7 +71,7 @@ PleRowAddress locate_ple_row(std::uint64_t global_row) {
 }
 
 PleShardView make_ple_shard_view(std::span<const std::byte> encoded, std::uint64_t rows,
-                                 std::uint64_t width) {
+                                 std::uint64_t width, std::uint64_t absolute_offset) {
     if (rows == 0 || width == 0 || width % 16 != 0 ||
         rows > std::numeric_limits<std::uint64_t>::max() / width) {
         throw std::invalid_argument("invalid PLE shard geometry");
@@ -91,6 +91,8 @@ PleShardView make_ple_shard_view(std::span<const std::byte> encoded, std::uint64
         .rows           = rows,
         .width          = width,
         .groups_per_row = width / 16,
+        .code_absolute_offset = absolute_offset,
+        .scale_absolute_offset = absolute_offset + scale_offset,
     };
 }
 

@@ -9,10 +9,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <locale>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
@@ -168,14 +170,21 @@ inline void emit_perf_json(const std::string& record) {
     std::fwrite(line.data(), 1, line.size(), stderr);
 }
 
-inline void emit_ple_perf(std::size_t tokens, std::size_t bytes, double gather_us, bool compressed) {
+inline void emit_ple_perf(std::size_t tokens, std::size_t bytes, double gather_us, bool compressed,
+                          std::string_view backend = "mmap",
+                          std::optional<double> page_read_us = std::nullopt,
+                          std::size_t coalesced_pages = 0, bool fallback = false) {
     std::ostringstream out;
     out.imbue(std::locale::classic());
     out.precision(17);
     out << "{\"sv\":0,\"schema\":1,\"kind\":\"ple_gather\",\"tokens\":" << tokens
         << ",\"payload_bytes\":" << bytes << ",\"gather_us\":" << gather_us
         << ",\"compressed\":" << (compressed ? "true" : "false")
-        << ",\"page_read_us\":null";
+        << ",\"storage_backend\":\"" << backend << "\""
+        << ",\"page_read_us\":";
+    if (page_read_us) out << *page_read_us; else out << "null";
+    out << ",\"coalesced_pages\":" << coalesced_pages
+        << ",\"storage_fallback\":" << (fallback ? "true" : "false");
     append_perf_context(out);
     out << '}';
     emit_perf_json(out.str());

@@ -162,6 +162,30 @@ struct ArtifactIdentity {
     bool operator==(const ArtifactIdentity&) const = default;
 };
 
+// Copyable ownership of the artifact file and its aligned direct-I/O descriptor.  Target-side
+// mapped views use this instead of reopening a pathname, so asynchronous reads remain bound to
+// the exact inode that supplied the validated artifact mapping.
+class DirectReader {
+public:
+    DirectReader() noexcept = default;
+
+    [[nodiscard]] explicit operator bool() const noexcept { return owner_ != nullptr; }
+    [[nodiscard]] bool supported() const noexcept;
+    std::size_t read(std::uint64_t absolute_offset, std::span<std::byte> destination) const;
+
+private:
+    friend class Reader;
+    using ReadFn = std::size_t (*)(const void*, std::uint64_t, std::span<std::byte>);
+    using SupportedFn = bool (*)(const void*) noexcept;
+
+    DirectReader(std::shared_ptr<const void> owner, ReadFn read, SupportedFn supported) noexcept
+        : owner_(std::move(owner)), read_(read), supported_(supported) {}
+
+    std::shared_ptr<const void> owner_;
+    ReadFn read_ = nullptr;
+    SupportedFn supported_ = nullptr;
+};
+
 class Reader {
 public:
     static constexpr std::size_t direct_io_alignment = 4096;
@@ -183,6 +207,7 @@ public:
     PayloadSpan payload(const ObjectDescriptor& object) const;
     PayloadSpan payload(std::string_view name) const;
     std::size_t read_direct(std::uint64_t absolute_offset, std::span<std::byte> destination) const;
+    DirectReader direct_reader() const noexcept;
     std::shared_ptr<const void> mapping_lease() const noexcept;
 
 private:

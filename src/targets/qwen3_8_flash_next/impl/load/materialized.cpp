@@ -18,6 +18,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -194,9 +195,12 @@ PleWeights load_ple(const PlePlan& plan, const artifact::MaterializedArtifact& b
         .query_norm       = bf16_tensor(backing, plan.query_norm, {10'240}),
         .value_projection = bf16_weight(backing, plan.value_projection, 2'560, 2'560),
     };
+    out.table.direct_reader = backing.direct_reader();
     for (std::size_t shard = 0; shard < out.table.shards.size(); ++shard) {
         out.table.shards[shard] =
-            make_ple_shard_view(backing.mapped_tensor_bytes(plan.shards[shard]));
+            make_ple_shard_view(backing.mapped_tensor_bytes(plan.shards[shard]),
+                                kPleRowsPerShard, kPleRowWidth,
+                                backing.mapped_tensor_absolute_offset(plan.shards[shard]));
     }
     return out;
 }
@@ -431,17 +435,24 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
     }
     if (plan.features.vision) { vision = load_vision(plan.vision, backing); }
 
-    // PLE is a random-access host weight table. Leaving its mapped pages cold makes
-    // the first code prompt pay thousands of synchronous disk faults per token batch.
-    // Warm only these persistent host weights after device materialization, before ready.
+    // mmap retains the established full-table warmup. Direct/auto modes intentionally avoid
+    // touching all 29.8 GiB so their bounded page reads can remove cold-start dependence on that
+    // prewarm. Auto may fall back to mmap for an unsupported read; that fallback is correct but
+    // deliberately cold and is reported by the SV6 evidence path rather than hidden here.
+    const char* ple_storage = std::getenv("NINFER_V100_PLE_STORAGE");
+    const bool warm_ple = ple_storage == nullptr || ple_storage[0] == '\0' ||
+                          std::string_view(ple_storage) == "mmap";
     const auto warm_started = std::chrono::steady_clock::now();
     std::size_t host_bytes = 0;
-    for (const auto& shard : text.ple.table.shards) {
-        warm_readonly_host_memory(shard.codes);
-        warm_readonly_host_memory(shard.scales);
-        host_bytes += shard.codes.size() + shard.scales.size();
+    if (warm_ple) {
+        for (const auto& shard : text.ple.table.shards) {
+            warm_readonly_host_memory(shard.codes);
+            warm_readonly_host_memory(shard.scales);
+            host_bytes += shard.codes.size() + shard.scales.size();
+        }
     }
-    std::fprintf(stderr, "flash_next host_ple_warm bytes=%zu duration_ms=%.3f\n", host_bytes,
+    std::fprintf(stderr, "flash_next host_ple_warm mode=%s bytes=%zu duration_ms=%.3f\n",
+                 warm_ple ? "mmap" : "skipped", host_bytes,
                  std::chrono::duration<double, std::milli>(
                      std::chrono::steady_clock::now() - warm_started).count());
     if (v100_perf_telemetry_enabled()) {

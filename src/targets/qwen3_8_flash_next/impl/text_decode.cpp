@@ -671,7 +671,8 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                                    WorkspaceArena& workspace, Tensor& final_hidden, Tensor& logits,
                                    cudaStream_t stream, const FlashNextDecodeStateSink* sink,
                                    bool use_qsa_prefill_mma, Tensor* out_hyper_hidden,
-                                   const Tensor* mtp_token_ids) {
+                                   const Tensor* mtp_token_ids,
+                                   const std::function<void()>& before_ple) {
     const std::int32_t tokens      = embedding.ne[1];
     const std::int32_t state_slots = state.ple_convolution_states.ne[2];
     if (tokens <= 0 || maximum_blocks <= 0 || maximum_blocks > 65'536 || first_token_index < 0 ||
@@ -756,6 +757,9 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
 
         // At layer 1: evaluate PLE neural injection and add residual
         if (layer == 1) {
+            // Root prefill may have an artifact-backed gather in flight while embedding and layer
+            // zero execute.  Publish its transfer/dequant dependency only at the first consumer.
+            if (before_ple) { before_ple(); }
             sync_hyper_shadow();
             emit_state("ple_gathered", gathered_ple_embedding);
             flash_next_ple_prefill_chunk(round_ws.hyper_hidden, gathered_ple_embedding, model.ple,
