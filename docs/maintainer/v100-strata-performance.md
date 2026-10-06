@@ -730,7 +730,8 @@ unqualified. It does not alter `auto`, the default, or any oracle threshold.
 To avoid simultaneous pending hardware jobs replacing each other in the shared
 V100 concurrency group, a push commit can select one hardware campaign with
 `[v100:sv0]`, `[v100:sv1]`, `[v100:sv2]`, `[v100:sv2-serve]`,
-`[v100:sv3]`, `[v100:sv3-serve]`, or `[v100:sv3-compare]` in its message.
+`[v100:sv3]`, `[v100:sv3-serve]`, `[v100:sv3-compare]`, `[v100:sv4]`, or
+`[v100:sv4-serve]` in its message.
 Other triggered workflows still run host checks but skip hardware. Untagged
 pushes and manual dispatches retain their prior behavior. Select one campaign
 and inspect its evidence before launching the next; do not publish over healthy
@@ -756,3 +757,19 @@ arms. Three fresh telemetry-off timing processes per arm alternate order.
 The incremental build is reused; one hardware campaign is selected. Small
 batch/decode, MTP and production gates remain outstanding. SV3's separate
 strict production response failure remains unresolved and unchanged.
+
+SV4 cached run `37462070948` at `f6b38df0` passed the fixed-static64 screen.
+Across three fresh processes per arm, grouped prefill measured 81.399 t/s
+(80.952--82.320) versus 53.768 t/s (52.199--54.980), a 51.39% median increase.
+Both arms retained the same 8,494,252,032-byte cache, 204,820 resident routes,
+286,700 CPU misses, fixed 3,072 startup fills, and zero evictions or outstanding
+leases. Final BF16 logits, numerical summaries, and repeated route/cache
+provenance were exact. Logical compact-weight reads fell from 792,670,453,600
+to 227,997,126,912 bytes; this remains accounting rather than physical traffic.
+
+The next bounded production screen compares grouping off/on with the same fixed
+profile, device route combine, 1,024--2,048-token cold prompt, prefix replay,
+continuation replay, and actual MTP drafting. It uses twelve fresh single-owner
+server processes and requires exact cross-arm greedy responses. This exercises
+the production request lifecycle and MTP but not concurrent multi-request decode;
+grouping remains opt-in and no default promotion is implied.

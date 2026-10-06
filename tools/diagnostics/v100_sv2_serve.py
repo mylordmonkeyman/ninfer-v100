@@ -30,7 +30,7 @@ def response_signature(response):
                 completion_tokens=response['usage']['completion_tokens'])
 
 
-def validate_events(events, responses, mtp, prefill_screen=False):
+def validate_events(events, responses, mtp, large_prefill=False):
     done = [e for e in events if e.get('event') == 'request_done']
     if any(e.get('event') in ('request_error','request_rejected') for e in events):
         raise ValueError('server reported request failure')
@@ -63,21 +63,25 @@ def validate_events(events, responses, mtp, prefill_screen=False):
             raise ValueError('no actual MTP drafting occurred')
     elif any(e['speculative']['drafted_tokens'] for e in done):
         raise ValueError('non-MTP control drafted tokens')
-    if prefill_screen and not 1024 <= done[0]["result"]["prompt_tokens"] <= 2048:
+    if large_prefill and not 1024 <= done[0]["result"]["prompt_tokens"] <= 2048:
         raise ValueError("production prompt did not exercise a single large prefill chunk")
     return done
 
 
-def run_server(executable, artifact, profile, output, mode, mtp, repeat, prefill_screen=False):
+def run_server(executable, artifact, profile, output, mode, mtp, repeat,
+               prefill_screen=False, cpu_group_screen=False):
     name = f'{mode}-mtp{int(mtp)}-{repeat}'
     log_path, request_path = output/f'{name}.log', output/f'{name}-requests.jsonl'
     env = os.environ.copy()
     for key in tuple(env):
         if (key.startswith('NINFER_PHASE') or key.startswith('NINFER_V100_EXPERT_') or
-                key.startswith('NINFER_V100_PREFILL_')):
+                key.startswith('NINFER_V100_PREFILL_') or
+                key.startswith('NINFER_V100_CPU_EXPERT_GROUP')):
             env.pop(key)
-    env.update(NINFER_V100_DEVICE_ROUTE_COMBINE='1' if prefill_screen or mode == 'device' else '0',
+    large_prefill = prefill_screen or cpu_group_screen
+    env.update(NINFER_V100_DEVICE_ROUTE_COMBINE='1' if large_prefill or mode == 'device' else '0',
                NINFER_V100_PREFILL_EXPERT_POLICY=mode if prefill_screen else 'cpu-cache',
+               NINFER_V100_CPU_EXPERT_GROUP='1' if cpu_group_screen and mode == 'grouped' else '0',
                NINFER_V100_EXPERT_PROFILE=str(profile.resolve()),NINFER_V100_EXPERT_POLICY='static',
                NINFER_FLASH_NEXT_EXPERT_CACHE='1',NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS='64',
                NINFER_FLASH_NEXT_EXPERT_CACHE_SERIAL='0',NINFER_FLASH_NEXT_EXPERT_CACHE_PREFILL='1',
@@ -92,7 +96,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat, prefill
     # Preserve the .ninfer alias: resolve() would strip the suffix of the mounted file.
     command=[str(executable.resolve()),str(artifact.absolute()),'--host','127.0.0.1',
              '--port',str(port),'--max-context','4096','--kv-capacity','4096',
-             '--max-concurrency','1','--prefill-chunk','2048' if prefill_screen else '128','--kv-dtype','bf16',
+             '--max-concurrency','1','--prefill-chunk','2048' if large_prefill else '128','--kv-dtype','bf16',
              '--device-state-slots','2','--host-state-slots','2','--host-kv-mib','256',
              '--max-private-continuations','2','--max-shared-prefixes','2',
              '--no-cuda-graph','--no-qsa-prefill-mma','--no-thinking',
@@ -122,7 +126,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat, prefill
                         if time.monotonic()>deadline: raise TimeoutError('server readiness timeout')
                         time.sleep(1)
                 model=models['data'][0]['id']
-                paragraphs=' '.join(f'Record {i}: the solar station stores energy during daylight and supplies the village after sunset.' for i in range(64 if prefill_screen else 16))
+                paragraphs=' '.join(f'Record {i}: the solar station stores energy during daylight and supplies the village after sunset.' for i in range(64 if large_prefill else 16))
                 messages=[{'role':'user','content':paragraphs+' Explain how its battery storage works in detail.'}]
                 payload=dict(model=model,messages=messages,max_tokens=64,temperature=0,seed=42,enable_thinking=False)
                 for readonly in (False,True):
@@ -151,7 +155,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat, prefill
     if monitor_errors or any(not s['thermal_status_observed'] or s['thermal_throttled'] for s in snapshots):
         raise ValueError('production thermal evidence missing or throttled')
     events=[json.loads(line) for line in request_path.read_text().splitlines() if line.strip()]
-    done=validate_events(events,responses,mtp,prefill_screen)
+    done=validate_events(events,responses,mtp,large_prefill)
     text=log_path.read_text()
     slots=re.findall(r'phase13.cache.slots_per_layer=(\d+)',text)
     size=re.findall(r'phase13.cache.bytes=(\d+)',text)
@@ -178,25 +182,33 @@ def main():
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--prefill-screen',action='store_true',
                         help='compare fixed-cache cpu-cache/stream with a large production prompt')
+    parser.add_argument('--cpu-group-screen',action='store_true',
+                        help='compare fixed-cache single/grouped CPU misses in production')
     parser.add_argument('--repeats',type=int,default=3)
     args=parser.parse_args()
     if args.artifact.suffix != '.ninfer' or not args.artifact.is_file():
         parser.error('--artifact requires an explicit readable .ninfer file')
+    if args.prefill_screen and args.cpu_group_screen:
+        parser.error('--prefill-screen and --cpu-group-screen are mutually exclusive')
     if args.repeats<3: parser.error('need three fresh-process observations per arm')
     args.output.mkdir(parents=True,exist_ok=True)
     profile=json.loads(args.profile.read_text())
     if profile['magic']!='NINFER_V100_EXPERT_PROFILE' or profile['version']!=2:
         raise ValueError('need identity-bound fixed profile')
-    modes=('cpu-cache','stream') if args.prefill_screen else ('legacy','device')
+    if args.cpu_group_screen:
+        modes=('single','grouped')
+    else:
+        modes=('cpu-cache','stream') if args.prefill_screen else ('legacy','device')
     observations=[]
     for repeat in range(args.repeats):
         for mtp in (False,True):
             for mode in (modes if repeat%2==0 else tuple(reversed(modes))):
-                row=run_server(args.executable,args.artifact,args.profile,args.output,mode,mtp,repeat,args.prefill_screen)
+                row=run_server(args.executable,args.artifact,args.profile,args.output,mode,mtp,
+                               repeat,args.prefill_screen,args.cpu_group_screen)
                 observations.append(row); atomic_json(args.output/'observations.json',observations)
                 peers=[r for r in observations if r['mtp']==mtp]
                 if any(r['response_signatures']!=peers[0]['response_signatures'] for r in peers):
-                    raise ValueError('legacy/device greedy production response or finish accounting differs')
+                    raise ValueError('cross-path greedy production response or finish accounting differs')
                 if len({r['cache_bytes'] for r in peers})!=1:
                     raise ValueError('production cache capacity differs between paths')
     results=[]
@@ -215,13 +227,19 @@ def main():
                     prefill_tokens_per_s_median=statistics.median(prefill),
                     fresh_prompt_tokens=fresh,decode_tokens_per_s_median=statistics.median(values),
                     minimum=min(values),maximum=max(values),process_observations=len(rows)))
-    report=dict(schema=1,milestone='SV3' if args.prefill_screen else 'SV2',scope='production_http_prefill_prefix_mtp_screen' if args.prefill_screen else 'production_http_prefix_mtp_screen',qualified=False,
+    milestone='SV4' if args.cpu_group_screen else ('SV3' if args.prefill_screen else 'SV2')
+    scope=('production_http_grouped_cpu_prefix_mtp_screen' if args.cpu_group_screen else
+           ('production_http_prefill_prefix_mtp_screen' if args.prefill_screen else
+            'production_http_prefix_mtp_screen'))
+    report=dict(schema=1,milestone=milestone,scope=scope,qualified=False,
                 candidate_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),results=results,
                 exact_compared_responses=True,limitations=[
                     'fixed 64 slots per layer, BF16 KV, one active request, short 4096 context',
                     'small two-turn corpus; no concurrent cancellation, long context, vision or full production matrix',
                     'MTP drafting required; acceptance counts retained, no minimum acceptance coefficient imposed',
-                    'no independent oracle thresholds changed; accepted baseline numerical failure remains separate'])
+                    'no independent oracle thresholds changed; accepted baseline numerical failure remains separate'] +
+                    (['grouped CPU experts remain opt-in; no concurrent-request matrix in this screen']
+                     if args.cpu_group_screen else []))
     atomic_json(args.output/'report.json',report)
     lines=['Production HTTP prefill/prefix/MTP screen; defaults unchanged.','',
            '| Mode | MTP | Request | Prefill t/s median | Decode t/s median (range) |','|---|---|---|---:|---:|']

@@ -1,6 +1,9 @@
 import copy
+from pathlib import Path
+import tempfile
 import unittest
-from v100_sv2_serve import validate_events
+from unittest import mock
+from v100_sv2_serve import run_server, validate_events
 
 
 class ProductionEvidenceTest(unittest.TestCase):
@@ -43,6 +46,30 @@ class ProductionEvidenceTest(unittest.TestCase):
         with self.assertRaises(ValueError): validate_events(events+[{'event':'request_error'}],responses,True)
         events,responses=self.fixtures(False)
         self.assertEqual(len(validate_events(events,responses,False)),4)
+
+    def test_group_screen_selects_only_the_grouping_environment(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch('v100_sv2_serve.gpu_snapshot', return_value={
+                    'thermal_status_observed': True, 'thermal_throttled': False}), \
+                mock.patch('v100_sv2_serve.subprocess.Popen') as popen, \
+                mock.patch('v100_sv2_serve.request') as request_call:
+            process=popen.return_value
+            process.poll.side_effect=[None]+[None]*20
+            process.wait.return_value=0
+            # Stop after readiness; the captured environment is the contract under test.
+            request_call.side_effect=[{'data':[{'id':'model'}]},RuntimeError('stop')]
+            output=Path(directory)
+            artifact=output/'model.ninfer';artifact.write_bytes(b'x')
+            profile=output/'profile.json';profile.write_text('{}')
+            with self.assertRaisesRegex(RuntimeError,'stop'):
+                run_server(Path('/bin/true'),artifact,profile,output,'grouped',False,0,
+                           cpu_group_screen=True)
+            environment=popen.call_args.kwargs['env']
+            self.assertEqual(environment['NINFER_V100_CPU_EXPERT_GROUP'],'1')
+            self.assertEqual(environment['NINFER_V100_PREFILL_EXPERT_POLICY'],'cpu-cache')
+            self.assertEqual(environment['NINFER_V100_DEVICE_ROUTE_COMBINE'],'1')
+            command=popen.call_args.args[0]
+            self.assertEqual(command[command.index('--prefill-chunk')+1],'2048')
 
 
 if __name__=='__main__': unittest.main()
