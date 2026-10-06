@@ -58,7 +58,7 @@ def parse_startup_log(text, mode):
             "total_pages": total, "resident_pages": resident}
 
 
-def parse_ple_records(text, mode, telemetry):
+def parse_ple_records(text, mode, telemetry, expected_tokens=None):
     records = []
     for line in text.splitlines():
         try:
@@ -71,18 +71,21 @@ def parse_ple_records(text, mode, telemetry):
         if records:
             raise ValueError("telemetry-off timing server emitted PLE diagnostics")
         return None
-    if len(records) != 1:
-        raise ValueError(f"expected one compressed PLE record, found {len(records)}")
-    row = records[0]
     backend = "direct" if mode == "direct" else "mmap"
-    if row.get("storage_backend") != backend or row.get("storage_fallback"):
-        raise ValueError("PLE request used the wrong storage backend or fallback")
-    if row.get("tokens", 0) <= 0 or row.get("payload_bytes") != row["tokens"] * 1600:
-        raise ValueError("PLE request compressed-byte accounting differs")
-    if backend == "direct" and (row.get("coalesced_pages", 0) <= 0 or
-                                row.get("page_read_us") is None):
-        raise ValueError("strict direct request lacks page-read evidence")
-    return row
+    for row in records:
+        if row.get("storage_backend") != backend or row.get("storage_fallback"):
+            raise ValueError("PLE execution used the wrong storage backend or fallback")
+        if row.get("tokens", 0) <= 0 or row.get("payload_bytes") != row["tokens"] * 1600:
+            raise ValueError("PLE execution compressed-byte accounting differs")
+        if backend == "direct" and (row.get("coalesced_pages", 0) <= 0 or
+                                    row.get("page_read_us") is None):
+            raise ValueError("strict direct execution lacks page-read evidence")
+    matching = [row for row in records if row.get("tokens") == expected_tokens]
+    if len(matching) != 1:
+        raise ValueError(
+            f"expected one {expected_tokens}-token request PLE record, found {len(matching)} "
+            f"among {len(records)} compressed records")
+    return matching[0]
 
 
 def run_server(executable, artifact, output, mode, repeat, telemetry):
@@ -177,6 +180,8 @@ def run_server(executable, artifact, output, mode, repeat, telemetry):
         raise ValueError("TTFT request unexpectedly reused a prefix")
     if event["result"]["prompt_tokens"] != response["usage"]["prompt_tokens"]:
         raise ValueError("HTTP and engine prompt accounting differ")
+    if event["result"]["computed_prefill_tokens"] != event["result"]["prompt_tokens"]:
+        raise ValueError("TTFT request did not compute the complete prompt")
     if not 1024 <= event["result"]["prompt_tokens"] <= 2048:
         raise ValueError("TTFT request did not exercise one large prefill chunk")
     if any(not math.isfinite(timings[key]) or timings[key] <= 0
@@ -185,7 +190,9 @@ def run_server(executable, artifact, output, mode, repeat, telemetry):
     text = log_path.read_text()
     row = {"name": name, "mode": mode, "repeat": repeat, "telemetry": telemetry,
            "ready_seconds": ready_seconds, "startup": parse_startup_log(text, mode),
-           "ple": parse_ple_records(text, mode, telemetry), "request": event,
+           "ple": parse_ple_records(text, mode, telemetry,
+                                    event["result"]["computed_prefill_tokens"]),
+           "request": event,
            "response_signature": response_signature(response)}
     print(f"{name}: ready={ready_seconds:.3f}s ttft={timings['ttft']:.3f}s", flush=True)
     return row

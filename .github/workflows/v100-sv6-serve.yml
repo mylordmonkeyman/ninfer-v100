@@ -103,53 +103,6 @@ jobs:
               echo "::warning::sv6-serve previous-run server log $(basename "$latest_log") tail base64=${payload}"
             fi
           fi
-      - name: Reserve the V100 from llama-swap
-        shell: bash
-        run: |
-          set -uo pipefail
-          # This runner shares the V100 with the agent's own inference model,
-          # which llama-swap (127.0.0.1:9292) keeps loaded (~30 GiB) while the
-          # agent session is active. Unload it for the duration of the run;
-          # llama-swap lazily reloads it on the agent's next inference
-          # request, so the agent must stay silent while the screen runs.
-          swap_base=http://127.0.0.1:9292
-          agent_models="qwen3.8-27b-ninfer qwen3.8-27b-omp"
-          unload() {
-            for model in $agent_models; do
-              code=$(curl -s -m 10 -X POST -o /tmp/unload-response.json -w '%{http_code}' \
-                "$swap_base/api/models/unload/$model" || true)
-              echo "unload $model -> HTTP $code: $(head -c 200 /tmp/unload-response.json 2>/dev/null)"
-            done
-          }
-          swap_reachable=1
-          unload
-          if [ "${code:-000}" = "000" ]; then
-            swap_reachable=0
-            echo "WARNING: llama-swap (127.0.0.1:9292) is not reachable from the runner netns; the agent host must keep the agent model unloaded."
-            echo "::warning::llama-swap unreachable from the runner; relying on the agent-host pre-unload"
-          fi
-          required_free_mib=28000
-          deadline=$(( $(date +%s) + 900 ))
-          last_unload=0
-          while :; do
-            free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits | head -n1 | tr -d '[:space:]')
-            echo "GPU 0 free memory: ${free_mib} MiB (need at least ${required_free_mib} MiB)"
-            if [ -n "$free_mib" ] && [ "$free_mib" -ge "$required_free_mib" ]; then
-              echo "V100 reserved for the SV6 serve screen."
-              break
-            fi
-            if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "ERROR: GPU 0 free memory stayed below ${required_free_mib} MiB for 15 minutes after unloading the agent model." >&2
-              echo "The V100 is contended (the agent model is loaded or the agent is actively in use). Keep the agent idle and re-trigger the SV6 serve screen." >&2
-              exit 1
-            fi
-            now=$(date +%s)
-            if [ "$swap_reachable" = "1" ] && [ $(( now - last_unload )) -ge 60 ]; then
-              last_unload=$now
-              unload
-            fi
-            sleep 15
-          done
       - name: Prepare exact model alias and evidence directory
         shell: bash
         run: |

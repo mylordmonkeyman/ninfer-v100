@@ -19,7 +19,35 @@ class Sv6ServeTests(unittest.TestCase):
         row = {"kind": "ple_gather", "compressed": True, "tokens": 8,
                "payload_bytes": 12800, "storage_backend": "direct",
                "storage_fallback": False, "coalesced_pages": 5, "page_read_us": 10.0}
-        self.assertEqual(module.parse_ple_records(json.dumps(row), "direct", True)["tokens"], 8)
+        self.assertEqual(module.parse_ple_records(
+            json.dumps(row), "direct", True, 8)["tokens"], 8)
+
+    def test_request_record_ignores_server_warmup_prefill(self):
+        warmup = {"kind": "ple_gather", "compressed": True, "tokens": 13,
+                  "payload_bytes": 20800, "storage_backend": "mmap",
+                  "storage_fallback": False, "coalesced_pages": 0,
+                  "page_read_us": None}
+        request = {"kind": "ple_gather", "compressed": True, "tokens": 1227,
+                   "payload_bytes": 1963200, "storage_backend": "mmap",
+                   "storage_fallback": False, "coalesced_pages": 0,
+                   "page_read_us": None}
+        text = "\n".join(json.dumps(row) for row in (warmup, request))
+        self.assertEqual(module.parse_ple_records(
+            text, "mmap-warm", True, 1227), request)
+
+    def test_request_record_still_validates_warmup_backend(self):
+        warmup = {"kind": "ple_gather", "compressed": True, "tokens": 13,
+                  "payload_bytes": 20800, "storage_backend": "direct",
+                  "storage_fallback": False, "coalesced_pages": 1,
+                  "page_read_us": 1.0}
+        request = {"kind": "ple_gather", "compressed": True, "tokens": 1227,
+                   "payload_bytes": 1963200, "storage_backend": "mmap",
+                   "storage_fallback": False, "coalesced_pages": 0,
+                   "page_read_us": None}
+        with self.assertRaisesRegex(ValueError, "wrong storage backend"):
+            module.parse_ple_records(
+                "\n".join(json.dumps(row) for row in (warmup, request)),
+                "mmap-warm", True, 1227)
 
     def test_failure_digest(self):
         import tempfile

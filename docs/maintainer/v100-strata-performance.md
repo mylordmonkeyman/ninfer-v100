@@ -1011,10 +1011,11 @@ events, and the HTTP response. The workflow publishes the digest as the first
 failure annotation of the failed run and of the next run's previous-evidence
 step, keeping each annotation within the public annotation limit.
 
-The runner's GPU reservation unloads the agent's llama-swap models and then
-requires at least 28 GiB of free VRAM on GPU 0 for 15 minutes. Reservations
-failed repeatedly while the agent model was still serving: the V100 headroom
-never appeared within the budget. Trigger the SV6 screen only after the agent
-host has unloaded its own llama-swap models from the agent host (llama-swap
-port 9292), and keep the agent silent while the run is active so the model is
-not reloaded into the V100 mid-screen.
+Run `37542177376` reached a complete warm-mmap HTTP request and exposed a
+collector assumption rather than a storage failure. The server performs a
+13-token compressed startup prefill before the measured 1,227-token request,
+so the log correctly contains two compressed PLE records. The collector now
+selects exactly one record matching `computed_prefill_tokens` while validating
+the backend, fallback state and byte accounting of every compressed record.
+The workflow only checks for 28 GiB of free V100 memory and fails if the card
+is occupied; it never unloads or stops another GPU workload.
