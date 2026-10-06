@@ -49,6 +49,22 @@ class Sv6ServeTests(unittest.TestCase):
                 "\n".join(json.dumps(row) for row in (warmup, request)),
                 "mmap-warm", True, 1227)
 
+    def test_request_record_requires_matching_tokens(self):
+        request = {"kind": "ple_gather", "compressed": True, "tokens": 1227,
+                   "payload_bytes": 1963200, "storage_backend": "mmap",
+                   "storage_fallback": False, "coalesced_pages": 0,
+                   "page_read_us": None}
+        with self.assertRaisesRegex(ValueError, "1228-token request PLE record"):
+            module.parse_ple_records(
+                json.dumps(request), "mmap-warm", True, 1228)
+
+    def test_telemetry_off_rejects_ple_records(self):
+        record = {"kind": "ple_gather", "compressed": True, "tokens": 13,
+                  "payload_bytes": 20800, "storage_backend": "mmap",
+                  "storage_fallback": False}
+        with self.assertRaisesRegex(ValueError, "emitted PLE diagnostics"):
+            module.parse_ple_records(json.dumps(record), "direct", False)
+
     def test_failure_digest(self):
         import tempfile
         from pathlib import Path
