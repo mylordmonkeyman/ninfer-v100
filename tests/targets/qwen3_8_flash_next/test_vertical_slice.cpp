@@ -83,6 +83,16 @@ int main() {
                           oracle, oracle);
     }
     const auto identical_metrics = identical.finalize();
+    const auto& identical_observation = identical.last_observation();
+    if (!identical_observation || !identical_observation->finite ||
+        !identical_observation->has_nll ||
+        identical_observation->candidate_top1 != identical_observation->oracle_top1 ||
+        identical_observation->kl_divergence > 1.0e-12 ||
+        identical_observation->candidate_nll != identical_observation->oracle_nll ||
+        identical_observation->candidate_top1_margin !=
+            identical_observation->oracle_top1_margin) {
+        failures += fail("per-position oracle observation did not preserve exact metrics");
+    }
     Phase11OracleThresholds smoke_thresholds{};
     smoke_thresholds.minimum_positions = 32;
     if (!phase11_oracle_passes(identical_metrics, smoke_thresholds) ||

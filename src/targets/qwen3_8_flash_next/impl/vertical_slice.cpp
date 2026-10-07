@@ -198,13 +198,30 @@ void Phase11OracleAccumulator::observe(std::uint32_t position,
         }
     }
     maximum_logit_error_ = std::max(maximum_logit_error_, local_max_error);
+    Phase11OracleObservation observation{
+        .position = position,
+        .target_token = target_token,
+        .finite = finite,
+        .max_logit_error = local_max_error,
+    };
     if (!finite) {
         ++nonfinite_positions_;
+        last_observation_ = observation;
         return;
     }
 
     const TopK candidate_top = top10(candidate_logits);
     const TopK oracle_top = top10(oracle_logits);
+    observation.candidate_top1 = candidate_top.ids[0];
+    observation.oracle_top1 = oracle_top.ids[0];
+    if (candidate_top.count > 1) {
+        observation.candidate_top1_margin =
+            candidate_top.values[0] - candidate_top.values[1];
+    }
+    if (oracle_top.count > 1) {
+        observation.oracle_top1_margin =
+            oracle_top.values[0] - oracle_top.values[1];
+    }
     if (candidate_top.ids[0] == oracle_top.ids[0]) {
         ++top1_matches_;
     }
@@ -231,14 +248,20 @@ void Phase11OracleAccumulator::observe(std::uint32_t position,
         std::max(0.0, static_cast<double>(kl));
     kl_sum_ += kl_value;
     kl_values_.push_back(kl_value);
+    observation.kl_divergence = kl_value;
 
     if (target_token >= 0 &&
         static_cast<std::size_t>(target_token) < oracle_logits.size()) {
         ++nll_positions_;
-        oracle_nll_sum_ +=
+        const double oracle_nll =
             oracle_log_z - static_cast<double>(oracle_logits[target_token]);
-        candidate_nll_sum_ +=
+        const double candidate_nll =
             candidate_log_z - static_cast<double>(candidate_logits[target_token]);
+        oracle_nll_sum_ += oracle_nll;
+        candidate_nll_sum_ += candidate_nll;
+        observation.has_nll = true;
+        observation.oracle_nll = oracle_nll;
+        observation.candidate_nll = candidate_nll;
     }
 
     Phase11DivergenceExample example{
@@ -257,6 +280,7 @@ void Phase11OracleAccumulator::observe(std::uint32_t position,
         kl_value > worst_kl_divergence_->kl_divergence) {
         worst_kl_divergence_ = example;
     }
+    last_observation_ = observation;
 }
 
 Phase11OracleMetrics Phase11OracleAccumulator::finalize() const {

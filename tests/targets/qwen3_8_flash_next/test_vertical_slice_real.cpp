@@ -1544,11 +1544,57 @@ static int run_sv7_batched_oracle(FlashNextTextExecutor& executor,
     ninfer::Tensor logits(logit_storage.p,ninfer::DType::BF16,{248'320,1});
     std::vector<std::uint16_t> words(vocab),tail(vocab);
     std::vector<float> candidate(vocab);
+    const char* logits_out_path=std::getenv("NINFER_V100_SV7_LOGITS_OUT");
+    const char* observations_out_path=std::getenv("NINFER_V100_SV7_OBSERVATIONS_OUT");
+    const char* baseline_logits_path=std::getenv("NINFER_V100_SV7_BASELINE_LOGITS");
+    const char* pair_observations_out_path=std::getenv("NINFER_V100_SV7_PAIR_OBSERVATIONS_OUT");
+    std::ofstream logits_out,observations_out,pair_observations_out;
+    std::ifstream baseline_logits;
+    std::vector<std::uint16_t> baseline_words;
+    std::vector<float> baseline;
+    const auto write_observation=[](std::ofstream& out,const Phase11OracleObservation& observation) {
+        out<<observation.position<<','<<observation.target_token<<','
+           <<(observation.finite?1:0)<<','<<observation.candidate_top1<<','
+           <<observation.oracle_top1<<','<<std::setprecision(17)
+           <<observation.kl_divergence<<','<<observation.max_logit_error<<','
+           <<observation.candidate_top1_margin<<','<<observation.oracle_top1_margin<<','
+           <<(observation.has_nll?1:0)<<',';
+        if(observation.has_nll)
+            out<<observation.candidate_nll<<','<<observation.oracle_nll;
+        else out<<',';
+        out<<'\n';
+    };
+    const auto open_observations=[](std::ofstream& out,const char* path) {
+        if(!path || !*path)return;
+        out.open(path,std::ios::out|std::ios::trunc);
+        if(!out)throw std::runtime_error("cannot open SV7 observation output");
+        out<<"position,target_token,finite,candidate_top1,oracle_top1,kl_divergence,max_logit_error,"
+              "candidate_top1_margin,oracle_top1_margin,has_nll,candidate_nll,oracle_nll\n";
+    };
+    if(logits_out_path && *logits_out_path) {
+        logits_out.open(logits_out_path,std::ios::binary|std::ios::out|std::ios::trunc);
+        if(!logits_out)throw std::runtime_error("cannot open SV7 represented-logit output");
+    }
+    open_observations(observations_out,observations_out_path);
+    if(baseline_logits_path && *baseline_logits_path) {
+        const auto expected_bytes=static_cast<std::uintmax_t>(records.size())*
+            static_cast<std::uintmax_t>(vocab)*sizeof(std::uint16_t);
+        if(fs::file_size(baseline_logits_path)!=expected_bytes)
+            throw std::runtime_error("SV7 paired baseline logit size mismatch");
+        baseline_logits.open(baseline_logits_path,std::ios::binary);
+        if(!baseline_logits)throw std::runtime_error("cannot open SV7 paired baseline logits");
+        if(!pair_observations_out_path || !*pair_observations_out_path)
+            throw std::invalid_argument("SV7 paired baseline requires pair observation output");
+        open_observations(pair_observations_out,pair_observations_out_path);
+        baseline_words.resize(vocab);
+        baseline.resize(vocab);
+    }
     struct DrainOracleWork {
         cudaStream_t stream;
         ~DrainOracleWork(){(void)cudaStreamSynchronize(stream);}
     } drain{device.stream};
     Phase11OracleAccumulator accumulator;
+    Phase11OracleAccumulator pair_accumulator;
     auto lane=executor.allocate_lane();
     const std::array<LaneCommitDecision,1> decisions{{{.accept=true}}};
     const auto started=std::chrono::steady_clock::now();
@@ -1600,10 +1646,27 @@ static int run_sv7_batched_oracle(FlashNextTextExecutor& executor,
             if(t==chunk_size-1 && words!=tail)
                 throw std::runtime_error("SV7 reconstructed endpoint logits differ from production prefill");
             for(std::size_t i=0;i<vocab;++i)candidate[i]=bf16_to_float(words[i]);
+            if(logits_out.is_open()) {
+                logits_out.write(reinterpret_cast<const char*>(words.data()),
+                    static_cast<std::streamsize>(words.size()*sizeof(std::uint16_t)));
+                if(!logits_out)throw std::runtime_error("SV7 represented-logit write failed");
+            }
             const auto index=offset+t;
             const auto oracle=load_fp32_logits(records[index]);
             const auto target=index+1<records.size()?records[index+1].token_id:-1;
             accumulator.observe(records[index].position,target,candidate,oracle);
+            if(observations_out.is_open())
+                write_observation(observations_out,*accumulator.last_observation());
+            if(baseline_logits.is_open()) {
+                baseline_logits.read(reinterpret_cast<char*>(baseline_words.data()),
+                    static_cast<std::streamsize>(baseline_words.size()*sizeof(std::uint16_t)));
+                if(baseline_logits.gcount()!=static_cast<std::streamsize>(
+                        baseline_words.size()*sizeof(std::uint16_t)))
+                    throw std::runtime_error("SV7 paired baseline logits ended early");
+                for(std::size_t i=0;i<vocab;++i)baseline[i]=bf16_to_float(baseline_words[i]);
+                pair_accumulator.observe(records[index].position,target,candidate,baseline);
+                write_observation(pair_observations_out,*pair_accumulator.last_observation());
+            }
         }
         round.commit(decisions);
         if(executor.committed_frontier(lane)!=static_cast<std::int32_t>(offset+chunk_size))
@@ -1612,6 +1675,25 @@ static int run_sv7_batched_oracle(FlashNextTextExecutor& executor,
                  <<" endpoint_logits_exact=1"<<std::endl;
     }
     executor.release_lane(lane);device.synchronize();
+    if(logits_out.is_open()) {
+        logits_out.flush();
+        if(!logits_out)throw std::runtime_error("SV7 represented-logit output flush failed");
+    }
+    if(observations_out.is_open()) {
+        observations_out.flush();
+        if(!observations_out)throw std::runtime_error("SV7 observation output flush failed");
+    }
+    if(pair_observations_out.is_open()) {
+        pair_observations_out.flush();
+        if(!pair_observations_out)throw std::runtime_error("SV7 pair observation output flush failed");
+        const auto pair_metrics=pair_accumulator.finalize();
+        std::cout<<"sv7.paired.positions="<<pair_metrics.positions
+                 <<" control_to_candidate_top1_agreement="<<std::setprecision(10)
+                 <<pair_metrics.top1_agreement
+                 <<" control_to_candidate_mean_kl="<<pair_metrics.mean_kl
+                 <<" control_to_candidate_p99_kl="<<pair_metrics.p99_kl
+                 <<" max_logit_error="<<pair_metrics.maximum_logit_error<<'\n';
+    }
     const auto metrics=accumulator.finalize();print_metrics(metrics);
     const bool passes=phase11_oracle_passes(metrics); // Default thresholds, including 4096 minimum.
     std::cout<<"sv7.batched_oracle.independent_pass="<<(passes?1:0)

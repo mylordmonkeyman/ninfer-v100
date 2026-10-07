@@ -1,0 +1,227 @@
+name: V100 SV7 Paired Accuracy
+on:
+  push:
+    branches: [perf/v100-strata-derived]
+    paths:
+      - '.github/workflows/v100-sv7-paired.yml'
+      - 'src/targets/qwen3_8_flash_next/impl/vertical_slice.*'
+      - 'tests/targets/qwen3_8_flash_next/test_vertical_slice*.cpp'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 32
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Run host diagnostic checks
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+            -s tools/diagnostics -p 'test_v100*.py'
+          git diff --check
+  hardware:
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[v100:') || contains(github.event.head_commit.message, '[v100:sv7-paired]')
+    needs: checks
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    concurrency:
+      group: v100-sv0-hardware
+      cancel-in-progress: false
+    timeout-minutes: 120
+    env:
+      CUDA_VISIBLE_DEVICES: '0'
+      NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+      NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+      NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: '32'
+      NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: auto
+      NINFER_FLASH_NEXT_FP32_HYPER_STATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_CONV: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_READOUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_GATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_MOE_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT_LAYERS_32_47: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_SHARED_INPUT: '0'
+      NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE: '0'
+      NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          clean: false
+      - name: Prepare paired numerical evidence
+        run: |
+          mkdir -p sv7-paired-results
+          find sv7-paired-results -mindepth 1 -delete
+      - name: Build the paired diagnostic once and check V100 headroom
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > sv7-paired-results/candidate-sha.txt
+          nvidia-smi -q > sv7-paired-results/gpu.txt
+          /usr/local/cuda-12.8/bin/nvcc --version > sv7-paired-results/cuda.txt
+          numactl --hardware > sv7-paired-results/numa.txt
+          test -f "$NINFER_WEIGHTS"
+          test -r "$NINFER_WEIGHTS"
+          free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits | tr -d '[:space:]')
+          if (( free_mib < 28000 )); then
+            echo '::error::V100 lacks test headroom; no unrelated workloads were stopped.'
+            exit 1
+          fi
+          free_tmp_kib=$(df -Pk /tmp | awk 'NR==2 {print $4}')
+          if (( free_tmp_kib < 4194304 )); then
+            echo '::error::Runner lacks 4 GiB temporary space for paired represented logits.'
+            exit 1
+          fi
+          cmake -S . -B build-sv7-paired -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-sv7-paired --target ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            ninfer_qwen3_8_flash_next_vertical_slice_test
+          build-sv7-paired/tests/ninfer_qwen3_8_flash_next_vertical_slice_test \
+            2>&1 | tee sv7-paired-results/contracts.log
+      - name: Capture paired SIMT and MMA evidence on identical positions
+        shell: bash
+        run: |
+          set +e
+          set -uo pipefail
+          baseline=$(mktemp /tmp/ninfer-sv7-simt-logits.XXXXXX.bf16)
+          trap 'rm -f "$baseline"' EXIT
+          export NINFER_V100_SV7_BATCHED_ORACLE=1
+          export NINFER_FLASH_NEXT_EXPERT_CACHE=0
+          export NINFER_V100_TELEMETRY=1
+          export NINFER_V100_PLE_IO=mmap
+          export NINFER_V100_QSA_SCORE_COMPARE=0
+          export NINFER_FLASH_NEXT_QSA_PREFILL_MMA=1
+          unset NINFER_PHASE11_ORACLE_SMOKE_POSITIONS NINFER_PHASE11_PREFILL_PROBE_POSITIONS
+          NINFER_V100_QSA_SCORE_MMA=0 \
+            NINFER_V100_SV7_LOGITS_OUT="$baseline" \
+            NINFER_V100_SV7_OBSERVATIONS_OUT=sv7-paired-results/simt.csv \
+            build-sv7-paired/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            2>&1 | tee sv7-paired-results/simt.log
+          simt=$?
+          baseline_bytes=$(stat -c %s "$baseline" 2>/dev/null || echo 0)
+          NINFER_V100_QSA_SCORE_MMA=1 \
+            NINFER_V100_SV7_BASELINE_LOGITS="$baseline" \
+            NINFER_V100_SV7_OBSERVATIONS_OUT=sv7-paired-results/mma.csv \
+            NINFER_V100_SV7_PAIR_OBSERVATIONS_OUT=sv7-paired-results/direct.csv \
+            build-sv7-paired/tests/ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            2>&1 | tee sv7-paired-results/mma.log
+          mma=$?
+          echo "simt=$simt mma=$mma baseline_bytes=$baseline_bytes" | tee sv7-paired-results/status.txt
+          python3 - <<'PYCODE'
+          import csv, json, math, pathlib, statistics
+          root=pathlib.Path('sv7-paired-results')
+          def rows(name):
+              with (root/name).open(newline='') as f:
+                  out=list(csv.DictReader(f))
+              assert len(out)==4096,(name,len(out))
+              assert [int(r['position']) for r in out]==list(range(4096)),name
+              assert all(r['finite']=='1' for r in out),name
+              return out
+          simt=rows('simt.csv'); mma=rows('mma.csv'); direct=rows('direct.csv')
+          def vals(rs,key):
+              return [float(r[key]) for r in rs]
+          def p99(xs):
+              xs=sorted(xs); return xs[max(0,math.ceil(.99*len(xs))-1)]
+          def mean(xs): return sum(xs)/len(xs)
+          simt_kl=vals(simt,'kl_divergence'); mma_kl=vals(mma,'kl_divergence')
+          direct_kl=vals(direct,'kl_divergence')
+          nll_delta=[]; simt_nll_error=[]; mma_nll_error=[]
+          changed=[]; fixed=broken=0
+          for s,m,d in zip(simt,mma,direct):
+              assert s['target_token']==m['target_token']==d['target_token']
+              s_top=int(s['candidate_top1']); m_top=int(m['candidate_top1'])
+              oracle=int(s['oracle_top1']); assert oracle==int(m['oracle_top1'])
+              if s_top!=m_top:
+                  changed.append((float(s['candidate_top1_margin']),float(m['candidate_top1_margin'])))
+                  if s_top!=oracle and m_top==oracle: fixed+=1
+                  if s_top==oracle and m_top!=oracle: broken+=1
+              if d['has_nll']=='1':
+                  nll_delta.append(float(d['candidate_nll'])-float(d['oracle_nll']))
+              if s['has_nll']=='1':
+                  simt_nll_error.append(float(s['candidate_nll'])-float(s['oracle_nll']))
+                  mma_nll_error.append(float(m['candidate_nll'])-float(m['oracle_nll']))
+          kl_delta=[m-s for s,m in zip(simt_kl,mma_kl)]
+          abs_nll=[abs(x) for x in nll_delta]
+          abs_kl_delta=[abs(x) for x in kl_delta]
+          status=(root/'status.txt').read_text().split()
+          summary={
+              'schema':1,'positions':4096,
+              'qualification':'pending_non_regression_allowance',
+              'control_to_candidate':{
+                  'top1_disagreement_fraction':sum(int(s['candidate_top1'])!=int(m['candidate_top1']) for s,m in zip(simt,mma))/4096,
+                  'mean_kl':mean(direct_kl),'p99_kl':p99(direct_kl),'max_kl':max(direct_kl),
+                  'mean_signed_target_nll_delta':mean(nll_delta),
+                  'p99_absolute_target_nll_delta':p99(abs_nll),
+                  'max_absolute_target_nll_delta':max(abs_nll),
+                  'max_logit_error':max(vals(direct,'max_logit_error')),
+                  'changed_top1_positions':len(changed),
+                  'changed_control_margin_median':statistics.median([x[0] for x in changed]) if changed else 0.0,
+                  'changed_candidate_margin_median':statistics.median([x[1] for x in changed]) if changed else 0.0,
+              },
+              'paired_vs_fp32_oracle':{
+                  'control_mean_kl':mean(simt_kl),'candidate_mean_kl':mean(mma_kl),
+                  'mean_kl_delta_candidate_minus_control':mean(kl_delta),
+                  'p99_absolute_kl_delta':p99(abs_kl_delta),
+                  'positions_kl_improved':sum(x<0 for x in kl_delta),
+                  'positions_kl_worsened':sum(x>0 for x in kl_delta),
+                  'positions_kl_equal':sum(x==0 for x in kl_delta),
+                  'top1_fixes':fixed,'top1_breaks':broken,
+                  'control_p99_kl':p99(simt_kl),'candidate_p99_kl':p99(mma_kl),
+                  'control_mean_signed_target_nll_error':mean(simt_nll_error),
+                  'candidate_mean_signed_target_nll_error':mean(mma_nll_error),
+                  'mean_signed_target_nll_error_delta_candidate_minus_control':mean(
+                      [m-s for s,m in zip(simt_nll_error,mma_nll_error)]),
+              },
+              'old_absolute_gate':{
+                  'control_process_exit':int(status[0].split('=')[1]),
+                  'candidate_process_exit':int(status[1].split('=')[1]),
+              }
+          }
+          (root/'paired-summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(summary,sort_keys=True))
+          for mode in ('simt','mma'):
+              text=(root/(mode+'.log')).read_text()
+              events=[]
+              for line in text.splitlines():
+                  try: row=json.loads(line)
+                  except json.JSONDecodeError: continue
+                  if row.get('kind')=='qsa_score_dispatch':events.append(row)
+              assert len(events)==96,(mode,len(events))
+              assert all(e['tokens']==512 and e['fp8'] and e['mma']==(mode=='mma') for e in events)
+              assert 'phase11.positions=4096' in text and text.count('endpoint_logits_exact=1')==8
+          assert 'sv7.paired.positions=4096' in (root/'mma.log').read_text()
+          assert int(status[2].split('=')[1])==4096*248320*2
+          PYCODE
+          coverage=$?
+          if (( coverage != 0 )); then
+            echo "::error::Paired evidence coverage failed; simt=$simt mma=$mma"
+            exit 1
+          fi
+      - name: Preserve paired numerical evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-sv7-paired-${{ github.run_id }}-${{ github.run_attempt }}
+          path: sv7-paired-results/
+          retention-days: 30
+          if-no-files-found: warn

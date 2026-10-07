@@ -45,6 +45,21 @@ struct Phase11OracleThresholds {
     double maximum_relative_mean_nll_delta = 5.0e-3;
 };
 
+struct Phase11OracleObservation {
+    std::uint32_t position = 0;
+    std::int32_t target_token = -1;
+    std::int32_t candidate_top1 = -1;
+    std::int32_t oracle_top1 = -1;
+    bool finite = false;
+    bool has_nll = false;
+    double kl_divergence = 0.0;
+    double candidate_nll = 0.0;
+    double oracle_nll = 0.0;
+    float max_logit_error = 0.0F;
+    float candidate_top1_margin = 0.0F;
+    float oracle_top1_margin = 0.0F;
+};
+
 struct Phase11OracleMetrics {
     std::uint32_t positions = 0;
     std::uint32_t nll_positions = 0;
@@ -67,6 +82,8 @@ public:
                  std::span<const float> oracle_logits);
 
     [[nodiscard]] Phase11OracleMetrics finalize() const;
+    [[nodiscard]] const std::optional<Phase11OracleObservation>&
+    last_observation() const noexcept { return last_observation_; }
 
 private:
     std::uint64_t top1_matches_ = 0;
@@ -84,6 +101,7 @@ private:
     std::vector<double> kl_values_;
     std::optional<Phase11DivergenceExample> first_top1_divergence_;
     std::optional<Phase11DivergenceExample> worst_kl_divergence_;
+    std::optional<Phase11OracleObservation> last_observation_;
 };
 
 [[nodiscard]] bool
