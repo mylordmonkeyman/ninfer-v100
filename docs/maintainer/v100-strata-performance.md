@@ -1031,3 +1031,32 @@ runner ownership and, only when needed, retains one runner-owned artifact copy
 all arms. The source artifact is unchanged. The focused reader fixture now
 flushes its own file and requires eviction to reach zero pages. Zero cold
 residency, exact responses and strict-direct accounting remain required.
+
+SV6 serving run `37552703529` at `10583de7` passed all twelve fresh servers
+with exact greedy responses, verified warm/cold PLE residency and no direct
+fallback. The original model was owned by UID 1000 and not writable by runner
+UID 1001; the owned-copy control restored observable residency. For 1,227
+fresh prompt tokens and 16 output tokens, telemetry-off TTFT medians/ranges
+(seconds) were warm mmap 28.744 (27.997–29.574), cold mmap 28.923
+(28.822–28.963), and direct 28.496 (27.802–28.515). Direct skipped the
+32,000,153,600-byte prewarm; ready medians were 23.592/11.799/6.238 seconds
+for warm mmap/cold mmap/direct, with wide mmap ranges reflecting startup cache
+state. Strict direct gathered 1,963,200 compact bytes from 4,675 pages without
+fallback; diagnostic page-read service time was 71.847 ms. The roughly 1.5%
+cold request TTFT reduction is not a material serving improvement. No warm
+repeated-request, concurrent, or alternate-filesystem qualification is claimed,
+and mmap stays default. Further SV6 performance variants are not justified by
+this bounded screen.
+
+## SV7 exact FP16 representation gate
+
+The first SV7 building block converts finite BF16 bit patterns to FP16 only
+when the represented value is unchanged, including signed zero and exactly
+representable subnormals. Nonfinite, out-of-range and inexact values are
+rejected. An independent mathematical enumeration of every finite FP16 value
+checks all 65,536 BF16 patterns (8,704 are eligible). A host-only real-artifact
+inventory reports counts per contiguous BF16 matrix before selecting any
+projection for replacement. This is representation evidence only: no device
+weights, dispatch, activation arithmetic, or defaults change. Tensor-core
+kernels, measured crossover thresholds, attention math and the unchanged
+independent numerical/long-prefix gates remain outstanding.

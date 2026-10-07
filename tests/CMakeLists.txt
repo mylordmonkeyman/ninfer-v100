@@ -79,6 +79,11 @@ if(NINFER_VOLTA_BUILD)
     LIBRARIES CUDA::cudart)
 endif()
 
+# Exact finite representation gate used by the Volta FP16 weight path.
+add_executable(ninfer_exact_bf16_fp16_test ops/test_exact_bf16_fp16.cpp)
+target_include_directories(ninfer_exact_bf16_fp16_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME ninfer_exact_bf16_fp16_test COMMAND ninfer_exact_bf16_fp16_test)
+
 # Artifact framing and model-independent runtime contracts.
 ninfer_add_test(ninfer_structured_output_test SOURCES test_structured_output.cpp LIBRARIES ninfer_core)
 ninfer_add_op_test(ninfer_selected_block_attention_test
