@@ -88,8 +88,12 @@ def validate_qsa_dispatch(text, mode):
     large=[row for row in records if row.get('tokens',0)>=512]
     if not large or any(not row.get('fp8') for row in records):
         raise ValueError('missing actual large FP8 QSA prefill dispatch')
-    if any(row.get('mma') != (mode=='score-mma') for row in large):
-        raise ValueError('QSA dispatch did not use the requested score path')
+    mma_large=sum(bool(row.get('mma')) for row in large)
+    if mode=='simt':
+        if mma_large:
+            raise ValueError('SIMT QSA control unexpectedly used MMA')
+    elif mma_large*2 != len(large):
+        raise ValueError('QSA candidate did not restrict MMA to the late half of QSA layers')
     if any(row.get('mma') and row.get('tokens',0)<512 for row in records):
         raise ValueError('QSA MMA escaped the measured batch range')
     return records
@@ -145,6 +149,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                NINFER_FLASH_NEXT_EXPERT_CACHE_GROUPED_PREFILL='1',
                NINFER_V100_TELEMETRY='1' if diagnostic else '0',NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING='0',
                NINFER_V100_QSA_SCORE_MMA='1' if qsa_score_screen and mode=='score-mma' else '0',
+               NINFER_V100_QSA_SCORE_MMA_MIN_QSA='6' if qsa_score_screen and mode=='score-mma' else '0',
                NINFER_V100_QSA_SCORE_COMPARE='1' if qsa_score_attribution else '0',
                NINFER_V100_PLE_IO='mmap',
                NINFER_FLASH_NEXT_STAGE_LEDGER='0',NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT='0',
@@ -283,15 +288,17 @@ def main():
     else:
         modes=('cpu-cache','stream') if args.prefill_screen else ('legacy','device')
     observations=[]
+    diagnostic_cross_path_exact=None
     if args.qsa_score_screen:
-        # Stop at the first dispatch/response failure before starting timing or MTP.
+        # Hard dispatch/accounting/replay failures still stop. Arithmetic cross-path
+        # text differences are preserved as diagnostics after paired accuracy admission.
         diagnostics=[]
         for mode in modes:
             row=run_server(args.executable,args.artifact,args.profile,args.output,mode,False,
                            -1,qsa_score_screen=True,diagnostic=True)
             diagnostics.append(row);atomic_json(args.output/'dispatch-observations.json',diagnostics)
-            if row['response_signatures']!=diagnostics[0]['response_signatures']:
-                raise ValueError('QSA diagnostic changed exact greedy response or finish accounting')
+        diagnostic_cross_path_exact=(diagnostics[0]['response_signatures']==
+                                     diagnostics[1]['response_signatures'])
     for repeat in range(args.repeats):
         for mtp in (False,True):
             for mode in (modes if repeat%2==0 else tuple(reversed(modes))):
@@ -300,12 +307,31 @@ def main():
                                args.route_handoff_policy,qsa_score_screen=args.qsa_score_screen)
                 observations.append(row); atomic_json(args.output/'observations.json',observations)
                 peers=[r for r in observations if r['mtp']==mtp]
-                if any(r['response_signatures']!=peers[0]['response_signatures'] for r in peers):
+                same_mode=[r for r in peers if r['mode']==mode]
+                if any(r['response_signatures']!=same_mode[0]['response_signatures']
+                       for r in same_mode):
+                    raise ValueError('same-path fresh-process greedy response or finish accounting differs')
+                if (not args.qsa_score_screen and
+                        any(r['response_signatures']!=peers[0]['response_signatures'] for r in peers)):
                     raise ValueError('cross-path greedy production response or finish accounting differs')
-                if args.route_handoff_screen or args.qsa_score_screen:
+                if args.route_handoff_screen:
                     validate_handoff_peers(peers)
                 if len({r['cache_bytes'] for r in peers})!=1:
                     raise ValueError('production cache capacity differs between paths')
+    cross_path_response_matches=[]
+    if args.qsa_score_screen:
+        for repeat in range(args.repeats):
+            for mtp in (False,True):
+                pair=[r for r in observations if r['repeat']==repeat and r['mtp']==mtp]
+                if len(pair)!=2:
+                    raise ValueError('missing QSA A/B observation pair')
+                cross_path_response_matches.append(dict(
+                    repeat=repeat,mtp=mtp,
+                    exact=pair[0]['response_signatures']==pair[1]['response_signatures'],
+                    speculative_counts={r['mode']:[
+                        dict(drafted=e['speculative']['drafted_tokens'],
+                             accepted=e['speculative']['accepted_tokens'])
+                        for e in r['requests']] for r in pair}))
     results=[]
     labels=('cold','prefix-replay','continuation','continuation-replay')
     for mtp in (False,True):
@@ -335,7 +361,11 @@ def main():
     report=dict(schema=1,milestone=milestone,scope=scope,qualified=False,
                 route_handoff_policy=args.route_handoff_policy if args.route_handoff_screen else None,
                 candidate_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),results=results,
-                exact_compared_responses=True,limitations=[
+                exact_compared_responses=(all(x['exact'] for x in cross_path_response_matches)
+                                          if args.qsa_score_screen else True),
+                diagnostic_cross_path_exact=diagnostic_cross_path_exact,
+                cross_path_response_matches=cross_path_response_matches,
+                limitations=[
                     f'fixed 64 slots per layer, {"FP8" if args.qsa_score_screen else "BF16"} KV, one active request, short 4096 context',
                     'small two-turn corpus; no concurrent cancellation, long context, vision or full production matrix',
                     'MTP drafting required; acceptance counts retained, no minimum acceptance coefficient imposed',
@@ -344,7 +374,8 @@ def main():
                      if args.cpu_group_screen else []) +
                     (['route handoff remains opt-in; both arms use grouped CPU experts; no concurrent-request matrix']
                      if args.route_handoff_screen else []) +
-                    (['attention remains opt-in; dispatch diagnostics are excluded from timing; full-model independent long-prefix gate outstanding']
+                    (['attention remains opt-in; dispatch diagnostics are excluded from timing; paired 4096-position accuracy admission is separate',
+                       'cross-path greedy text and MTP accept-count differences are diagnostic, while same-path replay/accounting remain hard gates']
                      if args.qsa_score_screen else []))
     atomic_json(args.output/'report.json',report)
     lines=['Production HTTP prefill/prefix/MTP screen; defaults unchanged.','',

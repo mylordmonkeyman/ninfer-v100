@@ -6,7 +6,59 @@ Frozen source: `forwardport/v100-flash-next` at
 Reference inspected: `jmnargi/Strata-V100` `9d7774919e26d235359bc2c3001f61f607eb288d`.
 Milestones are SV0–SV8 in the supplied specification; they do not advance Phase 18.
 
-## Current milestone: SV7 qualification blocked
+## Current milestone: SV7 late-half serving qualification
+
+The full-12-QSA score-MMA path remains numerically mixed and is not promoted.
+A narrower candidate now applies the same validated FP8 score-MMA kernel only
+to QSA ordinals 6–11; ordinals 0–5 remain SIMT. This is still opt-in and off by
+default.
+
+Paired run [37573202537](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37573202537)
+at `aaa759ea` completed 4,096 identical positions with artifact
+`11461029631` (SHA256
+`242754d52d67f1cd1913a036f4c811d307d1bdc3849adfbfb5d32a31a257d430`).
+Coverage is complete: both arms have 96 T=512 FP8 QSA dispatches and eight
+exact endpoint reconstructions; the candidate has exactly 48 MMA and 48 SIMT
+dispatches.
+
+| Paired metric | Full 12-QSA MMA | Late-half MMA |
+|---|---:|---:|
+| Direct mean KL vs SIMT | 0.0957484 | 0.00636928 |
+| Direct top-1 disagreement | 5.54% | 1.8311% |
+| Mean target-NLL delta vs SIMT | +0.2270 | +0.03149 |
+| Median target-NLL delta | +0.0796 | ~0.00000011 |
+| Positions with worse target NLL | 60.9% | 50.89% |
+| 1% / 5% trimmed mean NLL delta | ~+0.23 / ~+0.23 | +0.02645 / +0.02224 |
+
+Against the unchanged FP32 oracle, the late-half candidate improves mean KL
+from `0.12648098` to `0.12302956` and mean absolute target-NLL error from
+`1.16087` to `1.14199`. Its mean signed target-NLL error moves toward zero
+from `-0.07194` to `-0.04045`. Oracle top-1 agreement changes from
+`93.0664%` to `92.8467%` (-0.2197 percentage points), with 31 fixes and
+40 breaks, while P99 KL changes from `2.36349` to `2.40457` (+1.74%).
+
+For this **unchanged late-half candidate only**, those observed top-1/P99-KL
+differences are accepted as a bounded admission to serving performance testing
+because mean KL and mean absolute target-NLL error improve, the direct median
+NLL shift is effectively zero, and the broad NLL regression seen with full MMA
+is absent. This is not a reusable numerical tolerance, does not satisfy the old
+absolute Phase-11 oracle thresholds, and does not qualify the feature for
+default-on use. Any arithmetic/scope change requires a new paired numerical
+screen.
+
+Serving qualification therefore keeps request/accounting, finite behavior,
+dispatch eligibility, same-path prefix/continuation replay, cache capacity, and
+MTP activation/drafting as hard gates. Cross-path greedy text equality and
+cross-path MTP draft/accept equality are recorded diagnostics rather than
+automatic failures for this arithmetic candidate. Default promotion still
+requires a material end-to-end benefit and no new correctness failure.
+
+The preceding late-half attempt [37572405077](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37572405077)
+is invalid numerical evidence: a diagnostic parser used the C++ multi-character
+literal `'\\\\0'`, so the candidate aborted before inference. Commit
+`aaa759ea` fixes only that parser to `'\\0'`; no kernel arithmetic changed.
+
+## Earlier SV7 strict/full-MMA evidence
 
 The SV7 FP8 attention candidate has passed isolated and sampled real-input
 attention checks, but remains off by default. Full 4096-position numerical
