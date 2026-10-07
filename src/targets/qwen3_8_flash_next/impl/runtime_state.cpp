@@ -88,7 +88,8 @@ FlashNextRuntimeAllocation::FlashNextRuntimeAllocation(FlashNextRuntimePlan plan
 void FlashNextRuntimeAllocation::configure_expert_cache(const TextModelView& model) {
     const char* prefill_policy = std::getenv("NINFER_V100_PREFILL_EXPERT_POLICY");
     const bool prefill_stream = flash_next_expert_stream_requested();
-    const bool decode_stream = flash_next_decode_expert_stream_requested();
+    const unsigned decode_stream_min_routes = flash_next_decode_expert_stream_min_routes();
+    const bool decode_stream = decode_stream_min_routes != 0;
     if (prefill_stream || decode_stream) {
         if (!model.host_experts || plan_.config.use_cuda_graph) {
             throw std::invalid_argument(
@@ -129,6 +130,8 @@ void FlashNextRuntimeAllocation::configure_expert_cache(const TextModelView& mod
         state_view_.expert_stream = expert_stream_.get();
         state_view_.expert_stream_prefill = prefill_stream;
         state_view_.expert_stream_decode = decode_stream;
+        state_view_.expert_stream_decode_min_routes =
+            decode_stream ? decode_stream_min_routes : 1U;
         state_view_.expert_stream_min_tokens = threshold;
     }
     const char* enabled=std::getenv("NINFER_FLASH_NEXT_EXPERT_CACHE");

@@ -74,7 +74,7 @@ def payload(model,run):
                 max_tokens=128,temperature=0,seed=42,enable_thinking=False)
 
 def run_ninfer(a,out,run,decode_stream,diagnostic=False):
-    mode='stream' if decode_stream else 'cpu'
+    mode='hybrid' if decode_stream else 'cpu'
     suffix='-diag' if diagnostic else ''
     p=port();base=f'http://127.0.0.1:{p}'
     log=out/f'ninfer-{mode}-{run}{suffix}.log'
@@ -92,7 +92,7 @@ def run_ninfer(a,out,run,decode_stream,diagnostic=False):
       'NINFER_FLASH_NEXT_EXPERT_CACHE_GROUPED_PREFILL':'1',
       'NINFER_V100_DEVICE_ROUTE_COMBINE':'1',
       'NINFER_V100_PREFILL_EXPERT_POLICY':'cpu-cache',
-      'NINFER_V100_DECODE_EXPERT_POLICY':'stream' if decode_stream else 'cpu-cache',
+      'NINFER_V100_DECODE_EXPERT_POLICY':'hybrid' if decode_stream else 'cpu-cache',
       'NINFER_V100_CPU_EXPERT_GROUP':'1',
       'NINFER_V100_ROUTE_HANDOFF':'0',
       'NINFER_V100_PLE_IO':'mmap',
@@ -166,9 +166,9 @@ def stats(rows,engine,key):
 
 def summary(rows):
     out={}
-    for engine in ('ninfer-cpu','ninfer-stream','strata'):
+    for engine in ('ninfer-cpu','ninfer-hybrid','strata'):
         out[engine]={k:stats(rows,engine,k) for k in ('prefill_tps','decode_tps','ttft_s','wall_s')}
-    cpu=out['ninfer-cpu'];stream=out['ninfer-stream'];st=out['strata']
+    cpu=out['ninfer-cpu'];stream=out['ninfer-hybrid'];st=out['strata']
     out['ratios']={
       'stream_over_cpu_prefill':stream['prefill_tps']['median']/cpu['prefill_tps']['median'],
       'stream_over_cpu_decode':stream['decode_tps']['median']/cpu['decode_tps']['median'],
@@ -176,9 +176,9 @@ def summary(rows):
       'strata_over_stream_decode':st['decode_tps']['median']/stream['decode_tps']['median']}
     out['timed_response_equal_by_run']={}
     for run in range(3):
-        pair=[x for x in rows if x['run']==run and x['engine'] in ('ninfer-cpu','ninfer-stream') and not x.get('diagnostic')]
+        pair=[x for x in rows if x['run']==run and x['engine'] in ('ninfer-cpu','ninfer-hybrid') and not x.get('diagnostic')]
         out['timed_response_equal_by_run'][str(run)]=len({x['response_sha256'] for x in pair})==1
-    out['cache_slots']={eng:sorted({x['cache_slots'] for x in rows if x['engine']==eng and x.get('cache_slots') is not None}) for eng in ('ninfer-cpu','ninfer-stream')}
+    out['cache_slots']={eng:sorted({x['cache_slots'] for x in rows if x['engine']==eng and x.get('cache_slots') is not None}) for eng in ('ninfer-cpu','ninfer-hybrid')}
     return out
 
 def main():
@@ -203,14 +203,14 @@ def main():
     s=summary(rows);(a.output/'summary.json').write_text(json.dumps(s,indent=2))
     lines=['NInfer decode-miss GPU streaming vs Strata-V100 same-host screen (MTP draft window 1)','',
       f"NInfer CPU misses prefill/decode: {s['ninfer-cpu']['prefill_tps']['median']:.2f} / {s['ninfer-cpu']['decode_tps']['median']:.2f} tok/s",
-      f"NInfer GPU-stream misses prefill/decode: {s['ninfer-stream']['prefill_tps']['median']:.2f} / {s['ninfer-stream']['decode_tps']['median']:.2f} tok/s",
+      f"NInfer hybrid misses prefill/decode: {s['ninfer-hybrid']['prefill_tps']['median']:.2f} / {s['ninfer-hybrid']['decode_tps']['median']:.2f} tok/s",
       f"Strata prefill/decode: {s['strata']['prefill_tps']['median']:.2f} / {s['strata']['decode_tps']['median']:.2f} tok/s",
       f"Stream/CPU prefill: {s['ratios']['stream_over_cpu_prefill']:.2f}x",
       f"Stream/CPU decode: {s['ratios']['stream_over_cpu_decode']:.2f}x",
       f"Strata/stream prefill: {s['ratios']['strata_over_stream_prefill']:.2f}x",
       f"Strata/stream decode: {s['ratios']['strata_over_stream_decode']:.2f}x",
-      f"NInfer cache slots CPU/stream: {s['cache_slots']['ninfer-cpu']} / {s['cache_slots']['ninfer-stream']}",
-      f"Timed CPU/stream response equality by run: {s['timed_response_equal_by_run']}",
-      '', 'Important: decode streaming changes miss execution from AVX2 CPU arithmetic to the existing GPU expert kernel. Generated-text equality is diagnostic; same-input numerical qualification is required before promotion. NInfer and Strata use different quantization/container formats.']
+      f"NInfer cache slots CPU/hybrid: {s['cache_slots']['ninfer-cpu']} / {s['cache_slots']['ninfer-hybrid']}",
+      f"Timed CPU/hybrid response equality by run: {s['timed_response_equal_by_run']}",
+      '', 'Important: hybrid decode streams only repeated miss experts; singleton misses remain on AVX2 CPU. Generated-text equality is diagnostic; same-input numerical qualification is required before promotion. NInfer and Strata use different quantization/container formats.']
     (a.output/'summary.txt').write_text('\n'.join(lines)+'\n');print('\n'.join(lines))
 if __name__=='__main__':main()

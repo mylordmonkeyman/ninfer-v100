@@ -98,8 +98,17 @@ int main() { try {
 #else
     setenv("NINFER_V100_DECODE_EXPERT_POLICY", "stream", 1);
 #endif
-    require(flash_next_decode_expert_stream_requested(),
+    require(flash_next_decode_expert_stream_requested() &&
+                flash_next_decode_expert_stream_min_routes() == 1,
             "decode stream policy was not enabled");
+#if defined(_WIN32)
+    _putenv_s("NINFER_V100_DECODE_EXPERT_POLICY", "hybrid");
+#else
+    setenv("NINFER_V100_DECODE_EXPERT_POLICY", "hybrid", 1);
+#endif
+    require(flash_next_decode_expert_stream_requested() &&
+                flash_next_decode_expert_stream_min_routes() == 2,
+            "decode hybrid policy was not enabled");
 #if defined(_WIN32)
     _putenv_s("NINFER_V100_DECODE_EXPERT_POLICY", "invalid");
 #else

@@ -4,6 +4,7 @@
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 [[nodiscard]] bool flash_next_expert_stream_requested();
 [[nodiscard]] bool flash_next_decode_expert_stream_requested();
+[[nodiscard]] unsigned flash_next_decode_expert_stream_min_routes();
 [[nodiscard]] std::size_t flash_next_expert_stream_device_bytes(unsigned maximum_routes);
 
 struct FlashNextStreamRoute {

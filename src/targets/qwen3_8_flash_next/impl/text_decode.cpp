@@ -576,7 +576,8 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                 nullptr
 #endif
                 , state.expert_cache, static_cast<unsigned>(layer), false,
-                state.expert_stream_decode ? state.expert_stream : nullptr
+                state.expert_stream_decode ? state.expert_stream : nullptr,
+                state.expert_stream_decode_min_routes
             );
         } else {
             flash_next_moe(round_ws.block_input, model.layers[layer].moe,

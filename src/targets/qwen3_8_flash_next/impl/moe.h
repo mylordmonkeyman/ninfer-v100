@@ -50,7 +50,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                                 const Tensor* shared_expert_input_fp32 = nullptr,
                                 Tensor* output_fp32 = nullptr,
                                 FlashNextExpertCache* cache = nullptr, unsigned layer = 0,
-                                bool prefill = false, FlashNextExpertStream* expert_stream = nullptr);
+                                bool prefill = false, FlashNextExpertStream* expert_stream = nullptr,
+                                unsigned expert_stream_min_routes = 1);
 
 void flash_next_moe_bf16(const Tensor& input, const MoeBf16Weights& weights, Tensor& output,
                          WorkspaceArena& workspace, cudaStream_t stream);
