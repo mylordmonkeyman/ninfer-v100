@@ -46,7 +46,7 @@ def run_ninfer(a,out,run,grouped,diagnostic=False):
     mode='grouped' if grouped else 'single'; p=port();base=f'http://127.0.0.1:{p}'; log=out/f'ninfer-{mode}-{run}{"-diag" if diagnostic else ""}.log'; reqlog=out/f'ninfer-{mode}-{run}{"-diag" if diagnostic else ""}-requests.jsonl'
     env=os.environ.copy(); env.update({
       'NINFER_V100_EXPERT_PROFILE':str(a.profile.resolve()),'NINFER_V100_EXPERT_POLICY':'static',
-      'NINFER_FLASH_NEXT_EXPERT_CACHE':'1','NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS':'64',
+      'NINFER_FLASH_NEXT_EXPERT_CACHE':'1','NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS':'512',
       'NINFER_FLASH_NEXT_EXPERT_CACHE_SERIAL':'0','NINFER_FLASH_NEXT_EXPERT_CACHE_PREFILL':'1',
       'NINFER_FLASH_NEXT_EXPERT_CACHE_BATCHED_DECODE':'0','NINFER_FLASH_NEXT_EXPERT_CACHE_GROUPED_PREFILL':'1',
       'NINFER_V100_DEVICE_ROUTE_COMBINE':'1','NINFER_V100_PREFILL_EXPERT_POLICY':'cpu-cache',
