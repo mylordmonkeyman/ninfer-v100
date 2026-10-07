@@ -13,6 +13,7 @@ env:
   CMAKE_BUILD_PARALLEL_LEVEL: 32
 jobs:
   hardware:
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[v100:') || contains(github.event.head_commit.message, '[v100:sv7-attention]')
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:
       group: v100-sv0-hardware

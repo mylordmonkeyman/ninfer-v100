@@ -1117,3 +1117,24 @@ T>=512, still requiring both explicit opt-in and the existing MMA flag.
 These are bounded attention-kernel timings on repeated represented contexts,
 not serving speedups, MTP evidence, or full-model/long-prefix qualification.
 BF16 and smaller batches retain SIMT. Existing numerical gates remain intact.
+
+
+Run `37555770421` at `e58e05ed` captured **both** target regression failures:
+SIMT control and experimental candidate each exit 1 with the identical T=2,
+index 32886 value-cache mismatch (`0xbeeb` sequential, `0xbeec` chunked),
+before attention output checks. This preserves the failed gate; it does not
+qualify the optimization. Independent FP64 attention checks still pass and
+the large FP8 timing crossover repeats.
+
+The next bounded screen uses the public HTTP engine with FP8 KV, a single
+large prompt chunk, fixed 64 expert slots per layer, prefix replay and MTP.
+An initial diagnostic pair must show actual large FP8 SIMT/MMA dispatch and
+exact matching greedy response signatures before any timing matrix starts.
+Telemetry is disabled for the three fresh-process timing observations per
+arm, with thermal sampling and unchanged response and MTP draft/accept-count
+checks. The component FP64 oracle now checks every output row at each timing
+batch size, including T=512 through 8192. A single serving workflow executes
+those checks and the screen sequentially; the component-only workflow skips
+that publication to avoid a redundant GPU run. This remains a bounded screen,
+with full-model independent long-prefix qualification outstanding: the
+existing single-token Phase 11 oracle cannot exercise the T>=512 dispatch.

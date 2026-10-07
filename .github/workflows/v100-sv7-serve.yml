@@ -1,0 +1,126 @@
+name: V100 SV7 Production FP8 QSA Scores
+on:
+  push:
+    branches: [perf/v100-strata-derived]
+    paths:
+      - '.github/workflows/v100-sv7-serve.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 32
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Run host diagnostic checks
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+            -s tools/diagnostics -p 'test_v100*.py'
+          git diff --check
+  hardware:
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[v100:') || contains(github.event.head_commit.message, '[v100:sv7-serve]')
+    needs: checks
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    concurrency:
+      group: v100-sv0-hardware
+      cancel-in-progress: false
+    timeout-minutes: 120
+    env:
+      CUDA_VISIBLE_DEVICES: '0'
+      NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+      NINFER_FLASH_NEXT_ORACLE_MANIFEST: /oracle/phase11/manifest.json
+      NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: '32'
+      NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND: auto
+      NINFER_FLASH_NEXT_FP32_HYPER_STATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_CONV: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_PROJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_READOUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_GATE: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_GDN_OUTPUT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_HYPER_INJECT_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INPUT: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_NORMALIZED: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_LOW_RANK: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_APPLY: '1'
+      NINFER_FLASH_NEXT_FP32_MLP_HYPER_INJECTION: '1'
+      NINFER_FLASH_NEXT_FP32_MOE_OUTPUT: '1'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_ROUTER_INPUT_LAYERS_32_47: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT: '0'
+      NINFER_FLASH_NEXT_FP32_MOE_SHARED_INPUT: '0'
+      NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE: '0'
+      NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          clean: false
+      - name: Prepare bounded production evidence
+        run: |
+          mkdir -p sv7-serve-results sv7-serve-source
+          find sv7-serve-results -mindepth 1 -delete
+          find sv7-serve-source -mindepth 1 -delete
+      - name: Download validated identity-bound resident profile
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: v100-sv2-37270512213-1
+          run-id: 37270512213
+          github-token: ${{ github.token }}
+          path: sv7-serve-source
+      - name: Build the production server once and check V100 headroom
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > sv7-serve-results/candidate-sha.txt
+          nvidia-smi -q > sv7-serve-results/gpu.txt
+          /usr/local/cuda-12.8/bin/nvcc --version > sv7-serve-results/cuda.txt
+          numactl --hardware > sv7-serve-results/numa.txt
+          sha256sum sv7-serve-source/sv2-static-profile.json \
+            > sv7-serve-results/profile-sha256.txt
+          test -f "$NINFER_WEIGHTS"
+          test -r "$NINFER_WEIGHTS"
+          ln -s "$NINFER_WEIGHTS" sv7-serve-source/model.ninfer
+          free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free \
+            --format=csv,noheader,nounits | tr -d '[:space:]')
+          if (( free_mib < 28000 )); then
+            echo '::error::V100 lacks test headroom; no unrelated workloads were stopped.'
+            exit 1
+          fi
+          cmake -S . -B build-sv6 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-sv6 --target ninfer-serve \
+            ninfer_qwen3_8_flash_next_perf_telemetry_test ninfer_volta_qsa_scores_test
+          build-sv6/tests/ninfer_qwen3_8_flash_next_perf_telemetry_test \
+            > sv7-serve-results/policy-telemetry.log
+      - name: Independent FP64 attention checks at production batch sizes
+        run: |
+          build-sv6/tests/ninfer_volta_qsa_scores_test 2>&1 | tee sv7-serve-results/attention-oracle.log
+      - name: Verify FP8 score dispatch and compare exact HTTP prefix/MTP behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/diagnostics/v100_sv2_serve.py \
+            --executable build-sv6/apps/ninfer-serve \
+            --artifact sv7-serve-source/model.ninfer \
+            --profile sv7-serve-source/sv2-static-profile.json \
+            --output sv7-serve-results --repeats 3 --qsa-score-screen
+          cat sv7-serve-results/report.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve production evidence including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-sv7-serve-${{ github.run_id }}-${{ github.run_attempt }}
+          path: sv7-serve-results/
+          retention-days: 30
+          if-no-files-found: warn

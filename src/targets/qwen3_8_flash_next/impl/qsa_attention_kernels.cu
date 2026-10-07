@@ -1,6 +1,7 @@
 #include "targets/qwen3_8_flash_next/impl/qsa_attention_kernels.h"
 
 #include "core/device.h"
+#include "targets/qwen3_8_flash_next/impl/perf_telemetry.h"
 #include "ninfer/ops/selected_block_attention.h"
 #include "ops/common/math.cuh"
 #include "ops/common/mma.cuh"
@@ -1123,9 +1124,14 @@ void flash_next_qsa_attention_prefill_launch(
 #if defined(NINFER_VOLTA_BUILD)
     const char* mode = std::getenv("NINFER_V100_QSA_SCORE_MMA");
     const bool experimental = mode != nullptr && std::strcmp(mode, "1") == 0;
+    const bool score_mma = use_mma && experimental && is_fp8 && tokens >= 512;
+    if (v100_perf_telemetry_enabled()) {
+        std::fprintf(stderr,
+            "{\"kind\":\"qsa_score_dispatch\",\"tokens\":%d,\"fp8\":%s,\"mma\":%s}\n",
+            tokens, is_fp8 ? "true" : "false", score_mma ? "true" : "false");
+    }
     flash_next_qsa_volta_attend_launch(scratch.query, token_indices, table_row,
-        selected_blocks, selected_counts, cache, scratch.attended, stream,
-        use_mma && experimental && is_fp8 && tokens >= 512);
+        selected_blocks, selected_counts, cache, scratch.attended, stream, score_mma);
 #else
     if (is_fp8) {
         if (use_mma) {

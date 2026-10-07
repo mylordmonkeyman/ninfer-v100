@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
-from v100_sv2_serve import run_server, validate_events, validate_handoff_peers
+from v100_sv2_serve import run_server, validate_events, validate_handoff_peers, validate_qsa_dispatch
 
 
 class ProductionEvidenceTest(unittest.TestCase):
@@ -21,6 +21,45 @@ class ProductionEvidenceTest(unittest.TestCase):
                    'speculative':{'backend':'mtp' if mtp else 'none','drafted_tokens':24 if mtp else 0}}
             responses.append(response);events.append(event)
         return events,responses
+
+    def test_qsa_dispatch_rejects_inactive_or_wrong_paths(self):
+        import json
+        rows=[dict(kind='qsa_score_dispatch',tokens=1227,fp8=True,mma=True),
+              dict(kind='qsa_score_dispatch',tokens=64,fp8=True,mma=False)]
+        encode=lambda values: '\n'.join(json.dumps(x) for x in values)
+        self.assertEqual(validate_qsa_dispatch(encode(rows),'score-mma'),rows)
+        with self.assertRaises(ValueError): validate_qsa_dispatch('', 'score-mma')
+        with self.assertRaises(ValueError): validate_qsa_dispatch(encode(rows[1:]), 'score-mma')
+        with self.assertRaises(ValueError): validate_qsa_dispatch(encode(rows), 'simt')
+        for field,value in [('fp8',False),('tokens',64),('mma',False)]:
+            changed=copy.deepcopy(rows);changed[0][field]=value
+            with self.assertRaises(ValueError): validate_qsa_dispatch(encode(changed),'score-mma')
+        rows[0]['mma']=False
+        self.assertEqual(validate_qsa_dispatch(encode(rows),'simt'),rows)
+
+    def test_qsa_screen_isolates_score_flag_and_uses_fp8_batch(self):
+        for mode,flag in (('simt','0'),('score-mma','1')):
+            with tempfile.TemporaryDirectory() as directory, \
+                    mock.patch('v100_sv2_serve.gpu_snapshot', return_value={
+                        'thermal_status_observed': True, 'thermal_throttled': False}), \
+                    mock.patch('v100_sv2_serve.subprocess.Popen') as popen, \
+                    mock.patch('v100_sv2_serve.request') as request_call, \
+                    mock.patch.dict('os.environ', {'NINFER_FLASH_NEXT_QSA_PREFILL_MMA':'0',
+                                                  'NINFER_V100_PLE_IO':'direct'}):
+                process=popen.return_value;process.poll.return_value=None
+                request_call.side_effect=[{'data':[{'id':'model'}]},RuntimeError('stop')]
+                output=Path(directory)
+                with self.assertRaisesRegex(RuntimeError,'stop'):
+                    run_server(Path('/bin/true'),output/'model.ninfer',output/'profile.json',
+                               output,mode,False,-1,qsa_score_screen=True,diagnostic=True)
+                command=popen.call_args.args[0];environment=popen.call_args.kwargs['env']
+                self.assertEqual(command[command.index('--kv-dtype')+1],'fp8')
+                self.assertEqual(command[command.index('--prefill-chunk')+1],'2048')
+                self.assertIn('--qsa-prefill-mma',command)
+                self.assertNotIn('NINFER_FLASH_NEXT_QSA_PREFILL_MMA',environment)
+                self.assertEqual(environment['NINFER_V100_QSA_SCORE_MMA'],flag)
+                self.assertEqual(environment['NINFER_V100_TELEMETRY'],'1')
+                self.assertEqual(environment['NINFER_V100_PLE_IO'],'mmap')
 
     def test_large_prefill_screen_requires_actual_prompt_extent(self):
         events,responses=self.fixtures(False)

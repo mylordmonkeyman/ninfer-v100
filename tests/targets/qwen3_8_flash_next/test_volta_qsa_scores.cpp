@@ -123,6 +123,28 @@ int main() {
                             CUDA_CHECK(cudaEventRecord(b,device.stream));CUDA_CHECK(cudaEventSynchronize(b));
                             float ms;CUDA_CHECK(cudaEventElapsedTime(&ms,a,b));
                             std::cout<<"Score-path timing fp8="<<fp8<<" T="<<batch<<" mma="<<mma<<" us="<<ms*1000/iterations<<'\n';
+                            // Every represented input repeats an independently computed FP64
+                            // case. Check ALL rows, including the production crossover sizes.
+                            std::vector<std::uint16_t> batch_actual(batch_q.size());
+                            bo.copy_to_host(batch_actual.data(),bo.bytes);
+                            double squared=0,norm=0;
+                            for (std::size_t i=0;i<batch_actual.size();++i) {
+                                const double expected=value(bf(float(reference[i%reference.size()])));
+                                const double actual=value(batch_actual[i]);
+                                const double diff=actual-expected;
+                                if (!std::isfinite(actual)) throw std::runtime_error("nonfinite batched attended value");
+                                squared+=diff*diff;norm+=expected*expected;
+                            }
+                            double maximum=0;
+                            for(double x:reference)maximum=std::max(maximum,std::abs(x));
+                            for(std::size_t i=0;i<batch_actual.size();++i) {
+                                const double expected=value(bf(float(reference[i%reference.size()])));
+                                if(std::abs(value(batch_actual[i])-expected)>1e-3*maximum+1e-2*std::abs(expected))
+                                    throw std::runtime_error("batched QSA independent pointwise threshold failed");
+                            }
+                            const double relative=std::sqrt(squared/norm);
+                            std::cout<<"Batch FP64 oracle fp8="<<fp8<<" T="<<batch<<" mma="<<mma<<" relative_l2="<<relative<<'\n';
+                            if(relative>1e-3)throw std::runtime_error("batched QSA independent oracle threshold failed");
                         }
                     }
                     CUDA_CHECK(cudaEventDestroy(a));CUDA_CHECK(cudaEventDestroy(b));

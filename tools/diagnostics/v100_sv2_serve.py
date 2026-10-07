@@ -77,9 +77,27 @@ def validate_handoff_peers(peers):
         raise ValueError('route handoff changed MTP draft/accept counts')
 
 
+def validate_qsa_dispatch(text, mode):
+    if mode not in ('simt','score-mma'):
+        raise ValueError('unknown QSA score mode')
+    records=[]
+    for line in text.splitlines():
+        try: row=json.loads(line)
+        except json.JSONDecodeError: continue
+        if row.get('kind')=='qsa_score_dispatch': records.append(row)
+    large=[row for row in records if row.get('tokens',0)>=512]
+    if not large or any(not row.get('fp8') for row in records):
+        raise ValueError('missing actual large FP8 QSA prefill dispatch')
+    if any(row.get('mma') != (mode=='score-mma') for row in large):
+        raise ValueError('QSA dispatch did not use the requested score path')
+    if any(row.get('mma') and row.get('tokens',0)<512 for row in records):
+        raise ValueError('QSA MMA escaped the measured batch range')
+    return records
+
+
 def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                prefill_screen=False, cpu_group_screen=False, route_handoff_screen=False,
-               route_handoff_policy="all"):
+               route_handoff_policy="all", qsa_score_screen=False, diagnostic=False):
     name = f'{mode}-mtp{int(mtp)}-{repeat}'
     log_path, request_path = output/f'{name}.log', output/f'{name}-requests.jsonl'
     env = os.environ.copy()
@@ -87,9 +105,12 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
         if (key.startswith('NINFER_PHASE') or key.startswith('NINFER_V100_EXPERT_') or
                 key.startswith('NINFER_V100_PREFILL_') or
                 key.startswith('NINFER_V100_CPU_EXPERT_GROUP') or
-                key.startswith('NINFER_V100_ROUTE_HANDOFF')):
+                key.startswith('NINFER_V100_ROUTE_HANDOFF') or
+                key.startswith('NINFER_V100_QSA_SCORE_') or
+                key.startswith('NINFER_V100_PLE_') or
+                key == 'NINFER_FLASH_NEXT_QSA_PREFILL_MMA'):
             env.pop(key)
-    large_prefill = prefill_screen or cpu_group_screen or route_handoff_screen
+    large_prefill = prefill_screen or cpu_group_screen or route_handoff_screen or qsa_score_screen
     env.update(NINFER_V100_ROUTE_HANDOFF=('prefill' if route_handoff_policy == 'prefill' else '1')
                if route_handoff_screen and mode == 'handoff' else '0',
                NINFER_V100_DEVICE_ROUTE_COMBINE='1' if large_prefill or mode == 'device' else '0',
@@ -100,7 +121,9 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                NINFER_FLASH_NEXT_EXPERT_CACHE_SERIAL='0',NINFER_FLASH_NEXT_EXPERT_CACHE_PREFILL='1',
                NINFER_FLASH_NEXT_EXPERT_CACHE_BATCHED_DECODE='0',
                NINFER_FLASH_NEXT_EXPERT_CACHE_GROUPED_PREFILL='1',
-               NINFER_V100_TELEMETRY='0',NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING='0',
+               NINFER_V100_TELEMETRY='1' if diagnostic else '0',NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING='0',
+               NINFER_V100_QSA_SCORE_MMA='1' if qsa_score_screen and mode=='score-mma' else '0',
+               NINFER_V100_PLE_IO='mmap',
                NINFER_FLASH_NEXT_STAGE_LEDGER='0',NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT='0',
                NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE='0')
     # Bind only a loopback port. The subprocess is the only process this tool stops.
@@ -109,10 +132,10 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
     # Preserve the .ninfer alias: resolve() would strip the suffix of the mounted file.
     command=[str(executable.resolve()),str(artifact.absolute()),'--host','127.0.0.1',
              '--port',str(port),'--max-context','4096','--kv-capacity','4096',
-             '--max-concurrency','1','--prefill-chunk','2048' if large_prefill else '128','--kv-dtype','bf16',
+             '--max-concurrency','1','--prefill-chunk','2048' if large_prefill else '128','--kv-dtype','fp8' if qsa_score_screen else 'bf16',
              '--device-state-slots','2','--host-state-slots','2','--host-kv-mib','256',
              '--max-private-continuations','2','--max-shared-prefixes','2',
-             '--no-cuda-graph','--no-qsa-prefill-mma','--no-thinking',
+             '--no-cuda-graph','--qsa-prefill-mma' if qsa_score_screen else '--no-qsa-prefill-mma','--no-thinking',
              '--request-log-jsonl',str(request_path)]
     if mtp:
         command += ['--spec','mtp','--draft-tokens','3','--lm-head-draft']
@@ -170,6 +193,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
     events=[json.loads(line) for line in request_path.read_text().splitlines() if line.strip()]
     done=validate_events(events,responses,mtp,large_prefill)
     text=log_path.read_text()
+    dispatch=validate_qsa_dispatch(text,mode) if qsa_score_screen and diagnostic else None
     slots=re.findall(r'phase13.cache.slots_per_layer=(\d+)',text)
     size=re.findall(r'phase13.cache.bytes=(\d+)',text)
     seeded=re.findall(r'v100.profile.seeded=(\d+)',text)
@@ -180,7 +204,8 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
     startup=[e for e in events if e.get('event')=='server_start']
     if len(startup)!=1 or not startup[0]['engine']['prefix_reuse']:
         raise ValueError('missing production Engine/prefix capability record')
-    result=dict(name=name,mode=mode,mtp=mtp,repeat=repeat,cache_slots_per_layer=64,
+    result=dict(name=name,mode=mode,mtp=mtp,repeat=repeat,diagnostic=diagnostic,
+                qsa_dispatch=dispatch,cache_slots_per_layer=64,
                 cache_bytes=int(size[0]),startup=startup[0],requests=done,
                 response_signatures=[response_signature(r) for r in responses])
     print(f'{name}: production prefix/continuation and drafting checks passed',flush=True)
@@ -201,35 +226,48 @@ def main():
                         help='compare serial/route-ready with grouping enabled in both arms')
     parser.add_argument('--route-handoff-policy',choices=('all','prefill'),default='all',
                         help='phase eligibility for the route-ready candidate; serial control remains off')
+    parser.add_argument('--qsa-score-screen',action='store_true',
+                        help='compare SIMT/MMA FP8 KV scores with actual large dispatch evidence')
     parser.add_argument('--repeats',type=int,default=3)
     args=parser.parse_args()
     if args.artifact.suffix != '.ninfer' or not args.artifact.is_file():
         parser.error('--artifact requires an explicit readable .ninfer file')
-    if sum((args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen)) > 1:
+    if sum((args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,args.qsa_score_screen)) > 1:
         parser.error('performance screen flags are mutually exclusive')
     if args.repeats<3: parser.error('need three fresh-process observations per arm')
     args.output.mkdir(parents=True,exist_ok=True)
     profile=json.loads(args.profile.read_text())
     if profile['magic']!='NINFER_V100_EXPERT_PROFILE' or profile['version']!=2:
         raise ValueError('need identity-bound fixed profile')
-    if args.route_handoff_screen:
+    if args.qsa_score_screen:
+        modes=('simt','score-mma')
+    elif args.route_handoff_screen:
         modes=('serial','handoff')
     elif args.cpu_group_screen:
         modes=('single','grouped')
     else:
         modes=('cpu-cache','stream') if args.prefill_screen else ('legacy','device')
     observations=[]
+    if args.qsa_score_screen:
+        # Stop at the first dispatch/response failure before starting timing or MTP.
+        diagnostics=[]
+        for mode in modes:
+            row=run_server(args.executable,args.artifact,args.profile,args.output,mode,False,
+                           -1,qsa_score_screen=True,diagnostic=True)
+            diagnostics.append(row);atomic_json(args.output/'dispatch-observations.json',diagnostics)
+            if row['response_signatures']!=diagnostics[0]['response_signatures']:
+                raise ValueError('QSA diagnostic changed exact greedy response or finish accounting')
     for repeat in range(args.repeats):
         for mtp in (False,True):
             for mode in (modes if repeat%2==0 else tuple(reversed(modes))):
                 row=run_server(args.executable,args.artifact,args.profile,args.output,mode,mtp,
                                repeat,args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,
-                               args.route_handoff_policy)
+                               args.route_handoff_policy,qsa_score_screen=args.qsa_score_screen)
                 observations.append(row); atomic_json(args.output/'observations.json',observations)
                 peers=[r for r in observations if r['mtp']==mtp]
                 if any(r['response_signatures']!=peers[0]['response_signatures'] for r in peers):
                     raise ValueError('cross-path greedy production response or finish accounting differs')
-                if args.route_handoff_screen:
+                if args.route_handoff_screen or args.qsa_score_screen:
                     validate_handoff_peers(peers)
                 if len({r['cache_bytes'] for r in peers})!=1:
                     raise ValueError('production cache capacity differs between paths')
@@ -245,7 +283,9 @@ def main():
                 prefill=[tokens/r['requests'][index]['timings_seconds']['prefill']
                          if r['requests'][index]['timings_seconds']['prefill']>0 else 0
                          for tokens,r in zip(fresh,rows)]
+                ttft=[r['requests'][index]['timings_seconds']['ttft'] for r in rows]
                 results.append(dict(mode=mode,mtp=mtp,request=label,
+                    ttft_seconds_median=statistics.median(ttft),ttft_seconds_min=min(ttft),ttft_seconds_max=max(ttft),
                     prefill_tokens_per_s_median=statistics.median(prefill),
                     fresh_prompt_tokens=fresh,decode_tokens_per_s_median=statistics.median(values),
                     minimum=min(values),maximum=max(values),process_observations=len(rows)))
@@ -255,23 +295,27 @@ def main():
            ('production_http_grouped_cpu_prefix_mtp_screen' if args.cpu_group_screen else
             ('production_http_prefill_prefix_mtp_screen' if args.prefill_screen else
              'production_http_prefix_mtp_screen')))
+    if args.qsa_score_screen:
+        milestone='SV7';scope='production_http_fp8_qsa_score_prefix_mtp_screen'
     report=dict(schema=1,milestone=milestone,scope=scope,qualified=False,
                 route_handoff_policy=args.route_handoff_policy if args.route_handoff_screen else None,
                 candidate_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),results=results,
                 exact_compared_responses=True,limitations=[
-                    'fixed 64 slots per layer, BF16 KV, one active request, short 4096 context',
+                    f'fixed 64 slots per layer, {"FP8" if args.qsa_score_screen else "BF16"} KV, one active request, short 4096 context',
                     'small two-turn corpus; no concurrent cancellation, long context, vision or full production matrix',
                     'MTP drafting required; acceptance counts retained, no minimum acceptance coefficient imposed',
                     'no independent oracle thresholds changed; accepted baseline numerical failure remains separate'] +
                     (['grouped CPU experts remain opt-in; no concurrent-request matrix in this screen']
                      if args.cpu_group_screen else []) +
                     (['route handoff remains opt-in; both arms use grouped CPU experts; no concurrent-request matrix']
-                     if args.route_handoff_screen else []))
+                     if args.route_handoff_screen else []) +
+                    (['attention remains opt-in; dispatch diagnostics are excluded from timing; full-model independent long-prefix gate outstanding']
+                     if args.qsa_score_screen else []))
     atomic_json(args.output/'report.json',report)
     lines=['Production HTTP prefill/prefix/MTP screen; defaults unchanged.','',
-           '| Mode | MTP | Request | Prefill t/s median | Decode t/s median (range) |','|---|---|---|---:|---:|']
+           '| Mode | MTP | Request | TTFT s median (range) | Prefill t/s median | Decode t/s median (range) |','|---|---|---|---:|---:|---:|']
     for r in results:
-        lines.append(f"| {r['mode']} | {r['mtp']} | {r['request']} | {r['prefill_tokens_per_s_median']:.3f} | {r['decode_tokens_per_s_median']:.3f} ({r['minimum']:.3f}–{r['maximum']:.3f}) |")
+        lines.append(f"| {r['mode']} | {r['mtp']} | {r['request']} | {r['ttft_seconds_median']:.3f} ({r['ttft_seconds_min']:.3f}–{r['ttft_seconds_max']:.3f}) | {r['prefill_tokens_per_s_median']:.3f} | {r['decode_tokens_per_s_median']:.3f} ({r['minimum']:.3f}–{r['maximum']:.3f}) |")
     (args.output/'report.txt').write_text('\n'.join(lines)+'\n'); print('\n'.join(lines))
 
 
