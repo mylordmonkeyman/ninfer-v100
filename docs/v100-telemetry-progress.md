@@ -292,3 +292,24 @@ report CLI. Native caller host compilation is required in the hosted check.
 All 31 telemetry and 58 diagnostic Python checks pass locally (89 total).
 Prompt MTP prefill/history setup, alternative proposal costs, request/output
 boundaries and GPU intervals/launch accounting still require implementation.
+
+## First consolidated V100 qualification prepared
+
+Hosted run `37702676945` passed both jobs for NInfer `fe4be8e1` and frozen Strata
+`204c7589`, including all 89 Python checks, CPU fixtures and actual caller host
+compilation. The draft-cost implementation is software-validated.
+
+The dispatch-only `v100-strata-compare.yml` now builds both engines once and
+runs known-work GPU fixtures followed by an alternating level 0/1/2 matrix with
+two warmups and three measured requests per cell. It preserves the installed
+Strata baseline and records observer request/output boundaries, native telemetry
+and 200 ms system samples. Exact HTTP output fidelity and level-1 HTTP overhead
+are checked within each engine. This first hardware gate deliberately retains
+explicit missing native request IDs, teacher-forced full input traces and GPU
+substage attribution; it is not the comprehensive comparison or an optimization
+qualification. See `v100-first-qualification.md` for frozen settings and limits.
+All 35 telemetry/harness and 58 diagnostic Python checks pass locally (93 total).
+The harness integration fixture starts actual local HTTP servers, exercises both
+engines' distinct native log paths at levels 0/2, verifies observer boundaries
+and preserves fixed payloads. It caught and resolved the empty level-0 telemetry
+parser case before hardware use. YAML and dispatch-only/concurrency checks pass.

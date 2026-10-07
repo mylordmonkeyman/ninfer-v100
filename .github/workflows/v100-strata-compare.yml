@@ -1,4 +1,4 @@
-name: V100 NInfer vs Strata Comparison
+name: V100 Telemetry First Hardware Qualification
 on:
   workflow_dispatch:
 permissions:
@@ -7,23 +7,12 @@ permissions:
 env:
   CMAKE_BUILD_PARALLEL_LEVEL: 32
 jobs:
-  checks:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          persist-credentials: false
-      - run: |
-          python3 -m py_compile tools/diagnostics/v100_strata_compare.py tools/diagnostics/v100_decode_stream_compare.py tools/diagnostics/v100_decode_fraction_compare.py tools/diagnostics/v100_cpu_worker_compare.py tools/diagnostics/v100_cpu_worker_warm_compare.py
-          git diff --check
   hardware:
-    needs: checks
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:
       group: v100-sv0-hardware
       cancel-in-progress: false
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       CUDA_VISIBLE_DEVICES: '0'
       NINFER_WEIGHTS: /models/qwen3-8b-flash-next
@@ -32,88 +21,95 @@ jobs:
         with:
           persist-credentials: false
           clean: false
-      - name: Check V100 headroom and existing Strata assets
+      - name: Freeze environment and check existing assets
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p strata-compare-results strata-compare-source
-          find strata-compare-results -mindepth 1 -delete
-          find strata-compare-source -mindepth 1 -delete
+          results="$GITHUB_WORKSPACE/telemetry-qualification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir "$results"
+          echo "QUALIFICATION_RESULTS=$results" >> "$GITHUB_ENV"
           free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits | tr -d '[:space:]')
           if (( free_mib < 28000 )); then
-            echo "::error::V100 is busy ($free_mib MiB free); no unrelated process was stopped."
+            echo "::error::V100 is occupied ($free_mib MiB free); no unrelated process was stopped."
             exit 1
           fi
           test -r "$NINFER_WEIGHTS"
-          strata_root=''
-          for root in /opt/ai/strata /srv/Strata-V100; do
-            config="$root/strata-unsloth-ud-q4_k_xl.json"
-            if [[ -x "$root/.venv/bin/python" && -r "$root/serve/server.py" && -r "$config" ]]; then
-              strata_root="$root"; break
-            fi
-          done
-          if [[ -z "$strata_root" ]]; then
-            echo 'Visible candidate model/runtime assets:'
-            find /models /var/lib/llama /opt/ai /srv -maxdepth 4 -type f \
-              \( -iname '*Flash-Next*' -o -iname '*q4*k*xl*' -o -name 'server.py' -o -name 'strata' \) \
-              -print 2>/dev/null | head -200 || true
-            echo 'Local Strata files are absent; probing host llama-swap without loading a model.'
-            for endpoint in http://127.0.0.1:9292 http://127.0.0.1:8080; do
-              echo "PROBE $endpoint"
-              curl -fsS --max-time 3 "$endpoint/v1/models" || true
-              echo
-            done
-            echo '::error::Existing Strata install/config is not visible in this runner namespace.'
-            exit 1
-          fi
-          echo "STRATA_ROOT=$strata_root" >> "$GITHUB_ENV"
-          echo "STRATA_CONFIG=$strata_root/strata-unsloth-ud-q4_k_xl.json" >> "$GITHUB_ENV"
-          test -r "$strata_root/data/expert-profile.bin"
-          git rev-parse HEAD > strata-compare-results/ninfer-sha.txt
-          git -c safe.directory="$strata_root" -C "$strata_root" rev-parse HEAD > strata-compare-results/strata-sha.txt
-          sha256sum "$strata_root/strata-unsloth-ud-q4_k_xl.json" > strata-compare-results/strata-config-sha256.txt
-          nvidia-smi -q > strata-compare-results/gpu.txt
-          /usr/local/cuda-12.8/bin/nvcc --version > strata-compare-results/cuda.txt
-          numactl --hardware > strata-compare-results/numa.txt
-      - name: Download validated NInfer resident profile
+          test -x /opt/ai/strata/.venv/bin/python
+          test -r /opt/ai/strata/strata-unsloth-ud-q4_k_xl.json
+          installed_sha=$(git -c safe.directory=/opt/ai/strata -C /opt/ai/strata rev-parse HEAD)
+          test "$installed_sha" = ad5206fba4914b4ab0ffb5e1d17bae4cd77ba778
+          git rev-parse HEAD > "$results/ninfer-sha.txt"
+          echo "$installed_sha" > "$results/installed-strata-sha.txt"
+          cp /opt/ai/strata/strata-unsloth-ud-q4_k_xl.json "$results/installed-strata-config.json"
+          sha256sum /opt/ai/strata/strata-unsloth-ud-q4_k_xl.json > "$results/installed-strata-config.sha256"
+          stat "$NINFER_WEIGHTS" > "$results/ninfer-model-stat.txt"
+          nvidia-smi -q > "$results/gpu.txt"
+          numactl --hardware > "$results/numa.txt"
+          lscpu > "$results/cpu.txt"
+          /usr/local/cuda-12.8/bin/nvcc --version > "$results/cuda.txt"
+          nvidia-smi --id=0 --query-gpu=uuid --format=csv,noheader | tr -d '[:space:]' > "$results/gpu-uuid.txt"
+      - name: Check out frozen instrumented Strata without changing installed baseline
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: mylordmonkeyman/Strata-V100
+          ref: 204c758935fc70020ee272f56c3c60d5890aa6c3
+          path: telemetry-strata-source
+          persist-credentials: false
+      - name: Download existing validated resident profile
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: v100-sv2-37270512213-1
           run-id: 37270512213
           github-token: ${{ github.token }}
-          path: strata-compare-source
-      - name: Build current NInfer server
+          path: telemetry-profile-source
+      - name: Build both frozen engines once
         shell: bash
         run: |
           set -euo pipefail
-          ln -s "$NINFER_WEIGHTS" strata-compare-source/model.ninfer
-          cmake -S . -B build-strata-compare -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
-            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
-            -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-strata-compare --target \
-            ninfer_qwen3_8_flash_next_expert_stream_test ninfer-serve
-          build-strata-compare/tests/ninfer_qwen3_8_flash_next_expert_stream_test \
-            | tee strata-compare-results/expert-stream-test.log
-      - name: Run alternating same-host comparison
+          git -C telemetry-strata-source rev-parse HEAD > "$QUALIFICATION_RESULTS/strata-sha.txt"
+          cmp docs/v100-cross-engine-telemetry-spec.md telemetry-strata-source/docs/v100-cross-engine-telemetry-spec.md
+          cmake -S . -B build-telemetry-qualification -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-telemetry-qualification --target ninfer-serve \
+            ninfer_qwen3_8_flash_next_expert_cache_test ninfer_qwen3_8_flash_next_expert_stream_test
+          cmake -S telemetry-strata-source -B build-strata-telemetry-qualification -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70
+          cmake --build build-strata-telemetry-qualification --target strata
+          cp build-telemetry-qualification/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
+          cp build-strata-telemetry-qualification/CMakeCache.txt "$QUALIFICATION_RESULTS/strata-CMakeCache.txt"
+      - name: Validate known GPU expert work before loading full models
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/diagnostics/v100_cpu_worker_warm_compare.py \
-            --ninfer build-strata-compare/apps/ninfer-serve \
-            --artifact strata-compare-source/model.ninfer \
-            --profile strata-compare-source/sv2-static-profile.json \
-            --strata-python "$STRATA_ROOT/.venv/bin/python" \
-            --strata-server "$STRATA_ROOT/serve/server.py" \
-            --strata-config "$STRATA_CONFIG" \
-            --strata-profile "$STRATA_ROOT/data/expert-profile.bin" \
-            --output strata-compare-results --repeats 1
-          cat strata-compare-results/summary.txt >> "$GITHUB_STEP_SUMMARY"
-      - name: Preserve comparison evidence
+          for level in 0 1 2; do
+            for fixture in expert_cache expert_stream; do
+              V100_COMPARE_TELEMETRY_LEVEL="$level" V100_COMPARE_RUN_ID="fixture-${fixture}-l${level}" \
+                "build-telemetry-qualification/tests/ninfer_qwen3_8_flash_next_${fixture}_test" \
+                > "$QUALIFICATION_RESULTS/${fixture}-l${level}.log" 2>&1
+            done
+          done
+      - name: Qualify native outputs and telemetry overhead in one sequential matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/telemetry/qualify_v100.py \
+            --ninfer build-telemetry-qualification/apps/ninfer-serve \
+            --artifact "$NINFER_WEIGHTS" --profile telemetry-profile-source/sv2-static-profile.json \
+            --strata-python /opt/ai/strata/.venv/bin/python \
+            --strata-server telemetry-strata-source/serve/server.py \
+            --strata-config /opt/ai/strata/strata-unsloth-ud-q4_k_xl.json \
+            --strata-binary build-strata-telemetry-qualification/strata \
+            --gpu-uuid "$(cat "$QUALIFICATION_RESULTS/gpu-uuid.txt")" \
+            --output "$QUALIFICATION_RESULTS/matrix" --warmups 2 --repeats 3 \
+            > "$QUALIFICATION_RESULTS/matrix-summary.log" 2>&1
+          cat "$QUALIFICATION_RESULTS/matrix-summary.log" >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve all evidence including partial failures
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: v100-strata-compare-${{ github.run_id }}-${{ github.run_attempt }}
-          path: strata-compare-results/
+          name: v100-telemetry-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: telemetry-qualification-${{ github.run_id }}-${{ github.run_attempt }}/
           retention-days: 30
           if-no-files-found: warn
