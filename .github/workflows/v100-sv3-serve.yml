@@ -1,13 +1,5 @@
 name: V100 SV3 Production Cached Prefill
 on:
-  push:
-    branches: [perf/v100-strata-derived]
-    paths:
-      - '.github/workflows/v100-sv3-serve.yml'
-      - 'tools/diagnostics/v100_sv2_serve.py'
-      - 'tools/diagnostics/test_v100_sv2_serve.py'
-      - 'src/targets/qwen3_8_flash_next/impl/program.cpp'
-      - 'src/targets/qwen3_8_flash_next/impl/moe.cpp'
   workflow_dispatch:
 permissions:
   contents: read
@@ -26,7 +18,6 @@ jobs:
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/diagnostics -p 'test_v100*.py'
   hardware:
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[v100:') || contains(github.event.head_commit.message, '[v100:sv3-serve]')
     needs: checks
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:

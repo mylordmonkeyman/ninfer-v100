@@ -1,22 +1,5 @@
 name: V100 SV0 Baseline and Observability
 on:
-  push:
-    branches: [perf/v100-strata-derived]
-    paths:
-      - '.github/workflows/v100-sv0.yml'
-      - 'src/ops/linear/bf16/bf16_telemetry*'
-      - 'src/targets/qwen3_8_flash_next/impl/perf_telemetry.h'
-      - 'src/targets/qwen3_8_flash_next/impl/expert_cache*'
-      - 'src/targets/qwen3_8_flash_next/impl/expert_heat.h'
-      - 'src/targets/qwen3_8_flash_next/impl/expert_profile.h'
-      - 'src/targets/qwen3_8_flash_next/impl/load/**'
-      - 'src/targets/qwen3_8_flash_next/impl/runtime_state.cpp'
-      - 'tests/targets/qwen3_8_flash_next/test_expert_profile.cpp'
-      - 'tests/targets/qwen3_8_flash_next/test_expert_cache.cpp'
-      - 'tests/targets/qwen3_8_flash_next/test_expert_heat.cpp'
-      - 'src/targets/qwen3_8_flash_next/impl/text_executor*'
-      - 'tests/targets/qwen3_8_flash_next/test_text_executor.cpp'
-      - 'tools/diagnostics/v100_sv0*'
   workflow_dispatch:
 permissions:
   contents: read
@@ -41,7 +24,6 @@ jobs:
             "/tmp/sv0-${test}"
           done
   hardware:
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[v100:') || contains(github.event.head_commit.message, '[v100:sv0]')
     needs: checks
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:

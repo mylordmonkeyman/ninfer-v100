@@ -1,14 +1,11 @@
 name: V100 27B HTTP Smoke
 on:
-  push:
-    branches: [forwardport/v100-flash-next]
-    paths: ['.github/workflows/v100-27b-http-smoke.yml']
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
   group: v100-27b-http-smoke
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   serve:
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]

@@ -1,25 +1,5 @@
 name: V100 SV6 Queued PLE I/O
 on:
-  push:
-    branches: [perf/v100-strata-derived]
-    paths:
-      - '.github/workflows/v100-sv6.yml'
-      - 'src/artifact/materializer.*'
-      - 'src/artifact/reader.*'
-      - 'src/targets/qwen3_8_flash_next/impl/load/materialized.cpp'
-      - 'src/targets/qwen3_8_flash_next/CMakeLists.txt'
-      - 'src/targets/qwen3_8_flash_next/impl/perf_telemetry.h'
-      - 'src/targets/qwen3_8_flash_next/impl/ple_*'
-      - 'src/targets/qwen3_8_flash_next/impl/text_decode.*'
-      - 'src/targets/qwen3_8_flash_next/impl/text_executor.cpp'
-      - 'tests/targets/qwen3_8_flash_next/test_ple_pipeline.cpp'
-      - 'tests/targets/qwen3_8_flash_next/test_ple_read_batch.cpp'
-      - 'tests/targets/qwen3_8_flash_next/test_ple_direct_io.cpp'
-      - 'tests/CMakeLists.txt'
-      - 'tests/test_ninfer_artifact_reader.cpp'
-      - 'tools/diagnostics/v100_sv6_runtime.py'
-      - 'tools/diagnostics/test_v100_sv6_runtime.py'
-      - 'docs/maintainer/v100-strata-performance.md'
   workflow_dispatch:
 permissions:
   contents: read
@@ -52,7 +32,6 @@ jobs:
             -s tools/diagnostics -p 'test_v100*.py'
           git diff --check
   hardware:
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[v100:') || contains(github.event.head_commit.message, '[v100:sv6]')
     needs: checks
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:

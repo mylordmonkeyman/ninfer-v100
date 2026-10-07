@@ -1,17 +1,12 @@
 name: V100 Qwen36 NVFP4 Recheck
 on:
-  push:
-    branches: [forwardport/v100-flash-next]
-    paths:
-      - '.github/workflows/v100-qwen36-nvfp4-recheck.yml'
-      - 'src/ops/linear/nvfp4/nvfp4_codec.cuh'
   workflow_dispatch:
 permissions:
   contents: read
   actions: read
 concurrency:
   group: v100-qwen36-nvfp4-recheck
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   real-model:
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]

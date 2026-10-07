@@ -1,18 +1,12 @@
 name: V100 Qwen Model Matrix
 on:
-  push:
-    branches: [forwardport/v100-flash-next]
-    paths:
-      - '.github/workflows/v100-qwen-model-matrix.yml'
-      - 'tools/validation/download_qwen_qualification.py'
-      - 'tools/validation/compare_v100_qwen_parity.py'
   workflow_dispatch:
 permissions:
   contents: read
   actions: read
 concurrency:
   group: v100-qwen-model-matrix
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   real-model:
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]

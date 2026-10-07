@@ -1,9 +1,5 @@
 name: V100 SV7 Real QSA Arithmetic Attribution
 on:
-  push:
-    branches: [perf/v100-strata-derived]
-    paths:
-      - '.github/workflows/v100-sv7-attribution.yml'
   workflow_dispatch:
 permissions:
   contents: read
@@ -24,7 +20,6 @@ jobs:
             -s tools/diagnostics -p 'test_v100*.py'
           git diff --check
   hardware:
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[v100:') || contains(github.event.head_commit.message, '[v100:sv7-attribution]')
     needs: checks
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:

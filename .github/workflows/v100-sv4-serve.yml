@@ -1,15 +1,5 @@
 name: V100 SV4 Production Grouped CPU Experts
 on:
-  push:
-    branches: [perf/v100-strata-derived]
-    paths:
-      - '.github/workflows/v100-sv4-serve.yml'
-      - 'tools/diagnostics/v100_sv2_serve.py'
-      - 'tools/diagnostics/test_v100_sv2_serve.py'
-      - 'src/targets/qwen3_8_flash_next/impl/cpu_expert_*'
-      - 'src/targets/qwen3_8_flash_next/impl/moe.*'
-      - 'tests/targets/qwen3_8_flash_next/test_cpu_expert_group.cpp'
-      - 'docs/maintainer/v100-strata-performance.md'
   workflow_dispatch:
 permissions:
   contents: read
@@ -30,7 +20,6 @@ jobs:
             -s tools/diagnostics -p 'test_v100*.py'
           git diff --check
   hardware:
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[v100:') || contains(github.event.head_commit.message, '[v100:sv4-serve]')
     needs: checks
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:

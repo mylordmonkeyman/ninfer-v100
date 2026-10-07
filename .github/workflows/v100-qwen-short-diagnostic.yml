@@ -1,19 +1,12 @@
 name: V100 Qwen Short Prompt Diagnostic
 on:
-  push:
-    branches: [forwardport/v100-flash-next]
-    paths:
-      - '.github/workflows/v100-qwen-short-diagnostic.yml'
-      - 'tools/validation/v100_qwen_short_probe.cpp'
-      - 'tools/validation/v100_real_splitk_oracle.h'
-      - 'tools/validation/v100_ordered_splitk_reference.patch'
   workflow_dispatch:
 permissions:
   contents: read
 # Prioritize the accuracy blocker over further peer-model qualification.
 concurrency:
   group: v100-qwen-model-matrix
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   diagnose:
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]

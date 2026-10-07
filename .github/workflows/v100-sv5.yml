@@ -1,18 +1,5 @@
 name: V100 SV5 Route Ready Handoff
 on:
-  push:
-    branches: [perf/v100-strata-derived]
-    paths:
-      - '.github/workflows/v100-sv5.yml'
-      - 'src/targets/qwen3_8_flash_next/impl/route_handoff.h'
-      - 'src/targets/qwen3_8_flash_next/impl/moe.*'
-      - 'src/targets/qwen3_8_flash_next/impl/perf_telemetry.h'
-      - 'tests/targets/qwen3_8_flash_next/test_route_handoff.cu'
-      - 'tests/targets/qwen3_8_flash_next/test_vertical_slice_real.cpp'
-      - 'tools/diagnostics/v100_sv4_runtime.py'
-      - 'tools/diagnostics/test_v100_sv4_runtime.py'
-      - 'tests/CMakeLists.txt'
-      - 'docs/maintainer/v100-strata-performance.md'
   workflow_dispatch:
 permissions:
   contents: read
@@ -44,7 +31,6 @@ jobs:
             -s tools/diagnostics -p 'test_v100*.py'
           git diff --check
   hardware:
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[v100:') || contains(github.event.head_commit.message, '[v100:sv5]')
     needs: checks
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:

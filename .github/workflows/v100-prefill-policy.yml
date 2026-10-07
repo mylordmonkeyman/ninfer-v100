@@ -1,15 +1,11 @@
 name: V100 Prefill Policy
 on:
-  push:
-    branches: [forwardport/v100-flash-next]
-    paths:
-      - '.github/workflows/v100-prefill-policy.yml'
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
   group: v100-prefill-policy
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   workflow-update:
     if: ${{ github.event_name == 'push' }}

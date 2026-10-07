@@ -1,16 +1,5 @@
 name: V100 SV6 Production PLE TTFT
 on:
-  push:
-    branches: [perf/v100-strata-derived]
-    paths:
-      - '.github/workflows/v100-sv6-serve.yml'
-      - 'src/artifact/reader.*'
-      - 'src/targets/qwen3_8_flash_next/impl/load/materialized.cpp'
-      - 'src/targets/qwen3_8_flash_next/impl/ple_*'
-      - 'tests/test_ninfer_artifact_reader.cpp'
-      - 'tools/diagnostics/v100_sv6_serve.py'
-      - 'tools/diagnostics/test_v100_sv6_serve.py'
-      - 'docs/maintainer/v100-strata-performance.md'
   workflow_dispatch:
 permissions:
   contents: read
@@ -42,7 +31,6 @@ jobs:
             -s tools/diagnostics -p 'test_v100*.py'
           git diff --check
   hardware:
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[v100:') || contains(github.event.head_commit.message, '[v100:sv6-serve]')
     needs: checks
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:

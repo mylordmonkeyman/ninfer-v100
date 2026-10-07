@@ -1,12 +1,5 @@
 name: V100 Phase 17 CUDA Graph Reconsideration
 on:
-  push:
-    branches: [forwardport/v100-flash-next]
-    paths:
-      - '.github/workflows/v100-phase17-graph.yml'
-      - 'tests/targets/qwen3_8_flash_next/test_vertical_slice_real.cpp'
-      - 'src/targets/qwen3_8_flash_next/impl/expert_cache.cpp'
-      - 'src/targets/qwen3_8_flash_next/impl/expert_cache.h'
   workflow_dispatch:
 permissions:
   contents: read

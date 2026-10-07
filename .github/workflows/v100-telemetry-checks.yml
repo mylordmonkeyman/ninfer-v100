@@ -1,0 +1,35 @@
+name: V100 Telemetry Software Checks
+on:
+  push:
+    branches: [perf/v100-strata-derived]
+    paths:
+      - '.github/workflows/**'
+      - 'tools/telemetry/**'
+      - 'tools/diagnostics/**'
+      - 'src/targets/qwen3_8_flash_next/impl/**'
+      - 'tests/targets/qwen3_8_flash_next/**'
+      - 'docs/v100-cross-engine-telemetry-spec.md'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Check Python tooling
+        run: |
+          python3 -m compileall -q tools/telemetry tools/diagnostics
+          python3 -m unittest discover -s tools/diagnostics -p 'test_v100*.py'
+          python3 -m unittest discover -s tools/telemetry -p 'test_*.py'
+      - name: Check host telemetry and profiles
+        run: |
+          for test in perf_telemetry expert_heat expert_profile; do
+            g++ -std=c++20 -O2 -DNDEBUG -Isrc -Ithird_party \
+              "tests/targets/qwen3_8_flash_next/test_${test}.cpp" -o "/tmp/${test}"
+            "/tmp/${test}"
+          done
+          git diff --check

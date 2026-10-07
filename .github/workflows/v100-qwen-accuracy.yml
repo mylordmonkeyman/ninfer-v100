@@ -1,15 +1,5 @@
 name: V100 Qwen Accuracy Parity
 on:
-  push:
-    branches: [forwardport/v100-flash-next]
-    paths:
-      - '.github/workflows/v100-qwen-accuracy.yml'
-      - 'tools/validation/v100_qwen_parity.cpp'
-      - 'tools/validation/compare_v100_qwen_parity.py'
-      - 'src/targets/qwen3_6/**'
-      - 'src/targets/qwen3_6_27b/**'
-      - 'src/ops/**'
-      - 'src/targets/qwen3_6_35b_a3b/**'
   workflow_dispatch:
     inputs:
       artifact_path:
@@ -20,7 +10,7 @@ permissions:
   contents: read
 concurrency:
   group: v100-qwen-accuracy
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   accuracy:
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]

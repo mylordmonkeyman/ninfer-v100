@@ -1,20 +1,5 @@
 name: V100 SV2 Device Route Combine
 on:
-  push:
-    branches: [perf/v100-strata-derived]
-    paths:
-      - '.github/workflows/v100-sv2.yml'
-      - 'include/ninfer/ops/expert_route_combine.h'
-      - 'src/ops/launcher/expert_route_combine.cu'
-      - 'src/targets/qwen3_8_flash_next/impl/expert_cache.cpp'
-      - 'src/targets/qwen3_8_flash_next/impl/expert_cache.h'
-      - 'src/targets/qwen3_8_flash_next/impl/moe.cpp'
-      - 'src/targets/qwen3_8_flash_next/impl/moe_workspace.h'
-      - 'src/targets/qwen3_8_flash_next/impl/perf_telemetry.h'
-      - 'tests/ops/test_expert_route_combine.cpp'
-      - 'tests/targets/qwen3_8_flash_next/test_expert_cache.cpp'
-      - 'tools/diagnostics/v100_sv2_runtime.py'
-      - 'tools/diagnostics/test_v100_sv2_runtime.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -32,7 +17,6 @@ jobs:
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/diagnostics -p 'test_v100*.py'
   hardware:
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[v100:') || contains(github.event.head_commit.message, '[v100:sv2]')
     needs: checks
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:

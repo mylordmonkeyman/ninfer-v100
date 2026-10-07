@@ -1,15 +1,5 @@
 name: V100 27B Regression
 on:
-  push:
-    branches: [forwardport/v100-flash-next]
-    paths:
-      - '.github/workflows/v100-27b-regression.yml'
-      - 'src/ops/**'
-      - 'src/targets/qwen3_6_27b/**'
-      - 'src/targets/qwen3_6/**'
-      - 'src/targets/qwen3_6_35b_a3b/**'
-      - 'src/CMakeLists.txt'
-      - 'CMakeLists.txt'
   workflow_dispatch:
     inputs:
       compare_baseline:
@@ -20,7 +10,7 @@ permissions:
   contents: read
 concurrency:
   group: v100-27b-regression
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   real-27b:
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]

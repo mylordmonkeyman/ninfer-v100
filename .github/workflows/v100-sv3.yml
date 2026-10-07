@@ -1,25 +1,5 @@
 name: V100 SV3 Prefill Staging Ring
 on:
-  push:
-    branches: [perf/v100-strata-derived]
-    paths:
-      - '.github/workflows/v100-sv3.yml'
-      - 'src/targets/qwen3_8_flash_next/impl/expert_stream.*'
-      - 'src/targets/qwen3_8_flash_next/impl/moe.*'
-      - 'src/targets/qwen3_8_flash_next/impl/perf_telemetry.h'
-      - 'src/targets/qwen3_8_flash_next/impl/program.cpp'
-      - 'src/targets/qwen3_8_flash_next/impl/runtime_state.*'
-      - 'src/targets/qwen3_8_flash_next/impl/runtime_plan.*'
-      - 'src/targets/qwen3_8_flash_next/impl/text_decode*'
-      - 'tests/targets/qwen3_8_flash_next/test_expert_stream.cpp'
-      - 'tests/targets/qwen3_8_flash_next/test_vertical_slice_real.cpp'
-      - 'tools/diagnostics/v100_sv3_runtime.py'
-      - 'tools/diagnostics/test_v100_sv3_runtime.py'
-      - 'tools/diagnostics/v100_sv3_calibrate.py'
-      - 'tools/diagnostics/test_v100_sv3_calibrate.py'
-      - 'tools/diagnostics/v100_sv3_cost.py'
-      - 'tools/diagnostics/test_v100_sv3_cost.py'
-      - 'docs/maintainer/v100-strata-performance.md'
   workflow_dispatch:
 permissions:
   contents: read
@@ -38,7 +18,6 @@ jobs:
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/diagnostics -p 'test_v100*.py'
   hardware:
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[v100:') || contains(github.event.head_commit.message, '[v100:sv3]')
     needs: checks
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:

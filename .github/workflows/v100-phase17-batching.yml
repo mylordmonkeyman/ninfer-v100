@@ -1,9 +1,5 @@
 name: V100 Phase 17 Decode Batching Qualification
 on:
-  push:
-    branches: [forwardport/v100-flash-next]
-    paths:
-      - '.github/workflows/v100-phase17-batching.yml'
   workflow_dispatch:
 permissions:
   contents: read
