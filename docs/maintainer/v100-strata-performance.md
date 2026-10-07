@@ -8,6 +8,33 @@ Milestones are SV0–SV8 in the supplied specification; they do not advance Phas
 
 ## Project status: SV0–SV7 complete; SV8 not triggered
 
+
+### Final integration audit
+
+After the SV7/SV8 decisions, the implementation branch was audited against the
+frozen source `e184de12772999f8d336ea395cedcc0cf0543c52`. It is 81 commits
+ahead and zero commits behind that source; no frozen-source history was
+rewritten.
+
+Runtime defaults remain conservative for the Strata-derived experiments:
+`NINFER_V100_EXPERT_POLICY` falls through to the existing LRU behavior;
+SV2 device route combine requires `NINFER_V100_DEVICE_ROUTE_COMBINE=1`;
+SV4 CPU expert grouping requires `NINFER_V100_CPU_EXPERT_GROUP=1`; SV5 route
+handoff is disabled when `NINFER_V100_ROUTE_HANDOFF` is unset/zero; SV6 PLE
+storage defaults to `mmap`; and SV7 score MMA requires the explicit
+`NINFER_V100_QSA_SCORE_MMA=1` gate in addition to its scope control. The
+late-half ordinal variable alone cannot enable MMA.
+
+The expert cache's grouped-prefill member remains enabled by default, but this
+is inherited unchanged from the frozen source rather than an SV4 promotion:
+both frozen source and final branch initialize `grouped_prefill_=true`.
+Likewise, the pre-existing `NINFER_FLASH_NEXT_QSA_PREFILL_MMA` runtime-plan
+control was not introduced by this project.
+
+No default-safety integration defect was found. Experimental features that
+failed production promotion remain available only through explicit controls,
+and no SV8 implementation was added without its required bottleneck evidence.
+
 The full-12-QSA score-MMA path remains numerically mixed and is not promoted.
 A narrower candidate now applies the same validated FP8 score-MMA kernel only
 to QSA ordinals 6–11; ordinals 0–5 remain SIMT. This is still opt-in and off by
