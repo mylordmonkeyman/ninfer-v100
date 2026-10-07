@@ -327,6 +327,11 @@ ninfer_add_test(ninfer_qwen3_8_flash_next_qsa_indexer_test
   LIBRARIES ninfer_qwen3_8_flash_next)
 set_tests_properties(ninfer_qwen3_8_flash_next_qsa_indexer_test
   PROPERTIES SKIP_RETURN_CODE 77)
+if(NINFER_VOLTA_BUILD)
+  ninfer_add_test(ninfer_volta_qsa_scores_test
+    SOURCES targets/qwen3_8_flash_next/test_volta_qsa_scores.cpp
+    LIBRARIES ninfer_qwen3_8_flash_next)
+endif()
 ninfer_add_test(ninfer_qwen3_8_flash_next_qsa_attention_test
   SOURCES targets/qwen3_8_flash_next/test_qsa_attention.cpp
   LIBRARIES ninfer_qwen3_8_flash_next)

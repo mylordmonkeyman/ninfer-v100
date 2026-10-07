@@ -1076,3 +1076,15 @@ Retain BF16 projection dispatch. The separate selected-block Volta attention
 inner-math opportunity still requires implementation assessment and unchanged
 independent numerical/long-prefix qualification; neither SV7 nor its accuracy
 gate is declared complete.
+
+The separate SV7 attention candidate adds an opt-in SM70 Q–K score path using
+`mma.m8n8k4` FP16 operands and FP32 accumulation. It retains selected-block
+addressing, FP32 softmax/value accumulation, BF16 output and both BF16 and
+software-decoded FP8 KV. Values outside finite FP16 range trigger warp-uniform
+FP32 score fallback. `NINFER_V100_QSA_SCORE_MMA=1` plus the existing prefill
+MMA enable selects this experimental path; it stays off by default. A prepared-
+query launch shared with production enables an independent FP64 full-attention
+oracle covering dense/sparse selections, tails, remapped pages, both KV types
+and range fallback, followed by matched kernel timing and existing target
+regressions. CUDA compilation, those gates, production benefit and long-prefix
+accuracy remain pending; no qualification or default change is claimed.

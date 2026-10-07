@@ -6,6 +6,9 @@
 #include "ops/common/mma.cuh"
 #include "ops/common/rowsplit_mma.cuh"
 #include "ops/common/warp.cuh"
+#if defined(NINFER_VOLTA_BUILD)
+#include "ops/common/volta_mma884.cuh"
+#endif
 #include "ops/linear/nvfp4/nvfp4_codec.cuh"
 
 #include <cuda_bf16.h>
@@ -335,7 +338,7 @@ __global__ void qsa_prefill_prepare_append_kv_kernel(
     value_pages[page_index] = to_storage<StorageT>(value_word);
 }
 
-template <int NUM_WARPS, typename StorageT>
+template <int NUM_WARPS, typename StorageT, bool VOLTA_SCORE_MMA = false>
 __global__ void qsa_prefill_sparse_attention_kernel(
     const __nv_bfloat16* __restrict__ query, const std::int32_t* __restrict__ token_indices,
     int table_row, const std::int32_t* __restrict__ selected_blocks,
@@ -395,9 +398,78 @@ __global__ void qsa_prefill_sparse_attention_kernel(
     for (int start = 0; start < total; start += CHUNK_SIZE) {
         const int count = min(CHUNK_SIZE, total - start);
 
+        const int step = NUM_WARPS * 2;
+#if defined(NINFER_VOLTA_BUILD)
+        if constexpr (VOLTA_SCORE_MMA) {
+            // Four independent m8n8k4 groups score eight keys apiece. Each A row
+            // repeats this query; retain row zero only. No Ampere instructions.
+            const int group = ops::volta_mma884_group(lane_id);
+            const int col = ops::volta_mma884_row_or_col(lane_id);
+            for (int base = warp_id * 32; base < count; base += NUM_WARPS * 32) {
+                const int local = base + group * 8 + col;
+                const bool valid = local < count;
+                const int candidate = valid ? (is_dense ? start + local :
+                    selected_token(start + local, selected_count, complete_blocks, selected)) : 0;
+                const int physical = valid ? block_table_row[candidate / kPageTokens] : 0;
+                const auto* key = key_pages +
+                    ((static_cast<std::int64_t>(physical) * kKvHeads + kv_head) * kPageTokens +
+                     candidate % kPageTokens) * kHeadDim;
+                ops::VoltaMma884Accumulator accum{};
+                bool outside_half = false;
+                for (int k = 0; k < kHeadDim; k += 4) {
+                    float kval[4]{};
+                    __half qhalf[4], khalf[4];
+#pragma unroll
+                    for (int j = 0; j < 4; ++j) {
+                        if (valid) {
+                            if constexpr (std::is_same_v<StorageT, __nv_bfloat16>) {
+                                kval[j] = __bfloat162float(key[k + j]);
+                            } else {
+                                kval[j] = ops::detail::decode_nvfp4_e4m3(key[k + j].__x);
+                            }
+                        }
+                        outside_half |= fabsf(s_q[k + j]) > 65504.0F || fabsf(kval[j]) > 65504.0F;
+                        qhalf[j] = __float2half_rn(s_q[k + j]);
+                        khalf[j] = __float2half_rn(kval[j]);
+                    }
+                    const ops::VoltaMma884Operand a{
+                        __half2_as_uint(__halves2half2(qhalf[0], qhalf[1])),
+                        __half2_as_uint(__halves2half2(qhalf[2], qhalf[3]))};
+                    const ops::VoltaMma884Operand b{
+                        __half2_as_uint(__halves2half2(khalf[0], khalf[1])),
+                        __half2_as_uint(__halves2half2(khalf[2], khalf[3]))};
+                    ops::volta_mma884_f16_f32(accum, a, b);
+                }
+                if (__any_sync(0xffffffffU, outside_half)) {
+                    // Preserve the BF16 range when a normalized/control input
+                    // cannot be staged finitely in half. The vote is warp uniform.
+                    float dot = 0.0F;
+                    if (valid) {
+                        for (int k = 0; k < kHeadDim; ++k) {
+                            const float value = [&] {
+                                if constexpr (std::is_same_v<StorageT, __nv_bfloat16>)
+                                    return __bfloat162float(key[k]);
+                                else return ops::detail::decode_nvfp4_e4m3(key[k].__x);
+                            }();
+                            dot = fmaf(s_q[k], value, dot);
+                        }
+                        s_scores[local] = dot * kScale;
+                    }
+                } else {
+#pragma unroll
+                    for (int i = 0; i < 8; ++i) {
+                        const auto coordinate = ops::volta_mma884_accumulator_coordinate(lane_id, i);
+                        const int index = base + group * 8 + coordinate.col;
+                        if (coordinate.row == 0 && index < count)
+                            s_scores[index] = accum.x[i] * kScale;
+                    }
+                }
+            }
+        } else
+#endif
+        {
         // 1. Compute Q-K dot products cooperatively:
         // Unroll by 2 tokens per warp
-        const int step = NUM_WARPS * 2;
         int c_base = warp_id * 2;
         for (; c_base + 1 < count; c_base += step) {
             int cand0, cand1;
@@ -459,6 +531,7 @@ __global__ void qsa_prefill_sparse_attention_kernel(
             if (lane_id == 0) {
                 s_scores[c_base] = dot0 * kScale;
             }
+        }
         }
         __syncthreads();
 
@@ -913,6 +986,36 @@ void flash_next_qsa_attention_store_launch(const Tensor& projected, const Tensor
     }
 }
 
+#if defined(NINFER_VOLTA_BUILD)
+void flash_next_qsa_volta_attend_launch(const Tensor& query, const Tensor& token_indices,
+    std::int32_t table_row, const Tensor& selected_blocks, const Tensor& selected_counts,
+    QsaAttentionCacheView cache, Tensor& attended, cudaStream_t stream, bool use_mma) {
+    const int tokens = token_indices.ne[0];
+    const auto launch = [&]<typename StorageT, bool ScoreMma>() {
+        constexpr int warps = 4;
+        qsa_prefill_sparse_attention_kernel<warps, StorageT, ScoreMma>
+            <<<dim3(kQueryHeads, tokens), warps * 32, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(query.data),
+                static_cast<const std::int32_t*>(token_indices.data), table_row,
+                static_cast<const std::int32_t*>(selected_blocks.data),
+                static_cast<const std::int32_t*>(selected_counts.data),
+                static_cast<const std::int32_t*>(cache.block_tables.data),
+                cache.block_tables.ne[0],
+                static_cast<const StorageT*>(cache.key_pages.data),
+                static_cast<const StorageT*>(cache.value_pages.data),
+                static_cast<__nv_bfloat16*>(attended.data));
+    };
+    if (cache.key_pages.dtype == DType::FP8_E4M3FN) {
+        if (use_mma) launch.template operator()<__nv_fp8_e4m3, true>();
+        else launch.template operator()<__nv_fp8_e4m3, false>();
+    } else {
+        if (use_mma) launch.template operator()<__nv_bfloat16, true>();
+        else launch.template operator()<__nv_bfloat16, false>();
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+#endif
+
 void flash_next_qsa_attention_prefill_launch(
     const Tensor& token_indices, const Tensor& mrope_positions, std::int32_t table_row,
     const Tensor& selected_blocks, const Tensor& selected_counts, const Tensor& query_norm,
@@ -931,36 +1034,11 @@ void flash_next_qsa_attention_prefill_launch(
 
     const bool is_fp8 = (cache.key_pages.dtype == DType::FP8_E4M3FN);
 #if defined(NINFER_VOLTA_BUILD)
-    // SM70 bring-up is deliberately eager/SIMT. The tiled prefill schedule uses
-    // cp.async + ldmatrix + m16n8k16 BF16 MMA and is not part of the Volta binary.
-    (void)use_mma;
-    constexpr int kPrefillWarps   = 4;
-    constexpr int kPrefillThreads = kPrefillWarps * 32;
-    if (is_fp8) {
-        qsa_prefill_sparse_attention_kernel<kPrefillWarps, __nv_fp8_e4m3>
-            <<<dim3(kQueryHeads, tokens), kPrefillThreads, 0, stream>>>(
-                static_cast<const __nv_bfloat16*>(scratch.query.data),
-                static_cast<const std::int32_t*>(token_indices.data), table_row,
-                static_cast<const std::int32_t*>(selected_blocks.data),
-                static_cast<const std::int32_t*>(selected_counts.data),
-                static_cast<const std::int32_t*>(cache.block_tables.data),
-                cache.block_tables.ne[0],
-                static_cast<const __nv_fp8_e4m3*>(cache.key_pages.data),
-                static_cast<const __nv_fp8_e4m3*>(cache.value_pages.data),
-                static_cast<__nv_bfloat16*>(scratch.attended.data));
-    } else {
-        qsa_prefill_sparse_attention_kernel<kPrefillWarps, __nv_bfloat16>
-            <<<dim3(kQueryHeads, tokens), kPrefillThreads, 0, stream>>>(
-                static_cast<const __nv_bfloat16*>(scratch.query.data),
-                static_cast<const std::int32_t*>(token_indices.data), table_row,
-                static_cast<const std::int32_t*>(selected_blocks.data),
-                static_cast<const std::int32_t*>(selected_counts.data),
-                static_cast<const std::int32_t*>(cache.block_tables.data),
-                cache.block_tables.ne[0],
-                static_cast<const __nv_bfloat16*>(cache.key_pages.data),
-                static_cast<const __nv_bfloat16*>(cache.value_pages.data),
-                static_cast<__nv_bfloat16*>(scratch.attended.data));
-    }
+    const char* mode = std::getenv("NINFER_V100_QSA_SCORE_MMA");
+    const bool experimental = mode != nullptr && std::strcmp(mode, "1") == 0;
+    flash_next_qsa_volta_attend_launch(scratch.query, token_indices, table_row,
+        selected_blocks, selected_counts, cache, scratch.attended, stream,
+        use_mma && experimental);
 #else
     if (is_fp8) {
         if (use_mma) {

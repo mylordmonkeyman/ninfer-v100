@@ -18,6 +18,13 @@ void flash_next_qsa_attention_launch(const Tensor& token_indices, const Tensor& 
                                      FlashNextQsaAttentionWorkspace& scratch, WorkspaceArena& workspace,
                                      cudaStream_t stream);
 
+#if defined(NINFER_VOLTA_BUILD)
+// Prepared-query selected-block operation, shared by serving and independent tests.
+void flash_next_qsa_volta_attend_launch(const Tensor& query, const Tensor& token_indices,
+    std::int32_t table_row, const Tensor& selected_blocks, const Tensor& selected_counts,
+    QsaAttentionCacheView cache, Tensor& attended, cudaStream_t stream, bool use_mma);
+#endif
+
 void flash_next_qsa_attention_prefill_launch(
     const Tensor& token_indices, const Tensor& mrope_positions, std::int32_t table_row,
     const Tensor& selected_blocks, const Tensor& selected_counts, const Tensor& query_norm,
