@@ -626,7 +626,7 @@ __global__ void qsa_prefill_volta_gqa_scores_kernel(
     const auto* selected = selected_blocks + static_cast<std::int64_t>(token) * kSelectedBlocks;
     const auto* table = block_tables + table_row * logical_pages;
     float accumulated[2][8]{};
-    float running_max[2] = {-CUDART_INF_F, -CUDART_INF_F};
+    float running_max[2] = {-__int_as_float(0x7f800000), -__int_as_float(0x7f800000)};
     float running_sum[2]{};
     for (int start = 0; start < total; start += chunk) {
         const int count = min(chunk, total - start);
@@ -690,7 +690,7 @@ __global__ void qsa_prefill_volta_gqa_scores_kernel(
         __syncthreads();
         // Each warp owns one or two complete query heads for softmax and PV.
         for (int h = warp, slot = 0; h < heads; h += 4, ++slot) {
-            float maximum = -CUDART_INF_F;
+            float maximum = -__int_as_float(0x7f800000);
             for (int c = lane; c < count; c += 32) maximum = fmaxf(maximum, scores[h][c]);
             for (int offset = 16; offset > 0; offset >>= 1)
                 maximum = fmaxf(maximum, __shfl_xor_sync(0xffffffffU, maximum, offset));
