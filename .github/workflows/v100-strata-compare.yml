@@ -95,4 +95,16 @@ jobs:
             --ninfer build-strata-compare/apps/ninfer-serve \
             --artifact strata-compare-source/model.ninfer \
             --profile strata-compare-source/sv2-static-profile.json \
-            --strata-pythom¸€ˆ‘MQIQ}I==P¼¹Ù•¹Ø½‰¥¸½ÁåÑ¡½¸ˆp(€€€€€€€€€€€€´µÍÑÉ…Ñ„µÍ•ÉÙ•È€ˆ‘MQIQ}I==P½Í•ÉÙ”½Í•ÉÙ•È¹Áäˆp(€€€€€€€€€€€€´µÍÑÉ…Ñ„µ½¹™¥œ€ˆ‘MQIQ}=9%ˆp(€€€€€€€€€€€€´µ½ÕÑÁÕÐÍÑÉ…Ñ„µ½µÁ…É”µÉ•ÍÕ±ÑÌ€´µÉ•Á•…ÑÌ€Ì(€€€€€€€€€…ÐÍÑÉ…Ñ„µ½µÁ…É”µÉ•ÍÕ±ÑÌ½ÍÕµµ…Éä¹ÑáÐ€øø€ˆ‘%Q!U	}MQA}MU55Idˆ(€€€€€€´¹…µ”èAÉ•Í•ÉÙ”½µÁ…É¥Í½¸•Ù¥‘•¹”(€€€€€€€¥˜è…±Ý…åÌ ¤(€€€€€€€ÕÍ•Ìè…Ñ¥½¹Ì½ÕÁ±½…µ…ÉÑ¥™…Ñ•„ÄØÕ˜áØÕˆÙ”ÜÕˆÔÐÀÐÐå”äÉˆÐààÙ˜ÐÌØÀÝ™„ÀÈ(€€€€€€€Ý¥Ñ è(€€€€€€€€€¹…µ”èØÄÀÀµÍÑÉ…Ñ„µ½µÁ…É”´‘íì¥Ñ¡Õˆ¹ÉÕ¹}¥õô´‘íì¥Ñ¡Õˆ¹ÉÕ¹}…ÑÑ•µÁÐõô(€€€€€€€€€Á…Ñ èÍÑÉ…Ñ„µ½µÁ…É”µÉ•ÍÕ±ÑÌ¼(€€€€€€€€€É•Ñ•¹Ñ¥½¸µ‘…åÌè€ÌÀ(€€€€€€€€€¥˜µ¹¼µ™¥±•Ìµ™½Õ¹èÝ…É¸
+            --strata-python "$STRATA_ROOT/.venv/bin/python" \
+            --strata-server "$STRATA_ROOT/serve/server.py" \
+            --strata-config "$STRATA_CONFIG" \
+            --output strata-compare-results --repeats 3
+          cat strata-compare-results/summary.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve comparison evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-strata-compare-${{ github.run_id }}-${{ github.run_attempt }}
+          path: strata-compare-results/
+          retention-days: 30
+          if-no-files-found: warn
