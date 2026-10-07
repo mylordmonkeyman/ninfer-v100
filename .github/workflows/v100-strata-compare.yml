@@ -32,8 +32,6 @@ jobs:
     env:
       CUDA_VISIBLE_DEVICES: '0'
       NINFER_WEIGHTS: /models/qwen3-8b-flash-next
-      STRATA_ROOT: /opt/ai/strata
-      STRATA_CONFIG: /opt/ai/strata/strata-unsloth-ud-q4_k_xl.json
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -51,13 +49,24 @@ jobs:
             echo "::error::V100 is busy ($free_mib MiB free); no unrelated process was stopped."
             exit 1
           fi
-          test -x "$STRATA_ROOT/.venv/bin/python"
-          test -r "$STRATA_ROOT/serve/server.py"
-          test -r "$STRATA_CONFIG"
           test -r "$NINFER_WEIGHTS"
+          strata_root=''
+          for root in /opt/ai/strata /srv/Strata-V100; do
+            config="$root/strata-unsloth-ud-q4_k_xl.json"
+            if [[ -x "$root/.venv/bin/python" && -r "$root/serve/server.py" && -r "$config" ]]; then
+              strata_root="$root"; break
+            fi
+          done
+          if [[ -z "$strata_root" ]]; then
+            echo '::error::Existing Strata install/config is not visible in this runner namespace.'
+            find /opt/ai /srv -maxdepth 2 -type d -iname '*strata*' -print 2>/dev/null || true
+            exit 1
+          fi
+          echo "STRATA_ROOT=$strata_root" >> "$GITHUB_ENV"
+          echo "STRATA_CONFIG=$strata_root/strata-unsloth-ud-q4_k_xl.json" >> "$GITHUB_ENV"
           git rev-parse HEAD > strata-compare-results/ninfer-sha.txt
-          git -C "$STRATA_ROOT" rev-parse HEAD > strata-compare-results/strata-sha.txt
-          sha256sum "$STRATA_CONFIG" > strata-compare-results/strata-config-sha256.txt
+          git -C "$strata_root" rev-parse HEAD > strata-compare-results/strata-sha.txt
+          sha256sum "$strata_root/strata-unsloth-ud-q4_k_xl.json" > strata-compare-results/strata-config-sha256.txt
           nvidia-smi -q > strata-compare-results/gpu.txt
           /usr/local/cuda-12.8/bin/nvcc --version > strata-compare-results/cuda.txt
           numactl --hardware > strata-compare-results/numa.txt
@@ -86,16 +95,4 @@ jobs:
             --ninfer build-strata-compare/apps/ninfer-serve \
             --artifact strata-compare-source/model.ninfer \
             --profile strata-compare-source/sv2-static-profile.json \
-            --strata-python "$STRATA_ROOT/.venv/bin/python" \
-            --strata-server "$STRATA_ROOT/serve/server.py" \
-            --strata-config "$STRATA_CONFIG" \
-            --output strata-compare-results --repeats 3
-          cat strata-compare-results/summary.txt >> "$GITHUB_STEP_SUMMARY"
-      - name: Preserve comparison evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: v100-strata-compare-${{ github.run_id }}-${{ github.run_attempt }}
-          path: strata-compare-results/
-          retention-days: 30
-          if-no-files-found: warn
+            --strata-pythom¸€ˆ‘MQIQ}I==P¼¹Ù•¹Ø½‰¥¸½ÁåÑ¡½¸ˆp(€€€€€€€€€€€€´µÍÑÉ…Ñ„µÍ•ÉÙ•È€ˆ‘MQIQ}I==P½Í•ÉÙ”½Í•ÉÙ•È¹Áäˆp(€€€€€€€€€€€€´µÍÑÉ…Ñ„µ½¹™¥œ€ˆ‘MQIQ}=9%ˆp(€€€€€€€€€€€€´µ½ÕÑÁÕÐÍÑÉ…Ñ„µ½µÁ…É”µÉ•ÍÕ±ÑÌ€´µÉ•Á•…ÑÌ€Ì(€€€€€€€€€…ÐÍÑÉ…Ñ„µ½µÁ…É”µÉ•ÍÕ±ÑÌ½ÍÕµµ…Éä¹ÑáÐ€øø€ˆ‘%Q!U	}MQA}MU55Idˆ(€€€€€€´¹…µ”èAÉ•Í•ÉÙ”½µÁ…É¥Í½¸•Ù¥‘•¹”(€€€€€€€¥˜è…±Ý…åÌ ¤(€€€€€€€ÕÍ•Ìè…Ñ¥½¹Ì½ÕÁ±½…µ…ÉÑ¥™…Ñ•„ÄØÕ˜áØÕˆÙ”ÜÕˆÔÐÀÐÐå”äÉˆÐààÙ˜ÐÌØÀÝ™„ÀÈ(€€€€€€€Ý¥Ñ è(€€€€€€€€€¹…µ”èØÄÀÀµÍÑÉ…Ñ„µ½µÁ…É”´‘íì¥Ñ¡Õˆ¹ÉÕ¹}¥õô´‘íì¥Ñ¡Õˆ¹ÉÕ¹}…ÑÑ•µÁÐõô(€€€€€€€€€Á…Ñ èÍÑÉ…Ñ„µ½µÁ…É”µÉ•ÍÕ±ÑÌ¼(€€€€€€€€€É•Ñ•¹Ñ¥½¸µ‘…åÌè€ÌÀ(€€€€€€€€€¥˜µ¹¼µ™¥±•Ìµ™½Õ¹èÝ…É¸
