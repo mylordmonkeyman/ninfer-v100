@@ -1,6 +1,7 @@
 #pragma once
 
 // SV0 host-only diagnostics. No CUDA allocation, synchronization, or policy selection.
+#include "targets/qwen3_8_flash_next/impl/telemetry/compare_telemetry.h"
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -18,7 +19,8 @@
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
-inline bool v100_perf_telemetry_enabled() noexcept {
+inline bool v100_perf_telemetry_enabled() {
+    if (std::getenv("V100_COMPARE_TELEMETRY_LEVEL")) return v100_compare::level() >= 2;
     static const bool enabled = [] {
         const char* value = std::getenv("NINFER_V100_TELEMETRY");
         return value && std::strcmp(value, "1") == 0;
@@ -50,11 +52,17 @@ inline std::uint64_t next_perf_executor_id() {
 class PerfContextScope {
 public:
     explicit PerfContextScope(const PerfContext& context)
-        : context_(context), previous_(active_perf_context) { active_perf_context = &context_; }
-    ~PerfContextScope() { active_perf_context = previous_; }
+        : context_(context), previous_(active_perf_context) {
+        active_perf_context = &context_;
+        if (v100_compare::level())
+            round_.emplace("ninfer", std::to_string(context.executor) + ":" +
+                           std::to_string(context.transaction), context.phase);
+    }
+    ~PerfContextScope() { round_.reset(); active_perf_context = previous_; }
     PerfContextScope(const PerfContextScope&) = delete;
     PerfContextScope& operator=(const PerfContextScope&) = delete;
 private:
+    std::optional<v100_compare::Round> round_;
     PerfContext context_;
     const PerfContext* previous_;
 };

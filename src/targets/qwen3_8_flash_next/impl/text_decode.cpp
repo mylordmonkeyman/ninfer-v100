@@ -17,6 +17,7 @@
 #include "targets/qwen3_8_flash_next/impl/qsa_indexer.h"
 #include "targets/qwen3_8_flash_next/impl/qsa_indexer_kernels.h"
 #include "targets/qwen3_8_flash_next/impl/stage_ledger.h"
+#include "targets/qwen3_8_flash_next/impl/telemetry/compare_telemetry.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode_kernels.h"
 #include "targets/qwen3_8_flash_next/impl/text_decode_workspace.h"
 
@@ -359,12 +360,14 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
 
     // 2. 48-layer execution loop
     for (std::size_t layer = 0; layer < 48; ++layer) {
+        v100_compare::HostSpan layer_span(layer, v100_compare::Stage::layer);
         char prefix_buf[32];
         std::snprintf(prefix_buf, sizeof(prefix_buf), "L%02zu_", layer);
         const std::string prefix(prefix_buf);
 
         // At layer 1: evaluate PLE neural injection and add residual
         if (layer == 1) {
+            v100_compare::HostSpan ple_span(layer, v100_compare::Stage::ple);
             sync_hyper_shadow();
             emit_state("ple_gathered", gathered_ple_embedding);
             flash_next_ple_decode(round_ws.hyper_hidden, gathered_ple_embedding, model.ple,
@@ -410,6 +413,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
         // Execute QSA or GDN attention
         Tensor attn_block_output_stage;
         if (is_qsa_layer(layer)) {
+            v100_compare::HostSpan qsa_span(layer, v100_compare::Stage::qsa);
             const std::size_t qsa_idx = qsa_ordinal(layer);
             flash_next_qsa_indexer_decode(
                 round_ws.block_input, model.full_attention[qsa_idx], token_indices, mrope_positions,
@@ -429,6 +433,7 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
                 state.qsa_attention_caches[qsa_idx], workspace, round_ws.block_output, stream,
                 qsa_emit);
         } else {
+            v100_compare::HostSpan gdn_span(layer, v100_compare::Stage::gdn);
             const std::size_t gdn_idx = gdn_ordinal(layer);
             GdnStageEmitter gdn_emit{};
             if (sink && sink->on_state) {
@@ -770,12 +775,14 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
 
     // 2. 48-layer execution loop
     for (std::size_t layer = 0; layer < 48; ++layer) {
+        v100_compare::HostSpan layer_span(layer, v100_compare::Stage::layer);
         char prefix_buf[32];
         std::snprintf(prefix_buf, sizeof(prefix_buf), "L%02zu_", layer);
         const std::string prefix(prefix_buf);
 
         // At layer 1: evaluate PLE neural injection and add residual
         if (layer == 1) {
+            v100_compare::HostSpan ple_span(layer, v100_compare::Stage::ple);
             // Root prefill may have an artifact-backed gather in flight while embedding and layer
             // zero execute.  Publish its transfer/dequant dependency only at the first consumer.
             if (before_ple) { before_ple(); }
@@ -811,6 +818,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
 
         // Execute QSA or GDN attention
         if (is_qsa_layer(layer)) {
+            v100_compare::HostSpan qsa_span(layer, v100_compare::Stage::qsa);
             const std::size_t qsa_idx = qsa_ordinal(layer);
             flash_next_qsa_indexer_prefill_chunk(
                 round_ws.block_input, model.full_attention[qsa_idx], token_indices,
@@ -830,6 +838,7 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                 workspace, round_ws.block_output, stream, qsa_emit,
                 use_qsa_prefill_mma && qsa_idx >= qsa_mma_min_ordinal);
         } else {
+            v100_compare::HostSpan gdn_span(layer, v100_compare::Stage::gdn);
             const std::size_t gdn_idx = gdn_ordinal(layer);
             flash_next_gdn_prefill_chunk(round_ws.block_input, model.gdn[gdn_idx], source_slot,
                                          destination_slot, state.gdn_convolution_states[gdn_idx],

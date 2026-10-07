@@ -32,4 +32,27 @@ jobs:
               "tests/targets/qwen3_8_flash_next/test_${test}.cpp" -o "/tmp/${test}"
             "/tmp/${test}"
           done
+          g++ -std=c++20 -O2 -Wall -Wextra -Werror -Isrc \
+            tests/targets/qwen3_8_flash_next/test_compare_telemetry.cpp -o /tmp/compare-telemetry
+          V100_COMPARE_TELEMETRY_LEVEL=1 /tmp/compare-telemetry > /tmp/compare-record.json 2>/tmp/compare-records.jsonl
+          python3 tools/telemetry/validate_records.py /tmp/compare-records.jsonl
           git diff --check
+  cuda-host-syntax:
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:12.8.1-devel-ubuntu24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install host compiler
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends g++
+      - name: Compile changed CUDA host code without acquiring a GPU
+        run: |
+          g++ -std=c++20 -fsyntax-only -DNINFER_VOLTA_BUILD \
+            -Iinclude -Isrc -Ithird_party -I/usr/local/cuda/include \
+            src/targets/qwen3_8_flash_next/impl/moe.cpp \
+            src/targets/qwen3_8_flash_next/impl/text_decode.cpp \
+            src/targets/qwen3_8_flash_next/impl/text_executor.cpp

@@ -26,3 +26,19 @@ Create the user-controlled Strata fork at the verified installed SHA, instrument
 both engines, validate counters and numerical off/on equivalence, build once,
 then validate overhead and run the frozen matrix. Never dispatch a performance
 campaign solely because a commit was made. No baseline attribution is yet available.
+
+## First NInfer instrumentation increment
+
+The shared schema and host-only round collector are implemented. Level 1 observes
+per-round/per-layer route conservation, logical CPU weight traffic, transient
+expert traffic, actual route/output transfer payloads and host time for routed
+MoE, CPU-pool execution, existing router rendezvous, QSA/GDN/PLE and layers. It
+adds no CUDA events or waits and does not force graph replay to eager execution.
+Graph replay without host callbacks leaves layer measurements unavailable.
+The old detailed event timing remains Level 2; it is not an aggregate overhead
+measurement. Existing diagnostic tests and shared-schema/collector tests pass.
+
+This increment does **not** complete T2/T4. Full request/lane linkage, actual
+worker distribution, distinct hit/miss IDs, cache deltas, GPU stage events,
+launch counts, NVTX, MTP acceptance/commit and hardware numerical/overhead
+qualification remain to be wired. No <2% overhead claim has been made.

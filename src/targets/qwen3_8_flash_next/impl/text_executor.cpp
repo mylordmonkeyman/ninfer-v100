@@ -145,9 +145,11 @@ FlashNextTextExecutor::FlashNextTextExecutor(const TextModelView& model,
                       ? (allocation.plan().config.speculative_draft_tokens + 1U)
                       : 1U))))),
       round_completion_(device) {
-    if (v100_perf_telemetry_enabled()) {
+    if (v100_perf_telemetry_enabled() || v100_compare::level()) {
         perf_executor_id_ = next_perf_executor_id();
-        bf16_timing_ = std::make_unique<ops::detail::Bf16TimingCollector>();
+        if (v100_perf_telemetry_enabled())
+            bf16_timing_ = std::make_unique<ops::detail::Bf16TimingCollector>();
+        if (v100_perf_telemetry_enabled()) {
         const auto& p = allocation.plan();
         std::ostringstream out;
         out << "{\"sv\":0,\"schema\":1,\"kind\":\"runtime_memory\",\"executor\":" << perf_executor_id_
@@ -164,6 +166,7 @@ FlashNextTextExecutor::FlashNextTextExecutor(const TextModelView& model,
             << ",\"sampling_workspace_allocation_bytes\":" << sampling_workspace_.capacity()
             << ",\"graph_allowance_bytes\":" << p.cuda_graph_allowance_bytes << '}';
         emit_perf_json(out.str());
+        }
     }
     instantiate_graphs();
 }
@@ -537,7 +540,7 @@ PendingRound FlashNextTextExecutor::finish_prepared_round(
     try {
         std::optional<PerfContextScope> perf_scope;
         std::optional<ops::detail::ScopedBf16Timing> bf16_scope;
-        if (bf16_timing_) {
+        if (bf16_timing_ || v100_compare::level()) {
             PerfContext context{.executor=perf_executor_id_, .transaction=prepared.transaction_id, .phase="decode"};
             context.span_count = batch_size;
             for (unsigned i = 0; i < batch_size; ++i) {
@@ -545,7 +548,7 @@ PendingRound FlashNextTextExecutor::finish_prepared_round(
                 context.spans[i] = {i, 1, h.lane_index(), h.epoch(), requests[i].token_index};
             }
             perf_scope.emplace(context);
-            bf16_scope.emplace(*bf16_timing_);
+            if (bf16_timing_) bf16_scope.emplace(*bf16_timing_);
         }
         pending_is_prefill_chunk_ = false;
 
@@ -662,12 +665,12 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
     try {
         std::optional<PerfContextScope> perf_scope;
         std::optional<ops::detail::ScopedBf16Timing> bf16_scope;
-        if (bf16_timing_) {
+        if (bf16_timing_ || v100_compare::level()) {
             PerfContext context{.executor=perf_executor_id_, .transaction=prepared.transaction_id, .phase="prefill"};
             context.span_count = 1;
             context.spans[0] = {0, num_tokens, handle.lane_index(), handle.epoch(), first_token_index};
             perf_scope.emplace(context);
-            bf16_scope.emplace(*bf16_timing_);
+            if (bf16_timing_) bf16_scope.emplace(*bf16_timing_);
         }
         pending_is_prefill_chunk_             = true;
         pending_prefill_lane_                 = lane;
@@ -845,12 +848,12 @@ PendingRound FlashNextTextExecutor::execute_speculative_verify_round(
     try {
         std::optional<PerfContextScope> perf_scope;
         std::optional<ops::detail::ScopedBf16Timing> bf16_scope;
-        if (bf16_timing_) {
+        if (bf16_timing_ || v100_compare::level()) {
             PerfContext context{.executor=perf_executor_id_, .transaction=prepared.transaction_id, .phase="verify"};
             context.span_count = 1;
             context.spans[0] = {0, num_tokens, handle.lane_index(), handle.epoch(), first_token_index};
             perf_scope.emplace(context);
-            bf16_scope.emplace(*bf16_timing_);
+            if (bf16_timing_) bf16_scope.emplace(*bf16_timing_);
         }
         pending_is_prefill_chunk_ = false;
         ledger_.sync_tables_if_dirty(alloc_, device_.stream);

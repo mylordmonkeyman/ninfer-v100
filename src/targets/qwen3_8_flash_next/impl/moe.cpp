@@ -304,6 +304,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                                 Tensor* output_fp32, FlashNextExpertCache* cache, unsigned layer,
                                 bool prefill, FlashNextExpertStream* expert_stream,
                                 unsigned expert_stream_min_routes) {
+    v100_compare::HostSpan moe_span(layer, v100_compare::Stage::moe);
     const std::int32_t tokens = input.ne[1];
     if (input.dtype != DType::BF16 || output.dtype != DType::BF16 || input.ne[0] != 2'560 ||
         output.ne[0] != 2'560 || tokens < 1 || output.ne[1] != tokens ||
@@ -459,7 +460,9 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     cpu.miss_routes.reserve(routed_paths);
 
     const bool telemetry = v100_perf_telemetry_enabled();
-    const auto rendezvous_started = telemetry ? PerfClock::now() : PerfClock::time_point{};
+    const bool aggregate = v100_compare::active != nullptr;
+    const bool observe_host = telemetry || aggregate;
+    const auto rendezvous_started = observe_host ? PerfClock::now() : PerfClock::time_point{};
     const std::uint16_t* host_input = cpu.input.data();
     if (route_handoff) {
         cpu.route_handoff->wait(route_ticket);
@@ -488,8 +491,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     }
 
     if (cache) cache->begin_layer(prefill);
-    const double rendezvous_us = telemetry ? perf_elapsed_us(rendezvous_started) : 0;
-    const bool measure = telemetry || (cache != nullptr && cache->timing_enabled());
+    const double rendezvous_us = observe_host ? perf_elapsed_us(rendezvous_started) : 0;
+    const bool measure = observe_host || (cache != nullptr && cache->timing_enabled());
     using Clock = std::chrono::steady_clock;
     const auto branch_started = measure ? Clock::now() : Clock::time_point{};
     std::array<std::vector<FlashNextStreamRoute>, 512> streamed_routes;
@@ -658,7 +661,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
             grouped_cpu_experts = tokens > 1 && resolve_cpu_expert_grouping();
 #endif
             cpu_batch = host_expert_worker_pool().run(cpu.tasks, grouped_cpu_experts);
-            if (telemetry && !grouped_cpu_experts) {
+            if (observe_host && !grouped_cpu_experts) {
                 cpu_batch.weight_read_bytes = cpu.tasks.size() * kExpertPairBytes;
             }
         } catch (...) {
@@ -752,6 +755,33 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         use_shared_fp32_intermediate, output_fp32);
     if (output_fp32 != nullptr) {
         s_host_expert_fp32_output_calls.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (aggregate) {
+        using C = v100_compare::Counter;
+        auto& round = *v100_compare::active;
+        const auto add = [&](C key, std::uint64_t value) { round.counter(layer, key, value); };
+        add(C::routed_tokens, tokens);
+        add(C::total_routes, routed_paths);
+        add(C::resident_routes, routed_paths - streamed_route_count - cpu.tasks.size());
+        add(C::cpu_routes, cpu.tasks.size());
+        add(C::nonresident_gpu_routes, streamed_route_count);
+        add(C::distinct_experts, ExpertRouteHistogram(cpu.ids).distinct);
+        add(C::cpu_groups, cpu_batch.groups);
+        add(C::cpu_grouped_routes, cpu_batch.grouped_pairs);
+        add(C::cpu_weight_read_bytes, cpu_batch.weight_read_bytes);
+        add(C::expert_h2d_bytes, stream_experts ? streamed_experts * kExpertSlotBytes : 0);
+        add(C::route_d2h_bytes,
+            ((stream_experts && !stream_cpu_fallback) ? 0 :
+                input_words*(use_routed_expert_input_fp32 ? sizeof(float) : sizeof(std::uint16_t)))
+            + routed_paths*(sizeof(std::int32_t)+(device_route_combine?0:sizeof(float))));
+        const auto hits = routed_paths - streamed_route_count - cpu.tasks.size();
+        add(C::output_d2h_bytes, device_route_combine ? 0 :
+            (hits ? cpu.pair_outputs.size()*sizeof(float) : 0));
+        add(C::output_h2d_bytes, device_route_combine ?
+            cpu.tasks.size()*kFlashNextExpertHidden*sizeof(float) : cpu.routed_sum.size()*sizeof(float));
+        round.duration(layer, v100_compare::Stage::host_wait, rendezvous_us);
+        round.duration(layer, v100_compare::Stage::cpu_expert,
+            std::chrono::duration<double, std::micro>(cpu_finished-cpu_started).count());
     }
     if (telemetry) {
         ExpertLayerMeasurement m;
