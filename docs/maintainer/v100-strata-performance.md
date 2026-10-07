@@ -1101,3 +1101,19 @@ sparse contexts. The existing target regression also failed at a value-cache
 bitwise comparison before attended-output checks; the follow-up records
 baseline and candidate independently without changing its thresholds. No
 production improvement or accuracy qualification is established.
+
+GQA follow-up run `37555634626` at `9eb61c68` compiled and passed the
+independent FP64 normwise/pointwise attention and range-fallback checks for
+both KV types. The target regression reproduced the value-cache mismatch
+with the optimization disabled, establishing a baseline failure. The shell
+inherited errexit and stopped before the candidate regression; this is
+corrected with explicit `set +e` while retaining both failing exit statuses.
+Matched prepared-query timings found no BF16 crossover: at T=512 SIMT/MMA
+were 2,180.920/3,419.700 µs, and T=8192 29,618.000/43,576.900 µs. For
+FP8 KV, T=512 was 7,152.380/5,787.080 µs, T=1024 13,939.900/10,100.500,
+T=4096 54,875.300/35,502.700, and T=8192 109,473.000/69,732.400.
+The experimental production dispatch is therefore limited to FP8 KV and
+T>=512, still requiring both explicit opt-in and the existing MMA flag.
+These are bounded attention-kernel timings on repeated represented contexts,
+not serving speedups, MTP evidence, or full-model/long-prefix qualification.
+BF16 and smaller batches retain SIMT. Existing numerical gates remain intact.

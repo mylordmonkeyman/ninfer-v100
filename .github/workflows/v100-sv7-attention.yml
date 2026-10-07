@@ -50,6 +50,7 @@ jobs:
       - name: Existing target regression with experimental score math
         shell: bash
         run: |
+          set +e
           set -uo pipefail
           NINFER_V100_QSA_SCORE_MMA=0 build-sv6/tests/ninfer_qwen3_8_flash_next_qsa_attention_test 2>&1 | tee sv7-attention-results/baseline-regression.log
           baseline=$?

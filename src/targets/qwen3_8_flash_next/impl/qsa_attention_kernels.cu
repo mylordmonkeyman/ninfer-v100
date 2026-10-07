@@ -1125,7 +1125,7 @@ void flash_next_qsa_attention_prefill_launch(
     const bool experimental = mode != nullptr && std::strcmp(mode, "1") == 0;
     flash_next_qsa_volta_attend_launch(scratch.query, token_indices, table_row,
         selected_blocks, selected_counts, cache, scratch.attended, stream,
-        use_mma && experimental);
+        use_mma && experimental && is_fp8 && tokens >= 512);
 #else
     if (is_fp8) {
         if (use_mma) {
