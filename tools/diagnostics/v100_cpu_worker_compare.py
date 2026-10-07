@@ -74,7 +74,7 @@ def payload(model,run):
                 max_tokens=128,temperature=0,seed=42,enable_thinking=False)
 
 def run_ninfer(a,out,run,workers):
-    mode=f"w{workers:02d}"
+    mode='default' if workers is None else f"w{workers:02d}"
     suffix=''
     p=port();base=f'http://127.0.0.1:{p}'
     log=out/f'ninfer-{mode}-{run}{suffix}.log'
@@ -93,7 +93,6 @@ def run_ninfer(a,out,run,workers):
       'NINFER_V100_DEVICE_ROUTE_COMBINE':'1',
       'NINFER_V100_PREFILL_EXPERT_POLICY':'cpu-cache',
       'NINFER_V100_DECODE_EXPERT_POLICY':'cpu-cache',
-      'NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS':str(workers),
       'NINFER_V100_CPU_EXPERT_GROUP':'1',
       'NINFER_V100_ROUTE_HANDOFF':'0',
       'NINFER_V100_PLE_IO':'mmap',
@@ -103,6 +102,10 @@ def run_ninfer(a,out,run,workers):
       'NINFER_FLASH_NEXT_STAGE_LEDGER':'0',
       'NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE':'0',
       'NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE':'0'})
+    if workers is None:
+        env.pop('NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS',None)
+    else:
+        env['NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS']=str(workers)
     cmd=[str(a.ninfer.resolve()),str(a.artifact.absolute()),'--host','127.0.0.1','--port',str(p),
          '--max-context','4096','--kv-capacity','4096','--max-concurrency','1','--prefill-chunk','2048',
          '--kv-dtype','fp8','--device-state-slots','2','--host-state-slots','2','--host-kv-mib','256',
@@ -122,7 +125,7 @@ def run_ninfer(a,out,run,workers):
     spec=done.get('speculative') or {}
     message=((resp.get('choices') or [{}])[0].get('message') or {}).get('content') or ''
     text=log.read_text(errors='replace');slots=CACHE_SLOTS_RE.search(text)
-    return dict(engine=f'ninfer-{mode}',run=run,workers=workers,diagnostic=False,
+    return dict(engine=f'ninfer-{mode}',run=run,workers=('default' if workers is None else workers),diagnostic=False,
         prompt_tokens=r['prompt_tokens'],cached=r['prefix_cache_hit_tokens'],fresh=fresh,
         output=r['completion_tokens'],prefill_tps=fresh/tm['prefill'],
         decode_tps=r['completion_tokens']/tm['decode'],ttft_s=tm['ttft'],
@@ -166,19 +169,20 @@ def stats(rows,engine,key):
     return {'median':statistics.median(vals),'min':min(vals),'max':max(vals)}
 
 def summary(rows):
-    workers=(32,48,56,64)
+    arms=(None,32,64)
     out={}
-    for count in workers:
-        engine=f"ninfer-w{count:02d}"
+    for count in arms:
+        engine='ninfer-default' if count is None else f"ninfer-w{count:02d}"
         out[engine]={k:stats(rows,engine,k) for k in ('prefill_tps','decode_tps','ttft_s','wall_s')}
     out['strata']={k:stats(rows,'strata',k) for k in ('prefill_tps','decode_tps','ttft_s','wall_s')}
-    best=max(workers,key=lambda n:out[f"ninfer-w{n:02d}"]['decode_tps']['median'])
-    best_engine=f"ninfer-w{best:02d}"
-    out['best_workers']=best
-    out['best_engine']=best_engine
-    out['strata_over_best_decode']=out['strata']['decode_tps']['median']/out[best_engine]['decode_tps']['median']
-    ninfer=[x for x in rows if x['engine'].startswith('ninfer-')]
-    out['ninfer_response_equal']=len({x['response_sha256'] for x in ninfer})==1
+    out['default_over_32_decode']=out['ninfer-default']['decode_tps']['median']/out['ninfer-w32']['decode_tps']['median']
+    out['default_over_64_decode']=out['ninfer-default']['decode_tps']['median']/out['ninfer-w64']['decode_tps']['median']
+    out['strata_over_default_decode']=out['strata']['decode_tps']['median']/out['ninfer-default']['decode_tps']['median']
+    equal={}
+    for run in sorted({x['run'] for x in rows if x['engine'].startswith('ninfer-')}):
+        same=[x for x in rows if x['run']==run and x['engine'].startswith('ninfer-')]
+        equal[str(run)]=len({x['response_sha256'] for x in same})==1
+    out['ninfer_response_equal_by_run']=equal
     return out
 
 def main():
@@ -187,28 +191,31 @@ def main():
     ap.add_argument('--profile',type=Path,required=True);ap.add_argument('--strata-python',type=Path,required=True)
     ap.add_argument('--strata-server',type=Path,required=True);ap.add_argument('--strata-config',type=Path,required=True)
     ap.add_argument('--strata-profile',type=Path,required=True);ap.add_argument('--output',type=Path,required=True)
-    ap.add_argument('--repeats',type=int,default=1);a=ap.parse_args();a.output.mkdir(parents=True,exist_ok=True)
+    ap.add_argument('--repeats',type=int,default=3);a=ap.parse_args();a.output.mkdir(parents=True,exist_ok=True)
     for p in (a.ninfer,a.artifact,a.profile,a.strata_python,a.strata_server,a.strata_config,a.strata_profile):
         if not p.exists():raise FileNotFoundError(p)
     a.profile=strata_profile_to_ninfer(a.strata_profile,a.profile,a.output/'strata-derived-ninfer-profile.json')
-    rows=[];worker_counts=(32,48,56,64)
-    arms=list(worker_counts)+['strata']
+    rows=[];arms=(None,32,64,'strata')
     for i in range(a.repeats):
-        order=arms if i%2==0 else list(reversed(arms))
+        order=arms if i%2==0 else tuple(reversed(arms))
         for arm in order:
             row=run_strata(a,a.output,i) if arm=='strata' else run_ninfer(a,a.output,i,arm)
             rows.append(row);(a.output/'observations.json').write_text(json.dumps(rows,indent=2))
     s=summary(rows);(a.output/'summary.json').write_text(json.dumps(s,indent=2))
-    lines=['NInfer CPU expert worker-count screen (MTP draft window 1)','',
-           'workers  prefill tok/s  decode tok/s']
-    for count in worker_counts:
-        eng=f"ninfer-w{count:02d}"
-        lines.append(f"{count:>7d}  {s[eng]['prefill_tps']['median']:>13.2f}  {s[eng]['decode_tps']['median']:>12.2f}")
-    lines += ['',f"Strata prefill/decode: {s['strata']['prefill_tps']['median']:.2f} / {s['strata']['decode_tps']['median']:.2f} tok/s",
-              f"Best NInfer worker count: {s['best_workers']}",
-              f"Strata/best-NInfer decode: {s['strata_over_best_decode']:.2f}x",
-              f"NInfer generated-response equality across worker counts: {s['ninfer_response_equal']}",
-              '', 'Three-repeat qualification of the high-worker region; generated-response equality remains diagnostic. Strata uses a different quantization/container format.']
+    lines=['NInfer Volta CPU-worker default qualification (MTP draft window 1)','',
+           'arm       prefill tok/s  decode tok/s',
+           f"default   {s['ninfer-default']['prefill_tps']['median']:>13.2f}  {s['ninfer-default']['decode_tps']['median']:>12.2f}",
+           f"w32       {s['ninfer-w32']['prefill_tps']['median']:>13.2f}  {s['ninfer-w32']['decode_tps']['median']:>12.2f}",
+           f"w64       {s['ninfer-w64']['prefill_tps']['median']:>13.2f}  {s['ninfer-w64']['decode_tps']['median']:>12.2f}",
+           '',
+           f"Strata prefill/decode: {s['strata']['prefill_tps']['median']:.2f} / {s['strata']['decode_tps']['median']:.2f} tok/s",
+           f"Default/32 decode: {s['default_over_32_decode']:.2f}x",
+           f"Default/64 decode: {s['default_over_64_decode']:.2f}x",
+           f"Strata/default decode: {s['strata_over_default_decode']:.2f}x",
+           f"Same-prompt NInfer response equality by run: {s['ninfer_response_equal_by_run']}",
+           '', 'Default is qualified against explicit 32/64 on identical prompts. Strata uses a different quantization/container format.']
     (a.output/'summary.txt').write_text('\n'.join(lines)+'\n');print('\n'.join(lines))
+
+if __name__=='__main__':main()
 
 if __name__=='__main__':main()

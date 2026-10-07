@@ -43,7 +43,11 @@ std::atomic<std::uint64_t> s_host_expert_routed_tokens{0};
 std::atomic<std::uint64_t> s_host_expert_pairs{0};
 
 unsigned resolve_host_expert_worker_count() {
+#if defined(NINFER_VOLTA_BUILD)
+    constexpr unsigned kDefaultWorkers = 64;
+#else
     constexpr unsigned kDefaultWorkers = 32;
+#endif
     constexpr unsigned kMaximumWorkers = 256;
     if (const char* env = std::getenv("NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS");
         env != nullptr && env[0] != '\0') {
