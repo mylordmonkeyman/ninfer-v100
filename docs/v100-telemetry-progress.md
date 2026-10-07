@@ -193,3 +193,29 @@ are software checks, not native Q4/full-model numerical equality, V100 cache
 qualification or level-1 overhead. Deferred GPU intervals/NVTX, launch accounting,
 caller request/MTP linkage and the frozen comprehensive hardware campaign remain
 required. No optimization policy or V100 campaign has been started.
+
+
+## Additional Strata adapter coverage
+
+Hosted run `37698041978` succeeded for NInfer `9edcb12ea9d409118e922ebba0dc34c606a78ae2`
+and Strata `0c6692f1e890ee3a12c327d1a77f92c94dd4ffcd`: all 78 Python tests,
+round scope/trace fixtures, NInfer real CPU outputs/accounting at levels 0/1/2,
+shared contract parity and both engines' CUDA host compilation, including the
+new GPU cache fixture's syntax. Its hosted Strata CPU fixture explicitly skipped
+because that machine lacked AVX512-VNNI/VBMI. The local Strata CPU fixture did run
+and passed at levels 0/1/2; the hosted skip is not hardware qualification.
+
+Strata `2753d4d1d326f296cc3cc484d316849a10088c7f` adds single-token adapter
+routed/resident/CPU classifications, distinct work, logical CPU weight bytes,
+MoE host spans and pool intervals. Classifications use the actual submitted CPU
+job slots, not a second cache decision. Remote-GPU adapter classification remains
+unavailable. Adapter/hit callback failures now mark the active round failed even
+if an outer native loop otherwise returns success; native failure control flow
+is unchanged.
+
+Verification transient expert H2D bytes are recorded at successful native
+`cudaMemcpyAsync` submissions. Explicit direct-mapped/no-copy calls observe zero
+copy bytes; PCIe demand-read traffic remains unavailable. Split-group doorbell
+steps map back to the actual model layer. Copy submission failures mark telemetry
+failed, without adding waits or changing native error handling. The new adapter
+and DMA observations still require actual native-model fidelity on V100.
