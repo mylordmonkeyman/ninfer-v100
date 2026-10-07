@@ -6,6 +6,7 @@ on:
       - '.github/workflows/v100-sv7-paired.yml'
       - 'src/targets/qwen3_8_flash_next/impl/vertical_slice.*'
       - 'tests/targets/qwen3_8_flash_next/test_vertical_slice*.cpp'
+      - 'src/targets/qwen3_8_flash_next/impl/text_decode.cpp'
   workflow_dispatch:
 permissions:
   contents: read
@@ -120,6 +121,7 @@ jobs:
           simt=$?
           baseline_bytes=$(stat -c %s "$baseline" 2>/dev/null || echo 0)
           NINFER_V100_QSA_SCORE_MMA=1 \
+            NINFER_V100_QSA_SCORE_MMA_MIN_QSA=6 \
             NINFER_V100_SV7_BASELINE_LOGITS="$baseline" \
             NINFER_V100_SV7_OBSERVATIONS_OUT=sv7-paired-results/mma.csv \
             NINFER_V100_SV7_PAIR_OBSERVATIONS_OUT=sv7-paired-results/direct.csv \
@@ -207,7 +209,10 @@ jobs:
                   except json.JSONDecodeError: continue
                   if row.get('kind')=='qsa_score_dispatch':events.append(row)
               assert len(events)==96,(mode,len(events))
-              assert all(e['tokens']==512 and e['fp8'] and e['mma']==(mode=='mma') for e in events)
+              assert all(e['tokens']==512 and e['fp8'] for e in events)
+              mma_count=sum(bool(e['mma']) for e in events)
+              expected=48 if mode=='mma' else 0
+              assert mma_count==expected,(mode,mma_count,expected)
               assert 'phase11.positions=4096' in text and text.count('endpoint_logits_exact=1')==8
           assert 'sv7.paired.positions=4096' in (root/'mma.log').read_text()
           assert int(status[2].split('=')[1])==4096*248320*2

@@ -693,6 +693,23 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
     }
     validate_flash_next_decode_state(state, state_slots);
 
+#if defined(NINFER_VOLTA_BUILD)
+    const std::size_t qsa_mma_min_ordinal = [] {
+        const char* env = std::getenv("NINFER_V100_QSA_SCORE_MMA_MIN_QSA");
+        if (env == nullptr || env[0] == '\\0') { return std::size_t{0}; }
+        char* end = nullptr;
+        const long value = std::strtol(env, &end, 10);
+        if (end == env || *end != '\\0' || value < 0 ||
+            value > static_cast<long>(kFullAttentionLayers)) {
+            throw std::invalid_argument(
+                "NINFER_V100_QSA_SCORE_MMA_MIN_QSA must be in [0,12]");
+        }
+        return static_cast<std::size_t>(value);
+    }();
+#else
+    constexpr std::size_t qsa_mma_min_ordinal = 0;
+#endif
+
     auto emit_state = [&](std::string_view name, const Tensor& tensor) {
         if (sink && sink->on_state) {
             // Diagnostic sink only (TRACE_STAGES / test dumper): device tensor must be idle.
@@ -808,7 +825,8 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
                 round_ws.block_input, model.full_attention[qsa_idx], token_indices,
                 mrope_positions, table_row, round_ws.selected_blocks,
                 round_ws.selected_counts, state.qsa_attention_caches[qsa_idx],
-                workspace, round_ws.block_output, stream, qsa_emit, use_qsa_prefill_mma);
+                workspace, round_ws.block_output, stream, qsa_emit,
+                use_qsa_prefill_mma && qsa_idx >= qsa_mma_min_ordinal);
         } else {
             const std::size_t gdn_idx = gdn_ordinal(layer);
             flash_next_gdn_prefill_chunk(round_ws.block_input, model.gdn[gdn_idx], source_slot,
