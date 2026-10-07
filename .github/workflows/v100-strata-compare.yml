@@ -5,6 +5,14 @@ on:
     paths:
       - '.github/workflows/v100-strata-compare.yml'
       - 'tools/diagnostics/v100_strata_compare.py'
+      - 'tools/diagnostics/v100_decode_stream_compare.py'
+      - 'src/targets/qwen3_8_flash_next/impl/expert_stream.h'
+      - 'src/targets/qwen3_8_flash_next/impl/expert_stream.cpp'
+      - 'src/targets/qwen3_8_flash_next/impl/runtime_plan.cpp'
+      - 'src/targets/qwen3_8_flash_next/impl/runtime_state.cpp'
+      - 'src/targets/qwen3_8_flash_next/impl/text_decode_state.h'
+      - 'src/targets/qwen3_8_flash_next/impl/text_decode.cpp'
+      - 'src/targets/qwen3_8_flash_next/impl/moe.cpp'
   workflow_dispatch:
 permissions:
   contents: read
@@ -20,7 +28,7 @@ jobs:
         with:
           persist-credentials: false
       - run: |
-          python3 -m py_compile tools/diagnostics/v100_strata_compare.py
+          python3 -m py_compile tools/diagnostics/v100_strata_compare.py tools/diagnostics/v100_decode_stream_compare.py
           git diff --check
   hardware:
     needs: checks
@@ -95,13 +103,16 @@ jobs:
           cmake -S . -B build-strata-compare -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
             -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
-            -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=OFF
-          cmake --build build-strata-compare --target ninfer-serve
+            -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-strata-compare --target \
+            ninfer_qwen3_8_flash_next_expert_stream_test ninfer-serve
+          build-strata-compare/tests/ninfer_qwen3_8_flash_next_expert_stream_test \
+            | tee strata-compare-results/expert-stream-test.log
       - name: Run alternating same-host comparison
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/diagnostics/v100_strata_compare.py \
+          python3 tools/diagnostics/v100_decode_stream_compare.py \
             --ninfer build-strata-compare/apps/ninfer-serve \
             --artifact strata-compare-source/model.ninfer \
             --profile strata-compare-source/sv2-static-profile.json \
