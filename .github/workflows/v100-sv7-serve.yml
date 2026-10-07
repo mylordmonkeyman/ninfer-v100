@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/v100-sv7-serve.yml'
       - 'tools/diagnostics/v100_sv2_serve.py'
+      - 'tools/diagnostics/test_v100_sv2_serve.py'
       - 'src/targets/qwen3_8_flash_next/impl/text_decode.cpp'
   workflow_dispatch:
 permissions:

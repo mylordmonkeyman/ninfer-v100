@@ -40,18 +40,23 @@ class ProductionEvidenceTest(unittest.TestCase):
 
     def test_qsa_dispatch_rejects_inactive_or_wrong_paths(self):
         import json
-        rows=[dict(kind='qsa_score_dispatch',tokens=1227,fp8=True,mma=True),
-              dict(kind='qsa_score_dispatch',tokens=64,fp8=True,mma=False)]
+        large=[dict(kind='qsa_score_dispatch',tokens=1227,fp8=True,mma=i>=6)
+               for i in range(12)]
+        rows=large+[dict(kind='qsa_score_dispatch',tokens=64,fp8=True,mma=False)]
         encode=lambda values: '\n'.join(json.dumps(x) for x in values)
         self.assertEqual(validate_qsa_dispatch(encode(rows),'score-mma'),rows)
         with self.assertRaises(ValueError): validate_qsa_dispatch('', 'score-mma')
-        with self.assertRaises(ValueError): validate_qsa_dispatch(encode(rows[1:]), 'score-mma')
+        with self.assertRaises(ValueError): validate_qsa_dispatch(encode(rows[-1:]), 'score-mma')
         with self.assertRaises(ValueError): validate_qsa_dispatch(encode(rows), 'simt')
-        for field,value in [('fp8',False),('tokens',64),('mma',False)]:
-            changed=copy.deepcopy(rows);changed[0][field]=value
-            with self.assertRaises(ValueError): validate_qsa_dispatch(encode(changed),'score-mma')
-        rows[0]['mma']=False
-        self.assertEqual(validate_qsa_dispatch(encode(rows),'simt'),rows)
+        changed=copy.deepcopy(rows);changed[0]['fp8']=False
+        with self.assertRaises(ValueError): validate_qsa_dispatch(encode(changed),'score-mma')
+        changed=copy.deepcopy(rows);changed[6]['mma']=False
+        with self.assertRaises(ValueError): validate_qsa_dispatch(encode(changed),'score-mma')
+        changed=copy.deepcopy(rows);changed[0]['mma']=True
+        with self.assertRaises(ValueError): validate_qsa_dispatch(encode(changed),'score-mma')
+        simt=copy.deepcopy(rows)
+        for row in simt: row['mma']=False
+        self.assertEqual(validate_qsa_dispatch(encode(simt),'simt'),simt)
 
     def test_qsa_screen_isolates_score_flag_and_uses_fp8_batch(self):
         for mode,flag,attribution in (('simt','0',False),('score-mma','1',False),('simt','0',True)):
@@ -75,6 +80,8 @@ class ProductionEvidenceTest(unittest.TestCase):
                 self.assertIn('--qsa-prefill-mma',command)
                 self.assertNotIn('NINFER_FLASH_NEXT_QSA_PREFILL_MMA',environment)
                 self.assertEqual(environment['NINFER_V100_QSA_SCORE_MMA'],flag)
+                self.assertEqual(environment['NINFER_V100_QSA_SCORE_MMA_MIN_QSA'],
+                                 '6' if mode=='score-mma' else '0')
                 self.assertEqual(environment['NINFER_V100_TELEMETRY'],'1')
                 self.assertEqual(environment['NINFER_V100_QSA_SCORE_COMPARE'],'1' if attribution else '0')
                 self.assertEqual(environment['NINFER_V100_PLE_IO'],'mmap')
