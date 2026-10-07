@@ -6,7 +6,34 @@ Frozen source: `forwardport/v100-flash-next` at
 Reference inspected: `jmnargi/Strata-V100` `9d7774919e26d235359bc2c3001f61f607eb288d`.
 Milestones are SV0–SV8 in the supplied specification; they do not advance Phase 18.
 
-## Current milestone: SV1 expert residency
+## Current milestone: SV7 qualification blocked
+
+The SV7 FP8 attention candidate has passed isolated and sampled real-input
+attention checks, but remains off by default. Full 4096-position numerical
+qualification and the exact serving continuation comparison both fail.
+Large BF16-to-FP16 GEMM replacements are separately blocked because this
+artifact's proposed matrices do not satisfy the exact representation gate.
+The numerical results below are from both paths executing FP8 KV in eight
+512-token prefill chunks, not the original BF16 single-token baseline.
+
+| Phase 11 criterion | Required | SIMT control | MMA candidate |
+|---|---:|---:|---:|
+| Positions | >=4096 | 4096 | 4096 |
+| Nonfinite positions | 0 | 0 | 0 |
+| Top-1 agreement | >=99% | 93.0664% | 93.8477% |
+| Mean KL | <=0.001 | 0.12648098 | 0.10941232 |
+| P99 KL | <=0.01 | 2.36349498 | 2.34690797 |
+| Relative mean NLL difference | <=0.5% | 1.0647% | 2.2951% |
+| Independent qualification | Pass | **Fail** | **Fail** |
+
+Run [37558842013](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37558842013)
+completed both arms, with 96 verified eligible dispatches and eight exact
+reconstructed endpoint matches per arm. A smaller mean KL does not override
+the failed criteria or the separate continuation divergence. No serving
+speedup, MTP qualification or default promotion is established. The current
+SV7 candidate screen is blocked under the specification's unchanged gates;
+an unchanged rerun is not justified. Optional SV8 tiering has not been started,
+and requires evidence of a material long-context KV/residency bottleneck.
 
 On 2026-10-04 the user explicitly accepted the frozen baseline and authorized
 continuation. SV0 is accepted by measured baseline parity. The independent
@@ -1225,3 +1252,28 @@ invalid chunk size, disabled MMA, BF16 GDN state, graphs, speculation,
 concurrency, resident experts and missing host-backed layers. The workflow
 runs these contract tests before the full prefix. Numerical thresholds and
 both independent oracle exit gates are unchanged.
+
+
+Full-prefix run `37558842013` at `7a2e0f3f` passed the preflight contract tests
+and completed both 4096-position arms. Artifact `11456385648` (SHA256
+`c2a0fc03b75e884352af0d8f6e55824a9c49040fa7c062ac583ae94f8770d856`)
+was downloaded and verified. Coverage passed: 96 actual FP8 T=512 QSA
+dispatches per arm, eight reconstructed endpoint bit matches, and zero
+nonfinite positions. SIMT and MMA each exited 1 solely at the unchanged
+independent numerical qualification, with the metrics in the current-status
+table. First top-1 divergence was position 10 for both. Maximum logit errors
+were 22.95859718/19.33674622; mean top-5 overlap was
+0.84233398/0.84545898, and mean top-10 overlap was
+0.83801270/0.84099121 (SIMT/MMA).
+
+MMA improves top-1 agreement and mean KL in this run but worsens the relative
+mean NLL difference. Both paths miss all four numerical acceptance limits.
+This does not establish a numerical regression caused solely by QSA MMA,
+or an accuracy-qualified faster path: the SIMT control also fails. The
+independent failure and the previously observed exact serving continuation
+failure remain reported separately. Diagnostic elapsed times include state
+hooks, per-position head execution, oracle I/O and metric evaluation, so they
+must not be presented as serving performance. The current candidate remains
+experimental and disabled by default; no unchanged rerun or speculative
+kernel variant is justified by these results. Further qualification requires
+material new numerical evidence or a concrete in-scope correction.
