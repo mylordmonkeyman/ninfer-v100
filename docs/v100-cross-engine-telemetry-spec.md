@@ -162,6 +162,44 @@ coverage leaves summed activity unknown. It preserves idle configured workers
 with zero jobs, but does not infer their idle duration or combine overlapping
 thread activity into request latency.
 
+## Native lifecycle records
+
+Separate schema `ninfer-strata-v100-lifecycle-v1` records successful native
+`verified`, `commit_returned`, `emitted` and `aborted` observations. It uses the
+same `run_id`/`round_id` as execution records, plus `sequence_trace_id` and a
+native token position. NInfer sequence correlation is executor/lane/epoch;
+Strata caller loops allocate an explicitly process-local trace label. These are
+**not external request IDs**. Strata's linked caller ID propagates through its
+native verifier scope without changing nested scope ownership.
+
+`proposed_drafts` is the actual draft count offered to this verification call,
+including suffix/oracle proposals where configured, after native selection and
+constraint trimming. It does not count all drafts generated and later discarded.
+The input width is one anchor plus offered drafts, also observed in the linked
+round context. `accepted_drafts` comes from the caller's actual comparisons;
+`verified_tokens` counts resulting output candidates (accepted drafts plus one
+target output), not all executed verification input columns. `proposal_source`
+is `mtp`, `suffix`, `oracle`, `none` or `unknown`. The record's `token_count` and,
+at levels 2/3, exact `token_ids` describe only its stated `token_semantics`.
+Level 1 emits counts/correlation only.
+
+NInfer Program records verified candidates and actual possibly truncated commit
+outputs. Strata records the input-state prefix selected by `ver.commit(a+1)`
+separately from actual output-loop tokens after EOS/max-new trimming. A native
+commit return can precede CUDA completion: no event here claims GPU completion
+and no additional wait is inserted. `first_token_index` is the native input
+anchor for verified/Strata events and the first committed output position for
+NInfer commit-return events. The linked execution context supplies input spans.
+
+`tools/telemetry/lifecycle.py` validates and reports observed acceptance histograms,
+input work, commits by token semantics and emission coverage. It checks duplicate
+identity, prefix consistency and conservation; partial/cancelled streams stay
+incomplete. Missing NInfer external-emission observations are unknown, not zero.
+Initial outputs outside these loops, complete request boundaries/IDs, draft
+production/cost, cancellation paths outside Program commit and confirmed GPU
+commit completion remain outstanding. This report cannot establish complete
+request throughput or qualify an optimization.
+
 ## Campaign artifacts and reproducibility
 
 The manifest freezes full engine SHAs, model/tokenizer and quant identity,

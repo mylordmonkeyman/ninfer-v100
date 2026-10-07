@@ -219,3 +219,34 @@ copy bytes; PCIe demand-read traffic remains unavailable. Split-group doorbell
 steps map back to the actual model layer. Copy submission failures mark telemetry
 failed, without adding waits or changing native error handling. The new adapter
 and DMA observations still require actual native-model fidelity on V100.
+
+
+## Caller speculation lifecycle increment
+
+Hosted run `37698481145` fully succeeded: all 78 Python checks, both real CPU
+fixtures at levels 0/1/2 without skips, caller-independent scope fixtures,
+shared contract parity and both engines' CUDA host compilation passed.
+
+NInfer Program now records actual speculative verification acceptance and
+possibly trimmed committed output tokens, linked to native executor/transaction
+and lane/epoch. Ordinary decode also records verified/committed results; zero
+acceptance records cancellation at the commit boundary. Strata serve and CLI
+verification loops correlate execution rounds with actual accepted drafts,
+input-state-prefix commit returns and outputs after their native EOS/max-new
+loops. MTP, suffix and oracle proposals retain their selected source. Caller
+trace labels are explicitly process-local, not invented external request IDs.
+No precision, proposal policy, output loop or synchronization behavior changes.
+
+The separate lifecycle validator/report keeps offered verification drafts,
+accepted outputs, state-input commits and emissions distinct. It rejects
+conservation/identity/prefix mismatches, preserves partial coverage and leaves
+NInfer external emissions unknown. Real C++ fixture records exercise levels
+0/1/2, nested round linkage, trimmed commits and EOS-shortened emissions. These
+fixtures validate telemetry contracts, not full-model acceptance or accuracy.
+All 25 telemetry and 58 diagnostic Python tests pass locally (83 total).
+
+This increment does not complete request attribution. Full external request
+IDs/start/end, initial outputs outside the loops, NInfer engine output emission,
+draft generation/production costs, additional cancellation paths, confirmed GPU
+commit completion, deferred GPU timing and native-model hardware fidelity remain.
+Actual caller source host compilation is included in the next hosted check.

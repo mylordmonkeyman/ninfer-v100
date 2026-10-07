@@ -70,6 +70,7 @@ public:
     PendingRound& operator=(PendingRound&& other) noexcept;
 
     [[nodiscard]] bool valid() const noexcept;
+    [[nodiscard]] std::uint64_t telemetry_transaction_id() const noexcept { return transaction_id_; }
     [[nodiscard]] std::uint32_t batch_size() const;
     [[nodiscard]] Tensor logits() const;
     [[nodiscard]] Tensor final_hidden() const;
@@ -109,6 +110,7 @@ public:
     FlashNextTextExecutor(FlashNextTextExecutor&&)                 = delete;
     FlashNextTextExecutor& operator=(FlashNextTextExecutor&&)      = delete;
 
+    [[nodiscard]] std::uint64_t telemetry_executor_id() const noexcept { return perf_executor_id_; }
     [[nodiscard]] LaneHandle allocate_lane();
     void release_lane(LaneHandle handle);
 

@@ -60,7 +60,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: mylordmonkeyman/Strata-V100
-          ref: 2753d4d1d326f296cc3cc484d316849a10088c7f
+          ref: 5a2949b0f91ec33416872eeafbe52cf09562d00b
           path: strata-cpu-source
           persist-credentials: false
       - name: Check Strata round ownership and native token traces
@@ -80,6 +80,7 @@ jobs:
           for level in (1, 2):
               records = read_records(f'/tmp/strata-round-{level}.jsonl')
               assert [r['status'] for r in records] == ['ok', 'failed', 'failed']
+              assert records[0]['round_id'].startswith('strata:caller:')
               context = records[0]['context']
               assert context['spans'][0]['first_token_index'] == 42
               assert ('input_token_ids' in context) == (level == 2)
@@ -133,18 +134,21 @@ jobs:
             src/targets/qwen3_8_flash_next/impl/moe.cpp \
             src/targets/qwen3_8_flash_next/impl/cpu_expert_pool.cpp \
             src/targets/qwen3_8_flash_next/impl/text_decode.cpp \
-            src/targets/qwen3_8_flash_next/impl/text_executor.cpp
+            src/targets/qwen3_8_flash_next/impl/text_executor.cpp \
+            src/targets/qwen3_8_flash_next/impl/program.cpp
       - name: Check out frozen Strata telemetry fork
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: mylordmonkeyman/Strata-V100
-          ref: 2753d4d1d326f296cc3cc484d316849a10088c7f
+          ref: 5a2949b0f91ec33416872eeafbe52cf09562d00b
           path: strata-telemetry-source
           persist-credentials: false
       - name: Check shared schema and compile Strata telemetry
         run: |
           cmp docs/v100-cross-engine-telemetry-spec.md strata-telemetry-source/docs/v100-cross-engine-telemetry-spec.md
           cmp src/targets/qwen3_8_flash_next/impl/telemetry/compare_telemetry.h strata-telemetry-source/include/strata/telemetry/compare_telemetry.hpp
+          sed 's/"compare_telemetry.hpp"/"compare_telemetry.h"/' strata-telemetry-source/include/strata/telemetry/lifecycle_telemetry.hpp | \
+            cmp - src/targets/qwen3_8_flash_next/impl/telemetry/lifecycle_telemetry.h
           cd strata-telemetry-source
           g++ -std=c++20 -fsyntax-only -DSTRATA_VERSION='"0.1.36"' \
             -Iinclude -I/usr/local/cuda/include \

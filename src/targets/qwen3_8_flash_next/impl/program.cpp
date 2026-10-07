@@ -1,3 +1,4 @@
+#include "targets/qwen3_8_flash_next/impl/telemetry/lifecycle_telemetry.h"
 #include "targets/qwen3_8_flash_next/impl/program_impl.h"
 #include <ninfer/targets/qwen3_8_flash_next/package.h>
 #include "runtime/engine/context_cost.h"
@@ -2616,6 +2617,17 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
             accepted.push_back(sampled[st.draft_tokens.size()]);
         }
 
+        if (v100_compare::level()) {
+            const auto owner = impl_->executor_.telemetry_executor_id();
+            v100_compare::LifecycleEvent event{
+                .engine="ninfer", .round_id=std::to_string(owner)+":"+std::to_string(impl_->pending_round_.telemetry_transaction_id()),
+                .sequence_trace_id=std::to_string(owner)+":"+std::to_string(lane_idx)+":"+std::to_string(st.epoch),
+                .event="verified", .first_token_index=static_cast<std::uint64_t>(st.last_token_index),
+                .lane=lane_idx, .epoch=st.epoch, .proposed_drafts=st.draft_tokens.size(),
+                .accepted_drafts=accepted.size()-1, .verified_tokens=accepted.size(),
+                .token_semantics="verified_output_candidates", .proposal_source="mtp"};
+            event.tokens(std::span<const std::int32_t>(accepted)); event.emit();
+        }
         st.pending_accepted_tokens = accepted;
         if (st.speculative_stats.enabled) {
             st.speculative_stats.rounds += 1;
@@ -2704,6 +2716,18 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
     for (std::size_t b = 0; b < B; ++b) {
         impl_->pending_batch_tokens_[b]     = static_cast<TokenId>(sampled[b]);
         impl_->pending_batch_row_counts_[b] = 1;
+        if (v100_compare::level()) {
+            const auto lane = sequences[b].lane().value;
+            const auto& st = impl_->lane_states_[lane];
+            const auto owner = impl_->executor_.telemetry_executor_id();
+            v100_compare::LifecycleEvent event{
+                .engine="ninfer", .round_id=std::to_string(owner)+":"+std::to_string(impl_->pending_round_.telemetry_transaction_id()),
+                .sequence_trace_id=std::to_string(owner)+":"+std::to_string(lane)+":"+std::to_string(st.epoch),
+                .event="verified", .first_token_index=static_cast<std::uint64_t>(st.last_token_index),
+                .lane=lane, .epoch=st.epoch, .proposed_drafts=0, .accepted_drafts=0, .verified_tokens=1,
+                .token_semantics="verified_output_candidates", .proposal_source="none"};
+            event.tokens(std::span<const std::int32_t>(sampled.data()+b, 1)); event.emit();
+        }
     }
 
     // Attribute the round's blocking device stall to the wait bucket rather than
@@ -2791,6 +2815,8 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
         throw std::invalid_argument("decisions size mismatch with pending rows");
     }
 
+    const auto telemetry_tx = v100_compare::level() ? impl_->pending_round_.telemetry_transaction_id() : 0;
+    const auto telemetry_owner = v100_compare::level() ? impl_->executor_.telemetry_executor_id() : 0;
     CommitResult result;
     result.row_count = B;
 
@@ -2834,6 +2860,14 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
                 st.total_generated_tokens += 1;
             }
 
+            if (v100_compare::level() && telemetry_tx) {
+                v100_compare::LifecycleEvent event{
+                    .engine="ninfer", .round_id=std::to_string(telemetry_owner)+":"+std::to_string(telemetry_tx),
+                    .sequence_trace_id=std::to_string(telemetry_owner)+":"+std::to_string(lane_idx)+":"+std::to_string(st.epoch),
+                    .event="commit_returned", .first_token_index=static_cast<std::uint64_t>(st.last_token_index-dec.accepted_tokens+1),
+                    .lane=lane_idx, .epoch=st.epoch, .token_semantics="output_tokens"};
+                event.tokens(std::span<const std::int32_t>(st.pending_accepted_tokens)); event.emit();
+            }
             st.draft_tokens.clear();
             st.pending_accepted_tokens.clear();
 
@@ -2847,6 +2881,14 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
             st.pending_accepted_tokens.clear();
             if (impl_->pending_round_.valid()) {
                 impl_->pending_round_.abort();
+            }
+            if (v100_compare::level() && telemetry_tx) {
+                v100_compare::LifecycleEvent event{
+                    .engine="ninfer", .round_id=std::to_string(telemetry_owner)+":"+std::to_string(telemetry_tx),
+                    .sequence_trace_id=std::to_string(telemetry_owner)+":"+std::to_string(lane_idx)+":"+std::to_string(st.epoch),
+                    .event="aborted", .first_token_index=static_cast<std::uint64_t>(st.last_token_index),
+                    .lane=lane_idx, .epoch=st.epoch, .token_count=0};
+                event.emit();
             }
             impl_->drop_unpublished_checkpoints(st);
             impl_->executor_.release_lane(st.lane_handle);
@@ -2888,6 +2930,14 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
                 st.last_token_pos += 1;
                 st.last_token_index += 1;
                 ++st.total_generated_tokens;
+                if (v100_compare::level() && telemetry_tx) {
+                    v100_compare::LifecycleEvent event{
+                        .engine="ninfer", .round_id=std::to_string(telemetry_owner)+":"+std::to_string(telemetry_tx),
+                        .sequence_trace_id=std::to_string(telemetry_owner)+":"+std::to_string(lane_idx)+":"+std::to_string(st.epoch),
+                        .event="commit_returned", .first_token_index=static_cast<std::uint64_t>(st.last_token_index),
+                        .lane=lane_idx, .epoch=st.epoch, .token_semantics="output_tokens"};
+                    event.tokens(std::span<const TokenId>(&sampled, 1)); event.emit();
+                }
 
                 st.draft_tokens.clear();
 
@@ -2897,6 +2947,14 @@ Program::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision>
                     result.rows[b].disposition = runtime::CommitDisposition::Active;
                 }
             } else {
+                if (v100_compare::level() && telemetry_tx) {
+                    v100_compare::LifecycleEvent event{
+                        .engine="ninfer", .round_id=std::to_string(telemetry_owner)+":"+std::to_string(telemetry_tx),
+                        .sequence_trace_id=std::to_string(telemetry_owner)+":"+std::to_string(lane_idx)+":"+std::to_string(st.epoch),
+                        .event="aborted", .first_token_index=static_cast<std::uint64_t>(st.last_token_index),
+                        .lane=lane_idx, .epoch=st.epoch, .token_count=0};
+                    event.emit();
+                }
                 st.draft_tokens.clear();
                 st.pending_accepted_tokens.clear();
                 impl_->drop_unpublished_checkpoints(st);
