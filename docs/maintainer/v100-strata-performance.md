@@ -1138,3 +1138,39 @@ those checks and the screen sequentially; the component-only workflow skips
 that publication to avoid a redundant GPU run. This remains a bounded screen,
 with full-model independent long-prefix qualification outstanding: the
 existing single-token Phase 11 oracle cannot exercise the T>=512 dispatch.
+
+
+Serving run `37556490895` at `4961c810` passed compilation and the stronger
+all-row FP64 checks at every batch size through T=8192. Artifact `11454727866`
+(SHA256 `bf6b4f1ed6d27488402a38e9471f2466ed75b5635131066aafea9a77b999a4b6`)
+confirms 12 eligible QSA calls at T=1220 in each diagnostic process: SIMT in
+the control, MMA in the candidate. The 1227-token first response and its
+prefix replay matched exactly. The continuation used the same 1313-token
+prompt, 1220 cached tokens and 93 newly computed tokens, but its wording
+changed at character 282 (control: “and connection cables”; candidate:
+“(especially in lead-acid”). Each arm replayed its own continuation exactly.
+The cross-path gate **fails**; the harness stopped after the two diagnostic
+processes, without timing or MTP qualification. No serving improvement is
+established, and the candidate remains disabled by default.
+
+The follow-up is arithmetic attribution, not another kernel variant or a
+relaxed qualification gate. `NINFER_V100_QSA_SCORE_COMPARE=1` computes SIMT and
+MMA on the identical prepared queries and already stored FP8 KV in each
+eligible call. It preserves the actual path's output and uses a temporary
+output buffer for the alternate path, with all allocation/copies/waits limited
+to the explicit diagnostic. It reports complete-output bit mismatches,
+absolute differences and relative L2 differences. Three real query positions
+(first, midpoint, last), with all 24 heads, are also compared to an independent
+FP64 QK/softmax/PV reference over their actual selected blocks and causal
+tails. Only their selected physical pages are read. Mathematical FP8 decoding
+is checked against CUDA's represented conversion for all finite codes.
+The original component normwise and pointwise thresholds remain unchanged;
+failing sampled checks stop the diagnostic. Async host-copy storage is drained
+on every exit, including errors.
+
+The attribution workflow uses one SIMT serving process with the existing
+fixed profile and prefix/continuation workload; it performs no timing or MTP
+matrix. Its sampled reference is not a complete-model or long-prefix oracle,
+and a successful attribution run does not supersede the failed exact
+continuation gate. It is intended to distinguish local attention error from
+small representation/reduction differences before selecting any remediation.

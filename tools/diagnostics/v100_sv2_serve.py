@@ -95,9 +95,31 @@ def validate_qsa_dispatch(text, mode):
     return records
 
 
+def validate_qsa_comparisons(text, dispatch):
+    records=[]
+    for line in text.splitlines():
+        try: row=json.loads(line)
+        except json.JSONDecodeError: continue
+        if row.get('kind')=='qsa_real_comparison': records.append(row)
+    large=[row for row in dispatch if row['tokens']>=512]
+    if not records or [row['tokens'] for row in records] != [row['tokens'] for row in large]:
+        raise ValueError('missing same-input QSA comparison for an eligible dispatch')
+    for row in records:
+        if row.get('sample_queries')!=3 or row.get('sample_heads')!=24 or row.get('sample_oracle_pass') is not True:
+            raise ValueError('real QSA sampled independent oracle failed or incomplete')
+        for path in ('simt','mma'):
+            relative=row[path+'_fp64_relative_l2'];pointwise=row[path+'_pointwise_ratio']
+            if not math.isfinite(relative) or relative>1e-3 or relative<0 or not math.isfinite(pointwise) or not 0<=pointwise<=1:
+                raise ValueError('real QSA independent thresholds failed')
+        for key in ('relative_l2_difference','max_absolute_difference'):
+            if not math.isfinite(row[key]) or row[key]<0:
+                raise ValueError('invalid real QSA comparison metric')
+    return records
+
+
 def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                prefill_screen=False, cpu_group_screen=False, route_handoff_screen=False,
-               route_handoff_policy="all", qsa_score_screen=False, diagnostic=False):
+               route_handoff_policy="all", qsa_score_screen=False, diagnostic=False, qsa_score_attribution=False):
     name = f'{mode}-mtp{int(mtp)}-{repeat}'
     log_path, request_path = output/f'{name}.log', output/f'{name}-requests.jsonl'
     env = os.environ.copy()
@@ -123,6 +145,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                NINFER_FLASH_NEXT_EXPERT_CACHE_GROUPED_PREFILL='1',
                NINFER_V100_TELEMETRY='1' if diagnostic else '0',NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING='0',
                NINFER_V100_QSA_SCORE_MMA='1' if qsa_score_screen and mode=='score-mma' else '0',
+               NINFER_V100_QSA_SCORE_COMPARE='1' if qsa_score_attribution else '0',
                NINFER_V100_PLE_IO='mmap',
                NINFER_FLASH_NEXT_STAGE_LEDGER='0',NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT='0',
                NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE='0')
@@ -194,6 +217,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
     done=validate_events(events,responses,mtp,large_prefill)
     text=log_path.read_text()
     dispatch=validate_qsa_dispatch(text,mode) if qsa_score_screen and diagnostic else None
+    comparisons=validate_qsa_comparisons(text,dispatch) if qsa_score_attribution else None
     slots=re.findall(r'phase13.cache.slots_per_layer=(\d+)',text)
     size=re.findall(r'phase13.cache.bytes=(\d+)',text)
     seeded=re.findall(r'v100.profile.seeded=(\d+)',text)
@@ -205,7 +229,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
     if len(startup)!=1 or not startup[0]['engine']['prefix_reuse']:
         raise ValueError('missing production Engine/prefix capability record')
     result=dict(name=name,mode=mode,mtp=mtp,repeat=repeat,diagnostic=diagnostic,
-                qsa_dispatch=dispatch,cache_slots_per_layer=64,
+                qsa_dispatch=dispatch,qsa_comparisons=comparisons,cache_slots_per_layer=64,
                 cache_bytes=int(size[0]),startup=startup[0],requests=done,
                 response_signatures=[response_signature(r) for r in responses])
     print(f'{name}: production prefix/continuation and drafting checks passed',flush=True)
@@ -228,17 +252,28 @@ def main():
                         help='phase eligibility for the route-ready candidate; serial control remains off')
     parser.add_argument('--qsa-score-screen',action='store_true',
                         help='compare SIMT/MMA FP8 KV scores with actual large dispatch evidence')
+    parser.add_argument('--qsa-score-attribution',action='store_true',
+                        help='one SIMT serving process with same-input MMA/FP64 diagnostic comparisons; no timing')
     parser.add_argument('--repeats',type=int,default=3)
     args=parser.parse_args()
     if args.artifact.suffix != '.ninfer' or not args.artifact.is_file():
         parser.error('--artifact requires an explicit readable .ninfer file')
-    if sum((args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,args.qsa_score_screen)) > 1:
+    if sum((args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,args.qsa_score_screen,args.qsa_score_attribution)) > 1:
         parser.error('performance screen flags are mutually exclusive')
     if args.repeats<3: parser.error('need three fresh-process observations per arm')
     args.output.mkdir(parents=True,exist_ok=True)
     profile=json.loads(args.profile.read_text())
     if profile['magic']!='NINFER_V100_EXPERT_PROFILE' or profile['version']!=2:
         raise ValueError('need identity-bound fixed profile')
+    if args.qsa_score_attribution:
+        row=run_server(args.executable,args.artifact,args.profile,args.output,'simt',False,
+                       -2,qsa_score_screen=True,diagnostic=True,qsa_score_attribution=True)
+        atomic_json(args.output/'attribution.json',dict(schema=1,milestone='SV7',qualified=False,
+                    scope='same_input_real_fp8_qsa_sampled_oracle_attribution',observation=row,
+                    limitations=['three query positions and all heads per eligible call; not a complete model oracle',
+                                 'failed exact continuation screen remains failed; no timing or MTP qualification']))
+        print(f"Same-input real QSA sampled FP64 checks passed: {len(row['qsa_comparisons'])} eligible calls; no serving qualification",flush=True)
+        return
     if args.qsa_score_screen:
         modes=('simt','score-mma')
     elif args.route_handoff_screen:

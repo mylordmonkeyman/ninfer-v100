@@ -1,6 +1,10 @@
 #include "core/device.h"
 #include "targets/qwen3_8_flash_next/impl/qsa_attention_kernels.h"
 #include <cuda_bf16.h>
+#include <cuda_fp8.h>
+#if defined(NINFER_VOLTA_BUILD)
+#include "targets/qwen3_8_flash_next/impl/qsa_score_comparison.h"
+#endif
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -20,6 +24,18 @@ int main() {
     try {
         int devices = 0;
         if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) return 77;
+        // Verify the diagnostic's mathematical decoder against CUDA's native
+        // represented FP8 conversion for every finite code, not just test fixtures.
+        for (int bits=0;bits<256;++bits) {
+            if ((bits&127)==127) continue;
+            __nv_fp8_e4m3 code;code.__x=static_cast<unsigned char>(bits);
+            if(qsa_reference_fp8(bits)!=double(float(code)))
+                throw std::runtime_error("independent FP8 reference decoder mismatch");
+        }
+        for(float x:{0.0F,-0.0F,0.125F,-0.6F,0.50001F,65536.0F})
+            if(qsa_reference_rounded(x)!=double(value(bf(x))))
+                throw std::runtime_error("independent BF16 reference rounding mismatch");
+        std::cout<<"PASS: independent reference FP8 decoder and BF16 rounding\n";
         DeviceContext device;
         constexpr int P = 33, H = 24, D = 256, T = 6;
         const std::vector<int> positions{0, 2, 30, 254, 510, 2054};

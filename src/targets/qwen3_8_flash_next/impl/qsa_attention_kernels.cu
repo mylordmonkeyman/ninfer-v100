@@ -9,6 +9,7 @@
 #include "ops/common/warp.cuh"
 #if defined(NINFER_VOLTA_BUILD)
 #include "ops/common/volta_mma884.cuh"
+#include "targets/qwen3_8_flash_next/impl/qsa_score_comparison.h"
 #endif
 #include "ops/linear/nvfp4/nvfp4_codec.cuh"
 
@@ -1132,6 +1133,11 @@ void flash_next_qsa_attention_prefill_launch(
     }
     flash_next_qsa_volta_attend_launch(scratch.query, token_indices, table_row,
         selected_blocks, selected_counts, cache, scratch.attended, stream, score_mma);
+    const char* compare = std::getenv("NINFER_V100_QSA_SCORE_COMPARE");
+    if (compare && std::strcmp(compare, "1") == 0 && is_fp8 && tokens >= 512) {
+        compare_real_qsa_scores(scratch.query, token_indices, table_row,
+            selected_blocks, selected_counts, cache, scratch.attended, stream, score_mma);
+    }
 #else
     if (is_fp8) {
         if (use_mma) {

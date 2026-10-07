@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
-from v100_sv2_serve import run_server, validate_events, validate_handoff_peers, validate_qsa_dispatch
+from v100_sv2_serve import run_server, validate_events, validate_handoff_peers, validate_qsa_dispatch, validate_qsa_comparisons
 
 
 class ProductionEvidenceTest(unittest.TestCase):
@@ -22,6 +22,22 @@ class ProductionEvidenceTest(unittest.TestCase):
             responses.append(response);events.append(event)
         return events,responses
 
+    def test_real_qsa_comparison_requires_every_dispatch_and_unchanged_thresholds(self):
+        import json
+        dispatch=[dict(tokens=1220,mma=False,fp8=True),dict(tokens=64,mma=False,fp8=True)]
+        row=dict(kind='qsa_real_comparison',tokens=1220,sample_queries=3,sample_heads=24,
+                 sample_oracle_pass=True,simt_fp64_relative_l2=1e-5,mma_fp64_relative_l2=1e-5,
+                 simt_pointwise_ratio=.1,mma_pointwise_ratio=.1,
+                 relative_l2_difference=1e-5,max_absolute_difference=.001)
+        self.assertEqual(validate_qsa_comparisons(json.dumps(row),dispatch),[row])
+        with self.assertRaises(ValueError):validate_qsa_comparisons('',dispatch)
+        with self.assertRaises(ValueError):validate_qsa_comparisons(json.dumps(row),dispatch+dispatch[:1])
+        for key,value in [('sample_oracle_pass',False),('sample_heads',12),
+                          ('mma_fp64_relative_l2',.002),('simt_pointwise_ratio',1.01),
+                          ('relative_l2_difference',float('nan'))]:
+            altered=dict(row);altered[key]=value
+            with self.assertRaises(ValueError):validate_qsa_comparisons(json.dumps(altered),dispatch)
+
     def test_qsa_dispatch_rejects_inactive_or_wrong_paths(self):
         import json
         rows=[dict(kind='qsa_score_dispatch',tokens=1227,fp8=True,mma=True),
@@ -38,7 +54,7 @@ class ProductionEvidenceTest(unittest.TestCase):
         self.assertEqual(validate_qsa_dispatch(encode(rows),'simt'),rows)
 
     def test_qsa_screen_isolates_score_flag_and_uses_fp8_batch(self):
-        for mode,flag in (('simt','0'),('score-mma','1')):
+        for mode,flag,attribution in (('simt','0',False),('score-mma','1',False),('simt','0',True)):
             with tempfile.TemporaryDirectory() as directory, \
                     mock.patch('v100_sv2_serve.gpu_snapshot', return_value={
                         'thermal_status_observed': True, 'thermal_throttled': False}), \
@@ -51,7 +67,8 @@ class ProductionEvidenceTest(unittest.TestCase):
                 output=Path(directory)
                 with self.assertRaisesRegex(RuntimeError,'stop'):
                     run_server(Path('/bin/true'),output/'model.ninfer',output/'profile.json',
-                               output,mode,False,-1,qsa_score_screen=True,diagnostic=True)
+                               output,mode,False,-1,qsa_score_screen=True,diagnostic=True,
+                               qsa_score_attribution=attribution)
                 command=popen.call_args.args[0];environment=popen.call_args.kwargs['env']
                 self.assertEqual(command[command.index('--kv-dtype')+1],'fp8')
                 self.assertEqual(command[command.index('--prefill-chunk')+1],'2048')
@@ -59,6 +76,7 @@ class ProductionEvidenceTest(unittest.TestCase):
                 self.assertNotIn('NINFER_FLASH_NEXT_QSA_PREFILL_MMA',environment)
                 self.assertEqual(environment['NINFER_V100_QSA_SCORE_MMA'],flag)
                 self.assertEqual(environment['NINFER_V100_TELEMETRY'],'1')
+                self.assertEqual(environment['NINFER_V100_QSA_SCORE_COMPARE'],'1' if attribution else '0')
                 self.assertEqual(environment['NINFER_V100_PLE_IO'],'mmap')
 
     def test_large_prefill_screen_requires_actual_prompt_extent(self):
