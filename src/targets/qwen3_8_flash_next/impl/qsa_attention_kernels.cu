@@ -433,11 +433,15 @@ __global__ void qsa_prefill_sparse_attention_kernel(
                         khalf[j] = __float2half_rn(kval[j]);
                     }
                     const ops::VoltaMma884Operand a{
-                        __half2_as_uint(__halves2half2(qhalf[0], qhalf[1])),
-                        __half2_as_uint(__halves2half2(qhalf[2], qhalf[3]))};
+                        (static_cast<std::uint32_t>(__half_as_ushort(qhalf[0])) |
+                         (static_cast<std::uint32_t>(__half_as_ushort(qhalf[1])) << 16)),
+                        (static_cast<std::uint32_t>(__half_as_ushort(qhalf[2])) |
+                         (static_cast<std::uint32_t>(__half_as_ushort(qhalf[3])) << 16))};
                     const ops::VoltaMma884Operand b{
-                        __half2_as_uint(__halves2half2(khalf[0], khalf[1])),
-                        __half2_as_uint(__halves2half2(khalf[2], khalf[3]))};
+                        (static_cast<std::uint32_t>(__half_as_ushort(khalf[0])) |
+                         (static_cast<std::uint32_t>(__half_as_ushort(khalf[1])) << 16)),
+                        (static_cast<std::uint32_t>(__half_as_ushort(khalf[2])) |
+                         (static_cast<std::uint32_t>(__half_as_ushort(khalf[3])) << 16))};
                     ops::volta_mma884_f16_f32(accum, a, b);
                 }
                 if (__any_sync(0xffffffffU, outside_half)) {
