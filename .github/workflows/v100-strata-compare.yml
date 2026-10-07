@@ -27,7 +27,7 @@ jobs:
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:
       group: v100-sv0-hardware
-      cancel-in-progress: false
+      cancel-in-progress: true
     timeout-minutes: 120
     env:
       CUDA_VISIBLE_DEVICES: '0'
