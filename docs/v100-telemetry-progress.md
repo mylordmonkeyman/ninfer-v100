@@ -122,3 +122,35 @@ The common worker schema/coverage tests pass (nine focused telemetry tests,
 67 Python tests total). Level-1 overhead, native-model equality, GPU intervals,
 request/token/MTP linkage, worker affinity/idle time, cache deltas and memory
 sampling remain outstanding. No new hardware campaign has been launched.
+
+## External host/GPU sampler increment
+
+Hosted run `37694357589` succeeded: all 67 Python tests, both real CPU pool
+fixtures at levels 0/1/2, shared collector/spec parity and CUDA host compilation
+for both engines (including the worker pools) passed without skips.
+
+`tools/telemetry/sample_system.py` now samples an explicitly named NInfer or
+Strata process at 100–200 ms, with optional explicit GPU UUID selection through
+read-only NVML. Process CPU/fault/I/O/memory snapshots, host memory and optional
+GPU memory/utilization/power/clocks/PCIe rates are available. More expensive
+per-thread/NUMA snapshots default to 1000 ms. Missing metrics stay unavailable;
+PID/TID reuse is checked, collector costs/timestamps are recorded, and terminal
+records distinguish normal duration/process exit from a truncated stream.
+
+The separate `ninfer-strata-v100-system-v1` validator checks stream identity,
+ordering, finite values, coverage and terminal sample counts. The tool observes
+both engines from the campaign checkout; it does not need to alter Strata's
+installed source. Usage, units and qualification limits are in
+`v100-system-sampling.md`. No CUDA context, benchmark or runner is started by it.
+
+Six focused tests cover parsing/units, mixed page sizes, missing coverage,
+PID reuse, the NVML C ABI via a compiled fixture, a real child process, bounded
+collection, process exit and truncation. This environment mounts `/proc` from a
+parent PID namespace; the real fixture supplies its explicitly visible proc PID.
+All 15 telemetry tests and 58 diagnostic tests pass locally (73 total).
+
+The real V100 NVML path and external sampler overhead remain unqualified. Device
+utilization is not request/engine attribution, and process/NUMA snapshots are not
+an allocation breakdown. Request/token/MTP linkage, native Q4/full-model off/on
+qualification, cache deltas and deferred GPU intervals remain required before
+the comprehensive hardware campaign. No new V100 run has been dispatched.
