@@ -1060,3 +1060,19 @@ projection for replacement. This is representation evidence only: no device
 weights, dispatch, activation arithmetic, or defaults change. Tensor-core
 kernels, measured crossover thresholds, attention math and the unchanged
 independent numerical/long-prefix gates remain outstanding.
+
+Real-artifact eligibility run `37554211006` at `8ef4c56d` passed its exhaustive
+oracle and host inventory. Only 8 of 749 BF16 matrices are eligible, all
+`[1,2560]` shared-expert gates (layers 0, 5, 9, 13, 25, 29, 38, 40). None
+of the proposed large projection matrices passes the exact whole-tensor gate:
+QSA indexers/shared gate/up `[640,2560]` 0/111; shared down `[2560,640]`
+0/49; PLE key `[10240,2560]` 0/1; PLE value and related `[2560,2560]`
+0/3; MTP Q/G/K/V `[13312,2560]` 0/1 and output `[2560,6144]` 0/1.
+All rejected matrices contain finite values outside exact FP16 representation;
+no nonfinite values were found. The specified large-GEMM replacement is
+therefore ineligible for this artifact. Do not round weights, relax eligibility,
+or run a performance campaign that cannot exercise the proposed eligible path.
+Retain BF16 projection dispatch. The separate selected-block Volta attention
+inner-math opportunity still requires implementation assessment and unchanged
+independent numerical/long-prefix qualification; neither SV7 nor its accuracy
+gate is declared complete.
