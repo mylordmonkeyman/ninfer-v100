@@ -72,10 +72,10 @@ def common_payload(model,run):
     messages=[{'role':'user','content':f'Benchmark run {run}. '+PROMPT}]
     return dict(model=model,messages=messages,max_tokens=128,temperature=0,seed=42,enable_thinking=False)
 
-def run_ninfer(a,out,run,grouped,diagnostic=False):
-    mode='grouped' if grouped else 'single'; p=port();base=f'http://127.0.0.1:{p}'; log=out/f'ninfer-{mode}-{run}{"-diag" if diagnostic else ""}.log'; reqlog=out/f'ninfer-{mode}-{run}{"-diag" if diagnostic else ""}-requests.jsonl'
+def run_ninfer(a,out,run,grouped,diagnostic=False,policy='static'):
+    mode=('grouped' if grouped else 'single')+'-'+policy; p=port();base=f'http://127.0.0.1:{p}'; log=out/f'ninfer-{mode}-{run}{"-diag" if diagnostic else ""}.log'; reqlog=out/f'ninfer-{mode}-{run}{"-diag" if diagnostic else ""}-requests.jsonl'
     env=os.environ.copy(); env.update({
-      'NINFER_V100_EXPERT_PROFILE':str(a.profile.resolve()),'NINFER_V100_EXPERT_POLICY':'static',
+      'NINFER_V100_EXPERT_PROFILE':str(a.profile.resolve()),'NINFER_V100_EXPERT_POLICY':policy,
       'NINFER_FLASH_NEXT_EXPERT_CACHE':'1','NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS':'512',
       'NINFER_FLASH_NEXT_EXPERT_CACHE_SERIAL':'0','NINFER_FLASH_NEXT_EXPERT_CACHE_PREFILL':'1',
       'NINFER_FLASH_NEXT_EXPERT_CACHE_BATCHED_DECODE':'0','NINFER_FLASH_NEXT_EXPERT_CACHE_GROUPED_PREFILL':'1',
@@ -84,6 +84,10 @@ def run_ninfer(a,out,run,grouped,diagnostic=False):
       'NINFER_V100_QSA_SCORE_MMA':'0','NINFER_FLASH_NEXT_QSA_PREFILL_MMA':'0',
       'NINFER_V100_TELEMETRY':'1' if diagnostic else '0','NINFER_FLASH_NEXT_STAGE_LEDGER':'1' if diagnostic else '0',
       'NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE':'0','NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE':'0'})
+    if policy=='decay':
+        env['NINFER_V100_EXPERT_DECAY']='0.9'; env['NINFER_V100_EXPERT_DECAY_INTERVAL']='32'
+    else:
+        env.pop('NINFER_V100_EXPERT_DECAY',None); env.pop('NINFER_V100_EXPERT_DECAY_INTERVAL',None)
     cmd=[str(a.ninfer.resolve()),str(a.artifact.absolute()),'--host','127.0.0.1','--port',str(p),'--max-context','4096','--kv-capacity','4096','--max-concurrency','1','--prefill-chunk','2048','--kv-dtype','fp8','--device-state-slots','2','--host-state-slots','2','--host-kv-mib','256','--max-private-continuations','2','--max-shared-prefixes','2','--no-cuda-graph','--no-qsa-prefill-mma','--no-thinking','--spec','mtp','--draft-tokens','3','--lm-head-draft','--request-log-jsonl',str(reqlog)]
     monstop=threading.Event(); t=threading.Thread(target=monitor,args=(out/f'ninfer-{mode}-{run}{"-diag" if diagnostic else ""}-gpu.csv',monstop));t.start()
     with log.open('w') as f:
@@ -118,12 +122,17 @@ def run_strata(a,out,run):
 
 def summary(rows):
     out={}
-    for eng in ('ninfer-single','ninfer-grouped','strata'):
+    for eng in ('ninfer-grouped-static','ninfer-grouped-decay','strata'):
         rr=[x for x in rows if x['engine']==eng and not x.get('diagnostic')]
         out[eng]={}
         for key in ('prefill_tps','decode_tps','ttft_s','wall_s'):
             vals=[x[key] for x in rr];out[eng][key]={'median':statistics.median(vals),'min':min(vals),'max':max(vals)}
-    best_pref=max(out['ninfer-single']['prefill_tps']['median'],out['ninfer-grouped']['prefill_tps']['median']);best_dec=max(out['ninfer-single']['decode_tps']['median'],out['ninfer-grouped']['decode_tps']['median']);out['ratios']={'strata_over_best_ninfer_prefill':out['strata']['prefill_tps']['median']/best_pref,'strata_over_best_ninfer_decode':out['strata']['decode_tps']['median']/best_dec}
+    static=out['ninfer-grouped-static'];decay=out['ninfer-grouped-decay']
+    out['ratios']={
+      'decay_over_static_prefill':decay['prefill_tps']['median']/static['prefill_tps']['median'],
+      'decay_over_static_decode':decay['decode_tps']['median']/static['decode_tps']['median'],
+      'strata_over_decay_prefill':out['strata']['prefill_tps']['median']/decay['prefill_tps']['median'],
+      'strata_over_decay_decode':out['strata']['decode_tps']['median']/decay['decode_tps']['median']}
     return out
 
 def main():
@@ -133,12 +142,16 @@ def main():
     a.profile=strata_profile_to_ninfer(a.strata_profile,a.profile,a.output/'strata-derived-ninfer-profile.json')
     rows=[]
     for i in range(a.repeats):
-        order=('ninfer-single','ninfer-grouped','strata') if i%2==0 else ('strata','ninfer-grouped','ninfer-single')
+        order=('ninfer-grouped-static','ninfer-grouped-decay','strata') if i%2==0 else ('strata','ninfer-grouped-decay','ninfer-grouped-static')
         for eng in order:
-            row=(run_ninfer(a,a.output,i,False) if eng=='ninfer-single' else (run_ninfer(a,a.output,i,True) if eng=='ninfer-grouped' else run_strata(a,a.output,i)));rows.append(row);(a.output/'observations.json').write_text(json.dumps(rows,indent=2))
-    # One untimed NInfer diagnostic pass captures stage/telemetry evidence without contaminating timed rows.
-    rows.append(run_ninfer(a,a.output,999,True,True));(a.output/'observations.json').write_text(json.dumps(rows,indent=2))
+            if eng=='ninfer-grouped-static': row=run_ninfer(a,a.output,i,True,False,'static')
+            elif eng=='ninfer-grouped-decay': row=run_ninfer(a,a.output,i,True,False,'decay')
+            else: row=run_strata(a,a.output,i)
+            rows.append(row);(a.output/'observations.json').write_text(json.dumps(rows,indent=2))
+    rows.append(run_ninfer(a,a.output,998,True,True,'static'))
+    rows.append(run_ninfer(a,a.output,999,True,True,'decay'))
+    (a.output/'observations.json').write_text(json.dumps(rows,indent=2))
     s=summary(rows);(a.output/'summary.json').write_text(json.dumps(s,indent=2))
-    lines=['NInfer vs Strata-V100 same-host screen','',f"NInfer single prefill/decode: {s['ninfer-single']['prefill_tps']['median']:.2f} / {s['ninfer-single']['decode_tps']['median']:.2f} tok/s",f"NInfer grouped prefill/decode: {s['ninfer-grouped']['prefill_tps']['median']:.2f} / {s['ninfer-grouped']['decode_tps']['median']:.2f} tok/s",f"Strata prefill/decode: {s['strata']['prefill_tps']['median']:.2f} / {s['strata']['decode_tps']['median']:.2f} tok/s",f"Strata/best-NInfer prefill: {s['ratios']['strata_over_best_ninfer_prefill']:.2f}x",f"Strata/best-NInfer decode: {s['ratios']['strata_over_best_ninfer_decode']:.2f}x",'', 'Important: NInfer and Strata use different quantization/container formats; this screen diagnoses engine-path bottlenecks, not quantization-normalized speed.']
+    lines=['NInfer adaptive residency vs Strata-V100 same-host screen','',f"NInfer grouped static prefill/decode: {s['ninfer-grouped-static']['prefill_tps']['median']:.2f} / {s['ninfer-grouped-static']['decode_tps']['median']:.2f} tok/s",f"NInfer grouped decay prefill/decode: {s['ninfer-grouped-decay']['prefill_tps']['median']:.2f} / {s['ninfer-grouped-decay']['decode_tps']['median']:.2f} tok/s",f"Strata prefill/decode: {s['strata']['prefill_tps']['median']:.2f} / {s['strata']['decode_tps']['median']:.2f} tok/s",f"Decay/static prefill: {s['ratios']['decay_over_static_prefill']:.2f}x",f"Decay/static decode: {s['ratios']['decay_over_static_decode']:.2f}x",f"Strata/decay prefill: {s['ratios']['strata_over_decay_prefill']:.2f}x",f"Strata/decay decode: {s['ratios']['strata_over_decay_decode']:.2f}x",'', 'Important: NInfer and Strata use different quantization/container formats; this screen diagnoses engine-path bottlenecks, not quantization-normalized speed.']
     (a.output/'summary.txt').write_text('\n'.join(lines)+'\n');print('\n'.join(lines))
 if __name__=='__main__':main()
