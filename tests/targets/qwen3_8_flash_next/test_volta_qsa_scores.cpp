@@ -101,10 +101,29 @@ int main() {
                 }
                 if (!overflow) {
                     cudaEvent_t a,b;CUDA_CHECK(cudaEventCreate(&a));CUDA_CHECK(cudaEventCreate(&b));
-                    for(bool mma:{false,true}) {
-                        for(int i=0;i<3;++i)flash_next_qsa_volta_attend_launch(query,indices,0,selected,count,cache,attended,device.stream,mma);
-                        CUDA_CHECK(cudaEventRecord(a,device.stream));for(int i=0;i<20;++i)flash_next_qsa_volta_attend_launch(query,indices,0,selected,count,cache,attended,device.stream,mma);
-                        CUDA_CHECK(cudaEventRecord(b,device.stream));CUDA_CHECK(cudaEventSynchronize(b));float ms;CUDA_CHECK(cudaEventElapsedTime(&ms,a,b));std::cout<<"Score-path timing fp8="<<fp8<<" mma="<<mma<<" us="<<ms*1000/20<<'\n';
+                    for (int batch : {1,2,4,8,32,128,512,1024,4096,8192}) {
+                        std::vector<std::uint16_t> batch_q(batch*H*D);
+                        std::vector<int> batch_positions(batch),batch_counts(batch),batch_blocks(batch*512);
+                        for (int t=0;t<batch;++t) {
+                            const int source=t%T;
+                            std::copy_n(q.data()+source*H*D,H*D,batch_q.data()+t*H*D);
+                            batch_positions[t]=positions[source];batch_counts[t]=counts[source];
+                            std::copy_n(blocks.data()+source*512,512,batch_blocks.data()+t*512);
+                        }
+                        DeviceBuffer bq(batch_q.size()*2),bo(batch_q.size()*2),bi(batch*4),bc(batch*4),bs(batch_blocks.size()*4);
+                        bq.copy_from_host(batch_q.data(),bq.bytes);bi.copy_from_host(batch_positions.data(),bi.bytes);
+                        bc.copy_from_host(batch_counts.data(),bc.bytes);bs.copy_from_host(batch_blocks.data(),bs.bytes);
+                        Tensor tq(bq.p,DType::BF16,{D,H,batch}),to(bo.p,DType::BF16,{D,H,batch});
+                        Tensor ti(bi.p,DType::I32,{batch}),tc(bc.p,DType::I32,{batch}),ts(bs.p,DType::I32,{512,batch});
+                        const int iterations=batch<1024?20:5;
+                        for(bool mma:{false,true}) {
+                            for(int i=0;i<3;++i)flash_next_qsa_volta_attend_launch(tq,ti,0,ts,tc,cache,to,device.stream,mma);
+                            CUDA_CHECK(cudaEventRecord(a,device.stream));
+                            for(int i=0;i<iterations;++i)flash_next_qsa_volta_attend_launch(tq,ti,0,ts,tc,cache,to,device.stream,mma);
+                            CUDA_CHECK(cudaEventRecord(b,device.stream));CUDA_CHECK(cudaEventSynchronize(b));
+                            float ms;CUDA_CHECK(cudaEventElapsedTime(&ms,a,b));
+                            std::cout<<"Score-path timing fp8="<<fp8<<" T="<<batch<<" mma="<<mma<<" us="<<ms*1000/iterations<<'\n';
+                        }
                     }
                     CUDA_CHECK(cudaEventDestroy(a));CUDA_CHECK(cudaEventDestroy(b));
                 }

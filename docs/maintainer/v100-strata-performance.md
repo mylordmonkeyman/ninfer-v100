@@ -1088,3 +1088,16 @@ oracle covering dense/sparse selections, tails, remapped pages, both KV types
 and range fallback, followed by matched kernel timing and existing target
 regressions. CUDA compilation, those gates, production benefit and long-prefix
 accuracy remain pending; no qualification or default change is claimed.
+
+Initial SV7 score run `37555074758` at `8e602d08` compiled and passed the
+independent FP64 attention and finite-range fallback gates for BF16/FP8 KV
+(relative L2 at most 2.46e-6). The first per-query tile was slower: BF16
+168.704/375.245 µs, FP8 673.126/729.754 µs (SIMT/MMA, six prepared queries).
+It replicated one query across all eight MMA rows and is superseded by a
+GQA tile sharing the same KV head across eight actual query heads (four in
+the final tile), retaining FP32 online softmax/PV. The bounded follow-up
+measures T=1,2,4,8,32,128,512,1024,4096,8192 on repeated represented dense/
+sparse contexts. The existing target regression also failed at a value-cache
+bitwise comparison before attended-output checks; the follow-up records
+baseline and candidate independently without changing its thresholds. No
+production improvement or accuracy qualification is established.

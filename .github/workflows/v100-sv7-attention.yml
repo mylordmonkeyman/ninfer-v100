@@ -48,12 +48,18 @@ jobs:
           set -euo pipefail
           build-sv6/tests/ninfer_volta_qsa_scores_test 2>&1 | tee sv7-attention-results/oracle.log
       - name: Existing target regression with experimental score math
-        env:
-          NINFER_V100_QSA_SCORE_MMA: '1'
         shell: bash
         run: |
-          set -euo pipefail
-          build-sv6/tests/ninfer_qwen3_8_flash_next_qsa_attention_test 2>&1 | tee sv7-attention-results/regression.log
+          set -uo pipefail
+          NINFER_V100_QSA_SCORE_MMA=0 build-sv6/tests/ninfer_qwen3_8_flash_next_qsa_attention_test 2>&1 | tee sv7-attention-results/baseline-regression.log
+          baseline=$?
+          NINFER_V100_QSA_SCORE_MMA=1 build-sv6/tests/ninfer_qwen3_8_flash_next_qsa_attention_test 2>&1 | tee sv7-attention-results/regression.log
+          candidate=$?
+          echo "baseline=${baseline} candidate=${candidate}" | tee sv7-attention-results/regression-status.txt
+          if (( baseline != 0 || candidate != 0 )); then
+            echo "::error::Target regression remains unqualified; baseline=${baseline} candidate=${candidate}"
+            exit 1
+          fi
       - name: Preserve bounded SV7 attention evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
