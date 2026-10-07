@@ -195,6 +195,12 @@ NInfer commit-return events. The linked execution context supplies input spans.
 input work, commits by token semantics and emission coverage. It checks duplicate
 identity, prefix consistency and conservation; partial/cancelled streams stay
 incomplete. Missing NInfer external-emission observations are unknown, not zero.
+With `--round-logs`, the report also joins native execution records by engine,
+run, level and round, selects the actual lane/epoch span where applicable, and
+checks offered input width and exact sampled output prefixes when available.
+Missing execution records, ambiguous spans and unavailable exact IDs remain
+unknown. Strata ends the caller linkage immediately after verification; later
+draft production cannot inherit the preceding verifier's round identity.
 Initial outputs outside these loops, complete request boundaries/IDs, draft
 production/cost, cancellation paths outside Program commit and confirmed GPU
 commit completion remain outstanding. This report cannot establish complete

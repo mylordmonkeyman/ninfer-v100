@@ -4,7 +4,9 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from lifecycle import SCHEMA, validate, summarize, read_records
+from lifecycle import SCHEMA, validate, summarize, read_records, qualify_links
+from test_schema import fixture
+from validate_records import read_records as read_rounds
 
 
 def event(kind='verified', **kwargs):
@@ -54,6 +56,29 @@ class LifecycleTests(unittest.TestCase):
         v = event(); other = copy.deepcopy(v); other['sequence_trace_id']='1:1:5'
         self.assertEqual(len(summarize([v,other])['sequences']),2)
 
+    def test_native_linkage_and_missing_coverage(self):
+        v=event(); r=fixture(); r['level']=2; r['round_id']='1:9'
+        r['context']=dict(input_columns=4,execution_mode='cuda_graph',
+            spans=[dict(first_column=0,columns=4,first_token_index=42)],
+            sampled_token_ids=[101,202,303,404])
+        link=qualify_links([v],[r])[0]
+        self.assertTrue(link['input_width_matches']); self.assertTrue(link['candidate_prefix_matches'])
+        self.assertEqual(qualify_links([v],[])[0]['execution_status'],'missing')
+        r['context']['spans'][0]['columns']=3
+        with self.assertRaisesRegex(ValueError,'execution width'): qualify_links([v],[r])
+        r['context']['spans'][0]['columns']=4; r['context']['sampled_token_ids'][0]=999
+        with self.assertRaisesRegex(ValueError,'sampled prefix'): qualify_links([v],[r])
+
+    def test_batched_lane_linkage_uses_actual_lane_epoch(self):
+        v=event(lane=1,epoch=8,proposed_drafts=0,accepted_drafts=0,verified_tokens=1,token_count=1,token_ids=[202])
+        r=fixture(); r['level']=2; r['round_id']='1:9'
+        r['context']=dict(input_columns=2,execution_mode='cuda_graph',spans=[
+            dict(first_column=0,columns=1,first_token_index=42,lane=0,epoch=3),
+            dict(first_column=1,columns=1,first_token_index=9,lane=1,epoch=8)],sampled_token_ids=[101,202])
+        self.assertTrue(qualify_links([v],[r])[0]['candidate_prefix_matches'])
+        v['epoch']=9
+        self.assertIsNone(qualify_links([v],[r])[0]['input_width_matches'])
+
     def test_real_cpp_records_levels(self):
         root = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory() as tmp:
@@ -68,7 +93,10 @@ class LifecycleTests(unittest.TestCase):
                 if level==0: self.assertEqual(records,[]); continue
                 self.assertEqual(len(records),5)
                 self.assertEqual('token_ids' in records[0],level==2)
-                rows=summarize(records)['sequences']
+                report=summarize(records,read_rounds(log))
+                self.assertTrue(all(x['input_width_matches'] for x in report['execution_links']))
+                self.assertEqual(all(x['candidate_prefix_matches'] for x in report['execution_links']),level==2)
+                rows=report['sequences']
                 self.assertEqual(rows[0]['engine'],'ninfer'); self.assertIsNone(rows[0]['emitted_tokens'])
                 self.assertEqual(rows[1]['emitted_tokens'],1)
 

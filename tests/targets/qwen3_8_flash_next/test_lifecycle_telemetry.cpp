@@ -9,6 +9,14 @@ int main() {
     if (linked_round_id != link.id()) return 1;
     const std::array<int32_t, 3> candidates{101,202,303}, inputs{99,101,202};
     for (const char* engine : {"ninfer", "strata"}) {
+        Round native(engine, link.id(), "verify");
+        InputContext context;
+        context.input_columns = 4;
+        context.spans.push_back({0,4,42,std::nullopt,std::nullopt});
+        if (level() >= 2) context.input_token_ids = std::vector<std::int64_t>{99,101,202,303};
+        native.context(std::move(context));
+        const std::array<int32_t,4> sampled{101,202,303,404};
+        native.sampled_tokens(std::span<const int32_t>(sampled));
         LifecycleEvent v{.engine=engine, .round_id=link.id(), .sequence_trace_id="fixture:sequence",
             .event="verified", .first_token_index=42, .proposed_drafts=3, .accepted_drafts=2,
             .verified_tokens=3, .token_semantics="verified_output_candidates", .proposal_source="mtp"};
@@ -27,5 +35,7 @@ int main() {
             e.tokens(std::span<const int32_t>(candidates.data(),1)); e.emit();
         }
     }
+    link.finish();
+    if (!linked_round_id.empty() || link.id().empty()) return 1;
     return 0;
 }

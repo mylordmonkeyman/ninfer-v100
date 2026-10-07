@@ -11,15 +11,18 @@ public:
         if (level()) {
             id_ = std::string(engine) + ":caller:" + std::to_string(caller_sequence.fetch_add(1));
             linked_round_id = id_;
+            linked_ = true;
         }
     }
     RoundLink(const RoundLink&) = delete;
     RoundLink& operator=(const RoundLink&) = delete;
-    ~RoundLink() { linked_round_id = previous_; }
+    ~RoundLink() { finish(); }
+    void finish() noexcept { if (linked_) { linked_round_id = previous_; linked_ = false; } }
     const std::string& id() const noexcept { return id_; }
 private:
     std::string id_;
     std::string_view previous_;
+    bool linked_ = false;
 };
 inline std::string sequence_trace(const char* engine) {
     return std::string(engine) + ":sequence:" + std::to_string(caller_sequence.fetch_add(1));

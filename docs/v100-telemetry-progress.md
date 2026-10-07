@@ -250,3 +250,24 @@ IDs/start/end, initial outputs outside the loops, NInfer engine output emission,
 draft generation/production costs, additional cancellation paths, confirmed GPU
 commit completion, deferred GPU timing and native-model hardware fidelity remain.
 Actual caller source host compilation is included in the next hosted check.
+
+## Execution/lifecycle linkage qualification
+
+Hosted run `37700353449` succeeded for NInfer
+`fedfb49754de69573612d09332db7e2237717fd3` and frozen Strata
+`5a2949b0f91ec33416872eeafbe52cf09562d00b`: both CPU/checks and CUDA host
+compilation jobs passed, including the actual NInfer Program and Strata caller.
+
+The lifecycle report now accepts `--round-logs` to compare offered verification
+widths and sampled candidate prefixes with native execution records. Batched
+NInfer observations select the actual lane/epoch span; absent or ambiguous
+coverage remains unknown. Strata releases its linked verifier identity before
+later MTP draft work. The shared C++ fixture produces both execution and
+lifecycle records and tests that join at levels 1/2, including trimmed commits
+and EOS-shortened emissions. All 27 telemetry and 58 diagnostic Python tests
+pass locally (85 total). Shared contracts remain aligned.
+
+These checks validate software accounting and correlation, not full-model
+numerical fidelity, V100 overhead or performance. Request/output boundaries,
+draft costs, GPU intervals/launch accounting and the frozen hardware campaign
+remain outstanding; no V100 runner was acquired for this increment.

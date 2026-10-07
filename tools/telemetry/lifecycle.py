@@ -54,7 +54,41 @@ def read_records(path):
     return records
 
 
-def summarize(records):
+
+def qualify_links(records, execution_records):
+    """Check actual native input widths and sampled prefixes when observed."""
+    lookup = {}
+    for r in execution_records:
+        key = (r['engine'], r['run_id'], r['level'], r['round_id'])
+        if key in lookup: raise ValueError('duplicate execution round identity')
+        lookup[key] = r
+    links = []
+    for v in records:
+        if v['event'] != 'verified': continue
+        key = (v['engine'], v['run_id'], v['level'], v['round_id'])
+        execution = lookup.get(key)
+        width_match = prefix_match = None
+        if execution and 'context' in execution:
+            context = execution['context']
+            spans = context['spans']
+            if 'lane' in v:
+                spans = [s for s in spans if s.get('lane') == v['lane'] and s.get('epoch') == v['epoch']]
+            if len(spans) == 1:
+                span = spans[0]
+                width_match = span['columns'] == v['proposed_drafts'] + 1
+                if not width_match: raise ValueError('lifecycle proposals differ from native execution width')
+                if 'sampled_token_ids' in context and 'token_ids' in v:
+                    first = span['first_column']
+                    prefix_match = context['sampled_token_ids'][first:first + v['verified_tokens']] == v['token_ids']
+                    if not prefix_match: raise ValueError('lifecycle candidates differ from native sampled prefix')
+        links.append(dict(engine=v['engine'], run_id=v['run_id'], level=v['level'],
+            sequence_trace_id=v['sequence_trace_id'], round_id=v['round_id'],
+            execution_status=execution['status'] if execution else 'missing',
+            input_width_matches=width_match, candidate_prefix_matches=prefix_match))
+    return links
+
+
+def summarize(records, execution_records=None):
     rounds = {}
     for r in records:
         validate(r)
@@ -102,6 +136,7 @@ def summarize(records):
         if not row['emission_coverage_complete']: row['emitted_tokens'] = None
         out.append(dict(engine=engine, run_id=run, level=level, sequence_trace_id=sequence, **row))
     return dict(schema='ninfer-strata-v100-lifecycle-summary-v1', request_attribution_ready=False,
+        execution_links=qualify_links(records, execution_records) if execution_records is not None else [],
         limitations=['Trace labels are process-local correlation, not external request IDs.',
                      'Verified candidates, input-state commits and emitted outputs are distinct.',
                      'A native commit return may precede GPU completion; no extra synchronization is added.',
@@ -112,10 +147,13 @@ def summarize(records):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('logs', nargs='+', type=Path); p.add_argument('--output', required=True, type=Path)
+    p.add_argument('--round-logs', nargs='+', type=Path, help='Optional native execution logs for linkage checks')
     args = p.parse_args()
     records = [r for path in args.logs for r in read_records(path)]
     if not records: p.error('no lifecycle records')
-    args.output.write_text(json.dumps(summarize(records), indent=2, allow_nan=False) + '\n')
+    from validate_records import read_records as read_rounds
+    rounds = [r for path in args.round_logs for r in read_rounds(path)] if args.round_logs else None
+    args.output.write_text(json.dumps(summarize(records, rounds), indent=2, allow_nan=False) + '\n')
     print(f'Validated {len(records)} lifecycle events; request attribution remains unqualified')
 
 
