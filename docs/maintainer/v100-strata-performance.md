@@ -58,6 +58,47 @@ is invalid numerical evidence: a diagnostic parser used the C++ multi-character
 literal `'\\\\0'`, so the candidate aborted before inference. Commit
 `aaa759ea` fixes only that parser to `'\\0'`; no kernel arithmetic changed.
 
+## SV7 production decision: keep score-MMA opt-in
+
+Production serving run [37576144196](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37576144196)
+at `5516efe` completed successfully. Artifact `11463655499` has SHA256
+`c5a79adde815dcf0e79b875b9c61131ca103ca57423b8a7ad5ee14ec411b381a`.
+All hard gates passed: independent FP64 attention checks, actual FP8 late-half
+dispatch coverage, same-path prefix/continuation replay and request accounting,
+cache-capacity equality, MTP activation/drafting, and finite timing evidence.
+No sampled process reported thermal throttling.
+
+The request-level performance result does **not** support default promotion:
+
+| Workload | Late-half MMA vs SIMT prefill | TTFT change |
+|---|---:|---:|
+| MTP off, cold 1,227 fresh tokens | -0.12% | +0.12% |
+| MTP on, cold 1,227 fresh tokens | +1.80% | -1.77% |
+| MTP on, prefix replay (7 fresh tokens) | -6.56% | +6.96% |
+| MTP on, continuation (93 fresh tokens) | -10.85% | +12.13% |
+| MTP on, continuation replay (7 fresh tokens) | -15.30% | +18.01% |
+
+The three fresh-process cold repeats do not show a repeatable material gain:
+MTP-off candidate prefill changes were approximately +0.29%, -0.12%, and
+-0.71%; MTP-on changes were -0.24%, +1.02%, and +2.12%. The best relevant
+median improvement is therefore below the project's approximately 3%
+default-on promotion bar, while MTP small-prefill paths regress materially.
+
+Cross-path greedy text differed, as expected for the admitted arithmetic
+change. MTP remained functional. Cold requests retained 84 drafted / 34
+accepted tokens in both paths; continuation behavior changed from 76 drafted /
+36 accepted (SIMT) to 70 drafted / 38 accepted (late-half MMA). These are
+diagnostic differences, not correctness failures, and do not alter the
+performance conclusion.
+
+**Decision:** close SV7 score-MMA performance qualification without another
+confirmation campaign. Keep the feature experimental/opt-in and off by
+default. The late-half path remains useful reproducible evidence that bounds
+the numerical tradeoff, but its production benefit is too small and
+workload-dependent to justify default promotion. Do not reopen full-MMA or
+additional layer-mask variants absent new evidence identifying a materially
+different production bottleneck.
+
 ## Earlier SV7 strict/full-MMA evidence
 
 The SV7 FP8 attention candidate has passed isolated and sampled real-input
