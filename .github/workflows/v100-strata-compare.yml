@@ -74,7 +74,7 @@ jobs:
           echo "STRATA_ROOT=$strata_root" >> "$GITHUB_ENV"
           echo "STRATA_CONFIG=$strata_root/strata-unsloth-ud-q4_k_xl.json" >> "$GITHUB_ENV"
           git rev-parse HEAD > strata-compare-results/ninfer-sha.txt
-          git -C "$strata_root" rev-parse HEAD > strata-compare-results/strata-sha.txt
+          git -c safe.directory="$strata_root" -C "$strata_root" rev-parse HEAD > strata-compare-results/strata-sha.txt
           sha256sum "$strata_root/strata-unsloth-ud-q4_k_xl.json" > strata-compare-results/strata-config-sha256.txt
           nvidia-smi -q > strata-compare-results/gpu.txt
           /usr/local/cuda-12.8/bin/nvcc --version > strata-compare-results/cuda.txt
