@@ -240,10 +240,19 @@ gaps. No fabricated values may satisfy a campaign gate.
 
 ## Gates and matrix
 
-Hardware jobs are dispatch-only and `cancel-in-progress: false`; software checks
-use hosted CPU runners. No push acquires the V100. Preserve the installed
+Comprehensive campaign jobs are dispatch-only and `cancel-in-progress: false`;
+software checks use hosted CPU runners. Ordinary pushes do not acquire the V100.
+Preserve the installed
 Strata checkout; instrument a user-controlled fork of verified installed SHA
 `ad5206fba4914b4ab0ffb5e1d17bae4cd77ba778`.
+
+Explicit first-qualification launch exception, authorized October 7: the
+registered comparison workflow also accepts a push to `perf/v100-strata-derived`
+that changes its workflow file and whose head commit contains
+`[v100:telemetry-qualify]`. Only that explicit marker or workflow dispatch can
+allocate its hardware job; ordinary commits do not. This restores the previously
+used opt-in commit launch mechanism while retaining `cancel-in-progress: false`.
+It does not enable unmarked hardware pushes or ad hoc optimization screens.
 
 Before the first hardware campaign: validate known routes/bytes, nesting,
 CUDA-event boundaries, telemetry off/on numerical equivalence and schema output.

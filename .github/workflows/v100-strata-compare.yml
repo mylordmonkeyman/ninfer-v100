@@ -1,6 +1,9 @@
 name: V100 Telemetry First Hardware Qualification
 on:
   workflow_dispatch:
+  push:
+    branches: [perf/v100-strata-derived]
+    paths: ['.github/workflows/v100-strata-compare.yml']
 permissions:
   contents: read
   actions: read
@@ -8,6 +11,7 @@ env:
   CMAKE_BUILD_PARALLEL_LEVEL: 32
 jobs:
   hardware:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[v100:telemetry-qualify]')) }}
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:
       group: v100-sv0-hardware
@@ -52,7 +56,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: mylordmonkeyman/Strata-V100
-          ref: 204c758935fc70020ee272f56c3c60d5890aa6c3
+          ref: 98cbf622124ab25f89529ff0f56eebbf9fdfd5fd
           path: telemetry-strata-source
           persist-credentials: false
       - name: Download existing validated resident profile

@@ -1,13 +1,16 @@
 # First V100 telemetry qualification
 
 Run **V100 Telemetry First Hardware Qualification** on branch
-`perf/v100-strata-derived`. The workflow is dispatch-only and never cancels
+`perf/v100-strata-derived`. The workflow never cancels
 another job. It uses the existing `v100` runner and CUDA 12.8, refuses to proceed
 if GPU0 has less than 28,000 MiB free, and does not stop unrelated processes.
 It uses the already registered `v100-strata-compare.yml` workflow slot, so the
 Actions menu may still show its default-branch name, **V100 NInfer vs Strata
 Comparison**. Select `perf/v100-strata-derived` in **Run workflow**; this branch
 executes the qualification job described here, not the earlier comparison.
+The assistant can also launch it through the previously used opt-in commit
+mechanism: a commit changing this workflow file on that branch must contain
+`[v100:telemetry-qualify]`. Ordinary commits cannot allocate the hardware job.
 
 This is the first hardware gate, not the comprehensive attribution campaign or
 an optimization screen. The user's October 7 instruction to reach actual V100
@@ -16,7 +19,7 @@ reporting remaining coverage explicitly. The shared comprehensive specification
 still governs the later attribution matrix.
 
 The single job builds NInfer and frozen Strata
-`204c758935fc70020ee272f56c3c60d5890aa6c3` once in separate build directories.
+`98cbf622124ab25f89529ff0f56eebbf9fdfd5fd` once in separate build directories.
 It verifies that `/opt/ai/strata` remains at installed baseline
 `ad5206fba4914b4ab0ffb5e1d17bae4cd77ba778`. Existing model and tokenizer files
 are reused. Strata's copied configuration selects the newly built executable,

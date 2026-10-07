@@ -313,3 +313,8 @@ The harness integration fixture starts actual local HTTP servers, exercises both
 engines' distinct native log paths at levels 0/2, verifies observer boundaries
 and preserves fixed payloads. It caught and resolved the empty level-0 telemetry
 parser case before hardware use. YAML and dispatch-only/concurrency checks pass.
+
+The October 7 launch correction restores the earlier explicit commit-marker
+mechanism for this first qualification only. Workflow dispatch remains available;
+an ordinary commit cannot acquire the V100 and active runs are never cancelled.
+The prepared experiment and engine instrumentation are unchanged.
