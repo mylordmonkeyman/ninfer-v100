@@ -1692,7 +1692,8 @@ int main() {
 
         const auto preflight =
             preflight_text_file(weights_path, contract.runtime, 0);
-        validate_phase11_preflight(preflight);
+        if(sv7_batched_oracle)validate_sv7_batched_oracle_preflight(preflight);
+        else validate_phase11_preflight(preflight);
 
         ninfer::DeviceContext device(0);
         Phase11VramObservation vram{};

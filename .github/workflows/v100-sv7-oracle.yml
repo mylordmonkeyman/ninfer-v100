@@ -4,6 +4,8 @@ on:
     branches: [perf/v100-strata-derived]
     paths:
       - '.github/workflows/v100-sv7-oracle.yml'
+      - 'src/targets/qwen3_8_flash_next/impl/vertical_slice.*'
+      - 'tests/targets/qwen3_8_flash_next/test_vertical_slice*.cpp'
   workflow_dispatch:
 permissions:
   contents: read
@@ -88,7 +90,10 @@ jobs:
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
             -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
             -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-sv6 --target ninfer_qwen3_8_flash_next_vertical_slice_real_test
+          cmake --build build-sv6 --target ninfer_qwen3_8_flash_next_vertical_slice_real_test \
+            ninfer_qwen3_8_flash_next_vertical_slice_test
+          build-sv6/tests/ninfer_qwen3_8_flash_next_vertical_slice_test \
+            2>&1 | tee sv7-oracle-results/contracts.log
       - name: Unchanged Phase 11 criteria on all batched prefix positions in both arms
         shell: bash
         run: |

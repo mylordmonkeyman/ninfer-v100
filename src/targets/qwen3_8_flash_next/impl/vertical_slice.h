@@ -25,6 +25,8 @@ make_phase11_vertical_slice_contract(std::uint32_t max_context = 8'192,
                                      std::uint32_t prefill_chunk = 128);
 
 void validate_phase11_preflight(const FlashNextPreflightReport& report);
+// Separate SV7 execution contract; the original Phase 11 BF16 contract is unchanged.
+void validate_sv7_batched_oracle_preflight(const FlashNextPreflightReport& report);
 
 struct Phase11DivergenceExample {
     std::uint32_t position = 0;

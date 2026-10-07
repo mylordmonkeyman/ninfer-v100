@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <stdexcept>
 #include <vector>
 
 using namespace ninfer::targets::qwen3_8_flash_next::detail;
@@ -31,6 +32,43 @@ int main() {
         contract.expert_cache_enabled ||
         contract.minimum_teacher_forced_positions != 4'096) {
         failures += fail("Phase 11 contract fields are not correctness-first");
+    }
+
+    // Actual preflight policies remain distinct. Neither may accept the other's
+    // KV contract, and SV7 retains every resource/state safety requirement.
+    FlashNextPreflightReport report{};
+    report.runtime_plan.config=contract.runtime;
+    report.vram_ledger.host_backed_expert_layers=48;
+    report.vram_ledger.host_backed_expert_payload_bytes=1;
+    report.vram_ledger.host_backed_expert_layer_payload_bytes=1;
+    validate_phase11_preflight(report);
+    const auto rejects=[&](const FlashNextPreflightReport& value,bool sv7) {
+        try {
+            if(sv7)validate_sv7_batched_oracle_preflight(value);
+            else validate_phase11_preflight(value);
+        }catch(const std::logic_error&){return true;}
+        return false;
+    };
+    if(!rejects(report,true))failures+=fail("SV7 accepted the default BF16 contract");
+    report.runtime_plan.config.kv_cache=ninfer::KvCacheStorage::Fp8E4M3Row256;
+    report.runtime_plan.config.prefill_chunk=512;
+    report.runtime_plan.config.use_qsa_prefill_mma=true;
+    validate_sv7_batched_oracle_preflight(report);
+    if(!rejects(report,false))failures+=fail("Phase 11 accepted the SV7 FP8 contract");
+    for(int change=0;change<8;++change) {
+        auto invalid=report;
+        auto& config=invalid.runtime_plan.config;
+        switch(change) {
+            case 0:config.prefill_chunk=128;break;
+            case 1:config.use_qsa_prefill_mma=false;break;
+            case 2:config.gdn_state_storage=ninfer::GdnStateStorage::BF16;break;
+            case 3:config.use_cuda_graph=true;break;
+            case 4:config.speculative_draft_tokens=3;break;
+            case 5:config.max_concurrency=2;break;
+            case 6:invalid.vram_ledger.routed_expert_payload_bytes=1;break;
+            case 7:invalid.vram_ledger.host_backed_expert_layers=47;break;
+        }
+        if(!rejects(invalid,true))failures+=fail("SV7 accepted an invalid runtime/resource contract");
     }
 
     std::vector<float> oracle(32);

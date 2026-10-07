@@ -1210,3 +1210,18 @@ dispatches per arm plus all eight endpoint matches. No threshold, minimum,
 or exact response requirement is relaxed. These runs provide full-prefix
 numerical evidence, not performance measurements. The previous strict
 continuation failure stays separately reported regardless of these results.
+
+
+Full-prefix run `37558200438` at `1f9a745c` compiled, but both arms stopped
+before model load at the original Phase 11 BF16-only preflight validator.
+There are no numerical results or candidate dispatches from this attempt.
+The SV7 test now selects a separate FP8 preflight validator requiring
+512-token prefill, the MMA flag and at least 4096-token capacity. Shared checks
+still require eager non-MTP single-lane execution, FP32 GDN state, all 48
+host-backed expert layers, and no graph or resident routed-expert reservation.
+The original Phase 11 validator still rejects FP8 KV. Contract tests verify
+that the two valid configurations reject each other's KV format and reject
+invalid chunk size, disabled MMA, BF16 GDN state, graphs, speculation,
+concurrency, resident experts and missing host-backed layers. The workflow
+runs these contract tests before the full prefix. Numerical thresholds and
+both independent oracle exit gates are unchanged.

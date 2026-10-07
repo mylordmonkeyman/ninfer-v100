@@ -136,7 +136,8 @@ make_phase11_vertical_slice_contract(std::uint32_t max_context,
     return out;
 }
 
-void validate_phase11_preflight(const FlashNextPreflightReport& report) {
+static void validate_oracle_preflight(const FlashNextPreflightReport& report,
+                                      KvCacheStorage expected_kv) {
     const auto& plan = report.runtime_plan;
     const auto& ledger = report.vram_ledger;
     if (plan.config.use_cuda_graph || plan.config.speculative_draft_tokens != 0 ||
@@ -144,10 +145,12 @@ void validate_phase11_preflight(const FlashNextPreflightReport& report) {
         throw std::logic_error(
             "Phase 11 preflight does not satisfy eager non-MTP single-lane contract");
     }
-    if (plan.config.kv_cache != KvCacheStorage::BFloat16 ||
+    if (plan.config.kv_cache != expected_kv ||
         plan.config.gdn_state_storage != GdnStateStorage::FP32) {
         throw std::logic_error(
-            "Phase 11 preflight requires BF16 KV and FP32 GDN state");
+            expected_kv == KvCacheStorage::BFloat16 ?
+                "Phase 11 preflight requires BF16 KV and FP32 GDN state" :
+                "SV7 batched oracle preflight requires FP8 KV and FP32 GDN state");
     }
     if (ledger.cuda_graph_bytes != 0 || ledger.routed_expert_payload_bytes != 0 ||
         ledger.routed_expert_layers != 0) {
@@ -160,6 +163,17 @@ void validate_phase11_preflight(const FlashNextPreflightReport& report) {
         throw std::logic_error(
             "Phase 11 preflight requires all 48 routed-expert layers host-backed");
     }
+}
+
+void validate_phase11_preflight(const FlashNextPreflightReport& report) {
+    validate_oracle_preflight(report, KvCacheStorage::BFloat16);
+}
+
+void validate_sv7_batched_oracle_preflight(const FlashNextPreflightReport& report) {
+    const auto& config=report.runtime_plan.config;
+    if(config.prefill_chunk!=512 || !config.use_qsa_prefill_mma || config.max_context<4096)
+        throw std::logic_error("SV7 batched oracle requires 512-token MMA prefill and full-prefix capacity");
+    validate_oracle_preflight(report, KvCacheStorage::Fp8E4M3Row256);
 }
 
 void Phase11OracleAccumulator::observe(std::uint32_t position,
