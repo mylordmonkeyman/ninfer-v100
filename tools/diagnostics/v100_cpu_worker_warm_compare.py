@@ -125,7 +125,13 @@ def run_ninfer(a,out,run,workers,warmup=False):
     spec=done.get('speculative') or {}
     message=((resp.get('choices') or [{}])[0].get('message') or {}).get('content') or ''
     text=log.read_text(errors='replace');slots=CACHE_SLOTS_RE.search(text)
-    return dict(engine=f'ninfer-{mode}',run=run,workers=('default' if workers is None else workers),warmup=warmup,diagnostic=False,
+    if warmup:
+        return dict(engine='ninfer-warm',run=run,workers='default',warmup=True,diagnostic=False,
+            prompt_tokens=r['prompt_tokens'],cached=r['prefix_cache_hit_tokens'],fresh=fresh,
+            output=r['completion_tokens'],prefill_tps=(fresh/tm['prefill'] if tm['prefill'] else None),
+            decode_tps=None,ttft_s=tm['ttft'],prefill_s=tm['prefill'],decode_s=tm['decode'],
+            wall_s=wall,response_sha256=hashlib.sha256(message.encode()).hexdigest())
+    return dict(engine=f'ninfer-{mode}',run=run,workers=('default' if workers is None else workers),warmup=False,diagnostic=False,
         prompt_tokens=r['prompt_tokens'],cached=r['prefix_cache_hit_tokens'],fresh=fresh,
         output=r['completion_tokens'],prefill_tps=fresh/tm['prefill'],
         decode_tps=r['completion_tokens']/tm['decode'],ttft_s=tm['ttft'],
