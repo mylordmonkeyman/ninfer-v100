@@ -43,8 +43,13 @@ void run_cost_calibration(DeviceContext& device,
     std::vector<HostExpertTask> tasks(counts.back());
     std::vector<FlashNextStreamRoute> routes(counts.back());
     for(unsigned i=0;i<counts.back();++i) {
-        tasks[i]={expert,host_input.data(),nullptr,
-            static_cast<float*>(cpu_output.data())+std::size_t(i)*2560};
+        tasks[i]=HostExpertTask{
+            .expert=expert,
+            .expert_id=0,
+            .route_id=i,
+            .input=host_input.data(),
+            .input_fp32=nullptr,
+            .output=static_cast<float*>(cpu_output.data())+std::size_t(i)*2560};
         routes[i]={device_input.p,
             static_cast<float*>(gpu_output.p)+std::size_t(i)*2560};
     }

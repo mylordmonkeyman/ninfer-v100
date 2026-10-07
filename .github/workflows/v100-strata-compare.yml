@@ -13,6 +13,7 @@ on:
       - 'src/targets/qwen3_8_flash_next/impl/text_decode_state.h'
       - 'src/targets/qwen3_8_flash_next/impl/text_decode.cpp'
       - 'src/targets/qwen3_8_flash_next/impl/moe.cpp'
+      - 'tests/targets/qwen3_8_flash_next/test_expert_stream.cpp'
   workflow_dispatch:
 permissions:
   contents: read
