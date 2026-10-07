@@ -696,10 +696,10 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
 #if defined(NINFER_VOLTA_BUILD)
     const std::size_t qsa_mma_min_ordinal = [] {
         const char* env = std::getenv("NINFER_V100_QSA_SCORE_MMA_MIN_QSA");
-        if (env == nullptr || env[0] == '\\0') { return std::size_t{0}; }
+        if (env == nullptr || env[0] == '\0') { return std::size_t{0}; }
         char* end = nullptr;
         const long value = std::strtol(env, &end, 10);
-        if (end == env || *end != '\\0' || value < 0 ||
+        if (end == env || *end != '\0' || value < 0 ||
             value > static_cast<long>(kFullAttentionLayers)) {
             throw std::invalid_argument(
                 "NINFER_V100_QSA_SCORE_MMA_MIN_QSA must be in [0,12]");
