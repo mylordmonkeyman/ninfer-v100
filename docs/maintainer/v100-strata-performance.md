@@ -6,7 +6,7 @@ Frozen source: `forwardport/v100-flash-next` at
 Reference inspected: `jmnargi/Strata-V100` `9d7774919e26d235359bc2c3001f61f607eb288d`.
 Milestones are SV0–SV8 in the supplied specification; they do not advance Phase 18.
 
-## Current milestone: SV7 late-half serving qualification
+## Project status: SV0–SV7 complete; SV8 not triggered
 
 The full-12-QSA score-MMA path remains numerically mixed and is not promoted.
 A narrower candidate now applies the same validated FP8 score-MMA kernel only
@@ -98,6 +98,27 @@ the numerical tradeoff, but its production benefit is too small and
 workload-dependent to justify default promotion. Do not reopen full-MMA or
 additional layer-mask variants absent new evidence identifying a materially
 different production bottleneck.
+
+## SV8 decision: not started
+
+SV8 host-KV tiering is optional and, by the project specification, requires
+measured evidence of a material long-context KV/residency bottleneck after the
+SV1–SV7 campaigns. That trigger has not been established. The completed
+production screens instead identified policy/arithmetic tradeoffs at short
+context, and the final SV7 candidate failed the request-level promotion bar
+despite passing its correctness gates.
+
+No host-KV implementation or V100 campaign is therefore justified from the
+current evidence. Starting SV8 merely because it is the next numbered milestone
+would violate the evidence-gated scope of the project. Reopen SV8 only if a
+future bounded long-context workload demonstrates material KV/residency
+pressure on the target V100 configuration and records the corresponding memory
+and request-level impact.
+
+This completes the currently justified Strata-derived SV0–SV7 implementation
+and qualification sequence on `perf/v100-strata-derived`. Experimental paths
+that did not qualify remain opt-in/off by default; the frozen source branch is
+unchanged.
 
 ## Earlier SV7 strict/full-MMA evidence
 
