@@ -271,3 +271,24 @@ These checks validate software accounting and correlation, not full-model
 numerical fidelity, V100 overhead or performance. Request/output boundaries,
 draft costs, GPU intervals/launch accounting and the frozen hardware campaign
 remain outstanding; no V100 runner was acquired for this increment.
+
+## Actual MTP production and call costs
+
+Hosted run `37701019067` passed both jobs for NInfer `b5ba38ab` and frozen Strata
+`4021d00a`: the execution/lifecycle join is now software-validated in CI.
+
+NInfer's native MTP caller now records successful produced drafts before
+constraint trimming. Strata's serve/CLI callers use the existing `n_drafts`
+result, including the CLI initial call, and correlate subsequent production with
+the preceding verifier. Skipped calls produce no fabricated zero-cost event.
+Failed calls have unknown production. Level 1 records counts only; level 2 also
+records exact draft IDs and inclusive host call time without adding GPU work or
+waits. The draft report keeps actual production and later offered verification
+proposals separate; partial streams cannot establish a discarded-token count.
+
+The shared C++ fixture and Python checks exercise level 0 silence, level 1
+count-only records, successful and failed calls, exact level 2 traces and the
+report CLI. Native caller host compilation is required in the hosted check.
+All 31 telemetry and 58 diagnostic Python checks pass locally (89 total).
+Prompt MTP prefill/history setup, alternative proposal costs, request/output
+boundaries and GPU intervals/launch accounting still require implementation.

@@ -60,7 +60,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: mylordmonkeyman/Strata-V100
-          ref: 4021d00a7ab110cc1b71150d191c22eb718dea98
+          ref: 204c758935fc70020ee272f56c3c60d5890aa6c3
           path: strata-cpu-source
           persist-credentials: false
       - name: Check Strata round ownership and native token traces
@@ -140,7 +140,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: mylordmonkeyman/Strata-V100
-          ref: 4021d00a7ab110cc1b71150d191c22eb718dea98
+          ref: 204c758935fc70020ee272f56c3c60d5890aa6c3
           path: strata-telemetry-source
           persist-credentials: false
       - name: Check shared schema and compile Strata telemetry

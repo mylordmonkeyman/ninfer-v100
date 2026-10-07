@@ -208,6 +208,23 @@ request throughput or qualify an optimization.
 
 ## Campaign artifacts and reproducibility
 
+Actual MTP calls produce separate `ninfer-strata-v100-draft-v1` records. Their
+process-local draft ID and sequence label correlate production without assigning
+the next verifier's round before it exists. Strata additionally records the
+preceding verified round where available. Successful calls record actual produced
+counts and, at levels 2/3, exact IDs; failed calls leave production unknown.
+Level 1 adds no timing calls. Level 2 host call duration includes existing native
+waits and concurrent work, so it is not an isolated GPU interval. The observations
+include Strata CLI's initial draft and subsequent serve/CLI draft calls, and
+NInfer Program's native MTP call before constraint trimming. Prompt MTP prefill,
+history setup and alternative suffix/oracle production costs remain uncovered.
+
+`tools/telemetry/draft.py --lifecycle-logs ...` reports successful production and
+offered verification drafts by actual proposal source separately. It rejects
+duplicate draft identities, invalid timing/trace coverage and fabricated failed
+production. Missing call timing remains unknown. It does not infer discarded
+tokens from aggregate subtraction or claim complete request costs.
+
 The manifest freezes full engine SHAs, model/tokenizer and quant identity,
 configuration and manifest SHA256, exact prompt/continuation IDs, experimental
 flags, cache policy/bytes, worker/affinity/NUMA settings, graph mode, actual

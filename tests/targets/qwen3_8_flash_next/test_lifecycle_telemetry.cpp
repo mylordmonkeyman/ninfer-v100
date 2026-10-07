@@ -9,6 +9,11 @@ int main() {
     if (linked_round_id != link.id()) return 1;
     const std::array<int32_t, 3> candidates{101,202,303}, inputs{99,101,202};
     for (const char* engine : {"ninfer", "strata"}) {
+        {
+            DraftCall draft(engine, "fixture:sequence", 42);
+            draft.complete(std::span<const int32_t>(candidates));
+        }
+        { DraftCall failed(engine, "fixture:sequence", 45, link.id()); }
         Round native(engine, link.id(), "verify");
         InputContext context;
         context.input_columns = 4;

@@ -2565,8 +2565,13 @@ PendingBatch Program::decode(std::span<const SequenceHandle> sequences,
             Tensor last_hidden = impl_->allocation_.state_view().mtp_backbone_hidden.slice(1, impl_->allocation_.current_source_slot(lane_idx), 1);
             std::array<std::int32_t, 3> mrope_pos = {st.last_token_pos, st.last_token_pos,
                                                      st.last_token_pos};
+            const auto draft_sequence = v100_compare::level() ?
+                std::to_string(impl_->executor_.telemetry_executor_id()) + ":" +
+                std::to_string(lane_idx) + ":" + std::to_string(st.epoch) : std::string{};
+            v100_compare::DraftCall draft_observation("ninfer", draft_sequence, st.last_token_index);
             impl_->executor_.draft_mtp_tokens(st.lane_handle, st.last_token_id, st.last_token_index,
                                               mrope_pos, last_hidden, K, st.draft_tokens);
+            draft_observation.complete(std::span<const TokenId>(st.draft_tokens));
         }
 
         std::array<std::int32_t, 3> first_mrope_pos = {st.last_token_pos, st.last_token_pos,
