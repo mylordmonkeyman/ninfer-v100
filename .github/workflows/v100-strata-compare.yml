@@ -123,7 +123,7 @@ jobs:
             --strata-server "$STRATA_ROOT/serve/server.py" \
             --strata-config "$STRATA_CONFIG" \
             --strata-profile "$STRATA_ROOT/data/expert-profile.bin" \
-            --output strata-compare-results --repeats 1
+            --output strata-compare-results --repeats 3
           cat strata-compare-results/summary.txt >> "$GITHUB_STEP_SUMMARY"
       - name: Preserve comparison evidence
         if: always()

@@ -166,7 +166,7 @@ def stats(rows,engine,key):
     return {'median':statistics.median(vals),'min':min(vals),'max':max(vals)}
 
 def summary(rows):
-    workers=(16,24,32,40,48,64)
+    workers=(32,48,56,64)
     out={}
     for count in workers:
         engine=f"ninfer-w{count:02d}"
@@ -191,7 +191,7 @@ def main():
     for p in (a.ninfer,a.artifact,a.profile,a.strata_python,a.strata_server,a.strata_config,a.strata_profile):
         if not p.exists():raise FileNotFoundError(p)
     a.profile=strata_profile_to_ninfer(a.strata_profile,a.profile,a.output/'strata-derived-ninfer-profile.json')
-    rows=[];worker_counts=(16,24,32,40,48,64)
+    rows=[];worker_counts=(32,48,56,64)
     arms=list(worker_counts)+['strata']
     for i in range(a.repeats):
         order=arms if i%2==0 else list(reversed(arms))
@@ -208,7 +208,7 @@ def main():
               f"Best NInfer worker count: {s['best_workers']}",
               f"Strata/best-NInfer decode: {s['strata_over_best_decode']:.2f}x",
               f"NInfer generated-response equality across worker counts: {s['ninfer_response_equal']}",
-              '', 'One-repeat screening sweep only. The winning worker count must be repeated before promotion. Strata uses a different quantization/container format.']
+              '', 'Three-repeat qualification of the high-worker region; generated-response equality remains diagnostic. Strata uses a different quantization/container format.']
     (a.output/'summary.txt').write_text('\n'.join(lines)+'\n');print('\n'.join(lines))
 
 if __name__=='__main__':main()
