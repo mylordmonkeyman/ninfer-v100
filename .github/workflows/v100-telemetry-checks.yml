@@ -38,6 +38,9 @@ jobs:
           python3 tools/telemetry/validate_records.py /tmp/compare-records.jsonl
           git diff --check
   cuda-host-syntax:
+    defaults:
+      run:
+        shell: bash
     runs-on: ubuntu-24.04
     container: nvidia/cuda:12.8.1-devel-ubuntu24.04
     timeout-minutes: 15
@@ -45,10 +48,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Install host compiler
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends g++
+      - name: Verify container compiler
+        run: g++ --version
       - name: Compile changed CUDA host code without acquiring a GPU
         run: |
           includes=(-Iinclude -Isrc -Ithird_party -Ithird_party/utf8proc -I/usr/local/cuda/include)

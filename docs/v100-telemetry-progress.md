@@ -70,3 +70,9 @@ The preliminary common comparison tool reports observed per-layer host costs,
 coverage and work normalization, explicitly leaving critical-path contribution,
 request throughput and A/B candidates unqualified. It must not be used to
 justify an optimization before the remaining telemetry gates are met.
+
+Hosted check `37691123945` passed all 65 Python tests and host collector checks,
+but its CUDA syntax step never compiled: container default `sh` rejected the
+Bash include array. The job now selects Bash explicitly and uses the compiler
+already present in the CUDA image, avoiding redundant apt operations. This was
+a hosted workflow-shell failure, not a self-hosted V100 interruption.
