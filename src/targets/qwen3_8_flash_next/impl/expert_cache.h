@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/arena.h"
+#include "targets/qwen3_8_flash_next/impl/telemetry/compare_telemetry.h"
 #include "targets/qwen3_8_flash_next/impl/expert_bank.h"
 #include "targets/qwen3_8_flash_next/impl/expert_heat.h"
 #include "targets/qwen3_8_flash_next/impl/expert_profile.h"
@@ -115,6 +116,8 @@ public:
     };
     // Observability only; snapshot does not drain fills or change slot leases.
     [[nodiscard]] LayerSnapshot layer_snapshot(unsigned layer) const;
+    // Per-layer cumulative values; fill completion may belong to an earlier round.
+    [[nodiscard]] v100_compare::CacheSnapshot telemetry_snapshot(unsigned layer, bool ids) const;
     [[nodiscard]] FlashNextExpertCacheStats stats() const;
     [[nodiscard]] const FlashNextExpertCacheBudget& budget() const { return budget_; }
     [[nodiscard]] HostNvfp4ExpertPairView ready_view(unsigned layer, int expert);
@@ -145,6 +148,11 @@ private:
     bool stop_ = false, filling_ = false;
     std::uint64_t epoch_ = 0;
     FlashNextExpertCacheStats stats_;
+    struct LayerTotals {
+        std::uint64_t hits = 0, misses = 0, admitted = 0, ready = 0, evicted = 0, fill_bytes = 0;
+    };
+    std::array<LayerTotals, 48> layer_totals_{};
+    std::uint64_t telemetry_generation_ = 0;
     std::unique_ptr<FlashNextExpertHeat> heat_;
     std::unique_ptr<FlashNextExpertProfile> original_profile_;
     std::string save_profile_path_;

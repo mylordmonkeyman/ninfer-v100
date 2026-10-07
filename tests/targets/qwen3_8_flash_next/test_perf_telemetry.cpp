@@ -32,6 +32,7 @@ int main() {
     PerfContext context{.executor=1, .transaction=9, .phase="verify"};
     context.span_count = 1;
     context.spans[0] = {0, 1, 0, 2, 42};
+    context.input_token_ids = {101};
     {
         PerfContextScope scope(context);
         const auto record = mixed.json(histogram);

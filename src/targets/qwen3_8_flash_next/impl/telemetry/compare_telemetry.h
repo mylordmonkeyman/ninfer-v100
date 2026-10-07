@@ -9,6 +9,8 @@
 #include <cstring>
 #include <exception>
 #include <locale>
+#include <optional>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -69,6 +71,28 @@ struct alignas(64) WorkerObservation {
         else { ++full_jobs; full_us += us; }
     }
 };
+// Host ingress/egress only. Sampled candidates are not emitted or accepted tokens.
+struct InputSpan {
+    unsigned first_column = 0, columns = 0;
+    std::int64_t first_token_index = 0;
+    std::optional<unsigned> lane;
+    std::optional<std::uint64_t> epoch;
+};
+struct InputContext {
+    unsigned input_columns = 0;
+    std::optional<std::uint64_t> executor, transaction;
+    std::vector<InputSpan> spans;
+    std::optional<std::vector<std::int64_t>> input_token_ids, sampled_token_ids;
+    const char* execution_mode = "unknown";
+};
+struct CacheSnapshot {
+    std::uint64_t generation = 0, capacity_bytes = 0;
+    unsigned capacity_experts = 0, ready = 0, uploading = 0, leased = 0;
+    std::uint64_t hits_total = 0, misses_total = 0, admissions_total = 0;
+    std::uint64_t fills_total = 0, evictions_total = 0, fill_bytes_total = 0;
+    std::optional<std::vector<int>> resident_ids;
+};
+struct CacheWindow { CacheSnapshot begin, end; };
 struct Layer {
     bool observed = false;
     std::array<std::uint64_t, unsigned(Counter::count)> counters{};
@@ -76,6 +100,7 @@ struct Layer {
     std::array<double, unsigned(Stage::count)> host_us{};
     std::array<bool, unsigned(Stage::count)> stage_observed{};
     std::vector<WorkerObservation> workers;
+    std::vector<CacheWindow> cache_windows;
 };
 class Round;
 inline thread_local Round* active = nullptr;
@@ -94,6 +119,14 @@ public:
         } catch (...) { std::fputs("v100 compare telemetry serialization failed\n", stderr); }
     }
     void fail() noexcept { failed_ = true; }
+    void context(InputContext value) { context_ = std::move(value); }
+    void execution_mode(const char* value) noexcept {
+        if (context_) context_->execution_mode = value;
+    }
+    template<class Token> void sampled_tokens(std::span<const Token> tokens) {
+        if (context_ && level() >= 2)
+            context_->sampled_token_ids.emplace(tokens.begin(), tokens.end());
+    }
     void counter(unsigned layer, Counter key, std::uint64_t value) noexcept {
         if (layer >= layers_.size()) return;
         auto& l = layers_[layer]; l.observed = true;
@@ -103,6 +136,11 @@ public:
         if (layer >= layers_.size()) return;
         auto& l = layers_[layer]; l.observed = true;
         l.stage_observed[unsigned(key)] = true; l.host_us[unsigned(key)] += us;
+    }
+    void cache(unsigned layer, CacheSnapshot begin, CacheSnapshot end) {
+        if (layer >= layers_.size()) return;
+        auto& l = layers_[layer]; l.observed = true;
+        l.cache_windows.push_back({std::move(begin), std::move(end)});
     }
     void worker(unsigned layer, const WorkerObservation& observation) {
         if (layer >= layers_.size()) return;
@@ -129,7 +167,37 @@ public:
             << ",\"round_id\":" << quote(id_) << ",\"phase\":" << quote(phase_)
             << ",\"level\":" << level() << ",\"status\":\"" << (failed ? "failed" : "ok")
             << "\",\"timing_semantics\":\"host_observed_not_gpu_execution\",\"host_wall_us\":"
-            << wall << ",\"layers\":[";
+            << wall;
+        if (context_) {
+            const auto& c = *context_;
+            out << ",\"context\":{\"input_columns\":" << c.input_columns
+                << ",\"execution_mode\":" << quote(c.execution_mode);
+            if (c.executor) out << ",\"executor\":" << *c.executor;
+            if (c.transaction) out << ",\"transaction\":" << *c.transaction;
+            out << ",\"spans\":[";
+            bool sep = false;
+            for (const auto& span : c.spans) {
+                if (sep) out << ',';
+                sep = true;
+                out << "{\"first_column\":" << span.first_column << ",\"columns\":" << span.columns
+                    << ",\"first_token_index\":" << span.first_token_index;
+                if (span.lane) out << ",\"lane\":" << *span.lane;
+                if (span.epoch) out << ",\"epoch\":" << *span.epoch;
+                out << '}';
+            }
+            out << ']';
+            const auto tokens = [&](const char* name, const auto& ids) {
+                if (!ids) return;
+                out << ',' << quote(name) << ":[";
+                bool comma = false;
+                for (auto id : *ids) { if (comma) out << ','; comma = true; out << id; }
+                out << ']';
+            };
+            tokens("input_token_ids", c.input_token_ids);
+            tokens("sampled_token_ids", c.sampled_token_ids);
+            out << '}';
+        }
+        out << ",\"layers\":[";
         bool comma = false;
         for (unsigned i = 0; i < layers_.size(); ++i) {
             const auto& l = layers_[i]; if (!l.observed) continue;
@@ -169,6 +237,33 @@ public:
                 }
                 out << ']';
             }
+            if (!l.cache_windows.empty()) {
+                const auto snapshot = [&](const CacheSnapshot& c) {
+                    out << "{\"generation\":" << c.generation
+                        << ",\"capacity_bytes\":" << c.capacity_bytes
+                        << ",\"capacity_experts\":" << c.capacity_experts
+                        << ",\"ready\":" << c.ready << ",\"uploading\":" << c.uploading
+                        << ",\"leased\":" << c.leased
+                        << ",\"hits_total\":" << c.hits_total << ",\"misses_total\":" << c.misses_total
+                        << ",\"admissions_total\":" << c.admissions_total
+                        << ",\"fills_total\":" << c.fills_total << ",\"evictions_total\":" << c.evictions_total
+                        << ",\"fill_bytes_total\":" << c.fill_bytes_total;
+                    if (c.resident_ids) {
+                        out << ",\"resident_ids\":["; bool sep = false;
+                        for (int id : *c.resident_ids) { if (sep) out << ','; sep = true; out << id; }
+                        out << ']';
+                    }
+                    out << '}';
+                };
+                out << ",\"cache_windows\":["; bool sep = false;
+                for (const auto& window : l.cache_windows) {
+                    if (sep) out << ',';
+                    sep = true;
+                    out << "{\"begin\":"; snapshot(window.begin);
+                    out << ",\"end\":"; snapshot(window.end); out << '}';
+                }
+                out << ']';
+            }
             out << '}';
         }
         out << "]}"; return out.str();
@@ -177,6 +272,7 @@ private:
     const char* engine_; std::string id_; const char* phase_;
     Round* previous_; Clock::time_point started_; int exceptions_;
     bool failed_ = false;
+    std::optional<InputContext> context_;
     std::array<Layer, 48> layers_{};
 };
 class HostSpan {

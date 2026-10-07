@@ -179,7 +179,7 @@ void FlashNextExpertCache::seed(const FlashNextExpertProfile& profile) {
                 while (rank < budget_.slots_per_layer && queue_.size()+unsigned(filling_) < 4) {
                     const unsigned slot = layer*budget_.slots_per_layer+rank;
                     entries_[slot] = {profile.ranking[layer][rank], State::Uploading, ++epoch_, 0};
-                    queue_.push_back(slot); ++stats_.admitted; ++rank;
+                    queue_.push_back(slot); ++stats_.admitted; ++layer_totals_[layer].admitted; ++rank;
                     stats_.maximum_outstanding = std::max(stats_.maximum_outstanding,
                         unsigned(queue_.size())+unsigned(filling_));
                 }
@@ -262,12 +262,12 @@ bool FlashNextExpertCache::execute_impl(unsigned layer,int expert,const void* in
         bool found=false;
         for(unsigned i=layer*budget_.slots_per_layer;i<(layer+1)*budget_.slots_per_layer;++i)
             if(entries_[i].expert==expert&&entries_[i].state==State::Ready){slot=i;found=true;break;}
-        if(!found){++stats_.misses;return false;}
+        if(!found){++stats_.misses;++layer_totals_[layer].misses;return false;}
         if(output==nullptr)throw std::logic_error("Ready cache entry has no output storage");
         entries_[slot].epoch=++epoch_;++entries_[slot].leases;
         if (consumers_.empty() && timing_enabled_)
             CUDA_CHECK(cudaEventRecord(hit_start_, stream));
-        consumers_.emplace_back(slot,path);++stats_.hits;
+        consumers_.emplace_back(slot,path);++stats_.hits;++layer_totals_[layer].hits;
     }
     if (batching_layer_) {
         auto* descriptors=static_cast<FlashNextCachedExpertTask*>(batch_descriptors_->data());
@@ -434,6 +434,8 @@ void FlashNextExpertCache::reset() {
         if (!consumers_.empty()) throw std::logic_error("cache reset with outstanding consumers");
         std::fill(entries_.begin(), entries_.end(), Entry{});
         stats_ = {};
+        layer_totals_ = {};
+        ++telemetry_generation_;
         epoch_ = 0;
         if (heat_) heat_->reset();
         admissions_enabled_ = !static_profile_;
@@ -476,9 +478,9 @@ void FlashNextExpertCache::admit(unsigned layer,std::span<const std::int32_t> id
         if (adaptive_heat_ && entries_[victim].state != State::Empty &&
             heat_->score(layer, id) <= heat_->score(layer, entries_[victim].expert))
             continue;
-        if(entries_[victim].state!=State::Empty)++stats_.evicted;
+        if(entries_[victim].state!=State::Empty){++stats_.evicted;++layer_totals_[layer].evicted;}
         entries_[victim]={id,State::Uploading,++epoch_,0};
-        queue_.push_back(victim);++stats_.admitted;++admitted;
+        queue_.push_back(victim);++stats_.admitted;++layer_totals_[layer].admitted;++admitted;
         stats_.maximum_outstanding=std::max(stats_.maximum_outstanding,
             unsigned(queue_.size())+unsigned(filling_));
         work_.notify_one();
@@ -525,6 +527,9 @@ void FlashNextExpertCache::fill_loop() noexcept {
                 stats_.fill_wall_us+=elapsed;
                 stats_.pack_wall_us+=pack_us;stats_.h2d_us+=double(h2d_ms)*1000;
                 stats_.fill_bytes+=kExpertSlotBytes;
+                auto& layer_total = layer_totals_[slot/budget_.slots_per_layer];
+                layer_total.fill_bytes += kExpertSlotBytes;
+                ++layer_total.ready;
                 stats_.maximum_fill_wall_us=std::max(stats_.maximum_fill_wall_us,elapsed);
                 entries_[slot].state=State::Canonical;
                 // This leaf reads the canonical software-NVFP4 layout directly. No prepack
@@ -548,6 +553,28 @@ FlashNextExpertCache::LayerSnapshot FlashNextExpertCache::layer_snapshot(unsigne
         snapshot.ready += entries_[i].state == State::Ready;
         snapshot.uploading += entries_[i].state == State::Uploading;
         snapshot.leased += entries_[i].leases != 0;
+    }
+    return snapshot;
+}
+v100_compare::CacheSnapshot FlashNextExpertCache::telemetry_snapshot(unsigned layer, bool ids) const {
+    if (layer >= 48) throw std::invalid_argument("invalid telemetry cache layer");
+    std::lock_guard lock(mutex_);
+    check_failure();
+    v100_compare::CacheSnapshot snapshot;
+    snapshot.generation = telemetry_generation_;
+    snapshot.capacity_experts = budget_.slots_per_layer;
+    snapshot.capacity_bytes = std::uint64_t(budget_.slots_per_layer)*kExpertSlotBytes;
+    const auto& totals = layer_totals_[layer];
+    snapshot.hits_total = totals.hits; snapshot.misses_total = totals.misses;
+    snapshot.admissions_total = totals.admitted; snapshot.fills_total = totals.ready;
+    snapshot.evictions_total = totals.evicted; snapshot.fill_bytes_total = totals.fill_bytes;
+    if (ids) snapshot.resident_ids.emplace();
+    for (unsigned i = layer*budget_.slots_per_layer; i < (layer+1)*budget_.slots_per_layer; ++i) {
+        const auto& entry = entries_[i];
+        snapshot.ready += entry.state == State::Ready;
+        snapshot.uploading += entry.state == State::Uploading;
+        snapshot.leased += entry.leases != 0;
+        if (ids && entry.state == State::Ready) snapshot.resident_ids->push_back(entry.expert);
     }
     return snapshot;
 }

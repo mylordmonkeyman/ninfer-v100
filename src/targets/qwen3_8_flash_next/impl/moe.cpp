@@ -462,6 +462,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
 
     const bool telemetry = v100_perf_telemetry_enabled();
     const bool aggregate = v100_compare::active != nullptr;
+    std::optional<v100_compare::CacheSnapshot> cache_begin;
+    if (aggregate && cache) cache_begin = cache->telemetry_snapshot(layer, v100_compare::level() >= 2);
     std::bitset<512> resident_ids, missed_ids;
     const bool observe_host = telemetry || aggregate;
     const auto rendezvous_started = observe_host ? PerfClock::now() : PerfClock::time_point{};
@@ -789,6 +791,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
             (hits ? cpu.pair_outputs.size()*sizeof(float) : 0));
         add(C::output_h2d_bytes, device_route_combine ?
             cpu.tasks.size()*kFlashNextExpertHidden*sizeof(float) : cpu.routed_sum.size()*sizeof(float));
+        if (cache_begin)
+            round.cache(layer, std::move(*cache_begin), cache->telemetry_snapshot(layer, v100_compare::level() >= 2));
         round.duration(layer, v100_compare::Stage::host_wait, rendezvous_us);
         round.duration(layer, v100_compare::Stage::cpu_expert,
             std::chrono::duration<double, std::micro>(cpu_finished-cpu_started).count());

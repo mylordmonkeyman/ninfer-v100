@@ -32,6 +32,33 @@ class SchemaTests(unittest.TestCase):
         c['distinct_missed_experts'] = 601
         with self.assertRaisesRegex(ValueError, 'distinct'): validate(r)
 
+    def test_input_trace_and_lane_coverage(self):
+        r = fixture()
+        r['context'] = dict(input_columns=2, execution_mode='eager',
+            spans=[dict(first_column=0, columns=2, first_token_index=42, lane=0, epoch=3)])
+        validate(r)
+        r['context']['input_token_ids'] = [101, 202]
+        with self.assertRaisesRegex(ValueError, 'trace coverage'): validate(r)
+        r['level'] = 2; validate(r)
+        r['context']['sampled_token_ids'] = [303]
+        with self.assertRaisesRegex(ValueError, 'trace coverage'): validate(r)
+        del r['context']['sampled_token_ids']
+        r['context']['spans'][0]['first_column'] = 1
+        with self.assertRaisesRegex(ValueError, 'noncontiguous'): validate(r)
+
+    def test_cache_resets_and_monotonicity(self):
+        r = fixture()
+        c = dict(generation=0, capacity_bytes=400, capacity_experts=4, ready=1, uploading=0, leased=0,
+            hits_total=4, misses_total=2, admissions_total=2, fills_total=1, evictions_total=0, fill_bytes_total=100)
+        r['layers'][0]['cache_windows'] = [dict(begin=c, end=dict(c, hits_total=5))]
+        validate(r)
+        end = r['layers'][0]['cache_windows'][0]['end']
+        end['hits_total'] = 0
+        with self.assertRaisesRegex(ValueError, 'without reset'): validate(r)
+        end['generation'] = 1; validate(r)
+        end['ready'] = 5
+        with self.assertRaisesRegex(ValueError, 'occupancy'): validate(r)
+
     def test_bad_measurements(self):
         for v in (-1, float('nan'), float('inf'), True):
             r = fixture(); r['host_wall_us'] = v

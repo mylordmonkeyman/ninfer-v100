@@ -46,6 +46,42 @@ Counters are deltas within the record except fields suffixed `_snapshot` or
 reset boundaries, before summing. Durations are inclusive; nested stage times
 must not be summed into a latency decomposition.
 
+## Native input context and cache windows
+
+Optional `context` describes native host-visible round input, not a request record.
+`input_columns` and contiguous `spans` cover all submitted columns. Each span has
+`first_column`, `columns` and `first_token_index`; NInfer also records its actual
+`lane` and `epoch`, plus context `executor` and `transaction`. Strata positions
+are available, but caller request identity remains unavailable at these boundaries.
+`execution_mode` is `eager`, `cuda_graph` or `unknown` from the actual chosen path.
+At levels 2/3, available `input_token_ids` and `sampled_token_ids` preserve column
+order. They are absent at level 1. Sampled candidates are neither accepted drafts
+nor emitted text; no acceptance/throughput denominator may be derived from them.
+Strata's session loop receives device-owned embeddings, so its token IDs remain
+unavailable; PLE's token field is not substituted for an unobserved ingress.
+Teacher forcing, request IDs and the accepted/emitted trace still require caller
+instrumentation. A run ID must identify a single process in a frozen campaign.
+
+Optional layer `cache_windows` records before/after snapshots around each actual
+NInfer host-routed layer call. Snapshot counters are **per layer**, unlike the old
+SV0 global cache totals. `generation` increments on reset; never subtract totals
+across different generations. `capacity_experts`/`capacity_bytes` are the layer's
+allocated slots/payload capacity. `ready`, `uploading`, `leased` are slot counts.
+`hits_total`, `misses_total`, `admissions_total`, `fills_total`, `evictions_total`
+and `fill_bytes_total` are cumulative in that layer and generation. Fill bytes
+are actual padded H2D payload bytes. Levels 2/3 include `resident_ids` for Ready
+slots; level 1 does not allocate/serialize the IDs. Startup seeding is included
+in cumulative totals, not counted as current-round admissions.
+
+The preliminary report differences matched-generation snapshots only. These
+are observed-window deltas: an asynchronous fill may complete for an earlier
+round, and fills between layer-call windows remain unassigned. Reset windows
+make aggregate deltas unknown. Do not treat window deltas as all cache traffic
+or as a causal attribution to current-token requests. Snapshot reads take the
+existing cache mutex; they do not drain fills or add CUDA work. Cache overhead,
+source/page reads, adaptation timing and Strata dynamic-residency observations
+still require qualification/instrumentation.
+
 ## Stage taxonomy
 
 Common stage names are `request`, `tokenize`, `prefill`, `decode`, `layer`,
@@ -119,6 +155,12 @@ barriers, precision, worker count or scheduling. Failed dispatch observations ar
 not qualified by the success-only fixture checks. Real CPU fixtures check output
 bits and job conservation with levels 0/1/2; full native-model numerical equality
 and Level-1 overhead still require hardware qualification.
+
+The preliminary comparison reports jobs and timed host activity per observed
+`(run_id, pool_id, worker_id, role)`, with observation/timing coverage. Partial
+coverage leaves summed activity unknown. It preserves idle configured workers
+with zero jobs, but does not infer their idle duration or combine overlapping
+thread activity into request latency.
 
 ## Campaign artifacts and reproducibility
 

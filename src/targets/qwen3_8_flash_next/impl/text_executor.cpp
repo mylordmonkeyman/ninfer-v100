@@ -546,6 +546,7 @@ PendingRound FlashNextTextExecutor::finish_prepared_round(
             for (unsigned i = 0; i < batch_size; ++i) {
                 const auto h = requests[i].handle;
                 context.spans[i] = {i, 1, h.lane_index(), h.epoch(), requests[i].token_index};
+                if (v100_compare::level() >= 2) context.input_token_ids.push_back(requests[i].token_id);
             }
             perf_scope.emplace(context);
             if (bf16_timing_) bf16_scope.emplace(*bf16_timing_);
@@ -597,6 +598,7 @@ PendingRound FlashNextTextExecutor::finish_prepared_round(
                 ran = true;
             }
         }
+        if (v100_compare::active) v100_compare::active->execution_mode(ran ? "cuda_graph" : "eager");
         if (!ran) { execute_round_body(batch_size, active_blocks, sink); }
 
         // 5. Complete round on event wait
@@ -617,6 +619,8 @@ PendingRound FlashNextTextExecutor::finish_prepared_round(
             sampled_tokens[i] = host_egr->sampled_tokens[i];
         }
 
+        if (v100_compare::active)
+            v100_compare::active->sampled_tokens(std::span<const std::int32_t>(sampled_tokens.data(), batch_size));
         Tensor final_hidden =
             alloc_.round_tensors().final_hidden.slice(1, 0, static_cast<std::int32_t>(batch_size));
         Tensor hyper_hidden =
@@ -669,9 +673,11 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
             PerfContext context{.executor=perf_executor_id_, .transaction=prepared.transaction_id, .phase="prefill"};
             context.span_count = 1;
             context.spans[0] = {0, num_tokens, handle.lane_index(), handle.epoch(), first_token_index};
+            if (v100_compare::level() >= 2) context.input_token_ids.assign(token_ids.begin(), token_ids.end());
             perf_scope.emplace(context);
             if (bf16_timing_) bf16_scope.emplace(*bf16_timing_);
         }
+        if (v100_compare::active) v100_compare::active->execution_mode("eager");
         pending_is_prefill_chunk_             = true;
         pending_prefill_lane_                 = lane;
         pending_prefill_initial_active_slot_  = initial_active_slot;
@@ -852,6 +858,10 @@ PendingRound FlashNextTextExecutor::execute_speculative_verify_round(
             PerfContext context{.executor=perf_executor_id_, .transaction=prepared.transaction_id, .phase="verify"};
             context.span_count = 1;
             context.spans[0] = {0, num_tokens, handle.lane_index(), handle.epoch(), first_token_index};
+            if (v100_compare::level() >= 2) {
+                context.input_token_ids.push_back(anchor_token_id);
+                context.input_token_ids.insert(context.input_token_ids.end(), draft_tokens.begin(), draft_tokens.end());
+            }
             perf_scope.emplace(context);
             if (bf16_timing_) bf16_scope.emplace(*bf16_timing_);
         }
@@ -878,7 +888,9 @@ PendingRound FlashNextTextExecutor::execute_speculative_verify_round(
         const auto bucket_blocks = static_cast<std::int32_t>(decode_graphs_.buckets.blocks[bucket_index]);
         pending_custom_embeddings_.clear();
         auto* topology = find_topology(num_tokens, bucket_index, num_tokens > 1);
-        if (use_cuda_graph_ && topology != nullptr && topology->executable.ready()) {
+        const bool replay = use_cuda_graph_ && topology != nullptr && topology->executable.ready();
+        if (v100_compare::active) v100_compare::active->execution_mode(replay ? "cuda_graph" : "eager");
+        if (replay) {
             topology->executable.launch(device_.stream);
         } else {
             execute_round_body(num_tokens, bucket_blocks, nullptr, true);
@@ -902,6 +914,8 @@ PendingRound FlashNextTextExecutor::execute_speculative_verify_round(
             sampled_tokens_host[i] = host_egr->sampled_tokens[i];
         }
 
+        if (v100_compare::active)
+            v100_compare::active->sampled_tokens(std::span<const std::int32_t>(sampled_tokens_host.data(), num_tokens));
         finish_perf_projections();
         round_in_flight_ = true;
         return PendingRound(this, prepared.transaction_id, num_tokens, logits, final_hidden,

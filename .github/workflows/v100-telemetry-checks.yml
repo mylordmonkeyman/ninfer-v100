@@ -60,9 +60,33 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: mylordmonkeyman/Strata-V100
-          ref: f71fa0c41bf78aeb31e3656c5ce480a01d670ce3
+          ref: 0c6692f1e890ee3a12c327d1a77f92c94dd4ffcd
           path: strata-cpu-source
           persist-credentials: false
+      - name: Check Strata round ownership and native token traces
+        run: |
+          g++ -std=c++20 -O2 -Wall -Wextra -Werror -Istrata-cpu-source/include \
+            strata-cpu-source/tests/core/compare_round_test.cpp -o /tmp/strata-round-context
+          for level in 0 1 2; do
+            V100_COMPARE_TELEMETRY_LEVEL="$level" /tmp/strata-round-context \
+              2> "/tmp/strata-round-$level.jsonl"
+          done
+          python3 - <<'PYTEST'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, 'tools/telemetry')
+          from validate_records import read_records
+          assert Path('/tmp/strata-round-0.jsonl').read_text() == ''
+          for level in (1, 2):
+              records = read_records(f'/tmp/strata-round-{level}.jsonl')
+              assert [r['status'] for r in records] == ['ok', 'failed', 'failed']
+              context = records[0]['context']
+              assert context['spans'][0]['first_token_index'] == 42
+              assert ('input_token_ids' in context) == (level == 2)
+              if level == 2:
+                  assert context['input_token_ids'] == [101, 202]
+                  assert context['sampled_token_ids'] == [303, 404]
+          PYTEST
       - name: Check Strata CPU outputs and host/worker accounting
         run: |
           source=strata-cpu-source
@@ -104,6 +128,8 @@ jobs:
           includes=(-Iinclude -Isrc -Ithird_party -Ithird_party/utf8proc -I/usr/local/cuda/include)
           for directory in src/targets/*/export; do includes+=(-I"$directory"); done
           g++ -std=c++20 -fsyntax-only -DNINFER_VOLTA_BUILD "${includes[@]}" \
+            src/targets/qwen3_8_flash_next/impl/expert_cache.cpp \
+            tests/targets/qwen3_8_flash_next/test_expert_cache.cpp \
             src/targets/qwen3_8_flash_next/impl/moe.cpp \
             src/targets/qwen3_8_flash_next/impl/cpu_expert_pool.cpp \
             src/targets/qwen3_8_flash_next/impl/text_decode.cpp \
@@ -112,7 +138,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: mylordmonkeyman/Strata-V100
-          ref: f71fa0c41bf78aeb31e3656c5ce480a01d670ce3
+          ref: 0c6692f1e890ee3a12c327d1a77f92c94dd4ffcd
           path: strata-telemetry-source
           persist-credentials: false
       - name: Check shared schema and compile Strata telemetry

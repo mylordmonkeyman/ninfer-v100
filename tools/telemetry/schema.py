@@ -17,6 +17,60 @@ def number(value, name, integer=False):
     return value
 
 
+CACHE_TOTALS = ('hits_total', 'misses_total', 'admissions_total', 'fills_total',
+                'evictions_total', 'fill_bytes_total')
+
+
+def validate_context(context, level):
+    if not isinstance(context, dict): raise ValueError('invalid context')
+    columns = number(context.get('input_columns'), 'input_columns', True)
+    if columns < 1: raise ValueError('empty input context')
+    if context.get('execution_mode') not in ('unknown', 'eager', 'cuda_graph'):
+        raise ValueError('invalid execution mode')
+    for name in ('executor', 'transaction'):
+        if name in context: number(context[name], name, True)
+    end = 0
+    if not isinstance(context.get('spans'), list): raise ValueError('missing input spans')
+    for span in context['spans']:
+        first = number(span.get('first_column'), 'first_column', True)
+        count = number(span.get('columns'), 'columns', True)
+        number(span.get('first_token_index'), 'first_token_index', True)
+        if first != end or count < 1: raise ValueError('noncontiguous input spans')
+        if ('lane' in span) != ('epoch' in span): raise ValueError('incomplete lane identity')
+        for name in ('lane', 'epoch'):
+            if name in span: number(span[name], name, True)
+        end += count
+    if end != columns: raise ValueError('input span coverage mismatch')
+    for name in ('input_token_ids', 'sampled_token_ids'):
+        if name not in context: continue
+        ids = context[name]
+        if level < 2 or not isinstance(ids, list) or len(ids) != columns:
+            raise ValueError('invalid token trace coverage')
+        for token in ids: number(token, name, True)
+
+
+def validate_cache(window, level):
+    for boundary in ('begin', 'end'):
+        c = window.get(boundary)
+        if not isinstance(c, dict): raise ValueError('missing cache boundary')
+        for name in ('generation', 'capacity_bytes', 'capacity_experts', 'ready', 'uploading', 'leased') + CACHE_TOTALS:
+            number(c.get(name), name, True)
+        if c['ready'] + c['uploading'] > c['capacity_experts'] or c['leased'] > c['ready']:
+            raise ValueError('invalid cache occupancy')
+        if 'resident_ids' in c:
+            ids = c['resident_ids']
+            if level < 2 or not isinstance(ids, list) or len(ids) != c['ready'] or len(set(ids)) != len(ids):
+                raise ValueError('invalid cache resident coverage')
+            for expert in ids:
+                if number(expert, 'resident id', True) >= 512: raise ValueError('invalid cache expert')
+    a, b = window['begin'], window['end']
+    if b['generation'] < a['generation']: raise ValueError('cache generation reversed')
+    if a['generation'] == b['generation']:
+        if any(b[name] < a[name] for name in CACHE_TOTALS): raise ValueError('cache total decreased without reset')
+        if any(a[name] != b[name] for name in ('capacity_bytes', 'capacity_experts')):
+            raise ValueError('cache capacity changed without reset')
+
+
 def validate(record):
     if record.get('schema') != SCHEMA:
         raise ValueError('unsupported schema')
@@ -35,6 +89,8 @@ def validate(record):
     if record.get('timing_semantics') != 'host_observed_not_gpu_execution':
         raise ValueError('unknown timing semantics')
     number(record.get('host_wall_us'), 'host_wall_us')
+    if 'context' in record: validate_context(record['context'], record['level'])
+    if not isinstance(record.get('layers'), list): raise ValueError('missing layers')
     seen = set()
     for layer in record.get('layers', []):
         i = number(layer.get('layer'), 'layer', True)
@@ -49,6 +105,7 @@ def validate(record):
             if key not in STAGES:
                 raise ValueError(f'unknown stage {key}')
             number(value, key)
+        for window in layer.get('cache_windows', []): validate_cache(window, record['level'])
         workers_seen = set()
         for worker in layer.get('workers', []):
             pool = number(worker.get('pool_id'), 'pool_id', True)

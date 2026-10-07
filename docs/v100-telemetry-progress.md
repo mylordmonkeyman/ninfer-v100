@@ -154,3 +154,42 @@ utilization is not request/engine attribution, and process/NUMA snapshots are no
 an allocation breakdown. Request/token/MTP linkage, native Q4/full-model off/on
 qualification, cache deltas and deferred GPU intervals remain required before
 the comprehensive hardware campaign. No new V100 run has been dispatched.
+
+
+## Native context, cache windows and worker reporting increment
+
+Hosted run `37695723107` succeeded for the external sampler increment, including
+both real CPU fixtures and CUDA host syntax checks. No V100 was acquired.
+
+NInfer common records now link executor/transaction, lane/epoch and token-position
+spans to actual decode/prefill/verify inputs. The actual graph/eager choice is
+recorded without changing it. Levels 2/3 copy exact already-host-visible input
+IDs and sampled candidates; level 1 records ranges only. Strata prefill and
+verify record positions and host input IDs, and verification records sampled
+candidates after the existing completion boundary. Its session loop records the
+position/graph path but cannot see device-owned embedding token IDs. A successful
+split verifier now correctly marks its owner telemetry scope successful; native
+return behavior is unchanged. Caller request IDs, teacher forcing, MTP acceptance,
+commit and emitted token traces are still outstanding.
+
+NInfer cache totals now have independent layer counters updated under existing
+locks, including startup seeding, asynchronous fill publication and generation
+changes on reset. Common records contain before/after occupancy/capacity and
+cumulative totals for each observed host-routed layer call, with Ready IDs only
+at levels 2/3. Global legacy totals are retained as global legacy diagnostics.
+The preliminary report differences only matched-generation windows; asynchronous
+fills between windows remain unassigned and reset windows remain unknown.
+
+The report now includes observed worker distribution with process/pool identity,
+job totals and timing coverage. It does not infer idle time or add overlapping
+thread times to request latency. New regression coverage exercises exact token
+traces, multiple lane epochs, cache reset boundaries/monotonicity, cumulative
+versus delta reporting and partial worker timing coverage. The existing GPU cache
+fixture also checks layer isolation, seed accounting and reset semantics; its
+hardware execution is pending. The shared collector/spec remain byte-identical.
+
+All 20 telemetry and 58 diagnostic Python tests pass locally (78 total). These
+are software checks, not native Q4/full-model numerical equality, V100 cache
+qualification or level-1 overhead. Deferred GPU intervals/NVTX, launch accounting,
+caller request/MTP linkage and the frozen comprehensive hardware campaign remain
+required. No optimization policy or V100 campaign has been started.

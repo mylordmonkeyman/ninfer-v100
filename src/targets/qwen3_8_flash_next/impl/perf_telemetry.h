@@ -43,6 +43,7 @@ struct PerfContext {
     const char* phase = "unscoped";
     std::array<PerfLaneSpan, 8> spans{};
     unsigned span_count = 0;
+    std::vector<std::int64_t> input_token_ids{};
 };
 inline thread_local const PerfContext* active_perf_context = nullptr;
 inline std::uint64_t next_perf_executor_id() {
@@ -54,9 +55,22 @@ public:
     explicit PerfContextScope(const PerfContext& context)
         : context_(context), previous_(active_perf_context) {
         active_perf_context = &context_;
-        if (v100_compare::level())
+        if (v100_compare::level()) {
             round_.emplace("ninfer", std::to_string(context.executor) + ":" +
                            std::to_string(context.transaction), context.phase);
+            v100_compare::InputContext input;
+            input.executor = context.executor;
+            input.transaction = context.transaction;
+            for (unsigned i = 0; i < context.span_count; ++i) {
+                const auto& span = context.spans[i];
+                input.input_columns += span.columns;
+                input.spans.push_back({span.first_column, span.columns, span.first_token_index,
+                                       span.lane, span.epoch});
+            }
+            if (v100_compare::level() >= 2 && context.input_token_ids.size() == input.input_columns)
+                input.input_token_ids = context.input_token_ids;
+            round_->context(std::move(input));
+        }
     }
     ~PerfContextScope() { round_.reset(); active_perf_context = previous_; }
     PerfContextScope(const PerfContextScope&) = delete;

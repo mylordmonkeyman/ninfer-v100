@@ -339,6 +339,18 @@ int main(){try{
     require(!cache.execute(1,0,d_input.p,0,device.stream),"layer namespace collision");
     cache.admit(1,std::span(ids,1));cache.drain();cache.ready_view(1,0);
     require(cache.stats().evicted==1,"LRU victim not replaced");
+    const auto layer_zero = cache.telemetry_snapshot(0, true);
+    const auto layer_one = cache.telemetry_snapshot(1, true);
+    require(layer_zero.admissions_total == 3 && layer_zero.fills_total == 3 &&
+            layer_zero.evictions_total == 1 && layer_one.admissions_total == 1 &&
+            layer_one.fills_total == 1 && layer_one.evictions_total == 0,
+            "cache telemetry mixed layer totals");
+    require(layer_zero.fill_bytes_total == 3*kExpertSlotBytes &&
+            layer_one.fill_bytes_total == kExpertSlotBytes && layer_one.misses_total == 1,
+            "cache telemetry fill/route accounting");
+    require(layer_zero.resident_ids && layer_zero.resident_ids->size() == layer_zero.ready &&
+            layer_one.resident_ids && *layer_one.resident_ids == std::vector<int>{0},
+            "cache telemetry resident coverage");
     for (bool batched : {false,true}) {
         FlashNextExpertCache single_slot(host,1,false,1);
         single_slot.set_batched_decode(batched);
@@ -371,7 +383,13 @@ int main(){try{
     cap_two.admit(0,ids);cap_two.drain();
     require(cap_two.stats().admitted==3,"duplicate admission consumed cap");
     require(cap_two.stats().maximum_outstanding<=4,"fill queue exceeded bound");
+    const auto before_reset = cap_two.telemetry_snapshot(0, false);
     cap_two.reset();
+    const auto after_reset = cap_two.telemetry_snapshot(0, false);
+    require(after_reset.generation == before_reset.generation + 1 &&
+            after_reset.admissions_total == 0 && after_reset.fills_total == 0 &&
+            after_reset.ready == 0 && !after_reset.resident_ids,
+            "cache telemetry reset boundary");
     require(!cap_two.execute(0,2,d_input.p,0,device.stream),"reset retained Ready entry");
     cap_two.admit(0,ids);cap_two.drain();
     require(cap_two.stats().admitted==2,"reset did not restore admissions");
@@ -416,6 +434,12 @@ int main(){try{
     require(seeded.stats().ready==48 && seeded.stats().admitted==48,
         "startup seed returned before canonical Ready publication");
     require(seeded.stats().maximum_outstanding<=4,"startup seed exceeded queue bound");
+    for (unsigned layer = 0; layer < 48; ++layer) {
+        const auto snapshot = seeded.telemetry_snapshot(layer, true);
+        require(snapshot.admissions_total == 1 && snapshot.fills_total == 1 &&
+                snapshot.ready == 1 && snapshot.fill_bytes_total == kExpertSlotBytes,
+                "startup telemetry counted global fills in each layer");
+    }
     for (unsigned layer_id=0;layer_id<48;++layer_id) seeded.ready_view(layer_id,2);
     seeded.begin_layer(false);
     require(seeded.execute(0,2,d_input.p,0,device.stream),"ranked startup expert missing");
