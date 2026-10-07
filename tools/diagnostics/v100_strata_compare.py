@@ -1,9 +1,39 @@
 #!/usr/bin/env python3
-import argparse,json,math,os,re,signal,socket,statistics,subprocess,threading,time,urllib.request
+import argparse,hashlib,json,math,os,re,signal,socket,statistics,struct,subprocess,threading,time,urllib.request
 from pathlib import Path
 
 PROMPT=' '.join(f'Record {i}: the solar station stores energy during daylight and supplies the village after sunset.' for i in range(64))+' Explain how its battery storage works in detail.'
 STRATA_RE=re.compile(r'\[strata\] request prompt (\d+) cached (\d+) output (\d+) prompt_read ([\d.]+) ms total ([\d.]+) ms prefill ([\d.]+) tok/s decode ([\d.]+) tok/s')
+
+def strata_profile_to_ninfer(strata_path,template_path,output_path):
+    blob=strata_path.read_bytes()
+    if len(blob)<24 or blob[:4]!=b'STRP':
+        raise ValueError(f'{strata_path}: invalid Strata expert profile')
+    version,layers,experts,slots,count=struct.unpack_from('<5I',blob,4)
+    if (version,layers,experts)!=(1,48,512) or count>48*512 or len(blob)<24+4*count:
+        raise ValueError(f'{strata_path}: unsupported Strata expert profile geometry')
+    ranking=[[] for _ in range(48)];seen=[set() for _ in range(48)]
+    for i in range(count):
+        layer,expert=struct.unpack_from('<HH',blob,24+4*i)
+        if layer>=48 or expert>=512 or expert in seen[layer]:
+            raise ValueError(f'{strata_path}: invalid or duplicate ranked expert pair')
+        seen[layer].add(expert);ranking[layer].append(expert)
+    for layer in range(48):
+        ranking[layer].extend(expert for expert in range(512) if expert not in seen[layer])
+        if len(ranking[layer])!=512:
+            raise ValueError(f'{strata_path}: incomplete converted layer ranking')
+    profile=json.loads(template_path.read_text())
+    if profile.get('magic')!='NINFER_V100_EXPERT_PROFILE' or profile.get('version')!=2:
+        raise ValueError(f'{template_path}: invalid NInfer profile identity template')
+    profile['ranking']=ranking
+    profile['source']='strata_profile_transfer'
+    profile['strata_profile_sha256']=hashlib.sha256(blob).hexdigest()
+    profile['strata_profile_ranked_pairs']=count
+    profile['strata_profile_declared_slots']=slots
+    for key in ('frequency','training_trace_sha256','evaluation_trace_sha256'):
+        profile.pop(key,None)
+    output_path.write_text(json.dumps(profile,indent=2)+'\n')
+    return output_path
 
 def port():
     s=socket.socket();s.bind(('127.0.0.1',0));p=s.getsockname()[1];s.close();return p
@@ -97,9 +127,10 @@ def summary(rows):
     return out
 
 def main():
-    ap=argparse.ArgumentParser();ap.add_argument('--ninfer',type=Path,required=True);ap.add_argument('--artifact',type=Path,required=True);ap.add_argument('--profile',type=Path,required=True);ap.add_argument('--strata-python',type=Path,required=True);ap.add_argument('--strata-server',type=Path,required=True);ap.add_argument('--strata-config',type=Path,required=True);ap.add_argument('--output',type=Path,required=True);ap.add_argument('--repeats',type=int,default=3);a=ap.parse_args();a.output.mkdir(parents=True,exist_ok=True)
-    for p in (a.ninfer,a.artifact,a.profile,a.strata_python,a.strata_server,a.strata_config):
+    ap=argparse.ArgumentParser();ap.add_argument('--ninfer',type=Path,required=True);ap.add_argument('--artifact',type=Path,required=True);ap.add_argument('--profile',type=Path,required=True);ap.add_argument('--strata-python',type=Path,required=True);ap.add_argument('--strata-server',type=Path,required=True);ap.add_argument('--strata-config',type=Path,required=True);ap.add_argument('--strata-profile',type=Path,required=True);ap.add_argument('--output',type=Path,required=True);ap.add_argument('--repeats',type=int,default=3);a=ap.parse_args();a.output.mkdir(parents=True,exist_ok=True)
+    for p in (a.ninfer,a.artifact,a.profile,a.strata_python,a.strata_server,a.strata_config,a.strata_profile):
         if not p.exists(): raise FileNotFoundError(p)
+    a.profile=strata_profile_to_ninfer(a.strata_profile,a.profile,a.output/'strata-derived-ninfer-profile.json')
     rows=[]
     for i in range(a.repeats):
         order=('ninfer-single','ninfer-grouped','strata') if i%2==0 else ('strata','ninfer-grouped','ninfer-single')
