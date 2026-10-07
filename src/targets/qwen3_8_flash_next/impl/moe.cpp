@@ -88,6 +88,19 @@ bool resolve_device_route_combine() {
     throw std::invalid_argument("NINFER_V100_DEVICE_ROUTE_COMBINE must be 0 or 1");
 }
 
+double resolve_decode_expert_stream_fraction(bool prefill, bool stream_experts) {
+    if (prefill || !stream_experts) return 1.0;
+    const char* env = std::getenv("NINFER_V100_DECODE_EXPERT_STREAM_FRACTION");
+    if (env == nullptr || env[0] == '\0') return 1.0;
+    char* end = nullptr;
+    const double value = std::strtod(env, &end);
+    if (end == env || *end != '\0' || !std::isfinite(value) || value <= 0.0 || value > 1.0) {
+        throw std::invalid_argument(
+            "NINFER_V100_DECODE_EXPERT_STREAM_FRACTION must be in (0, 1]");
+    }
+    return value;
+}
+
 bool resolve_avx2_backend() {
     const char* env = std::getenv("NINFER_FLASH_NEXT_CPU_EXPERT_BACKEND");
     if (env == nullptr || env[0] == '\0' || std::string_view(env) == "auto") {
@@ -356,7 +369,10 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     if (stream_experts && (expert_stream_min_routes < 1 || expert_stream_min_routes > 2)) {
         throw std::invalid_argument("expert stream minimum routes must be 1 or 2");
     }
-    const bool stream_cpu_fallback = stream_experts && expert_stream_min_routes > 1;
+    const double stream_fraction =
+        resolve_decode_expert_stream_fraction(prefill, stream_experts);
+    const bool stream_cpu_fallback =
+        stream_experts && (expert_stream_min_routes > 1 || stream_fraction < 1.0);
     if (route_handoff && (!device_route_combine || stream_experts)) {
         throw std::invalid_argument(
             "route handoff requires device combine and BF16 CPU-cache expert execution");
@@ -536,14 +552,40 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         }
     }
     if (stream_experts) {
-        // Submit grouped resident consumers before streaming nonresidents. Their
-        // leases remain held until the common compute stream has completed.
+        // Fractional decode streaming mirrors Strata's hybrid principle: rank the
+        // current layer's distinct misses by routed work, stream only the hottest
+        // share, and leave the rest on the AVX2 pool. The older hybrid policy
+        // remains the min-routes threshold when the fraction is 1.
+        std::array<bool, 512> selected{};
+        if (stream_fraction < 1.0) {
+            std::vector<std::pair<std::size_t, std::size_t>> active;
+            active.reserve(512);
+            for (std::size_t expert_id = 0; expert_id < streamed_routes.size(); ++expert_id) {
+                if (!streamed_routes[expert_id].empty()) {
+                    active.emplace_back(streamed_routes[expert_id].size(), expert_id);
+                }
+            }
+            std::sort(active.begin(), active.end(), [](const auto& a, const auto& b) {
+                return a.first != b.first ? a.first > b.first : a.second < b.second;
+            });
+            const std::size_t limit = active.empty() ? 0 :
+                std::max<std::size_t>(1, static_cast<std::size_t>(
+                    std::ceil(stream_fraction * static_cast<double>(active.size()))));
+            for (std::size_t i = 0; i < std::min(limit, active.size()); ++i) {
+                selected[active[i].second] = true;
+            }
+        }
+
+        // Submit grouped resident consumers before streaming selected nonresidents.
+        // Their leases remain held until the common compute stream has completed.
         if (cache) cache->begin_device_results(stream);
         stream_hits_submitted = true;
         for (std::size_t expert_id = 0; expert_id < streamed_routes.size(); ++expert_id) {
             auto& routes = streamed_routes[expert_id];
             if (routes.empty()) continue;
-            if (routes.size() >= expert_stream_min_routes) {
+            const bool use_gpu = stream_fraction < 1.0 ? selected[expert_id] :
+                routes.size() >= expert_stream_min_routes;
+            if (use_gpu) {
                 expert_stream->submit(host_experts.expert(static_cast<std::int32_t>(expert_id)),
                                       routes, stream);
                 streamed_route_count += routes.size();
@@ -567,8 +609,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                 });
             }
         }
-    }
-    } catch (...) {
+    }    } catch (...) {
         if (stream_experts) {
             const auto failure = std::current_exception();
             // Host grouping/packing can fail after Ready consumers were leased.
