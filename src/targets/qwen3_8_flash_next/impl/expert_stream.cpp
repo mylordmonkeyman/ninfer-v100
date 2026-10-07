@@ -15,6 +15,14 @@ bool flash_next_expert_stream_requested() {
         "NINFER_V100_PREFILL_EXPERT_POLICY must be cpu-cache, stream or auto");
 }
 
+bool flash_next_decode_expert_stream_requested() {
+    const char* policy = std::getenv("NINFER_V100_DECODE_EXPERT_POLICY");
+    if (!policy || !*policy || std::string_view(policy) == "cpu-cache") return false;
+    if (std::string_view(policy) == "stream") return true;
+    throw std::invalid_argument(
+        "NINFER_V100_DECODE_EXPERT_POLICY must be cpu-cache or stream");
+}
+
 std::size_t flash_next_expert_stream_device_bytes(unsigned maximum_routes) {
     if (!maximum_routes || maximum_routes > 8192U * 10U)
         throw std::invalid_argument("invalid prefill stream route capacity");

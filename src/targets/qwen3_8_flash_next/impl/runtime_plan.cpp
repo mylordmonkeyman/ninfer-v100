@@ -120,6 +120,18 @@ struct FixedBaseBreakdown {
     }
 };
 
+std::size_t planned_expert_stream_bytes(const FlashNextRuntimeConfig& config) {
+    unsigned maximum_routes = 0;
+    if (flash_next_expert_stream_requested()) maximum_routes = config.prefill_chunk;
+    if (flash_next_decode_expert_stream_requested()) {
+        const unsigned decode_routes = std::max(
+            config.max_concurrency,
+            config.speculative_draft_tokens > 0 ? config.speculative_draft_tokens + 1U : 1U);
+        maximum_routes = std::max(maximum_routes, decode_routes);
+    }
+    return maximum_routes ? flash_next_expert_stream_device_bytes(maximum_routes) : 0;
+}
+
 FixedBaseBreakdown
 compute_fixed_base_bytes(const FlashNextRuntimeConfig& config, std::uint32_t resolved_state_slots,
                          std::uint32_t attention_logical_pages, std::uint32_t indexer_logical_pages,
@@ -262,8 +274,7 @@ flash_next_capacity_curve(const FlashNextRuntimeConfig& config) {
     const FixedBaseBreakdown fixed =
         compute_fixed_base_bytes(config, resolved_state_slots, attention_logical_pages,
                                  indexer_logical_pages, maximum_blocks);
-    const std::size_t expert_stream_bytes = flash_next_expert_stream_requested()
-        ? flash_next_expert_stream_device_bytes(config.prefill_chunk) : 0;
+    const std::size_t expert_stream_bytes = planned_expert_stream_bytes(config);
     const std::size_t fixed_base_bytes = checked_add(fixed.total_bytes(), expert_stream_bytes);
 
     const std::size_t graph_allowance =
@@ -367,8 +378,7 @@ FlashNextRuntimePlan finalize_flash_next_runtime_plan(const FlashNextRuntimeConf
                   flash_next_decode_graph_buckets(plan.maximum_blocks).count)
             : 0ULL;
     plan.cuda_graph_allowance_bytes = graph_allowance;
-    plan.expert_stream_device_bytes = flash_next_expert_stream_requested()
-        ? flash_next_expert_stream_device_bytes(config.prefill_chunk) : 0;
+    plan.expert_stream_device_bytes = planned_expert_stream_bytes(config);
 
     plan.total_device_bytes = checked_add(
         checked_add(plan.attention_kv_bytes, plan.indexer_block_keys_bytes),

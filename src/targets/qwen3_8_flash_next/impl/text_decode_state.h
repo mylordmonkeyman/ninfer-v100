@@ -16,6 +16,8 @@ class FlashNextExpertStream;
 struct FlashNextDecodeStateView {
     FlashNextExpertCache* expert_cache = nullptr;
     FlashNextExpertStream* expert_stream = nullptr;
+    bool expert_stream_prefill = false;
+    bool expert_stream_decode = false;
     std::int32_t expert_stream_min_tokens = 0;
     // The final cache belongs to MTP and is bound only when speculation is enabled.
     std::array<QsaIndexerCacheView, kFullAttentionLayers + 1> qsa_indexer_caches;

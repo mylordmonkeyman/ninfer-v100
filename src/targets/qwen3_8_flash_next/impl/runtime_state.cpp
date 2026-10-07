@@ -87,7 +87,9 @@ FlashNextRuntimeAllocation::FlashNextRuntimeAllocation(FlashNextRuntimePlan plan
 
 void FlashNextRuntimeAllocation::configure_expert_cache(const TextModelView& model) {
     const char* prefill_policy = std::getenv("NINFER_V100_PREFILL_EXPERT_POLICY");
-    if (flash_next_expert_stream_requested()) {
+    const bool prefill_stream = flash_next_expert_stream_requested();
+    const bool decode_stream = flash_next_decode_expert_stream_requested();
+    if (prefill_stream || decode_stream) {
         if (!model.host_experts || plan_.config.use_cuda_graph) {
             throw std::invalid_argument(
                 "Flash-Next expert streaming requires host experts and graphs disabled");
@@ -98,7 +100,7 @@ void FlashNextRuntimeAllocation::configure_expert_cache(const TextModelView& mod
                 "Flash-Next expert streaming requires NINFER_V100_DEVICE_ROUTE_COMBINE=1");
         }
         std::int32_t threshold = 1;
-        if (std::string_view(prefill_policy) == "auto") {
+        if (prefill_stream && std::string_view(prefill_policy) == "auto") {
             const char* value = std::getenv("NINFER_V100_PREFILL_STREAM_MIN_TOKENS");
             if (!value || !*value) {
                 throw std::invalid_argument(
@@ -112,11 +114,21 @@ void FlashNextRuntimeAllocation::configure_expert_cache(const TextModelView& mod
             }
             threshold = static_cast<std::int32_t>(parsed);
         }
-        expert_stream_ = std::make_unique<FlashNextExpertStream>(plan_.config.prefill_chunk);
+        unsigned maximum_routes = prefill_stream ? plan_.config.prefill_chunk : 0U;
+        if (decode_stream) {
+            maximum_routes = std::max(
+                maximum_routes,
+                std::max(plan_.config.max_concurrency,
+                    plan_.config.speculative_draft_tokens > 0
+                        ? plan_.config.speculative_draft_tokens + 1U : 1U));
+        }
+        expert_stream_ = std::make_unique<FlashNextExpertStream>(maximum_routes);
         if (expert_stream_->device_bytes() != plan_.expert_stream_device_bytes) {
             throw std::logic_error("Flash-Next expert stream allocation exceeded its plan");
         }
         state_view_.expert_stream = expert_stream_.get();
+        state_view_.expert_stream_prefill = prefill_stream;
+        state_view_.expert_stream_decode = decode_stream;
         state_view_.expert_stream_min_tokens = threshold;
     }
     const char* enabled=std::getenv("NINFER_FLASH_NEXT_EXPERT_CACHE");
