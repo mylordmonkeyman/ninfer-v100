@@ -37,6 +37,55 @@ jobs:
           V100_COMPARE_TELEMETRY_LEVEL=1 /tmp/compare-telemetry > /tmp/compare-record.json 2>/tmp/compare-records.jsonl
           python3 tools/telemetry/validate_records.py /tmp/compare-records.jsonl
           git diff --check
+      - name: Check NInfer CPU outputs and actual worker accounting
+        run: |
+          g++ -std=c++20 -O2 -pthread -Isrc -Iinclude -Ithird_party \
+            tests/targets/qwen3_8_flash_next/test_cpu_expert_group.cpp \
+            src/targets/qwen3_8_flash_next/impl/cpu_expert_pool.cpp \
+            src/targets/qwen3_8_flash_next/impl/cpu_expert_reference.cpp \
+            src/targets/qwen3_8_flash_next/impl/cpu_expert_avx2.cpp \
+            src/artifact/storage_layouts.cpp -o /tmp/ninfer-cpu-pool
+          for level in 0 1 2; do
+            result=0
+            V100_COMPARE_TELEMETRY_LEVEL="$level" /tmp/ninfer-cpu-pool \
+              > /tmp/ninfer-pool.out 2> /tmp/ninfer-pool.jsonl || result=$?
+            if [ "$result" = 77 ]; then
+              echo '::notice::NInfer CPU fixture unavailable: AVX2/FMA missing; not qualified here.'
+              break
+            fi
+            if [ "$result" != 0 ]; then cat /tmp/ninfer-pool.out /tmp/ninfer-pool.jsonl; exit "$result"; fi
+            python3 tools/telemetry/check_worker_fixture.py ninfer "$level" /tmp/ninfer-pool.jsonl
+          done
+      - name: Check out frozen Strata CPU telemetry fixture
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: mylordmonkeyman/Strata-V100
+          ref: f71fa0c41bf78aeb31e3656c5ce480a01d670ce3
+          path: strata-cpu-source
+          persist-credentials: false
+      - name: Check Strata CPU outputs and host/worker accounting
+        run: |
+          source=strata-cpu-source
+          g++ -std=c++20 -O2 -I"$source/include" \
+            -mavx512f -mavx512bw -mavx512vl -mavx512dq -mavx512vnni -mavx512vbmi -mf16c -mfma \
+            -c "$source/src/kernels/cpu/expert.cpp" -o /tmp/strata-expert.o
+          g++ -std=c++20 -O2 -I"$source/include" -mavx2 -mfma -mf16c \
+            -c "$source/src/kernels/cpu/q2_avx2.cpp" -o /tmp/strata-q2.o
+          g++ -std=c++20 -O2 -pthread -I"$source/include" \
+            "$source/tests/core/compare_pool_test.cpp" "$source/src/kernels/cpu/pool.cpp" \
+            "$source/src/kernels/cpu/expert_layout.cpp" /tmp/strata-expert.o /tmp/strata-q2.o \
+            -o /tmp/strata-cpu-pool
+          for level in 0 1 2; do
+            result=0
+            STRATA_POOL_SPIN_US=50 V100_COMPARE_TELEMETRY_LEVEL="$level" /tmp/strata-cpu-pool \
+              > /tmp/strata-pool.out 2> /tmp/strata-pool.jsonl || result=$?
+            if [ "$result" = 77 ]; then
+              echo '::notice::Strata Q2 CPU fixture unavailable: AVX512-VNNI/VBMI missing; not qualified here.'
+              break
+            fi
+            if [ "$result" != 0 ]; then cat /tmp/strata-pool.out /tmp/strata-pool.jsonl; exit "$result"; fi
+            python3 tools/telemetry/check_worker_fixture.py strata "$level" /tmp/strata-pool.jsonl
+          done
   cuda-host-syntax:
     defaults:
       run:
@@ -56,13 +105,14 @@ jobs:
           for directory in src/targets/*/export; do includes+=(-I"$directory"); done
           g++ -std=c++20 -fsyntax-only -DNINFER_VOLTA_BUILD "${includes[@]}" \
             src/targets/qwen3_8_flash_next/impl/moe.cpp \
+            src/targets/qwen3_8_flash_next/impl/cpu_expert_pool.cpp \
             src/targets/qwen3_8_flash_next/impl/text_decode.cpp \
             src/targets/qwen3_8_flash_next/impl/text_executor.cpp
       - name: Check out frozen Strata telemetry fork
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: mylordmonkeyman/Strata-V100
-          ref: 8bfa5bc409b73d65ea475d546d73073660fb89da
+          ref: f71fa0c41bf78aeb31e3656c5ce480a01d670ce3
           path: strata-telemetry-source
           persist-credentials: false
       - name: Check shared schema and compile Strata telemetry
@@ -73,4 +123,5 @@ jobs:
           g++ -std=c++20 -fsyntax-only -DSTRATA_VERSION='"0.1.36"' \
             -Iinclude -I/usr/local/cuda/include \
             src/core/expert_source.cpp src/core/session.cpp src/core/verify.cpp \
+            src/kernels/cpu/pool.cpp \
             src/prefill/prefill.cpp src/program/generate.cpp

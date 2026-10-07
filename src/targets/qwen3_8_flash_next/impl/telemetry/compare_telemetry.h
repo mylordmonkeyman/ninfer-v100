@@ -1,6 +1,7 @@
 #pragma once
 // Shared with the Strata fork. Host observations only; no CUDA work or waiting.
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -12,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace v100_compare {
 inline int level() {
@@ -51,12 +53,29 @@ inline constexpr std::array counter_names{
     "route_d2h_bytes", "output_d2h_bytes", "output_h2d_bytes"};
 enum class Stage : unsigned { layer, qsa, gdn, ple, moe, cpu_expert, host_wait, head, count };
 inline constexpr std::array stage_names{"layer", "qsa", "gdn", "ple", "moe", "cpu_expert", "host_wait", "head"};
+inline std::atomic<std::uint64_t> pool_sequence{0};
+// One writer per worker. Publish observations before the pool's existing
+// completion signal; only the inference owner merges them into a round.
+struct alignas(64) WorkerObservation {
+    std::uint64_t pool_id = 0;
+    unsigned worker_id = 0, configured_workers = 0;
+    bool host = false, timing_observed = false;
+    std::uint64_t full_jobs = 0, gate_up_jobs = 0, down_jobs = 0;
+    double full_us = 0, gate_up_us = 0, down_us = 0;
+    void job(unsigned phase, double us, bool timed) noexcept {
+        timing_observed |= timed;
+        if (phase == 1) { ++gate_up_jobs; gate_up_us += us; }
+        else if (phase == 2) { ++down_jobs; down_us += us; }
+        else { ++full_jobs; full_us += us; }
+    }
+};
 struct Layer {
     bool observed = false;
     std::array<std::uint64_t, unsigned(Counter::count)> counters{};
     std::array<bool, unsigned(Counter::count)> counter_observed{};
     std::array<double, unsigned(Stage::count)> host_us{};
     std::array<bool, unsigned(Stage::count)> stage_observed{};
+    std::vector<WorkerObservation> workers;
 };
 class Round;
 inline thread_local Round* active = nullptr;
@@ -84,6 +103,23 @@ public:
         if (layer >= layers_.size()) return;
         auto& l = layers_[layer]; l.observed = true;
         l.stage_observed[unsigned(key)] = true; l.host_us[unsigned(key)] += us;
+    }
+    void worker(unsigned layer, const WorkerObservation& observation) {
+        if (layer >= layers_.size()) return;
+        auto& l = layers_[layer]; l.observed = true;
+        for (auto& w : l.workers) {
+            if (w.pool_id != observation.pool_id || w.worker_id != observation.worker_id ||
+                w.host != observation.host) continue;
+            w.full_jobs += observation.full_jobs;
+            w.gate_up_jobs += observation.gate_up_jobs;
+            w.down_jobs += observation.down_jobs;
+            w.full_us += observation.full_us;
+            w.gate_up_us += observation.gate_up_us;
+            w.down_us += observation.down_us;
+            w.timing_observed |= observation.timing_observed;
+            return;
+        }
+        l.workers.push_back(observation);
     }
     std::string json(double wall, bool failed = false) const {
         const char* run = std::getenv("V100_COMPARE_RUN_ID");
@@ -114,7 +150,26 @@ public:
                 sep = true;
                 out << quote(stage_names[j]) << ':' << l.host_us[j];
             }
-            out << "}}";
+            out << "}";
+            if (!l.workers.empty()) {
+                out << ",\"workers\":[";
+                bool worker_sep = false;
+                for (const auto& w : l.workers) {
+                    if (worker_sep) out << ',';
+                    worker_sep = true;
+                    out << "{\"pool_id\":" << w.pool_id << ",\"worker_id\":" << w.worker_id
+                        << ",\"role\":\"" << (w.host ? "host" : "worker")
+                        << "\",\"configured_workers\":" << w.configured_workers
+                        << ",\"full_jobs\":" << w.full_jobs << ",\"gate_up_jobs\":" << w.gate_up_jobs
+                        << ",\"down_jobs\":" << w.down_jobs;
+                    if (w.timing_observed)
+                        out << ",\"full_us\":" << w.full_us << ",\"gate_up_us\":" << w.gate_up_us
+                            << ",\"down_us\":" << w.down_us;
+                    out << '}';
+                }
+                out << ']';
+            }
+            out << '}';
         }
         out << "]}"; return out.str();
     }

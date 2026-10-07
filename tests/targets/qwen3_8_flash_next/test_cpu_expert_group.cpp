@@ -11,6 +11,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <vector>
 
 namespace {
@@ -85,6 +86,8 @@ std::uint16_t float_to_bf16(float value) {
 
 int main() {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    std::optional<v100_compare::Round> telemetry;
+    if (v100_compare::level()) telemetry.emplace("ninfer", "cpu-group-fixture", "verify");
     if (!flash_next_cpu_nvfp4_avx2_available()) {
         std::cout << "SKIP: AVX2/FMA unavailable\n";
         return 77;
@@ -140,7 +143,7 @@ int main() {
                 .output = pooled[token].data(),
             });
         }
-        const auto pool_stats = pool.run(tasks, true);
+        const auto pool_stats = pool.run(tasks, true, 0);
         if (pool_stats.groups != 1 || pool_stats.grouped_pairs != width ||
             pool_stats.weight_read_bytes != static_cast<std::uint64_t>(expert_bytes)) {
             std::cerr << "group width " << width << " returned invalid pool accounting\n";
@@ -195,7 +198,7 @@ int main() {
                     .output = actual[i].data(),
                 });
             }
-            const auto stats = pool.run(tasks, true);
+            const auto stats = pool.run(tasks, true, 0);
             for (unsigned i = 0; i < count; ++i) {
                 if (std::memcmp(actual[i].data(), expected[i].data(), sizeof(actual[i])) != 0) {
                     throw std::runtime_error("grouped worker pool changed an output slot");
@@ -215,7 +218,7 @@ int main() {
                 rejected = true;
             }
             if (!rejected) { throw std::runtime_error("null grouped input accepted"); }
-            (void)pool.run(tasks, true);
+            (void)pool.run(tasks, true, 0);
             for (unsigned i = 0; i < count; ++i) {
                 if (std::memcmp(actual[i].data(), expected[i].data(), sizeof(actual[i])) != 0) {
                     throw std::runtime_error("grouped worker pool recovery changed output");
@@ -241,7 +244,7 @@ int main() {
             });
         }
         for (unsigned repeat = 0; repeat < 3; ++repeat) {
-            const auto stats = sparse_pool.run(tasks, true);
+            const auto stats = sparse_pool.run(tasks, true, 0);
             if (stats.groups != 1 || stats.grouped_pairs != 4 ||
                 stats.weight_read_bytes != (count - 3) * 2'764'808ULL) {
                 throw std::runtime_error("sparse grouped worker accounting mismatch");

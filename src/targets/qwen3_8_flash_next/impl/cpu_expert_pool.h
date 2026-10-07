@@ -1,5 +1,6 @@
 #pragma once
 #include "targets/qwen3_8_flash_next/impl/cpu_expert_reference.h"
+#include "targets/qwen3_8_flash_next/impl/telemetry/compare_telemetry.h"
 #include <atomic>
 #include <condition_variable>
 #include <exception>
@@ -41,9 +42,10 @@ class HostExpertWorkerPool {
     ~HostExpertWorkerPool();
     HostExpertWorkerPool(const HostExpertWorkerPool&) = delete;
     HostExpertWorkerPool& operator=(const HostExpertWorkerPool&) = delete;
-    HostExpertBatchStats run(std::span<const HostExpertTask> tasks, bool group_same_experts = false);
+    HostExpertBatchStats run(std::span<const HostExpertTask> tasks, bool group_same_experts = false,
+                            unsigned telemetry_layer = 48);
   private:
-    void worker_loop();
+    void worker_loop(unsigned worker_id);
     void stop_workers() noexcept;
     void execute_jobs(std::size_t count);
     struct RowJob {
@@ -62,6 +64,9 @@ class HostExpertWorkerPool {
     bool avx2_;
     bool fp32_intermediate_;
     std::vector<std::thread> workers_;
+    std::uint64_t pool_id_ = v100_compare::pool_sequence.fetch_add(1);
+    std::vector<v100_compare::WorkerObservation> worker_observations_;
+    int telemetry_level_ = 0;
     std::counting_semaphore<1'048'576> work_{0};
     std::atomic<bool> stop_{false};
     std::atomic<std::size_t> next_{0};

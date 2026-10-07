@@ -25,6 +25,8 @@ class CollectorTests(unittest.TestCase):
             self.assertEqual(main['run_id'], 'quoted"run\n')
             self.assertEqual(main['layers'][0]['counters']['total_routes'], 10)
             self.assertNotIn('gpu_us', main['layers'][0])
+            self.assertEqual(main['layers'][0]['workers'][0]['gate_up_jobs'], 2)
+            self.assertNotIn('gate_up_us', main['layers'][0]['workers'][0])
             records = [validate(json.loads(s)) for s in p.stderr.splitlines()]
             self.assertEqual(len(records), 2)
             env['V100_COMPARE_TELEMETRY_LEVEL'] = 'invalid'

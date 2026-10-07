@@ -668,7 +668,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
 #if defined(NINFER_VOLTA_BUILD)
             grouped_cpu_experts = tokens > 1 && resolve_cpu_expert_grouping();
 #endif
-            cpu_batch = host_expert_worker_pool().run(cpu.tasks, grouped_cpu_experts);
+            cpu_batch = host_expert_worker_pool().run(cpu.tasks, grouped_cpu_experts, layer);
             if (observe_host && !grouped_cpu_experts) {
                 cpu_batch.weight_read_bytes = cpu.tasks.size() * kExpertPairBytes;
             }

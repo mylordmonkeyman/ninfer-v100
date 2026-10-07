@@ -22,9 +22,10 @@ HostExpertWorkerPool::HostExpertWorkerPool(unsigned workers, bool avx2, bool fp3
         throw std::invalid_argument("AVX2/FMA unavailable or incompatible with FP32 diagnostic");
     }
     workers_.reserve(workers);
+    worker_observations_.resize(workers);
     try {
         for (unsigned worker = 0; worker < workers; ++worker) {
-            workers_.emplace_back([this] { worker_loop(); });
+            workers_.emplace_back([this, worker] { worker_loop(worker); });
         }
     } catch (...) {
         stop_workers();
@@ -51,7 +52,7 @@ void HostExpertWorkerPool::execute_jobs(std::size_t count) {
 }
 
 HostExpertBatchStats HostExpertWorkerPool::run(std::span<const HostExpertTask> tasks,
-                                               bool group_same_experts) {
+                                               bool group_same_experts, unsigned telemetry_layer) {
     HostExpertBatchStats stats;
     if (tasks.empty()) { return stats; }
     if (group_same_experts &&
@@ -75,6 +76,15 @@ HostExpertBatchStats HostExpertWorkerPool::run(std::span<const HostExpertTask> t
         throw std::invalid_argument("host expert batch exceeds worker semaphore capacity");
     }
     std::unique_lock<std::mutex> submit_lock(submit_mutex_);
+    telemetry_level_ = v100_compare::active && telemetry_layer < 48 ? v100_compare::level() : 0;
+    if (telemetry_level_) {
+        for (unsigned i = 0; i < worker_observations_.size(); ++i) {
+            auto& w = worker_observations_[i]; w = {};
+            w.pool_id = pool_id_; w.worker_id = i;
+            w.configured_workers = workers_.size();
+            w.timing_observed = telemetry_level_ >= 2;
+        }
+    }
     tasks_ = tasks.data();
     {
         std::lock_guard<std::mutex> error_lock(error_mutex_);
@@ -122,6 +132,8 @@ HostExpertBatchStats HostExpertWorkerPool::run(std::span<const HostExpertTask> t
     tasks_ = nullptr;
     work_count_ = 0;
     if (error) { std::rethrow_exception(error); }
+    if (telemetry_level_)
+        for (const auto& w : worker_observations_) v100_compare::active->worker(telemetry_layer, w);
     return stats;
 }
 
@@ -203,7 +215,7 @@ void HostExpertWorkerPool::run_grouped(std::span<const HostExpertTask> tasks,
     execute_jobs(row_jobs_.size());
 }
 
-void HostExpertWorkerPool::worker_loop() {
+void HostExpertWorkerPool::worker_loop(unsigned worker_id) {
     CpuNvfp4ExpertReferenceScratch scratch{};
     CpuNvfp4ExpertGroupScratch group_scratch{};
     for (;;) {
@@ -217,6 +229,8 @@ void HostExpertWorkerPool::worker_loop() {
             std::terminate();
         }
 
+        const auto started = telemetry_level_ >= 2 ? v100_compare::Clock::now() : v100_compare::Clock::time_point{};
+        const unsigned phase = row_sharded_ ? (down_phase_ ? 2 : 1) : 0;
         try {
             if (grouped_) {
                 const auto group_index = row_sharded_ ? row_jobs_[index].task : index;
@@ -299,6 +313,10 @@ void HostExpertWorkerPool::worker_loop() {
             std::lock_guard<std::mutex> error_lock(error_mutex_);
             if (!error_) { error_ = std::current_exception(); }
         }
+
+        if (telemetry_level_)
+            worker_observations_[worker_id].job(phase,
+                telemetry_level_ >= 2 ? v100_compare::elapsed_us(started) : 0, telemetry_level_ >= 2);
 
         {
             // Pair completion with the wait mutex to prevent lost wakeups.

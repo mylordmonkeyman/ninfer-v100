@@ -92,6 +92,34 @@ draft/verify/commit/head/sampling time and memory. Never derive acceptance from
 verify token count alone. CUDA API/launch/transfer counts and busy/idle interval
 unions require explicit measurement coverage.
 
+## CPU worker observations
+
+Observed layers may contain `workers`, keyed by engine/process-local `pool_id`,
+`worker_id` and `role=worker|host`. `configured_workers` is the pool's setting,
+not the number that claimed jobs; actual participants have a positive job count.
+Idle configured workers in an observed batch are included with zero job counts.
+Strata's extra host-drainer slot is separate from its configured worker count.
+Neither worker IDs nor pool IDs are OS thread IDs or CPU affinity measurements.
+
+`full_jobs`, `gate_up_jobs`, and `down_jobs` count actual scheduler claims: whole
+expert/group jobs or gate/up and down row-shard jobs. They are not routed-token
+counts, and different partition strategies produce different job counts. Repeated
+layer calls accumulate these counts. Level 1 records no per-job clocks. Level 2
+adds `full_us`, `gate_up_us`, and `down_us`, sums of elapsed host job intervals
+including preemption. A zero phase value means no separate job of that kind was
+claimed; a whole job's internal gate/up and down split remains unavailable.
+Worker interval sums overlap and cannot establish CPU busy time or critical path.
+Idle/wait durations, affinity, NUMA placement and intermediate quantization time
+remain unavailable until separately measured.
+
+Each worker writes a separate aligned slot before the existing completion signal;
+the inference owner merges after the existing completion/park barrier. Telemetry
+adds no locks or atomics to per-job accounting and does not change job allocation,
+barriers, precision, worker count or scheduling. Failed dispatch observations are
+not qualified by the success-only fixture checks. Real CPU fixtures check output
+bits and job conservation with levels 0/1/2; full native-model numerical equality
+and Level-1 overhead still require hardware qualification.
+
 ## Campaign artifacts and reproducibility
 
 The manifest freezes full engine SHAs, model/tokenizer and quant identity,

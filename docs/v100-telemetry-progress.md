@@ -95,3 +95,30 @@ synchronization and measure host submission/waits, not GPU execution. The hosted
 workflow now checks this frozen revision. GPU intervals, request/token/MTP
 linkage, actual worker distributions, cache deltas and prefill expert counters
 still need implementation; no comprehensive campaign is ready yet.
+
+## Actual CPU worker increment
+
+Hosted run `37692592309` passed all 66 Python tests, collector checks and both
+engines' changed CUDA host syntax checks before this increment.
+
+Both engines now report actual whole/group and gate/up/down shard job claims by
+pool, worker and role, including Strata's separate host drainer. Level 1 adds
+owner-local aligned counters with no per-job clocks. Level 2 adds elapsed host
+job times. Counts/times are published through the existing completion protocol
+and merged by the owner; job scheduling, barriers and arithmetic stay unchanged.
+Observed idle workers have zero claims; affinity, native OS thread ID and
+idle/wait intervals are still unavailable. Job counts are not route counts.
+
+Strata worker commit: `f71fa0c41bf78aeb31e3656c5ce480a01d670ce3`.
+Local real CPU fixtures passed at levels 0/1/2 for both engines, with exact serial
+output equality, repeated batches and known phase-job conservation. NInfer
+covers whole/group jobs, row sharding and recovery; Strata covers the Q2 path,
+inline execution, host draining, sleeping workers and multi-token row phases.
+These do not qualify the V100's native Q4 experts or full-model off/on equality.
+The hosted workflow now runs these fixtures, reports unsupported ISA as explicit
+unqualified skips, and includes both changed worker pools in CUDA host checks.
+
+The common worker schema/coverage tests pass (nine focused telemetry tests,
+67 Python tests total). Level-1 overhead, native-model equality, GPU intervals,
+request/token/MTP linkage, worker affinity/idle time, cache deltas and memory
+sampling remain outstanding. No new hardware campaign has been launched.

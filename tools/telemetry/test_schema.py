@@ -39,5 +39,19 @@ class SchemaTests(unittest.TestCase):
         r = fixture(); r['layers'].append(copy.deepcopy(r['layers'][0]))
         with self.assertRaisesRegex(ValueError, 'duplicate'): validate(r)
 
+    def test_worker_coverage(self):
+        r = fixture()
+        w = dict(pool_id=0, worker_id=4, role='host', configured_workers=4,
+                 full_jobs=1, gate_up_jobs=2, down_jobs=2)
+        r['layers'][0]['workers'] = [w]
+        validate(r)
+        w['full_us'] = 0
+        with self.assertRaisesRegex(ValueError, 'timing coverage'): validate(r)
+        r['level'] = 2
+        w.update(gate_up_us=10, down_us=20)
+        validate(r)
+        r['layers'][0]['workers'].append(copy.deepcopy(w))
+        with self.assertRaisesRegex(ValueError, 'duplicate worker'): validate(r)
+
 
 if __name__ == '__main__': unittest.main()

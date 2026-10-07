@@ -49,6 +49,26 @@ def validate(record):
             if key not in STAGES:
                 raise ValueError(f'unknown stage {key}')
             number(value, key)
+        workers_seen = set()
+        for worker in layer.get('workers', []):
+            pool = number(worker.get('pool_id'), 'pool_id', True)
+            index = number(worker.get('worker_id'), 'worker_id', True)
+            configured = number(worker.get('configured_workers'), 'configured_workers', True)
+            role = worker.get('role')
+            key = (pool, index, role)
+            if configured < 1 or role not in ('host', 'worker') or key in workers_seen:
+                raise ValueError('invalid/duplicate worker')
+            if index >= configured and not (role == 'host' and index == configured):
+                raise ValueError('invalid worker index')
+            workers_seen.add(key)
+            for field in ('full_jobs', 'gate_up_jobs', 'down_jobs'):
+                number(worker.get(field), field, True)
+            times = ('full_us', 'gate_up_us', 'down_us')
+            if any(field in worker for field in times):
+                if record['level'] < 2 or not all(field in worker for field in times):
+                    raise ValueError('invalid worker timing coverage')
+                for field in times:
+                    number(worker[field], field)
         c = layer['counters']
         route_fields = ('total_routes', 'resident_routes', 'cpu_routes', 'nonresident_gpu_routes')
         if all(key in c for key in route_fields):
