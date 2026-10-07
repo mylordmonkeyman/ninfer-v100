@@ -1,0 +1,101 @@
+name: V100 NInfer vs Strata Comparison
+on:
+  push:
+    branches: [perf/v100-strata-derived]
+    paths:
+      - '.github/workflows/v100-strata-compare.yml'
+      - 'tools/diagnostics/v100_strata_compare.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 32
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: |
+          python3 -m py_compile tools/diagnostics/v100_strata_compare.py
+          git diff --check
+  hardware:
+    needs: checks
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    concurrency:
+      group: v100-sv0-hardware
+      cancel-in-progress: false
+    timeout-minutes: 120
+    env:
+      CUDA_VISIBLE_DEVICES: '0'
+      NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+      STRATA_ROOT: /opt/ai/strata
+      STRATA_CONFIG: /opt/ai/strata/strata-unsloth-ud-q4_k_xl.json
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          clean: false
+      - name: Check V100 headroom and existing Strata assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p strata-compare-results strata-compare-source
+          find strata-compare-results -mindepth 1 -delete
+          find strata-compare-source -mindepth 1 -delete
+          free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits | tr -d '[:space:]')
+          if (( free_mib < 28000 )); then
+            echo "::error::V100 is busy ($free_mib MiB free); no unrelated process was stopped."
+            exit 1
+          fi
+          test -x "$STRATA_ROOT/.venv/bin/python"
+          test -r "$STRATA_ROOT/serve/server.py"
+          test -r "$STRATA_CONFIG"
+          test -r "$NINFER_WEIGHTS"
+          git rev-parse HEAD > strata-compare-results/ninfer-sha.txt
+          git -C "$STRATA_ROOT" rev-parse HEAD > strata-compare-results/strata-sha.txt
+          sha256sum "$STRATA_CONFIG" > strata-compare-results/strata-config-sha256.txt
+          nvidia-smi -q > strata-compare-results/gpu.txt
+          /usr/local/cuda-12.8/bin/nvcc --version > strata-compare-results/cuda.txt
+          numactl --hardware > strata-compare-results/numa.txt
+      - name: Download validated NInfer resident profile
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: v100-sv2-37270512213-1
+          run-id: 37270512213
+          github-token: ${{ github.token }}
+          path: strata-compare-source
+      - name: Build current NInfer server
+        shell: bash
+        run: |
+          set -euo pipefail
+          ln -s "$NINFER_WEIGHTS" strata-compare-source/model.ninfer
+          cmake -S . -B build-strata-compare -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=OFF
+          cmake --build build-strata-compare --target ninfer-serve
+      - name: Run alternating same-host comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/diagnostics/v100_strata_compare.py \
+            --ninfer build-strata-compare/apps/ninfer-serve \
+            --artifact strata-compare-source/model.ninfer \
+            --profile strata-compare-source/sv2-static-profile.json \
+            --strata-python "$STRATA_ROOT/.venv/bin/python" \
+            --strata-server "$STRATA_ROOT/serve/server.py" \
+            --strata-config "$STRATA_CONFIG" \
+            --output strata-compare-results --repeats 3
+          cat strata-compare-results/summary.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve comparison evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-strata-compare-${{ github.run_id }}-${{ github.run_attempt }}
+          path: strata-compare-results/
+          retention-days: 30
+          if-no-files-found: warn
