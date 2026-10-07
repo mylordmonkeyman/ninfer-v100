@@ -58,8 +58,11 @@ jobs:
             fi
           done
           if [[ -z "$strata_root" ]]; then
+            echo 'Visible candidate model/runtime assets:'
+            find /models /var/lib/llama /opt/ai /srv -maxdepth 4 -type f \
+              \( -iname '*Flash-Next*' -o -iname '*q4*k*xl*' -o -name 'server.py' -o -name 'strata' \) \
+              -print 2>/dev/null | head -200 || true
             echo '::error::Existing Strata install/config is not visible in this runner namespace.'
-            find /opt/ai /srv -maxdepth 2 -type d -iname '*strata*' -print 2>/dev/null || true
             exit 1
           fi
           echo "STRATA_ROOT=$strata_root" >> "$GITHUB_ENV"
