@@ -51,8 +51,25 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends g++
       - name: Compile changed CUDA host code without acquiring a GPU
         run: |
-          g++ -std=c++20 -fsyntax-only -DNINFER_VOLTA_BUILD \
-            -Iinclude -Isrc -Ithird_party -I/usr/local/cuda/include \
+          includes=(-Iinclude -Isrc -Ithird_party -Ithird_party/utf8proc -I/usr/local/cuda/include)
+          for directory in src/targets/*/export; do includes+=(-I"$directory"); done
+          g++ -std=c++20 -fsyntax-only -DNINFER_VOLTA_BUILD "${includes[@]}" \
             src/targets/qwen3_8_flash_next/impl/moe.cpp \
             src/targets/qwen3_8_flash_next/impl/text_decode.cpp \
             src/targets/qwen3_8_flash_next/impl/text_executor.cpp
+      - name: Check out frozen Strata telemetry fork
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: mylordmonkeyman/Strata-V100
+          ref: 44efd143e9e574ddf40d38dd6145c0504ce8707d
+          path: strata-telemetry-source
+          persist-credentials: false
+      - name: Check shared schema and compile Strata telemetry
+        run: |
+          cmp docs/v100-cross-engine-telemetry-spec.md strata-telemetry-source/docs/v100-cross-engine-telemetry-spec.md
+          cmp src/targets/qwen3_8_flash_next/impl/telemetry/compare_telemetry.h strata-telemetry-source/include/strata/telemetry/compare_telemetry.hpp
+          cd strata-telemetry-source
+          g++ -std=c++20 -fsyntax-only -DSTRATA_VERSION='"0.1.36"' \
+            -Iinclude -I/usr/local/cuda/include \
+            src/core/expert_source.cpp src/core/session.cpp src/core/verify.cpp \
+            src/prefill/prefill.cpp src/program/generate.cpp

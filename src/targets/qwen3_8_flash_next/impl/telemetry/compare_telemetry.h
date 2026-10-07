@@ -70,10 +70,11 @@ public:
     ~Round() noexcept {
         active = previous_;
         try {
-            const auto line = json(elapsed_us(started_), std::uncaught_exceptions() > exceptions_) + '\n';
+            const auto line = json(elapsed_us(started_), failed_ || std::uncaught_exceptions() > exceptions_) + '\n';
             std::fwrite(line.data(), 1, line.size(), stderr);
         } catch (...) { std::fputs("v100 compare telemetry serialization failed\n", stderr); }
     }
+    void fail() noexcept { failed_ = true; }
     void counter(unsigned layer, Counter key, std::uint64_t value) noexcept {
         if (layer >= layers_.size()) return;
         auto& l = layers_[layer]; l.observed = true;
@@ -120,6 +121,7 @@ public:
 private:
     const char* engine_; std::string id_; const char* phase_;
     Round* previous_; Clock::time_point started_; int exceptions_;
+    bool failed_ = false;
     std::array<Layer, 48> layers_{};
 };
 class HostSpan {

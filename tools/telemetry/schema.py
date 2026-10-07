@@ -27,6 +27,7 @@ def validate(record):
             raise ValueError(f'missing {name}')
     if record.get('kind') != 'round':
         raise ValueError('expected round record')
+    number(record.get('level'), 'level', True)
     if record.get('level') not in (1, 2, 3):
         raise ValueError('invalid telemetry level')
     if record.get('status') not in ('ok', 'failed'):

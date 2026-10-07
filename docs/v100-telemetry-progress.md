@@ -42,3 +42,31 @@ This increment does **not** complete T2/T4. Full request/lane linkage, actual
 worker distribution, distinct hit/miss IDs, cache deltas, GPU stage events,
 launch counts, NVTX, MTP acceptance/commit and hardware numerical/overhead
 qualification remain to be wired. No <2% overhead claim has been made.
+
+## First Strata instrumentation increment
+
+Strata commit `44efd143e9e574ddf40d38dd6145c0504ce8707d` is the first counterpart
+increment on `mylordmonkeyman/Strata-V100:telemetry/v100-ninfer-compare`, based on
+the verified installed revision. It contains the same host-only collector/spec,
+scopes native prefill/verify/decode rounds and records native multi-token adapter
+route classifications, CPU groups, logical weight bytes and host pool time.
+Prefill expert subpaths and complete GPU/MTP/cache/worker instrumentation remain
+missing. The installed checkout has not been changed.
+
+Hosted CUDA syntax checks use an isolated checkout of the exact Strata telemetry
+commit. They also compare the shared collector and spec bytes between engines.
+These check host compilation only, not linking, CUDA kernels or hardware fidelity.
+A missing target export include path in the first hosted NInfer syntax command
+was identified and corrected.
+
+The user provided `mylordmonkeyman/Strata-V100` during this session. Its
+`telemetry/v100-ninfer-compare` branch is based on the verified installed SHA.
+Use connector commits for this fork; no browser fallback is needed to create it.
+GitHub's connected tools expose read-only Actions inspection and reruns, but no
+workflow dispatch. Address that capability only once the concrete campaign is
+ready; no hardware benchmark is authorized by a telemetry-development push.
+
+The preliminary common comparison tool reports observed per-layer host costs,
+coverage and work normalization, explicitly leaving critical-path contribution,
+request throughput and A/B candidates unqualified. It must not be used to
+justify an optimization before the remaining telemetry gates are met.
