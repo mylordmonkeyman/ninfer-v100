@@ -12,6 +12,10 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -249,11 +253,17 @@ void test_direct_reader_lease() {
         throw std::runtime_error("artifact direct-reader lease did not retain exact file access");
     }
 #if !defined(_WIN32)
+    // Dirty fixture pages cannot be discarded; flush this file, never global caches.
+    const int fd = ::open(fixture.path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) { throw std::runtime_error("cannot open cache-control fixture"); }
+    const int synced = ::fsync(fd);
+    ::close(fd);
+    if (synced != 0) { throw std::runtime_error("cannot sync cache-control fixture"); }
     const auto before = direct.cache_residency(4096, page);
-    direct.evict_file_cache(4096, page);
+    direct.evict_file_cache(0, std::filesystem::file_size(fixture.path));
     const auto after = direct.cache_residency(4096, page);
     if (before.total_pages != 1 || before.resident_pages != 1 || after.total_pages != 1 ||
-        after.resident_pages > before.resident_pages) {
+        after.resident_pages != 0) {
         throw std::runtime_error("artifact file-specific cache control reported invalid residency");
     }
 #endif

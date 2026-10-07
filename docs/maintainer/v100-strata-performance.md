@@ -1019,3 +1019,15 @@ selects exactly one record matching `computed_prefill_tokens` while validating
 the backend, fallback state and byte accounting of every compressed record.
 The workflow only checks for 28 GiB of free V100 memory and fails if the card
 is occupied; it never unloads or stops another GPU workload.
+
+SV6 serve run `37545352729` attempt 2 at `c88de495` passed build/reader checks
+and a warm mmap HTTP request, then refused the cold arm: all 7,812,672 PLE
+pages were reported resident after eviction. Linux can synthesize this vector
+for unowned, non-writable files, so this result does not establish actual
+cache residency or a storage performance comparison. The reader now rejects
+such unverifiable residency queries. The serving workflow records source and
+runner ownership and, only when needed, retains one runner-owned artifact copy
+(reflink where supported), synchronized before use and reused across runs and
+all arms. The source artifact is unchanged. The focused reader fixture now
+flushes its own file and requires eviction to reach zero pages. Zero cold
+residency, exact responses and strict-direct accounting remain required.

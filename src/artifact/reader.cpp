@@ -368,6 +368,19 @@ public:
 #else
         const auto [begin, length] = aligned_range(absolute_offset, bytes);
         if (length == 0) { return {}; }
+        // Linux deliberately returns an all-resident vector for file mappings whose
+        // page-cache state the caller may not inspect. Do not accept that as evidence.
+        struct stat status {};
+        if (::fstat(fd_, &status) != 0) {
+            throw std::system_error(errno, std::generic_category(), "fstat artifact cache");
+        }
+        const std::string descriptor_path = "/proc/self/fd/" + std::to_string(fd_);
+        if (status.st_uid != ::geteuid() &&
+            ::faccessat(AT_FDCWD, descriptor_path.c_str(), W_OK, AT_EACCESS) != 0) {
+            throw ArtifactError(
+                "artifact cache residency requires an owned or writable file; "
+                "Linux mincore may otherwise return synthetic all-resident pages");
+        }
         constexpr std::size_t page = Reader::direct_io_alignment;
         std::vector<unsigned char> residency(length / page + (length % page != 0));
         if (::mincore(const_cast<std::byte*>(data_ + begin), length, residency.data()) != 0) {

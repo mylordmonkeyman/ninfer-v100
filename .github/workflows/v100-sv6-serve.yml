@@ -112,7 +112,6 @@ jobs:
           find sv6-serve-source -mindepth 1 -delete
           test -f "$NINFER_WEIGHTS"
           test -r "$NINFER_WEIGHTS"
-          ln -s "$NINFER_WEIGHTS" sv6-serve-source/model.ninfer
           git rev-parse HEAD > sv6-serve-results/candidate-sha.txt
           nvidia-smi -q > sv6-serve-results/gpu.txt
           /usr/local/cuda-12.8/bin/nvcc --version > sv6-serve-results/cuda.txt
@@ -125,6 +124,37 @@ jobs:
             fi
             exit 1
           fi
+          # mincore hides residency for files the runner neither owns nor may write.
+          # Retain one owned copy when necessary, shared by every arm; never alter /models.
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          source = pathlib.Path(os.environ['NINFER_WEIGHTS']).resolve()
+          info = source.stat()
+          selected = source
+          ownership = {'runner_uid': os.geteuid(), 'source_uid': info.st_uid,
+                       'source_writable': os.access(source, os.W_OK, effective_ids=True)}
+          if info.st_uid != os.geteuid() and not ownership['source_writable']:
+              cache = pathlib.Path('sv6-model-cache')
+              cache.mkdir(exist_ok=True)
+              selected = (cache / 'model.ninfer').absolute()
+              metadata = cache / 'source.json'
+              signature = {'source': str(source), 'device': info.st_dev,
+                           'inode': info.st_ino, 'size': info.st_size, 'mtime_ns': info.st_mtime_ns}
+              reusable = (selected.is_file() and selected.stat().st_uid == os.geteuid()
+                          and selected.stat().st_size == info.st_size and metadata.is_file()
+                          and json.loads(metadata.read_text()) == signature)
+              if not reusable:
+                  pending = cache / 'model.pending'
+                  subprocess.run(['cp', '--reflink=auto', '--', str(source), str(pending)], check=True)
+                  with pending.open('rb') as stream:
+                      os.fsync(stream.fileno())
+                  pending.replace(selected)
+                  metadata.write_text(json.dumps(signature))
+          ownership['selected'] = str(selected)
+          ownership['selected_uid'] = selected.stat().st_uid
+          pathlib.Path('sv6-serve-results/cache-ownership.json').write_text(json.dumps(ownership, indent=2))
+          pathlib.Path('sv6-serve-source/model.ninfer').symlink_to(selected)
+          PY
       - name: Build server and cache-control test once
         shell: bash
         run: |
