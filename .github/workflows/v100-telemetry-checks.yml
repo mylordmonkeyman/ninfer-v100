@@ -62,7 +62,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: mylordmonkeyman/Strata-V100
-          ref: 44efd143e9e574ddf40d38dd6145c0504ce8707d
+          ref: 8bfa5bc409b73d65ea475d546d73073660fb89da
           path: strata-telemetry-source
           persist-credentials: false
       - name: Check shared schema and compile Strata telemetry

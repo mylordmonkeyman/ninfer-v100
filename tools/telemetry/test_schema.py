@@ -22,6 +22,16 @@ class SchemaTests(unittest.TestCase):
         validate(r)
         self.assertNotIn('cpu_routes', r['layers'][0]['counters'])
 
+    def test_distinct_work_across_repeated_layer_calls(self):
+        r = fixture()
+        c = r['layers'][0]['counters']
+        c.update(total_routes=1200, resident_routes=600, cpu_routes=600,
+                 distinct_experts=1000, resident_distinct_experts=600,
+                 distinct_missed_experts=600)
+        validate(r)
+        c['distinct_missed_experts'] = 601
+        with self.assertRaisesRegex(ValueError, 'distinct'): validate(r)
+
     def test_bad_measurements(self):
         for v in (-1, float('nan'), float('inf'), True):
             r = fixture(); r['host_wall_us'] = v

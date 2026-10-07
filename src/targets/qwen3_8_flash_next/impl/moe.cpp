@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bitset>
 #include <cmath>
 #include <chrono>
 #include <cstdint>
@@ -461,6 +462,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
 
     const bool telemetry = v100_perf_telemetry_enabled();
     const bool aggregate = v100_compare::active != nullptr;
+    std::bitset<512> resident_ids, missed_ids;
     const bool observe_host = telemetry || aggregate;
     const auto rendezvous_started = observe_host ? PerfClock::now() : PerfClock::time_point{};
     const std::uint16_t* host_input = cpu.input.data();
@@ -524,7 +526,11 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                         static_cast<const std::uint16_t*>(input.data) + token_offset,
                         static_cast<float*>(scratch.down_intermediate.data) +
                             route_index * kFlashNextExpertHidden,
-                        static_cast<unsigned>(route_index), stream)) continue;
+                        static_cast<unsigned>(route_index), stream)) {
+                    if (aggregate) resident_ids.set(static_cast<std::size_t>(expert_id));
+                    continue;
+                }
+                if (aggregate) missed_ids.set(static_cast<std::size_t>(expert_id));
                 streamed_routes[static_cast<std::size_t>(expert_id)].push_back(
                     FlashNextStreamRoute{
                         static_cast<const std::uint16_t*>(input.data) + token_offset,
@@ -544,8 +550,10 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                     static_cast<const std::uint16_t*>(input.data)+token_offset,
                     static_cast<unsigned>(route_index), stream));
             if (cache_hit) {
+                if (aggregate) resident_ids.set(static_cast<std::size_t>(cpu.ids[route_index]));
                 continue;
             }
+            if (aggregate) missed_ids.set(static_cast<std::size_t>(cpu.ids[route_index]));
             cpu.miss_routes.push_back(route_index);
             cpu.tasks.push_back(HostExpertTask{
                 .expert = host_experts.expert(cpu.ids[route_index]),
@@ -766,6 +774,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         add(C::cpu_routes, cpu.tasks.size());
         add(C::nonresident_gpu_routes, streamed_route_count);
         add(C::distinct_experts, ExpertRouteHistogram(cpu.ids).distinct);
+        add(C::resident_distinct_experts, resident_ids.count());
+        add(C::distinct_missed_experts, missed_ids.count());
         add(C::cpu_groups, cpu_batch.groups);
         add(C::cpu_grouped_routes, cpu_batch.grouped_pairs);
         add(C::cpu_weight_read_bytes, cpu_batch.weight_read_bytes);

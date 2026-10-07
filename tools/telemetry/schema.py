@@ -54,7 +54,14 @@ def validate(record):
         if all(key in c for key in route_fields):
             if c['total_routes'] != c['resident_routes'] + c['cpu_routes'] + c['nonresident_gpu_routes']:
                 raise ValueError('route conservation failed')
-        for distinct in ('distinct_experts', 'resident_distinct_experts', 'distinct_missed_experts'):
-            if distinct in c and c[distinct] > 512:
+        # A round can call the same layer repeatedly (chunks/verify groups).
+        # These counters sum per-call distinct work, not a request-wide union.
+        for distinct, bound in (
+                ('distinct_experts', c.get('total_routes')),
+                ('resident_distinct_experts', c.get('resident_routes')),
+                ('distinct_missed_experts',
+                 c['cpu_routes'] + c['nonresident_gpu_routes']
+                 if 'cpu_routes' in c and 'nonresident_gpu_routes' in c else None)):
+            if distinct in c and bound is not None and c[distinct] > bound:
                 raise ValueError('invalid distinct expert count')
     return record

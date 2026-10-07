@@ -22,8 +22,8 @@ as the active experiment entry point after telemetry fidelity gates pass.
 
 ## Remaining gates
 
-Create the user-controlled Strata fork at the verified installed SHA, instrument
-both engines, validate counters and numerical off/on equivalence, build once,
+The user-controlled Strata fork now exists at the verified installed SHA. Finish
+instrumenting both engines, validate counters and numerical off/on equivalence, build once,
 then validate overhead and run the frozen matrix. Never dispatch a performance
 campaign solely because a commit was made. No baseline attribution is yet available.
 
@@ -76,3 +76,22 @@ but its CUDA syntax step never compiled: container default `sh` rejected the
 Bash include array. The job now selects Bash explicitly and uses the compiler
 already present in the CUDA image, avoiding redundant apt operations. This was
 a hosted workflow-shell failure, not a self-hosted V100 interruption.
+
+## Second instrumentation increment
+
+Hosted run `37692062279` succeeded: all 65 Python tests, host collector checks,
+and changed NInfer/Strata CUDA host syntax checks passed. It acquired no V100.
+
+NInfer now records distinct resident and distinct persistently missed expert IDs
+from each actual cache decision, including the hybrid streaming path. These are
+per-call counts accumulated into a round, not a request-wide union. The validator
+now bounds distinct work by observed routes instead of incorrectly capping a
+round at 512; repeated verify groups/chunks can exceed that cap. Its regression
+test raises the focused telemetry test count to eight (66 Python tests total).
+
+Strata commit `8bfa5bc409b73d65ea475d546d73073660fb89da` adds native prefill
+layer, PLE, GDN, QSA and MoE inclusive host spans. They add no CUDA events or
+synchronization and measure host submission/waits, not GPU execution. The hosted
+workflow now checks this frozen revision. GPU intervals, request/token/MTP
+linkage, actual worker distributions, cache deltas and prefill expert counters
+still need implementation; no comprehensive campaign is ready yet.
