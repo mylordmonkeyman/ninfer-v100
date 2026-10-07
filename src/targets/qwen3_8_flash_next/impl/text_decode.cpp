@@ -575,7 +575,8 @@ void flash_next_text_decode_core(const TextModelView& model, const Tensor& embed
 #else
                 nullptr
 #endif
-                , state.expert_cache, static_cast<unsigned>(layer)
+                , state.expert_cache, static_cast<unsigned>(layer), false,
+                state.expert_stream_decode ? state.expert_stream : nullptr
             );
         } else {
             flash_next_moe(round_ws.block_input, model.layers[layer].moe,
@@ -879,7 +880,8 @@ void flash_next_text_prefill_chunk(const TextModelView& model, const Tensor& emb
 #endif
                 , state.expert_cache && state.expert_cache->prefill_enabled() ?
                     state.expert_cache : nullptr, static_cast<unsigned>(layer), true,
-                state.expert_stream && tokens >= state.expert_stream_min_tokens ?
+                state.expert_stream_prefill && state.expert_stream &&
+                    tokens >= state.expert_stream_min_tokens ?
                     state.expert_stream : nullptr
             );
         } else {

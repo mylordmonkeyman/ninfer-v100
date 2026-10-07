@@ -81,6 +81,36 @@ void run_cost_calibration(DeviceContext& device,
     if(!records) throw std::runtime_error("failed to write SV3 cost records");
 }
 int main() { try {
+#if defined(_WIN32)
+    _putenv_s("NINFER_V100_DECODE_EXPERT_POLICY", "");
+#else
+    unsetenv("NINFER_V100_DECODE_EXPERT_POLICY");
+#endif
+    require(!flash_next_decode_expert_stream_requested(),
+            "unset decode expert policy did not preserve cpu-cache default");
+#if defined(_WIN32)
+    _putenv_s("NINFER_V100_DECODE_EXPERT_POLICY", "stream");
+#else
+    setenv("NINFER_V100_DECODE_EXPERT_POLICY", "stream", 1);
+#endif
+    require(flash_next_decode_expert_stream_requested(),
+            "decode stream policy was not enabled");
+#if defined(_WIN32)
+    _putenv_s("NINFER_V100_DECODE_EXPERT_POLICY", "invalid");
+#else
+    setenv("NINFER_V100_DECODE_EXPERT_POLICY", "invalid", 1);
+#endif
+    bool bad_decode_policy=false;
+    try { (void)flash_next_decode_expert_stream_requested(); }
+    catch(const std::invalid_argument&) { bad_decode_policy=true; }
+    require(bad_decode_policy,"invalid decode expert policy accepted");
+#if defined(_WIN32)
+    _putenv_s("NINFER_V100_DECODE_EXPERT_POLICY", "");
+#else
+    unsetenv("NINFER_V100_DECODE_EXPERT_POLICY");
+#endif
+    require(flash_next_expert_stream_device_bytes(4) < 12ULL*1024ULL*1024ULL,
+            "decode stream staging reserve is unexpectedly large");
     int devices=0; if(cudaGetDeviceCount(&devices)!=cudaSuccess || !devices) return 77;
     DeviceContext device;
     std::mt19937 rng(19);

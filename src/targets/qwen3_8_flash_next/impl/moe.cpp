@@ -351,7 +351,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     const bool device_route_combine = false;
     const bool route_handoff = false;
 #endif
-    const bool stream_experts = prefill && expert_stream != nullptr;
+    const bool stream_experts = expert_stream != nullptr;
     if (route_handoff && (!device_route_combine || stream_experts)) {
         throw std::invalid_argument(
             "route handoff requires device combine and BF16 CPU-cache expert execution");
@@ -599,14 +599,18 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     if (stream_experts && tokens >= 1024 && stream_diagnostics_enabled()) {
         compare_streamed_routes(layer, tokens, host_experts, streamed_routes, stream);
     }
+    // Telemetry is already an opt-in synchronization path. Drain ephemeral streamed
+    // misses here so its branch timing includes transfer and GPU expert execution.
+    if (stream_experts && telemetry) expert_stream->finish();
     const double branch_wall_us = measure ? perf_elapsed_us(branch_started) : 0;
     if (measure && cache) cache->record_schedule(
         std::chrono::duration<double, std::micro>(cpu_finished-cpu_started).count(),
         gpu_us, wait_us,
         branch_wall_us);
     // Admission is background work and cannot make a miss a current-token GPU dependency.
-    if (cache != nullptr && !stream_experts && !use_routed_expert_input_fp32 &&
-        !resolve_fp32_intermediate_diagnostic()) cache->admit(layer, cpu.ids);
+    if (cache != nullptr && (!stream_experts || !prefill) &&
+        !use_routed_expert_input_fp32 && !resolve_fp32_intermediate_diagnostic())
+        cache->admit(layer, cpu.ids);
 
     if (!device_route_combine) {
         for (std::int32_t token = 0; token < tokens; ++token) {
