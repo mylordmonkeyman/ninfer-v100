@@ -1,4 +1,6 @@
 #include "core/device.h"
+#include "ninfer/ops/linear.h"
+#include "targets/qwen3_8_flash_next/impl/hyper_connection.h"
 #include "targets/qwen3_8_flash_next/impl/gdn.h"
 #include "targets/qwen3_8_flash_next/impl/gdn_kernels.h"
 #include "targets/qwen3_8_flash_next/impl/gdn_workspace.h"
@@ -1526,6 +1528,98 @@ static int run_sv1_residency(FlashNextTextExecutor& executor,
     return 0;
 }
 
+// Full-manifest SV7 gate. The production prefill core computes every causal
+// backbone state; the existing diagnostic hook exports its final layer. Evaluate
+// the unchanged c=1 final mixer/head on each state, not just the chunk endpoint.
+// No oracle value is injected into execution. Tail logits must match production.
+static int run_sv7_batched_oracle(FlashNextTextExecutor& executor,
+    const TextModelView& model, ninfer::DeviceContext& device,
+    const std::vector<OracleRecord>& records) {
+    constexpr std::size_t chunk_size=512, hidden_dim=10'240, vocab=248'320;
+    if(records.size()!=4096)throw std::invalid_argument("SV7 batched oracle requires exactly 4096 manifest positions");
+    ninfer::WorkspaceArena head_workspace(64ULL<<20);
+    ninfer::DeviceBuffer hidden_storage(hidden_dim*2),mixed_storage(2560*2),logit_storage(vocab*2);
+    ninfer::Tensor hidden(hidden_storage.p,ninfer::DType::BF16,{10'240,1});
+    ninfer::Tensor mixed(mixed_storage.p,ninfer::DType::BF16,{2560,1});
+    ninfer::Tensor logits(logit_storage.p,ninfer::DType::BF16,{248'320,1});
+    std::vector<std::uint16_t> words(vocab),tail(vocab);
+    std::vector<float> candidate(vocab);
+    struct DrainOracleWork {
+        cudaStream_t stream;
+        ~DrainOracleWork(){(void)cudaStreamSynchronize(stream);}
+    } drain{device.stream};
+    Phase11OracleAccumulator accumulator;
+    auto lane=executor.allocate_lane();
+    const std::array<LaneCommitDecision,1> decisions{{{.accept=true}}};
+    const auto started=std::chrono::steady_clock::now();
+    for(std::size_t offset=0;offset<records.size();offset+=chunk_size) {
+        std::vector<std::int32_t> tokens(chunk_size);
+        std::vector<std::array<std::int32_t,3>> positions(chunk_size);
+        for(std::size_t t=0;t<chunk_size;++t) {
+            tokens[t]=records[offset+t].token_id;
+            const auto pos=static_cast<std::int32_t>(offset+t);positions[t]={pos,pos,pos};
+        }
+        std::vector<std::uint16_t> backbone;
+        DrainOracleWork chunk_drain{device.stream};
+        unsigned captures=0;
+        FlashNextDecodeStateSink sink;
+        sink.on_state=[&](std::string_view name,const ninfer::Tensor& tensor) {
+            if(name!="L47_hyper_after_mlp")return;
+            if(++captures!=1 || tensor.ne[0]!=hidden_dim || tensor.ne[1]!=chunk_size ||
+                !tensor.is_contiguous())throw std::runtime_error("SV7 final backbone hook shape/count invalid");
+            backbone.resize(hidden_dim*chunk_size);
+            if(tensor.dtype==ninfer::DType::BF16) {
+                CUDA_CHECK(cudaMemcpyAsync(backbone.data(),tensor.data,backbone.size()*2,cudaMemcpyDeviceToHost,device.stream));
+                device.synchronize();
+            } else if(tensor.dtype==ninfer::DType::FP32) {
+                std::vector<float> fp32(backbone.size());
+                DrainOracleWork capture_drain{device.stream};
+                CUDA_CHECK(cudaMemcpyAsync(fp32.data(),tensor.data,fp32.size()*4,cudaMemcpyDeviceToHost,device.stream));
+                device.synchronize();
+                for(std::size_t i=0;i<fp32.size();++i) {
+                    if(!std::isfinite(fp32[i]))throw std::runtime_error("SV7 final backbone contains nonfinite value");
+                    const auto bits=std::bit_cast<std::uint32_t>(fp32[i]);
+                    backbone[i]=static_cast<std::uint16_t>((bits+0x7fffU+((bits>>16)&1U))>>16);
+                }
+            } else throw std::runtime_error("SV7 final backbone hook dtype invalid");
+        };
+        auto round=executor.execute_prefill_chunk(lane,tokens,positions,offset,&sink);
+        if(captures!=1)throw std::runtime_error("SV7 final backbone hook missing");
+        CUDA_CHECK(cudaMemcpyAsync(tail.data(),round.logits().data,vocab*2,cudaMemcpyDeviceToHost,device.stream));
+        device.synchronize();
+        for(std::size_t t=0;t<chunk_size;++t) {
+            CUDA_CHECK(cudaMemcpyAsync(hidden.data,backbone.data()+t*hidden_dim,hidden_dim*2,
+                                      cudaMemcpyHostToDevice,device.stream));
+            head_workspace.reset();
+            auto scratch=allocate_flash_next_hyper_workspace(head_workspace,1);
+            flash_next_hyper_mix(hidden,model.final_mixer,scratch,mixed,device.stream);
+            ninfer::ops::linear(mixed,model.output_head,logits,ninfer::ops::LinearPolicy::A16Only,
+                               head_workspace,device.stream);
+            CUDA_CHECK(cudaMemcpyAsync(words.data(),logits.data,vocab*2,cudaMemcpyDeviceToHost,device.stream));
+            device.synchronize();
+            if(t==chunk_size-1 && words!=tail)
+                throw std::runtime_error("SV7 reconstructed endpoint logits differ from production prefill");
+            for(std::size_t i=0;i<vocab;++i)candidate[i]=bf16_to_float(words[i]);
+            const auto index=offset+t;
+            const auto oracle=load_fp32_logits(records[index]);
+            const auto target=index+1<records.size()?records[index+1].token_id:-1;
+            accumulator.observe(records[index].position,target,candidate,oracle);
+        }
+        round.commit(decisions);
+        if(executor.committed_frontier(lane)!=static_cast<std::int32_t>(offset+chunk_size))
+            throw std::runtime_error("SV7 oracle state frontier differs");
+        std::cout<<"sv7.batched_oracle.completed_positions="<<offset+chunk_size
+                 <<" endpoint_logits_exact=1"<<std::endl;
+    }
+    executor.release_lane(lane);device.synchronize();
+    const auto metrics=accumulator.finalize();print_metrics(metrics);
+    const bool passes=phase11_oracle_passes(metrics); // Default thresholds, including 4096 minimum.
+    std::cout<<"sv7.batched_oracle.independent_pass="<<(passes?1:0)
+             <<" elapsed_s="<<std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count()
+             <<" kv=fp8 chunk=512 positions=4096\n";
+    return passes?0:1;
+}
+
 int main() {
 #if !defined(NINFER_VOLTA_BUILD)
     std::cout << "SKIP: Phase 11 real vertical slice is an SM70 qualification target\n";
@@ -1585,8 +1679,16 @@ int main() {
         // every arm/size. The unchanged teacher-forced oracle retains 128.
         const char* probe_env = std::getenv("NINFER_PHASE11_PREFILL_PROBE_POSITIONS");
         const bool prefill_probe_enabled = probe_env != nullptr && probe_env[0] != '\0';
-        const auto contract = make_phase11_vertical_slice_contract(
-            max_context, prefill_probe_enabled ? 2048U : 128U);
+        const char* sv7_env=std::getenv("NINFER_V100_SV7_BATCHED_ORACLE");
+        const bool sv7_batched_oracle=sv7_env && std::string_view(sv7_env)=="1";
+        if(sv7_batched_oracle && (required_positions!=4096 || sv1 || prefill_probe_enabled))
+            throw std::invalid_argument("SV7 full oracle cannot combine with smoke, SV1 or probe modes");
+        auto contract = make_phase11_vertical_slice_contract(
+            max_context, sv7_batched_oracle ? 512U : (prefill_probe_enabled ? 2048U : 128U));
+        if(sv7_batched_oracle) {
+            contract.runtime.kv_cache=ninfer::KvCacheStorage::Fp8E4M3Row256;
+            contract.runtime.use_qsa_prefill_mma=true;
+        }
 
         const auto preflight =
             preflight_text_file(weights_path, contract.runtime, 0);
@@ -1631,6 +1733,8 @@ int main() {
             std::chrono::steady_clock::now()-cache_started).count();
         if (sv1) return run_sv1_residency(executor,allocation,device,sv1_workload,
             preflight.identity,cache_startup_seconds);
+        if(sv7_batched_oracle)
+            return run_sv7_batched_oracle(executor,model.text_view(),device,records);
 
         reset_flash_next_host_expert_execution_stats();
         if (const char* graph_pair = std::getenv("NINFER_PHASE17_HIT_GRAPH_BENCHMARK");

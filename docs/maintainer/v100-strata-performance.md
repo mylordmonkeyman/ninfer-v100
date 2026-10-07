@@ -1174,3 +1174,39 @@ matrix. Its sampled reference is not a complete-model or long-prefix oracle,
 and a successful attribution run does not supersede the failed exact
 continuation gate. It is intended to distinguish local attention error from
 small representation/reduction differences before selecting any remediation.
+
+
+Real-input attribution run `37557380800` at `6f680b96` passed. Artifact
+`11455373466` (SHA256
+`513f4258a84b51d7049b36188f3484581770ba3afb90af76ac2bc628712af2a0`)
+records all 12 eligible T=1220 calls. Both paths passed the sampled FP64
+reference checks. Complete-output SIMT/MMA relative L2 differences were
+`3.05062165e-5` through `5.04877559e-5`, with 562–1585 differing BF16 words
+among 7,495,680 per call. The worst sampled FP64 relative L2 error was
+`1.23491670e-4` for SIMT and `1.10200042e-4` for MMA, below the unchanged
+`1e-3` limit; all pointwise checks passed. The SIMT responses exactly
+reproduced the prior SIMT process. This supports small arithmetic differences
+as a possible cause of downstream divergence; it does not prove a whole-model
+accuracy result or identify a kernel defect. The failed continuation gate
+remains failed.
+
+The separate `NINFER_V100_SV7_BATCHED_ORACLE=1` test mode now evaluates the
+entire 4096-position manifest through eight successive causal prefill chunks
+of 512 tokens, with FP8 KV and the existing MMA flag enabled in both arms.
+The original single-token oracle mode is unchanged. This mode uses the
+existing `L47_hyper_after_mlp` diagnostic hook to capture every token's final
+backbone state, rejoins at the same represented BF16 boundary, and evaluates
+the production c=1 final mixer and A16 output head for each position. Each
+chunk's reconstructed endpoint logits must exactly match the executor's
+actual returned logits. No reference values are injected, and the causal
+state frontier is committed and checked after each chunk. Temporary head
+workspace is fixed at 64 MiB; host-copy lifetimes drain on errors.
+
+Both SIMT and MMA are compared independently to the existing FP32 oracle
+using the default Phase 11 accumulator and thresholds, including the 4096
+minimum. The workflow runs both arms even if one numerical gate fails,
+preserves both failing exit statuses, and requires 96 actual FP8 T=512 QSA
+dispatches per arm plus all eight endpoint matches. No threshold, minimum,
+or exact response requirement is relaxed. These runs provide full-prefix
+numerical evidence, not performance measurements. The previous strict
+continuation failure stays separately reported regardless of these results.
