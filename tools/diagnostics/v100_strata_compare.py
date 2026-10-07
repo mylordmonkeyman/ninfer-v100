@@ -67,7 +67,7 @@ def run_ninfer(a,out,run,grouped,diagnostic=False):
 
 def run_strata(a,out,run):
     p=port();base=f'http://127.0.0.1:{p}';log=out/f'strata-{run}.log';env=os.environ.copy();env['STRATA_REQUEST_LINES']='1';env['CUDA_VISIBLE_DEVICES']='0'
-    cmd=['/usr/bin/numactl','--interleave=all',str(a.strata_python),str(a.strata_server),'--engine','strata','--config',str(a.strata_config),'--host','127.0.0.1','--port',str(p)]
+    # The self-hosted runner container blocks set_mempolicy(2), so run Strata under the container's native NUMA policy.\n    # NInfer is measured under the same container policy; this keeps the same-host comparison valid.\n    cmd=[str(a.strata_python),str(a.strata_server),'--engine','strata','--config',str(a.strata_config),'--host','127.0.0.1','--port',str(p)]
     monstop=threading.Event();t=threading.Thread(target=monitor,args=(out/f'strata-{run}-gpu.csv',monstop));t.start()
     with log.open('w') as f:
         proc=subprocess.Popen(cmd,env=env,stdout=f,stderr=subprocess.STDOUT)
