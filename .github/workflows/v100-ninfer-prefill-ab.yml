@@ -1,5 +1,5 @@
 name: V100 NInfer MoE Prefill A/B
-# 10 fixed comparisons, filtered from the completed first A/B campaign.
+# Six fixed NInfer-only controls: static, LRU, LRU cap2, streaming, profile-prior, repeat.
 # Campaign 1: 13 sequential controlled cases; one GPU runner; no concurrent models.
 on:
   workflow_dispatch:
