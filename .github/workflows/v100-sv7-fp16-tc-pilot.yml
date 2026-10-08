@@ -1,0 +1,102 @@
+name: V100 SV7 Opt-in FP16 Tensor-Core Pilot
+on:
+  push:
+    branches: [perf/v100-strata-derived]
+    paths: ['.github/workflows/v100-sv7-fp16-tc-pilot.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 32
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Run independent exhaustive BF16-to-FP16 conversion checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          g++ -std=c++20 -O2 -Wall -Wextra -Werror -Isrc \
+            tests/ops/test_exact_bf16_fp16.cpp -o /tmp/ninfer-sv7-candidate-conversion
+          /tmp/ninfer-sv7-candidate-conversion
+          git diff --check
+  hardware:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[v100:sv7-tc-pilot]')) }}
+    needs: checks
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    concurrency:
+      group: v100-sv0-hardware
+      cancel-in-progress: false
+    timeout-minutes: 150
+    env:
+      CUDA_VISIBLE_DEVICES: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          clean: false
+      - name: Freeze candidate and verify isolated V100 headroom
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="$GITHUB_WORKSPACE/sv7-tc-pilot-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$dir"
+          echo "SV7_RESULTS=$dir" >> "$GITHUB_ENV"
+          git rev-parse HEAD > "$dir/source-sha.txt"
+          free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits | tr -d '[:space:]')
+          if (( free_mib < 28000 )); then
+            echo "::error::V100 busy, $free_mib MiB free; no unrelated process stopped."
+            exit 1
+          fi
+          nvidia-smi -q > "$dir/gpu.txt"
+          /usr/local/cuda-12.8/bin/nvcc --version > "$dir/cuda.txt"
+      - name: Compile SM70 CUTLASS and isolated BF16 projection oracle test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-sv7-tc-pilot -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=OFF -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-sv7-tc-pilot --target ninfer_linear_bf16_a16_test
+      - name: Paired existing BF16 SIMT and opt-in FP16 tensor-core FP64 gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          NINFER_V100_SV7_FP16_TC=0 \
+            build-sv7-tc-pilot/tests/ninfer_linear_bf16_a16_test --sv7-pilot-only \
+            2>&1 | tee "$SV7_RESULTS/baseline.log"
+          NINFER_V100_SV7_FP16_TC=1 \
+            build-sv7-tc-pilot/tests/ninfer_linear_bf16_a16_test --sv7-pilot-only \
+            2>&1 | tee "$SV7_RESULTS/tensorcore.log"
+          echo "SV7 pilot isolated oracle checks passed; no full-model qualification claimed." \
+            | tee "$SV7_RESULTS/summary.txt"
+      - name: Reject symlink and evidence uploads >=1 GiB
+        id: upload_guard
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="$GITHUB_WORKSPACE/sv7-tc-pilot-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [[ ! -d "$dir" ]]; then echo "safe=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          find "$dir" -type l -print -delete
+          bytes=$(du -sb -- "$dir" | cut -f1)
+          echo "Evidence: $bytes bytes"
+          if (( bytes >= 1073741824 )); then
+            echo "::error::Evidence >=1GiB, refusing upload."
+            echo "safe=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "safe=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Upload bounded candidate evidence
+        if: ${{ always() && steps.upload_guard.outputs.safe == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-sv7-tc-pilot-${{ github.run_id }}-${{ github.run_attempt }}
+          path: sv7-tc-pilot-${{ github.run_id }}-${{ github.run_attempt }}/
+          retention-days: 30
+          if-no-files-found: warn
