@@ -36,7 +36,11 @@ int main() {
         round.worker(0, worker);
         { Round nested("ninfer", "owner:nested", "verify"); }
         if (active != &round) return 1;
-        std::cout << round.json(30) << '\n';
+        const auto serialized = round.json(30);
+        if (level() == 1 && serialized.find("\"workers_compact\"") == std::string::npos) return 1;
+        if (level() >= 2 && serialized.find("\"workers\"") == std::string::npos) return 1;
+        if (level() >= 2 && serialized.find("\"workers_compact\"") != std::string::npos) return 1;
+        std::cout << serialized << '\n';
     }
     return active ? 1 : 0;
 }
