@@ -156,6 +156,8 @@ jobs:
           for directory in src/targets/*/export; do includes+=(-I"$directory"); done
           g++ -std=c++20 -fsyntax-only -DNINFER_VOLTA_BUILD "${includes[@]}" \
             src/targets/qwen3_8_flash_next/impl/expert_cache.cpp \
+            src/targets/qwen3_8_flash_next/impl/expert_stream.cpp \
+            tests/targets/qwen3_8_flash_next/test_expert_stream.cpp \
             tests/targets/qwen3_8_flash_next/test_expert_cache.cpp \
             src/targets/qwen3_8_flash_next/impl/moe.cpp \
             src/targets/qwen3_8_flash_next/impl/cpu_expert_pool.cpp \
