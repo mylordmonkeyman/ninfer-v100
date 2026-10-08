@@ -10,6 +10,7 @@ from pathlib import Path
 import zipfile
 
 from qualify_v100 import report
+from native_counter_inventory import inventory
 
 ENGINES = ('ninfer', 'strata')
 LEVELS = (0, 1, 2)
@@ -41,6 +42,7 @@ def replay(zip_path):
                     if digest != row['output_sha256']:
                         raise ValueError(f'{name}:{position}: response fingerprint mismatch')
                 rows.extend(samples)
+        native_route_inventory = [inventory(archive, engine) for engine in ENGINES]
     refreshed = report(rows)
     if refreshed['software_output_fidelity_passed'] != original['software_output_fidelity_passed']:
         raise ValueError('replayed strict fidelity result differs from frozen original')
@@ -54,7 +56,8 @@ def replay(zip_path):
             if normalized != old[key]:
                 raise ValueError(f'{current["engine"]}: replay changed frozen {key}')
     return dict(source_artifact=str(zip_path), requests_verified=len(rows),
-                frozen_strict_fidelity_agreed=True, analysis=refreshed)
+                frozen_strict_fidelity_agreed=True, analysis=refreshed,
+                native_route_inventory=native_route_inventory)
 
 
 def main():
