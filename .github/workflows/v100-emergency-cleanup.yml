@@ -14,7 +14,7 @@ jobs:
     concurrency:
       # Cleanup must NOT wait for the V100 hardware group it is trying to cancel.
       group: v100-emergency-cleanup
-      cancel-in-progress: false
+      cancel-in-progress: true
     timeout-minutes: 12
     env:
       GH_TOKEN: ${{ github.token }}
@@ -32,7 +32,19 @@ jobs:
             cat /tmp/v100-cancel-result
             exit 1
           fi
-          for attempt in $(seq 1 100); do
+          for attempt in $(seq 1 5); do
+            state="$(curl -fsS "${headers[@]}" "${api}/runs/${BAD_RUN_ID}" | jq -r '.status')"
+            echo "Run status: ${state}"
+            if [[ "${state}" == 'completed' ]]; then break; fi
+            sleep 5
+          done
+          if [[ "${state}" != 'completed' ]]; then
+            echo "Normal cancel has not stopped the upload; attempting GitHub force-cancel."
+            force_status="$(curl -sS -o /tmp/v100-force-result -w '%{http_code}' -X POST "${headers[@]}" "${api}/runs/${BAD_RUN_ID}/force-cancel")"
+            echo "Force-cancel API HTTP status: ${force_status}"
+            [[ "${force_status}" == '202' || "${force_status}" == '409' ]] || { cat /tmp/v100-force-result; exit 1; }
+          fi
+          for attempt in $(seq 1 60); do
             state="$(curl -fsS "${headers[@]}" "${api}/runs/${BAD_RUN_ID}" | jq -r '.status')"
             echo "Run status: ${state}"
             if [[ "${state}" == 'completed' ]]; then break; fi
