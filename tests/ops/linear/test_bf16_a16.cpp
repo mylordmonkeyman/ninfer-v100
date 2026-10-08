@@ -285,7 +285,7 @@ int run_sv7_bench() {
     // Output is CSV and can be paired between two fresh processes.
     constexpr int warmups = 2;
     constexpr int repeats = 5;
-    std::cout << "shape,tokens,repeat,wall_ms,workspace_bytes\\n";
+    std::cout << "shape,tokens,repeat,wall_ms,workspace_bytes\n";
     struct Shape { int n, k; unsigned seed; const char* name; };
     for (const Shape shape : {
             Shape{640, 2560, 423U, "qsa_indexer"},
@@ -315,11 +315,11 @@ int run_sv7_bench() {
                         std::chrono::duration<double, std::milli>(end - begin).count();
                     std::cout << shape.name << ',' << tokens << ',' << rep
                               << ',' << std::fixed << std::setprecision(5) << ms
-                              << ',' << capacity << '\\n';
+                              << ',' << capacity << '\n';
                 }
                 if (scratch.used() != 0 || scratch.peak_used() > capacity) {
                     std::cerr << "SV7 workspace capacity violated for " << shape.name
-                              << " T=" << tokens << '\\n';
+                              << " T=" << tokens << '\n';
                     return 1;
                 }
             }
