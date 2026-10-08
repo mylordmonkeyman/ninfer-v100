@@ -92,7 +92,7 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
         detail::w8_dispatch(x, w, out, policy, stream);
         return;
     case QType::BF16_CTRL:
-        detail::bf16_dispatch(x, w, out, policy, stream);
+        detail::bf16_dispatch(x, w, out, policy, workspace, stream);
         return;
     case QType::NVFP4:
         detail::nvfp4_dispatch(x, w, out, policy, workspace, stream);
@@ -151,6 +151,15 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
     case QType::BF16_CTRL:
         (void)detail::select_bf16_launch(output_rows, input_rows, min_tokens, policy);
         (void)detail::select_bf16_launch(output_rows, input_rows, max_tokens, policy);
+#if defined(NINFER_VOLTA_BUILD)
+        if (detail::bf16_volta_fp16_tc_enabled() && min_tokens <= 2048 &&
+            max_tokens >= 128) {
+            const auto bounded = std::min<std::int32_t>(max_tokens, 2048);
+            if (detail::bf16_volta_fp16_tc_supported(output_rows, input_rows, bounded))
+                return detail::bf16_volta_fp16_tc_workspace_bytes(
+                    output_rows, input_rows, bounded);
+        }
+#endif
         return 0;
     case QType::NVFP4:
         if (!detail::is_nvfp4_linear_problem(output_rows, input_rows) ||
