@@ -177,3 +177,60 @@ jobs:
             src/core/expert_source.cpp src/core/session.cpp src/core/verify.cpp \
             src/kernels/cpu/pool.cpp \
             src/prefill/prefill.cpp src/program/generate.cpp
+
+  evidence-replay:
+    # One-time hosted analysis of the frozen 2026-10-07 V100 evidence.
+    # Does not acquire the GPU runner or start either engine.
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[v100:evidence-replay]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Download frozen qualified hardware evidence (not models)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: v100-telemetry-qualification-37716164597-1
+          run-id: 37716164597
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/qualification-source
+      - name: Verify original evidence and classify indexed output parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd "$RUNNER_TEMP/qualification-source" && zip -qr "$RUNNER_TEMP/v100-evidence.zip" .)
+          python3 tools/telemetry/replay_qualification.py "$RUNNER_TEMP/v100-evidence.zip" \
+            --output "$RUNNER_TEMP/v100-evidence-replay.json" >/dev/null
+          python3 - <<'PYREPLAY'
+          import json, os
+          from pathlib import Path
+          report = json.loads((Path(os.environ['RUNNER_TEMP'])/'v100-evidence-replay.json').read_text())
+          analysis = report['analysis']
+          assert report['requests_verified'] == 48
+          assert report['frozen_strict_fidelity_agreed']
+          assert analysis['indexed_telemetry_output_parity_observed']
+          assert not analysis['software_output_fidelity_passed']
+          engines = {row['engine']: row for row in analysis['engines']}
+          assert engines['ninfer']['baseline_output_stable']
+          assert not engines['strata']['baseline_output_stable']
+          assert all(row['compared_request_positions'] == 8 and
+                     row['indexed_request_output_parity_passed']
+                     for row in engines.values())
+          print('PASS: verified all 48 saved HTTP responses without running GPU models')
+          print('PASS: all 8 positions match across levels 0/1/2 in both engines')
+          print('STRICT baseline-repeatability gate remains FAILED for Strata')
+          for engine, row in engines.items():
+              print(f"{engine}: median L1 overhead {100*row['level_1_overhead_fraction']:+.2f}%, "
+                    f"timing gate qualified={row['overhead_qualified']}")
+          PYREPLAY
+          cp "$RUNNER_TEMP/v100-evidence-replay.json" "$GITHUB_STEP_SUMMARY"
+      - name: Preserve small offline analysis only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-telemetry-offline-replay-37716164597
+          path: ${{ runner.temp }}/v100-evidence-replay.json
+          retention-days: 30
