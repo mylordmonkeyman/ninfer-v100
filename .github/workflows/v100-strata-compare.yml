@@ -81,6 +81,7 @@ jobs:
         run: |
           set -euo pipefail
           git -C telemetry-strata-source rev-parse HEAD > "$QUALIFICATION_RESULTS/strata-sha.txt"
+          test "$(cat "$QUALIFICATION_RESULTS/strata-sha.txt")" = f9d8fc4decc68bf809dfabde410907fb170bb929
           cmp docs/v100-cross-engine-telemetry-spec.md telemetry-strata-source/docs/v100-cross-engine-telemetry-spec.md
           cmake -S . -B build-telemetry-qualification -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70 \
