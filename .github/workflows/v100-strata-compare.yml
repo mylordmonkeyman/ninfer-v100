@@ -29,6 +29,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Remove only the prior run's bad link; do not touch the existing model bytes.
+          old_alias="$GITHUB_WORKSPACE/telemetry-qualification-37707932845-1/qualified-model.ninfer"
+          if [[ -L "$old_alias" ]]; then rm -- "$old_alias"; fi
           results="$GITHUB_WORKSPACE/telemetry-qualification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir "$results"
           echo "QUALIFICATION_RESULTS=$results" >> "$GITHUB_ENV"
@@ -106,7 +109,7 @@ jobs:
         run: |
           set -euo pipefail
           # On failure, print native engine details before the artifact upload step.
-          trap 'rc=$?; echo "::error::Native qualification failed (exit $rc)"; tail -100 "$QUALIFICATION_RESULTS/matrix-summary.log" 2>/dev/null || true; find "$QUALIFICATION_RESULTS/matrix" -maxdepth 2 -name server.log -type f -print -exec tail -n 35 {} \\; 2>/dev/null || true; exit "$rc"' ERR
+          trap 'rc=$?; echo "::error::Native qualification failed (exit $rc)"; tail -100 "$QUALIFICATION_RESULTS/matrix-summary.log" 2>/dev/null || true; find "$QUALIFICATION_RESULTS/matrix" -maxdepth 2 -name server.log -type f -print -exec tail -n 35 {} \; 2>/dev/null || true; exit "$rc"' ERR
           python3 tools/telemetry/qualify_v100.py \
             --ninfer build-telemetry-qualification/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" --profile telemetry-profile-source/sv2-static-profile.json \
