@@ -20,7 +20,11 @@ class QualificationTests(unittest.TestCase):
     def test_within_engine_fidelity_and_overhead_gate(self):
         data = rows(); self.assertTrue(report(data)['software_output_fidelity_passed'])
         data[3]['output_sha256'] = 'changed'
-        self.assertFalse(report(data)['software_output_fidelity_passed'])
+        changed = report(data)
+        self.assertFalse(changed['software_output_fidelity_passed'])
+        self.assertEqual(changed['engines'][0]['output_fidelity_failure_reason'],
+                         'telemetry_level_output_mismatch')
+        self.assertEqual(changed['engines'][0]['new_output_hashes_vs_baseline'][1], 1)
         data = rows(); data[0]['wall_us'] = 1300
         result = report(data)
         self.assertTrue(result['software_output_fidelity_passed'])
