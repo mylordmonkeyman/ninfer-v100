@@ -18,6 +18,7 @@ class ABV100Tests(unittest.TestCase):
         self.assertIn(('ninfer', 'cache-lru'), names)
         self.assertIn(('ninfer', 'lru-admission-2'), names)
         self.assertIn(('ninfer', 'lru-prefill-stream'), names)
+        self.assertIn(('ninfer', 'lru-prefill-auto256'), names)
         self.assertIn(('ninfer', 'profile-prior-50'), names)
         self.assertIn(('ninfer', 'workers-16'), names)
         self.assertIn(('strata', 'workers-16'), names)
@@ -30,7 +31,7 @@ class ABV100Tests(unittest.TestCase):
                          [('ninfer', 'baseline-repeat'), ('strata', 'baseline-repeat')])
         for _, name, overrides in CASES:
             self.assertEqual(bool(overrides), name not in ('baseline', 'baseline-repeat'))
-            if name in ('lru-admission-2','lru-prefill-stream','profile-prior-50'):
+            if name in ('lru-admission-2','lru-prefill-stream','lru-prefill-auto256','profile-prior-50'):
                 self.assertIn('NINFER_V100_EXPERT_POLICY', overrides)
             else:
                 self.assertLessEqual(len(overrides), 1)
