@@ -3,6 +3,7 @@ name: V100 NInfer Prefill Minimum GPU Routes A/B
 # Same frozen weights, quant, profile, cache slots, MTP=1 and prefill-only CPU grouping.
 # Do not launch concurrently with another V100 hardware job or modify the resident model.
 # Hosted Python, CPU, and CUDA host checks passed; one protected GPU run.
+# Trigger after successful source checks 37832303120; serialize with prior campaigns.
 
 on:
   workflow_dispatch:
