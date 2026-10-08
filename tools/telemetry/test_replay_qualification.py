@@ -69,6 +69,7 @@ class ReplayTests(unittest.TestCase):
             for native in result['native_route_inventory']:
                 self.assertEqual(native['counter_totals']['total_routes'], 10)
                 self.assertEqual(native['resident_route_fraction_among_observed'], .6)
+                self.assertTrue(native['route_fraction_complete'])
                 self.assertEqual(native['worker_jobs']['gate_up_jobs'], 2)
             self.assertFalse(result['analysis']['software_output_fidelity_passed'])
             self.assertTrue(result['analysis']['indexed_telemetry_output_parity_observed'])
