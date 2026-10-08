@@ -38,11 +38,13 @@ jobs:
             exit 1
           fi
           test -r "$NINFER_WEIGHTS"
-          # The validated resident model is stored without a .ninfer suffix.
-          # NInfer's loader checks the supplied filename; never rename/copy 113 GB of weights.
-          ln -s -- "$NINFER_WEIGHTS" "$results/qualified-model.ninfer"
-          test -r "$results/qualified-model.ninfer"
-          printf 'Source: %s\nAlias: %s\n' "$NINFER_WEIGHTS" "$results/qualified-model.ninfer" > "$results/ninfer-artifact-alias.txt"
+          # The resident model lacks a .ninfer suffix. Keep the alias OUTSIDE
+          # the uploaded results directory: upload-artifact dereferences symlinks
+          # and otherwise uploads the entire 113 GB model.
+          alias_path="$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer"
+          ln -s -- "$NINFER_WEIGHTS" "$alias_path"
+          test -r "$alias_path"
+          printf 'Source: %s\nAlias: %s\n' "$NINFER_WEIGHTS" "$alias_path" > "$results/ninfer-artifact-alias.txt"
           test -x /opt/ai/strata/.venv/bin/python
           test -r /opt/ai/strata/strata-unsloth-ud-q4_k_xl.json
           installed_sha=$(git -c safe.directory=/opt/ai/strata -C /opt/ai/strata rev-parse HEAD)
@@ -105,7 +107,7 @@ jobs:
           set -euo pipefail
           python3 tools/telemetry/qualify_v100.py \
             --ninfer build-telemetry-qualification/apps/ninfer-serve \
-            --artifact "$QUALIFICATION_RESULTS/qualified-model.ninfer" --profile telemetry-profile-source/sv2-static-profile.json \
+            --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" --profile telemetry-profile-source/sv2-static-profile.json \
             --strata-python /opt/ai/strata/.venv/bin/python \
             --strata-server telemetry-strata-source/serve/server.py \
             --strata-config /opt/ai/strata/strata-unsloth-ud-q4_k_xl.json \
