@@ -35,6 +35,14 @@ unsigned flash_next_expert_stream_ring_slots() {
     throw std::invalid_argument("NINFER_V100_EXPERT_STREAM_RING_SLOTS must be 4 or 8");
 }
 
+bool flash_next_expert_stream_pipeline_reuse() {
+    const char* env = std::getenv("NINFER_V100_EXPERT_STREAM_SLOT_REUSE");
+    if (!env || !*env || std::string_view(env) == "blocking") return false;
+    if (std::string_view(env) == "pipelined") return true;
+    throw std::invalid_argument(
+        "NINFER_V100_EXPERT_STREAM_SLOT_REUSE must be blocking or pipelined");
+}
+
 std::size_t flash_next_expert_stream_device_bytes(unsigned maximum_routes) {
     if (!maximum_routes || maximum_routes > 8192U * 10U)
         throw std::invalid_argument("invalid prefill stream route capacity");
@@ -45,7 +53,8 @@ std::size_t flash_next_expert_stream_device_bytes(unsigned maximum_routes) {
 }
 
 FlashNextExpertStream::FlashNextExpertStream(unsigned maximum_routes)
-    : maximum_routes_(maximum_routes), ring_slots_(flash_next_expert_stream_ring_slots()) {
+    : maximum_routes_(maximum_routes), ring_slots_(flash_next_expert_stream_ring_slots()),
+      pipeline_reuse_(flash_next_expert_stream_pipeline_reuse()) {
     if (!maximum_routes || maximum_routes > 8192U*10U)
         throw std::invalid_argument("invalid prefill stream route capacity");
     const std::size_t descriptors = ((std::size_t(maximum_routes)+3)/4)*sizeof(FlashNextCachedExpertGroup);
@@ -94,7 +103,19 @@ void FlashNextExpertStream::submit(const HostNvfp4ExpertPairView& expert,
     for (const auto& r:routes)
         if (!r.input_bf16 || !r.output_fp32) throw std::invalid_argument("null prefill stream route");
     auto& s=slots_[next_];
-    if(s.pending) { CUDA_CHECK(cudaEventSynchronize(s.consumed)); s.pending=false; }
+    if (s.pending) {
+        if (pipeline_reuse_) {
+            // The host pinned buffers can be safely repacked once the previous
+            // upload has completed, even while the previous kernel executes.
+            // Guard the GPU destination with an event dependency rather than
+            // blocking the host until the previous compute also completes.
+            CUDA_CHECK(cudaEventSynchronize(s.ready));
+            CUDA_CHECK(cudaStreamWaitEvent(transfer_, s.consumed, 0));
+        } else {
+            CUDA_CHECK(cudaEventSynchronize(s.consumed));
+        }
+        s.pending = false;
+    }
     auto* host=static_cast<std::byte*>(s.host_weights->data());
     std::memcpy(host,expert.gate_up.codes,1'638'400);
     std::memcpy(host+1'638'400,expert.gate_up.scales,204'800);
