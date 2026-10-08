@@ -58,9 +58,11 @@ def inventory(archive, engine, level=1):
                 all_layer_route_coverage=complete,
                 counter_totals={name: totals[name] for name in (*ROUTES, *WEIGHT_COUNTERS)},
                 worker_jobs=dict(jobs),
-                resident_route_fraction=(totals['resident_routes'] / route_total if route_total and complete else None),
-                cpu_route_fraction=(totals['cpu_routes'] / route_total if route_total and complete else None),
+                resident_route_fraction_among_observed=(totals['resident_routes'] / route_total if route_total else None),
+                cpu_route_fraction_among_observed=(totals['cpu_routes'] / route_total if route_total else None),
+                route_fraction_complete=complete,
                 notes=['Cumulative counters are sums of observed round/layer work including prefill and verify.',
                        'Route totals are not normalized by accepted tokens, model quantization or prompt tokens.',
                        'cpu_weight_read_bytes is an engine counter, not measured physical memory bandwidth.',
+                       'Route fractions use only layers with observed route counts; coverage is explicitly reported.',
                        'Missing layers/routes or asynchronous cache events cannot be inferred from the totals.'])
