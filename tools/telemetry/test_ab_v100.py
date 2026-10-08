@@ -46,10 +46,10 @@ class ABV100Tests(unittest.TestCase):
     def test_affinity_is_only_allowed_node0_cpu_set(self):
         from unittest.mock import patch
         with patch('ab_v100.os.sched_getaffinity',return_value={0,1,3,7}), \
-             patch('ab_v100.Path.read_text',return_value='0-3,6-7\\n'):
+             patch('ab_v100.Path.read_text',return_value='0-3,6-7\n'):
             self.assertEqual(node0_allowed_cpus(),[0,1,3,7])
         with patch('ab_v100.os.sched_getaffinity',return_value={7}), \
-             patch('ab_v100.Path.read_text',return_value='0-7\\n'):
+             patch('ab_v100.Path.read_text',return_value='0-7\n'):
             with self.assertRaisesRegex(RuntimeError,'fewer than 2'):
                 node0_allowed_cpus()
 
