@@ -39,8 +39,9 @@ class QualificationTests(unittest.TestCase):
         for row in data:
             if row['engine'] == 'strata':
                 row['output_sha256'] = 'variant-a' if row['level'] != 1 else 'variant-b'
-        data[13]['output_sha256'] = 'variant-b'
-        data[16]['output_sha256'] = 'variant-a'
+        data[10]['output_sha256'] = 'variant-b'
+        data[12]['output_sha256'] = 'variant-a'
+        data[16]['output_sha256'] = 'variant-b'
         result = report(data)
         strata = next(row for row in result['engines'] if row['engine'] == 'strata')
         self.assertFalse(result['software_output_fidelity_passed'])
