@@ -32,8 +32,13 @@ They are not a claim that the engines have matched quantization or MTP policy.
 
 Known-work NInfer GPU cache and stream fixtures run at levels 0/1/2 before full
 model loading. A skip or error fails the job. Each engine then runs levels 0/1/2,
-alternating engine order, with two warmups and three measured requests per
-process. The identical greedy, seeded prompt requests 64 output tokens. Only
+alternating engine order, with five warmups and three measured requests per
+process (revised after run 37713168658 showed substantial Strata cache-warmup
+drift). The identical greedy, seeded prompt requests 64 output tokens. Strata's
+OpenAI frontend reads `chat_template_kwargs.enable_thinking=false`, not the
+top-level `enable_thinking=false` field; both are included for Strata and
+answer content is required so an accidental reasoning-only test cannot pass.
+Only
 one request is in flight. Models remain loaded for warmups/repeats; only this
 job's launched process groups are stopped between cells.
 
@@ -46,6 +51,10 @@ joining remains a gap, while GPU samples describe GPU0.
 
 The report checks exact content/reasoning/tool payload equality within each
 engine across telemetry levels and requires repeatable level-0 output. It
+separately reports preexisting baseline nondeterminism, hashes absent from
+baseline observations and first-to-last measured latency trends, without
+relaxing the exact-output gate. Measurements with >5% sequential request drift
+remain unqualified even if the nominal median overhead is small. It
 reports median HTTP-wall overhead and flags level-1 overhead at or above 2%,
 or sample ranges above 5%, as unqualified. It does not compare numerical outputs
 across quantizations, measure pure decode overhead, infer a GPU critical path,
