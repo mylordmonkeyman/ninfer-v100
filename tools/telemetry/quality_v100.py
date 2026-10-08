@@ -47,6 +47,56 @@ TASKS = [
                 'have? Answer with only the integer.',
          expected='27', kind='text'),
 ]
+
+# Held-out extensions beyond the initial eight-task smoke set. Each policy sees
+# identical prompts in identical order; no answer is tuned to one policy.
+EXTENDED_TASKS = [
+    dict(id='fraction',size='short',
+         prompt='What is three quarters of 80? Answer with only the integer.',
+         expected='60',kind='text'),
+    dict(id='modulo',size='short',
+         prompt='What is the remainder when 1001 is divided by 9? Answer with only the integer.',
+         expected='2',kind='text'),
+    dict(id='sort',size='short',
+         prompt='Sort 9, 3, 14, 5 ascending. What is the second smallest? Answer with only the integer.',
+         expected='5',kind='text'),
+    dict(id='logic',size='short',
+         prompt='P is false. Q is true. Is (P OR Q) true or false? Answer with only one word.',
+         expected='true',kind='text'),
+    dict(id='string',size='short',
+         prompt='What is the final character of the code AB-37K? Answer with only the character.',
+         expected='k',kind='text'),
+    dict(id='python_eval',size='short',
+         prompt='In Python, what integer does len([1, 2, 3]) * 4 evaluate to? Answer only the integer.',
+         expected='12',kind='text'),
+    dict(id='long_early_retrieval',size='long',
+         prompt='The archive seal is TUNDRA. '+FILLER+
+                ' What is the archive seal? Answer with only the word.',
+         expected='tundra',kind='text'),
+    dict(id='long_multistep_math',size='long',
+         prompt=FILLER+' Compute (12 multiplied by 7) minus 15. Answer with only the integer.',
+         expected='69',kind='text'),
+    dict(id='long_last_update',size='long',
+         prompt='The obsolete priority was BRONZE. '+FILLER+
+                ' The updated and final priority is EMERALD. '
+                'What is the final priority? Answer with only the word.',
+         expected='emerald',kind='text'),
+    dict(id='long_transfer',size='long',
+         prompt=FILLER+' Depot North has 18 crates and Depot South has 27. '
+                'Four crates move from South to North. '
+                'How many crates remain at South? Answer with only the integer.',
+         expected='23',kind='text'),
+    dict(id='long_json',size='long',
+         prompt=FILLER+' Return only a JSON object with exactly two fields: '
+                '"region" equal to "west" and "active" equal to true (a JSON boolean).',
+         expected={'region':'west','active':True},kind='json'),
+    dict(id='long_compare',size='long',
+         prompt=FILLER+' Station East processed 53 packages and Station West '
+                'processed 47. Which station processed more? '
+                'Answer with only "East" or "West".',
+         expected='east',kind='text'),
+]
+
 POLICIES = [
     ('static', {}),
     ('lru', {'NINFER_V100_EXPERT_POLICY':'lru'}),
@@ -155,7 +205,10 @@ def main():
     for name in ('ninfer','artifact','profile','output'):
         p.add_argument('--'+name,required=True,type=Path)
     p.add_argument('--repeats',type=int,default=2)
+    p.add_argument('--suite',choices=('smoke','extended'),default='smoke')
     args=p.parse_args()
+    if args.suite=='extended':
+        TASKS.extend(EXTENDED_TASKS)
     if args.repeats<2:
         p.error('at least 2 repetitions required')
     args.output.mkdir(parents=True,exist_ok=True)
@@ -179,7 +232,7 @@ def main():
         (args.output/'summary.json').write_text(json.dumps(results,indent=2)+'\n')
     with (args.output/'quality.md').open('w') as f:
         f.write('# NInfer V100 policy correctness smoke test\n\n')
-        f.write('Eight objective tasks, two repeats each; not a general accuracy benchmark.\n\n')
+        f.write(f'{len(TASKS)} objective tasks, {args.repeats} repeats each; not a general accuracy benchmark.\n\n')
         f.write('| Policy | Correct | Short | Long |\n|---|---:|---:|---:|\n')
         for r in results:
             if r['status']!='ok':
