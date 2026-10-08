@@ -25,6 +25,7 @@ CASES = [
     ('ninfer', 'cache-off', {'NINFER_FLASH_NEXT_EXPERT_CACHE': '0'}),
     ('ninfer', 'cache-lru', {'NINFER_V100_EXPERT_POLICY': 'lru'}),
     ('strata', 'cache-off', {'cache': '0'}),
+    ('strata', 'cache-4096', {'cache': '4096'}),
     ('ninfer', 'workers-16', {'NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS': '16'}),
     ('strata', 'workers-16', {'workers': '16'}),
     ('ninfer', 'prefill-no-group', {'NINFER_FLASH_NEXT_EXPERT_CACHE_GROUPED_PREFILL': '0'}),
