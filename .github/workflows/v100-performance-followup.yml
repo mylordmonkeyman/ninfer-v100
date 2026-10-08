@@ -1,4 +1,5 @@
 name: V100 Cache Residency Follow-up A/B
+# 10 fixed comparisons, filtered from the completed first A/B campaign.
 # Campaign 1: 13 sequential controlled cases; one GPU runner; no concurrent models.
 on:
   workflow_dispatch:
