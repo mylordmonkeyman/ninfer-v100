@@ -118,7 +118,7 @@ jobs:
             --strata-config /opt/ai/strata/strata-unsloth-ud-q4_k_xl.json \
             --strata-binary build-strata-telemetry-qualification/strata \
             --gpu-uuid "$(cat "$QUALIFICATION_RESULTS/gpu-uuid.txt")" \
-            --output "$QUALIFICATION_RESULTS/matrix" --warmups 2 --repeats 3 \
+            --output "$QUALIFICATION_RESULTS/matrix" --warmups 5 --repeats 3 \
             > "$QUALIFICATION_RESULTS/matrix-summary.log" 2>&1
           cat "$QUALIFICATION_RESULTS/matrix-summary.log" >> "$GITHUB_STEP_SUMMARY"
       - name: Guard uploaded evidence against large files and symlinks
