@@ -97,6 +97,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         payload=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         assert payload['temperature']==0 and payload['seed']==42 and payload['max_tokens']==64
+        assert payload['enable_thinking'] is False
+        if config:
+            assert payload['chat_template_kwargs'] == {'enable_thinking': False}
+        else:
+            assert 'chat_template_kwargs' not in payload
         if int(os.environ['V100_COMPARE_TELEMETRY_LEVEL']):
             record.update(level=int(os.environ['V100_COMPARE_TELEMETRY_LEVEL']),
                           run_id=os.environ['V100_COMPARE_RUN_ID'], round_id=str(Handler.counter),
