@@ -206,16 +206,31 @@ def main():
         p.add_argument('--'+name,required=True,type=Path)
     p.add_argument('--repeats',type=int,default=2)
     p.add_argument('--suite',choices=('smoke','extended'),default='smoke')
+    p.add_argument('--task',action='append',default=[],
+                   help='Restrict to an exact task ID; repeat for multiple tasks')
+    p.add_argument('--policy',action='append',default=[],
+                   help='Restrict to static, lru, lru-auto256, or static-repeat')
     args=p.parse_args()
     if args.suite=='extended':
         TASKS.extend(EXTENDED_TASKS)
+    if args.task:
+        unknown=set(args.task)-{t['id'] for t in TASKS}
+        if unknown: p.error('unknown tasks: '+', '.join(sorted(unknown)))
+        TASKS[:]=[t for t in TASKS if t['id'] in args.task]
+    selected_policies=POLICIES+[('static-repeat',{})]
+    if args.policy:
+        unknown=set(args.policy)-{name for name,_ in selected_policies}
+        if unknown: p.error('unknown policies: '+', '.join(sorted(unknown)))
+        selected_policies=[entry for entry in selected_policies if entry[0] in args.policy]
+    else:
+        selected_policies=POLICIES
     if args.repeats<2:
         p.error('at least 2 repetitions required')
     args.output.mkdir(parents=True,exist_ok=True)
     (args.output/'tasks.json').write_text(json.dumps(TASKS,indent=2)+'\n')
     results=[]
     try:
-        for name,overrides in POLICIES:
+        for name,overrides in selected_policies:
             if gpu_free_mib()<28000:
                 raise RuntimeError('V100 occupied; refusing to stop unrelated processes')
             try:
