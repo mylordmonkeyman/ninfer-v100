@@ -3,6 +3,7 @@
 #include "targets/qwen3_8_flash_next/impl/expert_stream.h"
 #include "targets/qwen3_8_flash_next/impl/stream_order.h"
 #include "targets/qwen3_8_flash_next/impl/stream_fraction.h"
+#include "targets/qwen3_8_flash_next/impl/stream_admission.h"
 #include "targets/qwen3_8_flash_next/impl/route_handoff.h"
 #include "targets/qwen3_8_flash_next/impl/route_handoff_policy.h"
 #include "targets/qwen3_8_flash_next/impl/stream_diagnostics.h"
@@ -395,6 +396,9 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     const bool stream_cpu_fallback = stream_experts &&
         (expert_stream_min_routes > 1 || stream_fraction < 1.0 ||
          prefill_stream_min_routes > 1);
+    const bool streamed_prefill_admit_hot = prefill && stream_experts && cache &&
+        flash_next_stream_prefill_admit_hot(
+            std::getenv("NINFER_V100_PREFILL_STREAM_ADMIT"));
     if (route_handoff && (!device_route_combine || stream_experts)) {
         throw std::invalid_argument(
             "route handoff requires device combine and BF16 CPU-cache expert execution");
@@ -716,10 +720,25 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         std::chrono::duration<double, std::micro>(cpu_finished-cpu_started).count(),
         gpu_us, wait_us,
         branch_wall_us);
-    // Admission is background work and cannot make a miss a current-token GPU dependency.
-    if (cache != nullptr && (!stream_experts || !prefill) &&
-        !use_routed_expert_input_fp32 && !resolve_fp32_intermediate_diagnostic())
-        cache->admit(layer, cpu.ids);
+    // Background admissions cannot affect this layer's already classified
+    // routes. Streaming prefill normally disables admissions to avoid extra H2D
+    // contention; this explicit opt-in chooses just one of this layer's hottest
+    // nonresident experts to improve residency across repeated long prompts.
+    if (cache != nullptr && !use_routed_expert_input_fp32 &&
+        !resolve_fp32_intermediate_diagnostic()) {
+        if (streamed_prefill_admit_hot) {
+            std::array<std::size_t, 512> missed_counts{};
+            for (std::size_t id = 0; id < streamed_routes.size(); ++id)
+                missed_counts[id] = streamed_routes[id].size();
+            const int candidate = flash_next_stream_prefill_admit_candidate(missed_counts);
+            if (candidate >= 0) {
+                const std::int32_t expert_id = candidate;
+                cache->admit(layer, std::span(&expert_id, 1));
+            }
+        } else if (!stream_experts || !prefill) {
+            cache->admit(layer, cpu.ids);
+        }
+    }
 
     if (!device_route_combine) {
         for (std::int32_t token = 0; token < tokens; ++token) {
