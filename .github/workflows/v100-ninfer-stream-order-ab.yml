@@ -1,6 +1,7 @@
 name: V100 NInfer Expert Stream Order Performance A/B
 # Three serial controls: ID-order default, busy-first expert stream scheduling, ID-order repeat.
 # Identical four-slot H2D/compute ring across cases; only expert group submission order differs.
+# Four-versus-eight ring A/B is complete; keep four slots and test busy-first ordering.
 # No quantization changes or unrelated hardware jobs.
 # Benchmarks launch only after MTP and hosted ring software validation passed.
 
