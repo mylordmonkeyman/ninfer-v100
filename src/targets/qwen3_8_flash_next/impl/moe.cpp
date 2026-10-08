@@ -1,6 +1,7 @@
 #include "targets/qwen3_8_flash_next/impl/moe.h"
 #include "targets/qwen3_8_flash_next/impl/expert_cache.h"
 #include "targets/qwen3_8_flash_next/impl/expert_stream.h"
+#include "targets/qwen3_8_flash_next/impl/stream_order.h"
 #include "targets/qwen3_8_flash_next/impl/route_handoff.h"
 #include "targets/qwen3_8_flash_next/impl/route_handoff_policy.h"
 #include "targets/qwen3_8_flash_next/impl/stream_diagnostics.h"
@@ -84,6 +85,15 @@ bool resolve_cpu_expert_grouping() {
 bool resolve_route_handoff(bool prefill) {
     const char* env = std::getenv("NINFER_V100_ROUTE_HANDOFF");
     return route_handoff_enabled(env ? std::string_view(env) : std::string_view{}, prefill);
+}
+
+// Experimental schedule only; the default stream submission order is unchanged.
+bool resolve_stream_expert_busy_first() {
+    const char* policy = std::getenv("NINFER_V100_STREAM_EXPERT_ORDER");
+    if (!policy || !*policy || std::string_view(policy) == "id") return false;
+    if (std::string_view(policy) == "busy-first") return true;
+    throw std::invalid_argument(
+        "NINFER_V100_STREAM_EXPERT_ORDER must be id or busy-first");
 }
 
 bool resolve_device_route_combine() {
@@ -597,9 +607,14 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         // Their leases remain held until the common compute stream has completed.
         if (cache) cache->begin_device_results(stream);
         stream_hits_submitted = true;
-        for (std::size_t expert_id = 0; expert_id < streamed_routes.size(); ++expert_id) {
+        std::array<std::size_t, 512> stream_route_counts{};
+        for (std::size_t expert_id = 0; expert_id < streamed_routes.size(); ++expert_id)
+            stream_route_counts[expert_id] = streamed_routes[expert_id].size();
+        const auto stream_order = flash_next_stream_expert_order(
+            stream_route_counts, resolve_stream_expert_busy_first());
+        for (unsigned entry = 0; entry < stream_order.size; ++entry) {
+            const std::size_t expert_id = stream_order.ids[entry];
             auto& routes = streamed_routes[expert_id];
-            if (routes.empty()) continue;
             const bool use_gpu = stream_fraction < 1.0 ? selected[expert_id] :
                 routes.size() >= expert_stream_min_routes;
             if (use_gpu) {
