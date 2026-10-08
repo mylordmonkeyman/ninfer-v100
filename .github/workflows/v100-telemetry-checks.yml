@@ -34,8 +34,30 @@ jobs:
           done
           g++ -std=c++20 -O2 -Wall -Wextra -Werror -Isrc \
             tests/targets/qwen3_8_flash_next/test_compare_telemetry.cpp -o /tmp/compare-telemetry
-          V100_COMPARE_TELEMETRY_LEVEL=1 /tmp/compare-telemetry > /tmp/compare-record.json 2>/tmp/compare-records.jsonl
-          python3 tools/telemetry/validate_records.py /tmp/compare-records.jsonl
+          for level in 1 2; do
+            V100_COMPARE_TELEMETRY_LEVEL="$level" /tmp/compare-telemetry \
+              > "/tmp/compare-record-$level.json" 2> "/tmp/compare-records-$level.jsonl"
+            python3 tools/telemetry/validate_records.py "/tmp/compare-records-$level.jsonl"
+            TEST_LEVEL="$level" python3 - <<'PYTEST'
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, 'tools/telemetry')
+          from validate_records import read_records
+          level = int(os.environ['TEST_LEVEL'])
+          raw = Path(f'/tmp/compare-records-{level}.jsonl').read_text()
+          parsed = [json.loads(line) for line in raw.splitlines()]
+          recorded = [layer for record in parsed for layer in record['layers']
+                      if 'workers_compact' in layer or 'workers' in layer]
+          assert recorded, 'fixture did not exercise actual worker output'
+          assert all(('workers_compact' in layer) == (level == 1) for layer in recorded)
+          canonical = read_records(f'/tmp/compare-records-{level}.jsonl')
+          workers = [worker for record in canonical for layer in record['layers']
+                     for worker in layer.get('workers', [])]
+          assert workers and sum(w['gate_up_jobs'] for w in workers) == 2
+          assert all('workers_compact' not in layer for record in canonical
+                     for layer in record['layers'])
+          PYTEST
+          done
           git diff --check
       - name: Check NInfer CPU outputs and actual worker accounting
         run: |
