@@ -1,6 +1,7 @@
 name: V100 NInfer Modulo Regression Qualification
 # Four serial policy instances, two targeted tasks x twelve repeats; focused modulo regression.
 # Single hardware job, same weights/quantization and expert cache capacity.
+# Focused diagnosis: 12 repeats of modulo and sorting, including static repeat.
 # Initial 8-task suite passed 48/48 across three policies; this extends to 20 tasks.
 on:
   workflow_dispatch:
