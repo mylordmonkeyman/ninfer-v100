@@ -66,6 +66,42 @@ class SchemaTests(unittest.TestCase):
         r = fixture(); r['layers'].append(copy.deepcopy(r['layers'][0]))
         with self.assertRaisesRegex(ValueError, 'duplicate'): validate(r)
 
+    def test_compact_level1_workers_expand_losslessly(self):
+        r = fixture()
+        raw = [[7, 0, 0, 2, 3, 5, 8],
+               [7, 1, 0, 2, 0, 0, 0],
+               [7, 2, 1, 2, 0, 0, 0]]
+        r['layers'][0]['workers_compact'] = raw
+        result = validate(r)
+        workers = result['layers'][0]['workers']
+        self.assertNotIn('workers_compact', result['layers'][0])
+        self.assertEqual(len(workers), 3)
+        self.assertEqual([w['role'] for w in workers], ['worker', 'worker', 'host'])
+        self.assertEqual([w['worker_id'] for w in workers], [0, 1, 2])
+        self.assertEqual(sum(w['gate_up_jobs'] for w in workers), 5)
+        self.assertEqual(workers[1]['full_jobs'], 0)
+        # Canonical decoded records may be validated again.
+        validate(result)
+        reference = fixture()
+        reference['layers'][0]['workers'] = workers
+        self.assertEqual(result, reference)
+
+    def test_compact_worker_malformed_or_level2_is_rejected(self):
+        variants = ([[0, 0, 0, 2, 1, 2]],  # missing seventh field
+                    [[0, 0, 2, 2, 1, 2, 3]],  # invalid role
+                    [[0, 0, 0, 2, 1, 2, 3], [0, 0, 0, 2, 1, 2, 3]])
+        for value in variants:
+            r = fixture()
+            r['layers'][0]['workers_compact'] = value
+            with self.assertRaises(ValueError): validate(r)
+        r = fixture(); r['level'] = 2
+        r['layers'][0]['workers_compact'] = [[0, 0, 0, 1, 0, 0, 0]]
+        with self.assertRaisesRegex(ValueError, 'Level-1 only'): validate(r)
+        r = fixture()
+        r['layers'][0]['workers'] = []
+        r['layers'][0]['workers_compact'] = [[0, 0, 0, 1, 0, 0, 0]]
+        with self.assertRaisesRegex(ValueError, 'mutually exclusive'): validate(r)
+
     def test_worker_coverage(self):
         r = fixture()
         w = dict(pool_id=0, worker_id=4, role='host', configured_workers=4,
