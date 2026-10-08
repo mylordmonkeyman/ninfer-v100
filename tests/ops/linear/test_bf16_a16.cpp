@@ -104,7 +104,9 @@ int run_bf16_linear_case(DeviceWeight& weight, std::int32_t tokens,
     if (use_convenience_entry) {
         ops::linear(x, weight.view(), output, nullptr);
     } else {
-        DeviceArena workspace(256);
+        const auto required = ops::linear_workspace_capacity_bytes(
+            QType::BF16_CTRL, rows, hidden, ops::LinearPolicy::A16Only, tokens, tokens);
+        DeviceArena workspace(std::max<std::size_t>(256, required));
         ops::linear(x, weight.view(), output, ops::LinearPolicy::A16Only, workspace, nullptr);
     }
     cuda_synchronize();
@@ -356,7 +358,17 @@ int main(int argc, char** argv) {
 
     try {
         int failures = 0;
-        if (argc == 2 && std::string_view(argv[1]) == "--orcarouter-only") {
+        if (argc == 2 && std::string_view(argv[1]) == "--sv7-pilot-only") {
+            // Small real registered BF16 projection shapes. Run separately
+            // with NINFER_V100_SV7_FP16_TC=0 and =1, retaining existing FP64
+            // sampled-row reduction criteria and guards.
+            DeviceWeight qsa(make_patterned(640, 2560, 423U));
+            for (int t : {128, 512}) failures += run_bf16_linear_case(qsa, t);
+            DeviceWeight ple(make_patterned(2560, 2560, 421U));
+            for (int t : {128, 512}) failures += run_bf16_linear_case(ple, t);
+            DeviceWeight shared(make_patterned(2560, 640, 424U));
+            for (int t : {128, 512}) failures += run_bf16_linear_case(shared, t);
+        } else if (argc == 2 && std::string_view(argv[1]) == "--orcarouter-only") {
             DeviceWeight head(make_patterned(248320, 5120, 449U));
             for (const int tokens : {1, 2, 8, 9, 33, 129}) {
                 failures += run_bf16_linear_case(head, tokens);
