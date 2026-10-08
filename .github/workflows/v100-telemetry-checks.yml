@@ -59,6 +59,12 @@ jobs:
           PYTEST
           done
           git diff --check
+      - name: Verify optional expert streaming work-priority order
+        run: |
+          g++ -std=c++20 -O2 -Wall -Wextra -Werror -Isrc \
+            tests/targets/qwen3_8_flash_next/test_stream_order.cpp \
+            -o /tmp/ninfer-stream-order
+          /tmp/ninfer-stream-order
       - name: Check NInfer CPU outputs and actual worker accounting
         run: |
           g++ -std=c++20 -O2 -pthread -Isrc -Iinclude -Ithird_party \
