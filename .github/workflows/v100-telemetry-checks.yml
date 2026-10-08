@@ -71,6 +71,12 @@ jobs:
             tests/targets/qwen3_8_flash_next/test_stream_fraction.cpp \
             -o /tmp/ninfer-stream-fraction
           /tmp/ninfer-stream-fraction
+      - name: Verify opt-in prefill cache admission hotspot selection
+        run: |
+          g++ -std=c++20 -O2 -Wall -Wextra -Werror -Isrc \
+            tests/targets/qwen3_8_flash_next/test_stream_admission.cpp \
+            -o /tmp/ninfer-stream-admission
+          /tmp/ninfer-stream-admission
       - name: Check NInfer CPU outputs and actual worker accounting
         run: |
           g++ -std=c++20 -O2 -pthread -Isrc -Iinclude -Ithird_party \
