@@ -138,7 +138,8 @@ def require_gpu_headroom():
 
 def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                prefill_screen=False, cpu_group_screen=False, route_handoff_screen=False,
-               route_handoff_policy="all", qsa_score_screen=False, diagnostic=False, qsa_score_attribution=False):
+               route_handoff_policy="all", qsa_score_screen=False, diagnostic=False, qsa_score_attribution=False,
+               sv7_tc_screen=False):
     require_gpu_headroom()
     name = f'{mode}-mtp{int(mtp)}-{repeat}'
     log_path, request_path = output/f'{name}.log', output/f'{name}-requests.jsonl'
@@ -152,7 +153,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                 key.startswith('NINFER_V100_PLE_') or
                 key == 'NINFER_FLASH_NEXT_QSA_PREFILL_MMA'):
             env.pop(key)
-    large_prefill = prefill_screen or cpu_group_screen or route_handoff_screen or qsa_score_screen
+    large_prefill = prefill_screen or cpu_group_screen or route_handoff_screen or qsa_score_screen or sv7_tc_screen
     env.update(NINFER_V100_ROUTE_HANDOFF=('prefill' if route_handoff_policy == 'prefill' else '1')
                if route_handoff_screen and mode == 'handoff' else '0',
                NINFER_V100_DEVICE_ROUTE_COMBINE='1' if large_prefill or mode == 'device' else '0',
@@ -168,6 +169,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                NINFER_V100_QSA_SCORE_MMA_MIN_QSA='6' if qsa_score_screen and mode=='score-mma' else '0',
                NINFER_V100_QSA_SCORE_COMPARE='1' if qsa_score_attribution else '0',
                NINFER_V100_PLE_IO='mmap',
+               NINFER_V100_SV7_FP16_TC=('1' if mode == 'fp16-tc' else '0') if sv7_tc_screen else env.get('NINFER_V100_SV7_FP16_TC','0'),
                NINFER_FLASH_NEXT_STAGE_LEDGER='0',NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT='0',
                NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE='0')
     # Bind only a loopback port. The subprocess is the only process this tool stops.
@@ -237,6 +239,10 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
     events=[json.loads(line) for line in request_path.read_text().splitlines() if line.strip()]
     done=validate_events(events,responses,mtp,large_prefill)
     text=log_path.read_text()
+    if sv7_tc_screen:
+        actual = 'sv7.fp16_tc.dispatch=1' in text
+        if actual != (mode == 'fp16-tc'):
+            raise ValueError(f'{name}: SV7 FP16 TC actual dispatch={actual}; expected={mode == "fp16-tc"}')
     dispatch=validate_qsa_dispatch(text,mode) if qsa_score_screen and diagnostic else None
     comparisons=validate_qsa_comparisons(text,dispatch) if qsa_score_attribution else None
     slots=re.findall(r'phase13.cache.slots_per_layer=(\d+)',text)
@@ -271,6 +277,8 @@ def main():
                         help='compare serial/route-ready with grouping enabled in both arms')
     parser.add_argument('--route-handoff-policy',choices=('all','prefill'),default='all',
                         help='phase eligibility for the route-ready candidate; serial control remains off')
+    parser.add_argument('--sv7-tc-screen',action='store_true',
+                        help='compare opt-in FP16 tensor-core BF16 projection against SIMT in production HTTP')
     parser.add_argument('--qsa-score-screen',action='store_true',
                         help='compare SIMT/MMA FP8 KV scores with actual large dispatch evidence')
     parser.add_argument('--qsa-score-attribution',action='store_true',
@@ -279,7 +287,7 @@ def main():
     args=parser.parse_args()
     if args.artifact.suffix != '.ninfer' or not args.artifact.is_file():
         parser.error('--artifact requires an explicit readable .ninfer file')
-    if sum((args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,args.qsa_score_screen,args.qsa_score_attribution)) > 1:
+    if sum((args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,args.qsa_score_screen,args.qsa_score_attribution,args.sv7_tc_screen)) > 1:
         parser.error('performance screen flags are mutually exclusive')
     if args.repeats<3: parser.error('need three fresh-process observations per arm')
     args.output.mkdir(parents=True,exist_ok=True)
@@ -295,7 +303,9 @@ def main():
                                  'failed exact continuation screen remains failed; no timing or MTP qualification']))
         print(f"Same-input real QSA sampled FP64 checks passed: {len(row['qsa_comparisons'])} eligible calls; no serving qualification",flush=True)
         return
-    if args.qsa_score_screen:
+    if args.sv7_tc_screen:
+        modes=('bf16-simt','fp16-tc')
+    elif args.qsa_score_screen:
         modes=('simt','score-mma')
     elif args.route_handoff_screen:
         modes=('serial','handoff')
@@ -320,14 +330,15 @@ def main():
             for mode in (modes if repeat%2==0 else tuple(reversed(modes))):
                 row=run_server(args.executable,args.artifact,args.profile,args.output,mode,mtp,
                                repeat,args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,
-                               args.route_handoff_policy,qsa_score_screen=args.qsa_score_screen)
+                               args.route_handoff_policy,qsa_score_screen=args.qsa_score_screen,
+                               sv7_tc_screen=args.sv7_tc_screen)
                 observations.append(row); atomic_json(args.output/'observations.json',observations)
                 peers=[r for r in observations if r['mtp']==mtp]
                 same_mode=[r for r in peers if r['mode']==mode]
                 if any(r['response_signatures']!=same_mode[0]['response_signatures']
                        for r in same_mode):
                     raise ValueError('same-path fresh-process greedy response or finish accounting differs')
-                if (not args.qsa_score_screen and
+                if (not (args.qsa_score_screen or args.sv7_tc_screen) and
                         any(r['response_signatures']!=peers[0]['response_signatures'] for r in peers)):
                     raise ValueError('cross-path greedy production response or finish accounting differs')
                 if args.route_handoff_screen:
@@ -335,7 +346,7 @@ def main():
                 if len({r['cache_bytes'] for r in peers})!=1:
                     raise ValueError('production cache capacity differs between paths')
     cross_path_response_matches=[]
-    if args.qsa_score_screen:
+    if args.qsa_score_screen or args.sv7_tc_screen:
         for repeat in range(args.repeats):
             for mtp in (False,True):
                 pair=[r for r in observations if r['repeat']==repeat and r['mtp']==mtp]
@@ -374,11 +385,13 @@ def main():
              'production_http_prefix_mtp_screen')))
     if args.qsa_score_screen:
         milestone='SV7';scope='production_http_fp8_qsa_score_prefix_mtp_screen'
+    if args.sv7_tc_screen:
+        milestone='SV7';scope='production_http_bf16_fp16_tc_prefix_mtp_screen'
     report=dict(schema=1,milestone=milestone,scope=scope,qualified=False,
                 route_handoff_policy=args.route_handoff_policy if args.route_handoff_screen else None,
                 candidate_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),results=results,
                 exact_compared_responses=(all(x['exact'] for x in cross_path_response_matches)
-                                          if args.qsa_score_screen else True),
+                                          if args.qsa_score_screen or args.sv7_tc_screen else True),
                 diagnostic_cross_path_exact=diagnostic_cross_path_exact,
                 cross_path_response_matches=cross_path_response_matches,
                 limitations=[
@@ -392,7 +405,11 @@ def main():
                      if args.route_handoff_screen else []) +
                     (['attention remains opt-in; dispatch diagnostics are excluded from timing; paired 4096-position accuracy admission is separate',
                        'cross-path greedy text and MTP accept-count differences are diagnostic, while same-path replay/accounting remain hard gates']
-                     if args.qsa_score_screen else []))
+                     if args.qsa_score_screen else []) +
+                    (['SV7 FP16 TensorOp candidate is opt-in; actual dispatch verified in server log',
+                      'cross-path greedy differences are diagnostic only, not numerical qualification; same-mode replay and accounting remain hard gates',
+                      'short-context single-request profile; independent full-model oracle and long-prefix validation still required']
+                     if args.sv7_tc_screen else []))
     atomic_json(args.output/'report.json',report)
     lines=['Production HTTP prefill/prefix/MTP screen; defaults unchanged.','',
            '| Mode | MTP | Request | TTFT s median (range) | Prefill t/s median | Decode t/s median (range) |','|---|---|---|---:|---:|---:|']
