@@ -1,4 +1,5 @@
 name: V100 SV7 Opt-in FP16 Tensor-Core Pilot
+# Explicit one-shot isolated SM70 pilot after hosted conversion and syntax checks passed.
 on:
   push:
     branches: [perf/v100-strata-derived]
