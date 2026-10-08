@@ -1,0 +1,147 @@
+name: V100 NInfer Prefill Fraction A/B
+# Six serial controls: full-GPU baseline, GPU75, GPU70, GPU60, GPU50, baseline repeat.
+# Same frozen weights, quant, profile, cache slots and MTP=1; only the long-prefill CPU/GPU split changes.
+# Do not launch concurrently with another V100 hardware job or modify the resident model.
+# Hosted Python, CPU, and CUDA host checks passed; one protected GPU run.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [perf/v100-strata-derived]
+    paths: ['.github/workflows/v100-ninfer-prefill-fraction-ab.yml']
+permissions:
+  contents: read
+  actions: read
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 32
+jobs:
+  hardware:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[v100:ninfer-prefill-fraction-ab]')) }}
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    concurrency:
+      group: v100-sv0-hardware
+      cancel-in-progress: false
+    timeout-minutes: 180
+    env:
+      CUDA_VISIBLE_DEVICES: '0'
+      NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          clean: false
+      - name: Freeze environment and check existing assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          results="$GITHUB_WORKSPACE/ninfer-prefill-fraction-ab-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir "$results"
+          echo "AB_RESULTS=$results" >> "$GITHUB_ENV"
+          free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits | tr -d '[:space:]')
+          if (( free_mib < 28000 )); then
+            echo "::error::V100 is occupied ($free_mib MiB free); no unrelated process was stopped."
+            exit 1
+          fi
+          test -r "$NINFER_WEIGHTS"
+          # The resident model lacks a .ninfer suffix. Keep the alias OUTSIDE
+          # the uploaded results directory: upload-artifact dereferences symlinks
+          # and otherwise uploads the entire 113 GB model.
+          alias_path="$RUNNER_TEMP/ab-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer"
+          ln -s -- "$NINFER_WEIGHTS" "$alias_path"
+          test -r "$alias_path"
+          printf 'Source: %s\nAlias: %s\n' "$NINFER_WEIGHTS" "$alias_path" > "$results/ninfer-artifact-alias.txt"
+          stat "$NINFER_WEIGHTS" > "$results/ninfer-model-stat.txt"
+          nvidia-smi -q > "$results/gpu.txt"
+          numactl --hardware > "$results/numa.txt"
+          lscpu > "$results/cpu.txt"
+          /usr/local/cuda-12.8/bin/nvcc --version > "$results/cuda.txt"
+          nvidia-smi --id=0 --query-gpu=uuid --format=csv,noheader | tr -d '[:space:]' > "$results/gpu-uuid.txt"
+      - name: Download existing validated resident profile
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: v100-sv2-37270512213-1
+          run-id: 37270512213
+          github-token: ${{ github.token }}
+          path: telemetry-profile-source
+      - name: Build frozen NInfer once
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-ninfer-prefill-fraction-ab -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-ninfer-prefill-fraction-ab --target ninfer-serve \
+            ninfer_qwen3_8_flash_next_expert_cache_test ninfer_qwen3_8_flash_next_expert_stream_test
+          cp build-ninfer-prefill-fraction-ab/CMakeCache.txt "$AB_RESULTS/ninfer-CMakeCache.txt"
+      - name: Validate known GPU expert work before loading full models
+        shell: bash
+        run: |
+          set -euo pipefail
+          for level in 0 1 2; do
+            for fixture in expert_cache expert_stream; do
+              V100_COMPARE_TELEMETRY_LEVEL="$level" V100_COMPARE_RUN_ID="fixture-${fixture}-l${level}" \
+                "build-ninfer-prefill-fraction-ab/tests/ninfer_qwen3_8_flash_next_${fixture}_test" \
+                > "$AB_RESULTS/${fixture}-l${level}.log" 2>&1
+            done
+          done
+      - name: Run six serial full-GPU/fraction/fraction/fraction/fraction/full-GPU controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Each case starts ONE engine; the prior case's process group must be
+          # fully unloaded before the next case. Never stop unrelated processes.
+          trap 'rc=$?; echo "::error::A/B campaign stopped (exit $rc)"; tail -65 "$AB_RESULTS/console.log" 2>/dev/null || true; exit "$rc"' ERR
+          python3 tools/telemetry/ab_v100.py \
+            --ninfer build-ninfer-prefill-fraction-ab/apps/ninfer-serve \
+            --artifact "$RUNNER_TEMP/ab-model-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.ninfer" \
+            --profile telemetry-profile-source/sv2-static-profile.json \
+            --strata-python /opt/ai/strata/.venv/bin/python \
+            --strata-server telemetry-strata-source/serve/server.py \
+            --strata-config /opt/ai/strata/strata-unsloth-ud-q4_k_xl.json \
+            --strata-binary build-strata-ninfer-prefill-auto/strata \
+            --gpu-uuid "$(cat "$AB_RESULTS/gpu-uuid.txt")" \
+            --output "$AB_RESULTS/campaign" --warmups 5 --repeats 3 --max-output-tokens 64 --reference-variant lru-prefill-auto256 --case ninfer/lru-prefill-auto256 --case ninfer/lru-auto256-gpu75 --case ninfer/lru-auto256-gpu70 --case ninfer/lru-auto256-gpu60 --case ninfer/lru-auto256-gpu50 --case ninfer/lru-auto256-repeat \
+            | tee "$AB_RESULTS/console.log"
+          python3 - <<'PYREPORT'
+          import json,os
+          from pathlib import Path
+          out=Path(os.environ['AB_RESULTS'])/'campaign'
+          ratios=json.loads((out/'ratios.json').read_text())
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:
+              print('### Bounded prefill GPU-fraction A/B (same NInfer build/model)',file=f)
+              print('| Engine | Variant | Prompt | Median HTTP seconds | Relative speedup |',file=f)
+              print('|---|---|---|---:|---:|',file=f)
+              for r in ratios:
+                  print(f"| {r['engine']} | {r['variant']} | {r['prompt']} | {r['median_wall_s']:.2f} | {r['speedup_vs_same_engine_baseline']:.3f}x |",file=f)
+              print('Same NInfer weights, cache slots, MTP=1 and GPU ring; only the long-prefill nonresident CPU/GPU split changes.',file=f)
+          PYREPORT
+      - name: Guard uploaded evidence against large files and symlinks
+        id: upload_guard
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          folder="$GITHUB_WORKSPACE/ninfer-prefill-fraction-ab-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [[ ! -d "$folder" ]]; then
+            echo "safe=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No evidence directory was created."
+            exit 0
+          fi
+          # Symlinks are never needed in a diagnostic artifact; never dereference a model.
+          find "$folder" -type l -print -delete
+          bytes="$(du -sb -- "$folder" | cut -f1)"
+          echo "Diagnostic artifact source size: ${bytes} bytes"
+          if (( bytes >= 1073741824 )); then
+            echo "safe=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Diagnostic bundle exceeds the 1 GiB safety limit; refusing upload."
+            exit 0
+          fi
+          echo "safe=true" >> "$GITHUB_OUTPUT"
+      - name: Preserve all evidence including partial failures
+        if: ${{ always() && steps.upload_guard.outputs.safe == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-ninfer-prefill-fraction-ab-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ninfer-prefill-fraction-ab-${{ github.run_id }}-${{ github.run_attempt }}/
+          retention-days: 30
+          if-no-files-found: warn

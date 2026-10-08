@@ -79,6 +79,21 @@ CASES = [
         'NINFER_V100_PREFILL_STREAM_MIN_TOKENS':'256',
         'NINFER_V100_DEVICE_ROUTE_COMBINE':'1',
         'NINFER_V100_PREFILL_EXPERT_STREAM_FRACTION':'0.75'}),
+    ('ninfer','lru-auto256-gpu70', {'NINFER_V100_EXPERT_POLICY':'lru',
+        'NINFER_V100_PREFILL_EXPERT_POLICY':'auto',
+        'NINFER_V100_PREFILL_STREAM_MIN_TOKENS':'256',
+        'NINFER_V100_DEVICE_ROUTE_COMBINE':'1',
+        'NINFER_V100_PREFILL_EXPERT_STREAM_FRACTION':'0.70'}),
+    ('ninfer','lru-auto256-gpu60', {'NINFER_V100_EXPERT_POLICY':'lru',
+        'NINFER_V100_PREFILL_EXPERT_POLICY':'auto',
+        'NINFER_V100_PREFILL_STREAM_MIN_TOKENS':'256',
+        'NINFER_V100_DEVICE_ROUTE_COMBINE':'1',
+        'NINFER_V100_PREFILL_EXPERT_STREAM_FRACTION':'0.60'}),
+    ('ninfer','lru-auto256-gpu50', {'NINFER_V100_EXPERT_POLICY':'lru',
+        'NINFER_V100_PREFILL_EXPERT_POLICY':'auto',
+        'NINFER_V100_PREFILL_STREAM_MIN_TOKENS':'256',
+        'NINFER_V100_DEVICE_ROUTE_COMBINE':'1',
+        'NINFER_V100_PREFILL_EXPERT_STREAM_FRACTION':'0.50'}),
     ('ninfer','lru-auto256-repeat',{'NINFER_V100_EXPERT_POLICY': 'lru',
         'NINFER_V100_PREFILL_EXPERT_POLICY': 'auto',
         'NINFER_V100_PREFILL_STREAM_MIN_TOKENS': '256',
@@ -274,7 +289,7 @@ def run_case(args, engine, variant, overrides):
                 raise TimeoutError(f'{tag}: model did not become ready in 600s')
             sampler = subprocess.Popen([sys.executable, str(Path(__file__).with_name('sample_system.py')),
                 '--pid', str(proc.pid), '--engine', engine, '--run-id', tag, '--level', '1',
-                '--gpu-uuid', args.gpu_uuid, '--interval-ms', '500',
+                '--gpu-uuid', args.gpu_uuid, '--interval-ms', '200',
                 '--output', str(folder/'system.jsonl')])
             # The five long-prompt warmups build expert/cache residency.
             schedule = [('warmup', 'long')]*args.warmups + [
