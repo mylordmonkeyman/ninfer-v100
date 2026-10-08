@@ -16,6 +16,9 @@ class ABV100Tests(unittest.TestCase):
         self.assertIn(('strata', 'cache-off'), names)
         self.assertIn(('strata', 'cache-4096'), names)
         self.assertIn(('ninfer', 'cache-lru'), names)
+        self.assertIn(('ninfer', 'lru-admission-2'), names)
+        self.assertIn(('ninfer', 'lru-prefill-stream'), names)
+        self.assertIn(('ninfer', 'profile-prior-50'), names)
         self.assertIn(('ninfer', 'workers-16'), names)
         self.assertIn(('strata', 'workers-16'), names)
         self.assertIn(('ninfer', 'prefill-no-group'), names)
@@ -27,7 +30,10 @@ class ABV100Tests(unittest.TestCase):
                          [('ninfer', 'baseline-repeat'), ('strata', 'baseline-repeat')])
         for _, name, overrides in CASES:
             self.assertEqual(bool(overrides), name not in ('baseline', 'baseline-repeat'))
-            self.assertLessEqual(len(overrides), 1)
+            if name in ('lru-admission-2','lru-prefill-stream','profile-prior-50'):
+                self.assertIn('NINFER_V100_EXPERT_POLICY', overrides)
+            else:
+                self.assertLessEqual(len(overrides), 1)
 
     def test_flags_replace_existing_preserve_native_assets(self):
         baseline=['--pack','/model/pack','--native','/model/original.gguf',
