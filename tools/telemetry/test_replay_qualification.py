@@ -45,7 +45,7 @@ def make_zip(path, corrupt=False):
                    engine=engine, level=1, phase='verify', layers=[layer],
                    context=dict(input_columns=1))
         log_name = ('server.log' if engine == 'ninfer' else 'native-engine.log')
-        files[f'matrix/qualification-{engine}-l1/{log_name}'] = json.dumps(raw) + '\\n'
+        files[f'matrix/qualification-{engine}-l1/{log_name}'] = json.dumps(raw) + '\n'
     files['matrix/manifest.json'] = json.dumps(dict(warmups=warmups, repeats=repeats))
     files['matrix/summary.json'] = json.dumps(report(rows if not corrupt else [
         dict(r, output_sha256=hashlib.sha256(json.dumps(
