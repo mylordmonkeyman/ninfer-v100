@@ -134,6 +134,15 @@ Observed layers may contain `workers`, keyed by engine/process-local `pool_id`,
 `worker_id` and `role=worker|host`. `configured_workers` is the pool's setting,
 not the number that claimed jobs; actual participants have a positive job count.
 Idle configured workers in an observed batch are included with zero job counts.
+On the raw Level-1 JSONL wire only, engines may instead use `workers_compact`
+rather than `workers`. Each tuple has exactly seven integer fields in order:
+`[pool_id, worker_id, role_is_host, configured_workers, full_jobs,
+gate_up_jobs, down_jobs]`, with `role_is_host=0` for a pool worker and
+`1` for Strata's host drainer. All configured workers, including zero-claim
+workers, MUST be retained; this is lossless field-name compression, not sparse
+sampling. The common validator expands this to the named `workers` shape before
+any summaries or comparisons. Compact and named forms are mutually exclusive,
+and compact rows are invalid at Level 2/3, where per-job timing is required.
 Strata's extra host-drainer slot is separate from its configured worker count.
 Neither worker IDs nor pool IDs are OS thread IDs or CPU affinity measurements.
 
