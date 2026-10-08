@@ -18,6 +18,8 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -121,6 +123,11 @@ void launch_bf16_volta_fp16_tc(const Tensor& x, const Weight& w, Tensor& out,
     if (status_capture != cudaStreamCaptureStatusNone) {
         launch_bf16_volta_simt(x, w, out, stream);
         return;
+    }
+    // One process-local evidence marker, not a per-projection telemetry stream.
+    static std::atomic_flag observed = ATOMIC_FLAG_INIT;
+    if (!observed.test_and_set(std::memory_order_relaxed)) {
+        std::fprintf(stderr, "sv7.fp16_tc.dispatch=1 n=%d k=%d t=%d\\n", n, k, t);
     }
     auto scope = workspace.scope();
     Scratch<WorkspaceArena> scratch = allocate_scratch(workspace, n, k, t);
