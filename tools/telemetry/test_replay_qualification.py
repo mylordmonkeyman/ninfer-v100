@@ -45,7 +45,16 @@ def make_zip(path, corrupt=False):
                    engine=engine, level=1, phase='verify', layers=[layer],
                    context=dict(input_columns=1))
         log_name = ('server.log' if engine == 'ninfer' else 'native-engine.log')
-        files[f'matrix/qualification-{engine}-l1/{log_name}'] = json.dumps(raw) + '\n'
+        lines = [json.dumps(raw)]
+        if engine == 'strata':
+            # GPU-fused prefill knows the 10*2 route total, but not which
+            # route used the resident cache. Never impute the missing split.
+            prefill = dict(raw, phase='prefill',
+                           layers=[dict(layer=0, counters=dict(routed_tokens=2,
+                                                             total_routes=20),
+                                        host_us={})])
+            lines.append(json.dumps(prefill))
+        files[f'matrix/qualification-{engine}-l1/{log_name}'] = '\n'.join(lines) + '\n'
     files['matrix/manifest.json'] = json.dumps(dict(warmups=warmups, repeats=repeats))
     files['matrix/summary.json'] = json.dumps(report(rows if not corrupt else [
         dict(r, output_sha256=hashlib.sha256(json.dumps(
@@ -67,9 +76,14 @@ class ReplayTests(unittest.TestCase):
             self.assertTrue(result['frozen_strict_fidelity_agreed'])
             self.assertEqual(len(result['native_route_inventory']), 2)
             for native in result['native_route_inventory']:
-                self.assertEqual(native['counter_totals']['total_routes'], 10)
+                self.assertEqual(native['counter_totals']['total_routes'],
+                                 30 if native['engine'] == 'strata' else 10)
+                self.assertEqual(native['classified_route_total'], 10)
                 self.assertEqual(native['resident_route_fraction_among_observed'], .6)
-                self.assertTrue(native['route_fraction_complete'])
+                self.assertEqual(native['route_fraction_complete'],
+                                 native['engine'] == 'ninfer')
+                if native['engine'] == 'strata':
+                    self.assertAlmostEqual(native['classification_route_fraction'], 1 / 3)
                 self.assertEqual(native['worker_jobs']['gate_up_jobs'], 2)
             self.assertFalse(result['analysis']['software_output_fidelity_passed'])
             self.assertTrue(result['analysis']['indexed_telemetry_output_parity_observed'])
