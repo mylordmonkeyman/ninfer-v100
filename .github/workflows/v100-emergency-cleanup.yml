@@ -12,10 +12,9 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[v100:cancel-oversize]')) }}
     runs-on: ubuntu-latest
     concurrency:
-      # This is the exact group of the currently uploading V100 hardware job.
-      # An incoming cancellation-enabled job terminates the old one without using V100.
-      group: v100-sv0-hardware
-      cancel-in-progress: true
+      # Cleanup must NOT wait for the V100 hardware group it is trying to cancel.
+      group: v100-emergency-cleanup
+      cancel-in-progress: false
     timeout-minutes: 12
     env:
       GH_TOKEN: ${{ github.token }}
