@@ -48,7 +48,10 @@ def replay(zip_path):
         old = next(x for x in original['engines'] if x['engine'] == current['engine'])
         for key in ('baseline_output_stable', 'median_http_wall_us',
                     'relative_sample_range', 'level_1_overhead_fraction', 'overhead_qualified'):
-            if current[key] != old[key]:
+            # JSON object keys are strings; the in-memory report deliberately
+            # retains integer level keys. Compare the serialized wire shape.
+            normalized = json.loads(json.dumps(current[key], sort_keys=True))
+            if normalized != old[key]:
                 raise ValueError(f'{current["engine"]}: replay changed frozen {key}')
     return dict(source_artifact=str(zip_path), requests_verified=len(rows),
                 frozen_strict_fidelity_agreed=True, analysis=refreshed)
