@@ -24,6 +24,13 @@ CASES = [
     ('strata', 'baseline', {}),
     ('ninfer', 'cache-off', {'NINFER_FLASH_NEXT_EXPERT_CACHE': '0'}),
     ('ninfer', 'cache-lru', {'NINFER_V100_EXPERT_POLICY': 'lru'}),
+    ('ninfer', 'lru-admission-2', {'NINFER_V100_EXPERT_POLICY': 'lru',
+                                 'NINFER_FLASH_NEXT_EXPERT_CACHE_ADMISSION_CAP': '2'}),
+    ('ninfer', 'lru-prefill-stream', {'NINFER_V100_EXPERT_POLICY': 'lru',
+                                    'NINFER_V100_PREFILL_EXPERT_POLICY': 'stream',
+                                    'NINFER_V100_DEVICE_ROUTE_COMBINE': '1'}),
+    ('ninfer', 'profile-prior-50', {'NINFER_V100_EXPERT_POLICY': 'profile',
+                                   'NINFER_V100_EXPERT_PRIOR_WEIGHT': '50'}),
     ('strata', 'cache-off', {'cache': '0'}),
     ('strata', 'cache-4096', {'cache': '4096'}),
     ('ninfer', 'workers-16', {'NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS': '16'}),
@@ -280,8 +287,9 @@ def main():
     if selection - available:
         p.error('unknown A/B case(s): '+', '.join(sorted(selection-available)))
     cases = [c for c in CASES if not selection or c[0]+'/'+c[1] in selection]
-    if not all((e,'baseline') in [(x[0],x[1]) for x in cases] for e in ('ninfer','strata')):
-        p.error('both engines require their baseline for a controlled comparison')
+    selected_engines = {e for e, _, _ in cases}
+    if not all((e,'baseline') in [(x[0],x[1]) for x in cases] for e in selected_engines):
+        p.error('each selected engine requires its own baseline for a controlled comparison')
     (a.output/'matrix.json').write_text(json.dumps(dict(cases=cases,warmups=a.warmups,
         repeats=a.repeats,cross_quant_perf_is_not_controlled=True,
         main_config='same model and quantization within each engine',
