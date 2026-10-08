@@ -123,6 +123,36 @@ int main() { try {
 #else
     unsetenv("NINFER_V100_DECODE_EXPERT_POLICY");
 #endif
+    // The default is unchanged. The opt-in variant is exercised by the
+    // workflow's second full mathematical-oracle fixture run.
+#if defined(_WIN32)
+    _putenv_s("NINFER_V100_EXPERT_STREAM_SLOT_REUSE", "");
+#else
+    unsetenv("NINFER_V100_EXPERT_STREAM_SLOT_REUSE");
+#endif
+    require(!flash_next_expert_stream_pipeline_reuse(),
+            "expert stream slot reuse default must remain blocking");
+#if defined(_WIN32)
+    _putenv_s("NINFER_V100_EXPERT_STREAM_SLOT_REUSE", "pipelined");
+#else
+    setenv("NINFER_V100_EXPERT_STREAM_SLOT_REUSE", "pipelined", 1);
+#endif
+    require(flash_next_expert_stream_pipeline_reuse(),
+            "pipelined expert stream slot reuse was not selected");
+#if defined(_WIN32)
+    _putenv_s("NINFER_V100_EXPERT_STREAM_SLOT_REUSE", "invalid");
+#else
+    setenv("NINFER_V100_EXPERT_STREAM_SLOT_REUSE", "invalid", 1);
+#endif
+    bool invalid_reuse_rejected = false;
+    try { (void)flash_next_expert_stream_pipeline_reuse(); }
+    catch (const std::invalid_argument&) { invalid_reuse_rejected = true; }
+    require(invalid_reuse_rejected, "invalid expert stream reuse mode accepted");
+#if defined(_WIN32)
+    _putenv_s("NINFER_V100_EXPERT_STREAM_SLOT_REUSE", "");
+#else
+    unsetenv("NINFER_V100_EXPERT_STREAM_SLOT_REUSE");
+#endif
     const unsigned slots = flash_next_expert_stream_ring_slots();
     require(slots == 4 || slots == 8, "stream ring must have 4 or 8 slots");
     require(flash_next_expert_stream_device_bytes(4) <
