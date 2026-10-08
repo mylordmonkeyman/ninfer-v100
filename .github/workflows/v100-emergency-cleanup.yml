@@ -13,8 +13,9 @@ jobs:
     runs-on: ubuntu-latest
     concurrency:
       # Cleanup must NOT wait for the V100 hardware group it is trying to cancel.
-      group: v100-emergency-cleanup
-      cancel-in-progress: true
+      # Separate emergency run ID so cancellation cannot queue behind stale cleanup jobs.
+      group: v100-emergency-force-${{ github.run_id }}
+      cancel-in-progress: false
     timeout-minutes: 12
     env:
       GH_TOKEN: ${{ github.token }}
