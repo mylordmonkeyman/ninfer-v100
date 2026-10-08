@@ -121,9 +121,25 @@ def validate_qsa_comparisons(text, dispatch):
     return records
 
 
+def require_gpu_headroom():
+    """Optional fail-closed V100 free-memory guard before EACH fresh server launch."""
+    requested = os.environ.get('NINFER_V100_AB_MIN_FREE_GPU_MIB')
+    if requested is None:
+        return
+    if not requested.isascii() or not requested.isdecimal() or int(requested) < 1:
+        raise ValueError('NINFER_V100_AB_MIN_FREE_GPU_MIB must be a positive integer')
+    free = int(subprocess.check_output(
+        ['nvidia-smi', '--id=0', '--query-gpu=memory.free',
+         '--format=csv,noheader,nounits'], text=True).strip())
+    if free < int(requested):
+        raise RuntimeError(f'V100 occupied before case: {free} MiB free, '
+                           f'need {requested}; unrelated processes were not stopped')
+
+
 def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                prefill_screen=False, cpu_group_screen=False, route_handoff_screen=False,
                route_handoff_policy="all", qsa_score_screen=False, diagnostic=False, qsa_score_attribution=False):
+    require_gpu_headroom()
     name = f'{mode}-mtp{int(mtp)}-{repeat}'
     log_path, request_path = output/f'{name}.log', output/f'{name}-requests.jsonl'
     env = os.environ.copy()
