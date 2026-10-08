@@ -1,5 +1,5 @@
 name: V100 NInfer SV7 Production FP16 Tensor-Core A/B
-# Staged for one protected production HTTP performance A/B after isolated FP64 pilot.
+# Single protected production HTTP A/B after isolated FP64 pilot and hosted checks passed.
 # Compares opt-in FP16 TensorOp against original BF16 SIMT on identical resident weights.
 # Staging commit validates hosted syntax and tests; benchmark launch uses separate guarded commit.
 # Frozen model, identical cache budget, device combine, grouped AVX2 and MTP controls.
