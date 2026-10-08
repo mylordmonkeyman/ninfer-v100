@@ -36,6 +36,18 @@ class ABV100Tests(unittest.TestCase):
         self.assertEqual(controls['lru-auto256-repeat'],
                          controls['lru-prefill-auto256'])
         self.assertIn(('ninfer', 'profile-prior-50'), names)
+        self.assertIn(('ninfer', 'profile-prior-50-auto256'), names)
+        self.assertLess(names.index(('ninfer','lru-prefill-auto256')),
+                        names.index(('ninfer','profile-prior-50-auto256')))
+        self.assertLess(names.index(('ninfer','profile-prior-50-auto256')),
+                        names.index(('ninfer','lru-auto256-repeat')))
+        profile_auto = controls['profile-prior-50-auto256']
+        self.assertEqual(profile_auto['NINFER_V100_EXPERT_POLICY'], 'profile')
+        self.assertEqual(profile_auto['NINFER_V100_EXPERT_PRIOR_WEIGHT'], '50')
+        for key in ('NINFER_V100_PREFILL_EXPERT_POLICY',
+                    'NINFER_V100_PREFILL_STREAM_MIN_TOKENS',
+                    'NINFER_V100_DEVICE_ROUTE_COMBINE'):
+            self.assertEqual(profile_auto[key], controls['lru-prefill-auto256'][key])
         self.assertIn(('ninfer', 'workers-16'), names)
         self.assertIn(('strata', 'workers-16'), names)
         self.assertIn(('ninfer', 'prefill-no-group'), names)
@@ -50,7 +62,8 @@ class ABV100Tests(unittest.TestCase):
             if name in ('lru-admission-2','lru-prefill-stream','lru-prefill-auto256',
                         'lru-auto256-mtp2','lru-auto256-mtp3','lru-auto256-decode-hybrid',
                         'lru-auto256-repeat','lru-auto256-ring8','lru-auto256-busy-first',
-                         'lru-auto256-pipelined-reuse','profile-prior-50'):
+                         'lru-auto256-pipelined-reuse','profile-prior-50',
+                         'profile-prior-50-auto256'):
                 self.assertIn('NINFER_V100_EXPERT_POLICY', overrides)
             else:
                 self.assertLessEqual(len(overrides), 1)
