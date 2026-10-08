@@ -49,6 +49,13 @@ class ABV100Tests(unittest.TestCase):
                          ['NINFER_V100_CPU_EXPERT_GROUP'],'prefill')
         self.assertEqual(controls['lru-auto256-gpu50-repeat'],
                          controls['lru-auto256-gpu50'])
+        self.assertEqual(controls['lru-auto256-gpu50-group-prefill-repeat'],
+                         controls['lru-auto256-gpu50-group-prefill'])
+        for routes in (10,12,14):
+            variant=f'lru-auto256-minroutes{routes}-group-prefill'
+            self.assertEqual(controls[variant]['NINFER_V100_PREFILL_EXPERT_STREAM_MIN_ROUTES'],str(routes))
+            self.assertEqual(controls[variant]['NINFER_V100_CPU_EXPERT_GROUP'],'prefill')
+            self.assertNotIn('NINFER_V100_PREFILL_EXPERT_STREAM_FRACTION',controls[variant])
         self.assertEqual(controls['lru-auto256-repeat'],
                          controls['lru-prefill-auto256'])
         self.assertIn(('ninfer', 'profile-prior-50'), names)
@@ -82,6 +89,10 @@ class ABV100Tests(unittest.TestCase):
                          'lru-auto256-gpu75','lru-auto256-gpu70','lru-auto256-gpu60',
                          'lru-auto256-gpu60-group-prefill','lru-auto256-gpu50',
                          'lru-auto256-gpu50-group-prefill','lru-auto256-gpu50-repeat',
+                         'lru-auto256-gpu50-group-prefill-repeat',
+                         'lru-auto256-minroutes10-group-prefill',
+                         'lru-auto256-minroutes12-group-prefill',
+                         'lru-auto256-minroutes14-group-prefill',
                          'profile-prior-50',
                          'profile-prior-50-auto256'):
                 self.assertIn('NINFER_V100_EXPERT_POLICY', overrides)

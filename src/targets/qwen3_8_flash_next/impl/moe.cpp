@@ -385,8 +385,16 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     }
     const double stream_fraction =
         resolve_decode_expert_stream_fraction(prefill, stream_experts);
-    const bool stream_cpu_fallback =
-        stream_experts && (expert_stream_min_routes > 1 || stream_fraction < 1.0);
+    const unsigned prefill_stream_min_routes = stream_experts && prefill ?
+        flash_next_parse_prefill_stream_min_routes(
+            std::getenv("NINFER_V100_PREFILL_EXPERT_STREAM_MIN_ROUTES")) : 0;
+    if (prefill_stream_min_routes && stream_fraction < 1.0)
+        throw std::invalid_argument(
+            "NINFER_V100_PREFILL_EXPERT_STREAM_MIN_ROUTES conflicts with "
+            "NINFER_V100_PREFILL_EXPERT_STREAM_FRACTION below 1");
+    const bool stream_cpu_fallback = stream_experts &&
+        (expert_stream_min_routes > 1 || stream_fraction < 1.0 ||
+         prefill_stream_min_routes > 1);
     if (route_handoff && (!device_route_combine || stream_experts)) {
         throw std::invalid_argument(
             "route handoff requires device combine and BF16 CPU-cache expert execution");
@@ -613,8 +621,10 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         for (unsigned entry = 0; entry < stream_order.size; ++entry) {
             const std::size_t expert_id = stream_order.ids[entry];
             auto& routes = streamed_routes[expert_id];
-            const bool use_gpu = stream_fraction < 1.0 ? selected[expert_id] :
-                routes.size() >= expert_stream_min_routes;
+            const bool use_gpu = prefill_stream_min_routes ?
+                routes.size() >= prefill_stream_min_routes :
+                (stream_fraction < 1.0 ? selected[expert_id] :
+                 routes.size() >= expert_stream_min_routes);
             if (use_gpu) {
                 expert_stream->submit(host_experts.expert(static_cast<std::int32_t>(expert_id)),
                                       routes, stream);
