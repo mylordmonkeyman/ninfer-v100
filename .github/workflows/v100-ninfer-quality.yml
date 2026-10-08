@@ -1,0 +1,127 @@
+name: V100 NInfer Expert Policy Quality
+# Three policies, eight objective tasks x two repeats each; never treat this as general accuracy.
+on:
+  workflow_dispatch:
+  push:
+    branches: [perf/v100-strata-derived]
+    paths: ['.github/workflows/v100-ninfer-quality.yml']
+permissions:
+  contents: read
+  actions: read
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 32
+jobs:
+  hardware:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[v100:ninfer-quality]')) }}
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    concurrency:
+      group: v100-sv0-hardware
+      cancel-in-progress: false
+    timeout-minutes: 180
+    env:
+      CUDA_VISIBLE_DEVICES: '0'
+      NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          clean: false
+      - name: Freeze environment and check existing assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Remove only the prior run's bad link; do not touch the existing model bytes.
+          old_alias="$GITHUB_WORKSPACE/ninfer-quality-37707932845-1/qualified-model.ninfer"
+          if [[ -L "$old_alias" ]]; then rm -- "$old_alias"; fi
+          results="$GITHUB_WORKSPACE/ninfer-quality-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir "$results"
+          echo "AB_RESULTS=$results" >> "$GITHUB_ENV"
+          free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits | tr -d '[:space:]')
+          if (( free_mib < 28000 )); then
+            echo "::error::V100 is occupied ($free_mib MiB free); no unrelated process was stopped."
+            exit 1
+          fi
+          test -r "$NINFER_WEIGHTS"
+          # The resident model lacks a .ninfer suffix. Keep the alias OUTSIDE
+          # the uploaded results directory: upload-artifact dereferences symlinks
+          # and otherwise uploads the entire 113 GB model.
+          alias_path="$RUNNER_TEMP/ab-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer"
+          ln -s -- "$NINFER_WEIGHTS" "$alias_path"
+          test -r "$alias_path"
+          printf 'Source: %s\nAlias: %s\n' "$NINFER_WEIGHTS" "$alias_path" > "$results/ninfer-artifact-alias.txt"
+          stat "$NINFER_WEIGHTS" > "$results/ninfer-model-stat.txt"
+          nvidia-smi -q > "$results/gpu.txt"
+          numactl --hardware > "$results/numa.txt"
+          lscpu > "$results/cpu.txt"
+          /usr/local/cuda-12.8/bin/nvcc --version > "$results/cuda.txt"
+          nvidia-smi --id=0 --query-gpu=uuid --format=csv,noheader | tr -d '[:space:]' > "$results/gpu-uuid.txt"
+      - name: Download existing validated resident profile
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: v100-sv2-37270512213-1
+          run-id: 37270512213
+          github-token: ${{ github.token }}
+          path: telemetry-profile-source
+      - name: Build frozen NInfer once
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-ninfer-quality -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-ninfer-quality --target ninfer-serve \
+            ninfer_qwen3_8_flash_next_expert_cache_test ninfer_qwen3_8_flash_next_expert_stream_test
+          cp build-ninfer-quality/CMakeCache.txt "$AB_RESULTS/ninfer-CMakeCache.txt"
+      - name: Validate known GPU expert work before loading full models
+        shell: bash
+        run: |
+          set -euo pipefail
+          for level in 0 1 2; do
+            for fixture in expert_cache expert_stream; do
+              V100_COMPARE_TELEMETRY_LEVEL="$level" V100_COMPARE_RUN_ID="fixture-${fixture}-l${level}" \
+                "build-ninfer-quality/tests/ninfer_qwen3_8_flash_next_${fixture}_test" \
+                > "$AB_RESULTS/${fixture}-l${level}.log" 2>&1
+            done
+          done
+      - name: Run one sequential, objective policy-quality suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          # One model process at a time; only its own process group may be stopped.
+          python3 tools/telemetry/quality_v100.py \
+            --ninfer build-ninfer-quality/apps/ninfer-serve \
+            --artifact "$RUNNER_TEMP/ab-model-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.ninfer" \
+            --profile telemetry-profile-source/sv2-static-profile.json \
+            --output "$AB_RESULTS/quality" --repeats 2 \
+            | tee "$AB_RESULTS/quality-console.log"
+          cat "$AB_RESULTS/quality/quality.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Guard uploaded evidence against large files and symlinks
+        id: upload_guard
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          folder="$GITHUB_WORKSPACE/ninfer-quality-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [[ ! -d "$folder" ]]; then
+            echo "safe=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No evidence directory was created."
+            exit 0
+          fi
+          # Symlinks are never needed in a diagnostic artifact; never dereference a model.
+          find "$folder" -type l -print -delete
+          bytes="$(du -sb -- "$folder" | cut -f1)"
+          echo "Diagnostic artifact source size: ${bytes} bytes"
+          if (( bytes >= 1073741824 )); then
+            echo "safe=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Diagnostic bundle exceeds the 1 GiB safety limit; refusing upload."
+            exit 0
+          fi
+          echo "safe=true" >> "$GITHUB_OUTPUT"
+      - name: Preserve all evidence including partial failures
+        if: ${{ always() && steps.upload_guard.outputs.safe == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-ninfer-quality-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ninfer-quality-${{ github.run_id }}-${{ github.run_attempt }}/
+          retention-days: 30
+          if-no-files-found: warn
