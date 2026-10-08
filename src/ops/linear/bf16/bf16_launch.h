@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/tensor.h"
+#include "core/arena.h"
 
 #include <cuda_runtime.h>
 
@@ -24,6 +25,11 @@ void launch_bf16_n256_k5120(const Tensor& x, const Weight& weight, Tensor& out,
 #ifdef NINFER_VOLTA_BUILD
 void launch_bf16_volta_simt(const Tensor& x, const Weight& weight, Tensor& out,
                             cudaStream_t stream);
+bool bf16_volta_fp16_tc_enabled();
+bool bf16_volta_fp16_tc_supported(int n, int k, int t) noexcept;
+std::size_t bf16_volta_fp16_tc_workspace_bytes(int n, int k, int t);
+void launch_bf16_volta_fp16_tc(const Tensor& x, const Weight& weight, Tensor& out,
+                               WorkspaceArena& workspace, cudaStream_t stream);
 #endif
 
 } // namespace ninfer::ops::detail
