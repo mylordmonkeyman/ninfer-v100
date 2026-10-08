@@ -13,6 +13,7 @@
 #include <random>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <vector>
 using namespace ninfer;
@@ -123,6 +124,8 @@ int main() { try {
 #else
     unsetenv("NINFER_V100_DECODE_EXPERT_POLICY");
 #endif
+    const char* inherited_slot_reuse = std::getenv("NINFER_V100_EXPERT_STREAM_SLOT_REUSE");
+    const std::string initial_slot_reuse = inherited_slot_reuse ? inherited_slot_reuse : "";
     // The default is unchanged. The opt-in variant is exercised by the
     // workflow's second full mathematical-oracle fixture run.
 #if defined(_WIN32)
@@ -149,10 +152,15 @@ int main() { try {
     catch (const std::invalid_argument&) { invalid_reuse_rejected = true; }
     require(invalid_reuse_rejected, "invalid expert stream reuse mode accepted");
 #if defined(_WIN32)
-    _putenv_s("NINFER_V100_EXPERT_STREAM_SLOT_REUSE", "");
+    _putenv_s("NINFER_V100_EXPERT_STREAM_SLOT_REUSE", initial_slot_reuse.c_str());
 #else
-    unsetenv("NINFER_V100_EXPERT_STREAM_SLOT_REUSE");
+    if (initial_slot_reuse.empty()) unsetenv("NINFER_V100_EXPERT_STREAM_SLOT_REUSE");
+    else setenv("NINFER_V100_EXPERT_STREAM_SLOT_REUSE", initial_slot_reuse.c_str(), 1);
 #endif
+    // Preserve the incoming mode for the multi-ring correctness oracle below.
+    require(flash_next_expert_stream_pipeline_reuse() ==
+                (initial_slot_reuse == "pipelined"),
+            "restored expert stream slot reuse mode differs from requested fixture mode");
     const unsigned slots = flash_next_expert_stream_ring_slots();
     require(slots == 4 || slots == 8, "stream ring must have 4 or 8 slots");
     require(flash_next_expert_stream_device_bytes(4) <
