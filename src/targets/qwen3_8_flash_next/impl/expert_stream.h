@@ -7,6 +7,7 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 [[nodiscard]] unsigned flash_next_decode_expert_stream_min_routes();
 [[nodiscard]] std::size_t flash_next_expert_stream_device_bytes(unsigned maximum_routes);
 [[nodiscard]] unsigned flash_next_expert_stream_ring_slots();
+[[nodiscard]] bool flash_next_expert_stream_pipeline_reuse();
 
 struct FlashNextStreamRoute {
     const void* input_bf16;
@@ -38,6 +39,7 @@ private:
     std::array<Slot,8> slots_;  // Up to eight bounded in-flight H2D/compute slots.
     cudaStream_t transfer_ = nullptr;
     unsigned maximum_routes_, next_ = 0, ring_slots_ = 4;
+    bool pipeline_reuse_ = false;
     std::size_t device_bytes_ = 0, pinned_bytes_ = 0;
     std::uint64_t submitted_ = 0;
     void cleanup() noexcept;
