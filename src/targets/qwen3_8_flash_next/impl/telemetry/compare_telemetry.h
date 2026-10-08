@@ -220,22 +220,38 @@ public:
             }
             out << "}";
             if (!l.workers.empty()) {
-                out << ",\"workers\":[";
-                bool worker_sep = false;
-                for (const auto& w : l.workers) {
-                    if (worker_sep) out << ',';
-                    worker_sep = true;
-                    out << "{\"pool_id\":" << w.pool_id << ",\"worker_id\":" << w.worker_id
-                        << ",\"role\":\"" << (w.host ? "host" : "worker")
-                        << "\",\"configured_workers\":" << w.configured_workers
-                        << ",\"full_jobs\":" << w.full_jobs << ",\"gate_up_jobs\":" << w.gate_up_jobs
-                        << ",\"down_jobs\":" << w.down_jobs;
-                    if (w.timing_observed)
-                        out << ",\"full_us\":" << w.full_us << ",\"gate_up_us\":" << w.gate_up_us
-                            << ",\"down_us\":" << w.down_us;
-                    out << '}';
+                // Level 1 is the low-overhead tier. Preserve ALL workers, including
+                // zero-claim workers, without repeatedly spelling seven JSON keys.
+                // Level 2/3 retains named fields and timing detail.
+                if (level() == 1) {
+                    out << ",\"workers_compact\":[";
+                    bool worker_sep = false;
+                    for (const auto& w : l.workers) {
+                        if (worker_sep) out << ',';
+                        worker_sep = true;
+                        out << '[' << w.pool_id << ',' << w.worker_id << ','
+                            << (w.host ? 1 : 0) << ',' << w.configured_workers << ','
+                            << w.full_jobs << ',' << w.gate_up_jobs << ',' << w.down_jobs << ']';
+                    }
+                    out << ']';
+                } else {
+                    out << ",\"workers\":[";
+                    bool worker_sep = false;
+                    for (const auto& w : l.workers) {
+                        if (worker_sep) out << ',';
+                        worker_sep = true;
+                        out << "{\"pool_id\":" << w.pool_id << ",\"worker_id\":" << w.worker_id
+                            << ",\"role\":\"" << (w.host ? "host" : "worker")
+                            << "\",\"configured_workers\":" << w.configured_workers
+                            << ",\"full_jobs\":" << w.full_jobs << ",\"gate_up_jobs\":" << w.gate_up_jobs
+                            << ",\"down_jobs\":" << w.down_jobs;
+                        if (w.timing_observed)
+                            out << ",\"full_us\":" << w.full_us << ",\"gate_up_us\":" << w.gate_up_us
+                                << ",\"down_us\":" << w.down_us;
+                        out << '}';
+                    }
+                    out << ']';
                 }
-                out << ']';
             }
             if (!l.cache_windows.empty()) {
                 const auto snapshot = [&](const CacheSnapshot& c) {
