@@ -55,6 +55,37 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(strata['new_output_hashes_vs_baseline'][1], 0)
         self.assertEqual(strata['new_output_hashes_vs_baseline'][2], 0)
 
+    def test_indexed_output_parity_can_pass_with_nondeterministic_baseline(self):
+        data = rows()
+        for level in (0, 1, 2):
+            for position, row in enumerate(r for r in data if r['engine'] == 'strata' and r['level'] == level):
+                row['output_sha256'] = ('a', 'b', 'a')[position]
+                row['request_payload'] = {'same_prompt': True, 'seed': 42}
+        result = report(data)
+        self.assertFalse(result['software_output_fidelity_passed'])
+        self.assertTrue(result['indexed_telemetry_output_parity_observed'])
+        strata = next(x for x in result['engines'] if x['engine'] == 'strata')
+        self.assertEqual(strata['output_fidelity_failure_reason'], 'baseline_nondeterministic')
+        self.assertTrue(strata['indexed_request_output_parity_passed'])
+        self.assertEqual(strata['compared_request_positions'], 3)
+        self.assertEqual(strata['indexed_request_mismatches'], {1: [], 2: []})
+        # Same distribution of hashes is NOT enough if the order changes.
+        target = next(r for r in data if r['engine'] == 'strata' and r['level'] == 2)
+        target['output_sha256'] = 'b'
+        mismatch = report(data)
+        self.assertFalse(mismatch['indexed_telemetry_output_parity_observed'])
+        strata = next(x for x in mismatch['engines'] if x['engine'] == 'strata')
+        self.assertEqual(strata['indexed_request_mismatches'][2], [0])
+        self.assertEqual(strata['new_output_hashes_vs_baseline'][2], 0)
+
+    def test_indexed_comparison_rejects_different_request_payloads(self):
+        data = rows()
+        for row in data:
+            row['request_payload'] = {'seed': 42}
+        self.assertTrue(report(data)['indexed_telemetry_output_parity_observed'])
+        data[4]['request_payload'] = {'seed': 43}
+        self.assertFalse(report(data)['indexed_telemetry_output_parity_observed'])
+
     def test_latency_drift_is_reported_without_weakening_output_gate(self):
         data = rows()
         # The measured cells trend systematically downward as caches warm.
