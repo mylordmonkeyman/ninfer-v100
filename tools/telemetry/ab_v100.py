@@ -66,6 +66,19 @@ CASES = [
         'NINFER_V100_PREFILL_EXPERT_POLICY':'auto',
         'NINFER_V100_PREFILL_STREAM_MIN_TOKENS':'256',
         'NINFER_V100_DEVICE_ROUTE_COMBINE':'1'}),
+    # Long-prefill-only hybrid CPU/GPU execution: rank nonresident groups
+    # by routed work, send the busiest fraction to V100 and the rest to AVX2.
+    # Short prefill (<256 tokens) keeps the existing CPU/cache policy.
+    ('ninfer','lru-auto256-gpu90', {'NINFER_V100_EXPERT_POLICY':'lru',
+        'NINFER_V100_PREFILL_EXPERT_POLICY':'auto',
+        'NINFER_V100_PREFILL_STREAM_MIN_TOKENS':'256',
+        'NINFER_V100_DEVICE_ROUTE_COMBINE':'1',
+        'NINFER_V100_PREFILL_EXPERT_STREAM_FRACTION':'0.9'}),
+    ('ninfer','lru-auto256-gpu75', {'NINFER_V100_EXPERT_POLICY':'lru',
+        'NINFER_V100_PREFILL_EXPERT_POLICY':'auto',
+        'NINFER_V100_PREFILL_STREAM_MIN_TOKENS':'256',
+        'NINFER_V100_DEVICE_ROUTE_COMBINE':'1',
+        'NINFER_V100_PREFILL_EXPERT_STREAM_FRACTION':'0.75'}),
     ('ninfer','lru-auto256-repeat',{'NINFER_V100_EXPERT_POLICY': 'lru',
         'NINFER_V100_PREFILL_EXPERT_POLICY': 'auto',
         'NINFER_V100_PREFILL_STREAM_MIN_TOKENS': '256',
