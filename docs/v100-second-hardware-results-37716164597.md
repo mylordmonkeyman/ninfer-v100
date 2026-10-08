@@ -82,3 +82,27 @@ the observed +1.4456% point estimate qualified.
 The artifact-upload guard remains fixed: model alias only under
 `$RUNNER_TEMP`, symlinks removed from evidence directories, and upload
 refused for evidence >=1 GiB. No model-file contents are uploaded.
+
+## Subsequent instrumentation coverage correction (not yet V100 qualified)
+
+Reading the frozen Level-1 native logs, NInfer emitted route counts for
+**15,120/15,120** observed layer calls; Strata emitted all route categories
+for **12,384/12,768**. Strata's missing 384 observations were exactly
+its eight prefill rounds times 48 layers. Accordingly, the frozen
+~39% resident route share for NInfer and ~91.9% for Strata are **not
+comparable**: NInfer includes prefill routing while Strata's classified
+routing was limited to verify/decoding. The difference is a coverage gap,
+not proof of better expert-cache efficiency.
+
+A subsequent **unbenchmarked** change in
+`mylordmonkeyman/Strata-V100:telemetry/v100-ninfer-compare`
+instruments the Strata prefill GPU router's already-known T tokens and
+T*K route total without any GPU copy/synchronization; the resident/CPU/
+nonresident-GPU breakdown remains absent because those values are not
+available on the fused GPU prefill path. A common-schema CPU regression
+tests these known-only counters and confirms unknown classes stay absent.
+The offline replay tool reports classified-route coverage explicitly and
+uses *classified* route totals, never unclassified prefill totals, as the
+denominator for observed residency fractions. This new instrumentation
+requires actual V100 measurement in a later **consolidated** campaign
+before the missing prefill classification can be evaluated further.
