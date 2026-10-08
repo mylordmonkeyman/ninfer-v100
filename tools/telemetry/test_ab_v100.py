@@ -19,6 +19,16 @@ class ABV100Tests(unittest.TestCase):
         self.assertIn(('ninfer', 'lru-admission-2'), names)
         self.assertIn(('ninfer', 'lru-prefill-stream'), names)
         self.assertIn(('ninfer', 'lru-prefill-auto256'), names)
+        for variant in ('lru-auto256-mtp2','lru-auto256-mtp3',
+                        'lru-auto256-decode-hybrid','lru-auto256-repeat'):
+            self.assertIn(('ninfer',variant), names)
+        controls={v:overrides for engine,v,overrides in CASES if engine=='ninfer'}
+        self.assertEqual(controls['lru-auto256-mtp2']['draft_tokens'],'2')
+        self.assertEqual(controls['lru-auto256-mtp3']['draft_tokens'],'3')
+        self.assertEqual(controls['lru-auto256-decode-hybrid']
+                         ['NINFER_V100_DECODE_EXPERT_POLICY'],'hybrid')
+        self.assertEqual(controls['lru-auto256-repeat'],
+                         controls['lru-prefill-auto256'])
         self.assertIn(('ninfer', 'profile-prior-50'), names)
         self.assertIn(('ninfer', 'workers-16'), names)
         self.assertIn(('strata', 'workers-16'), names)
@@ -31,7 +41,9 @@ class ABV100Tests(unittest.TestCase):
                          [('ninfer', 'baseline-repeat'), ('strata', 'baseline-repeat')])
         for _, name, overrides in CASES:
             self.assertEqual(bool(overrides), name not in ('baseline', 'baseline-repeat'))
-            if name in ('lru-admission-2','lru-prefill-stream','lru-prefill-auto256','profile-prior-50'):
+            if name in ('lru-admission-2','lru-prefill-stream','lru-prefill-auto256',
+                        'lru-auto256-mtp2','lru-auto256-mtp3','lru-auto256-decode-hybrid',
+                        'lru-auto256-repeat','profile-prior-50'):
                 self.assertIn('NINFER_V100_EXPERT_POLICY', overrides)
             else:
                 self.assertLessEqual(len(overrides), 1)
