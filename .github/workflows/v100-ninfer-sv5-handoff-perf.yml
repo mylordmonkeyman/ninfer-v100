@@ -1,0 +1,129 @@
+name: V100 NInfer SV5 Early Handoff Performance A/B
+# Isolates the existing SV5 event-based router handoff against serial CPU-cache execution.
+# Frozen model, identical cache budget, device combine, grouped AVX2 and MTP controls.
+# No model writes, no unrelated process stops, no competing GPU jobs.
+on:
+  workflow_dispatch:
+  push:
+    branches: [perf/v100-strata-derived]
+    paths: ['.github/workflows/v100-ninfer-sv5-handoff-perf.yml']
+permissions:
+  contents: read
+  actions: read
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 32
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Validate existing SV5 performance harness and Python tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m compileall -q tools/diagnostics tools/telemetry
+          python3 -m unittest discover -s tools/diagnostics -p 'test_v100*.py'
+          python3 -m unittest discover -s tools/telemetry -p 'test_*.py'
+          git diff --check
+  hardware:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[v100:sv5-handoff-perf]')) }}
+    needs: checks
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    concurrency:
+      group: v100-sv0-hardware
+      cancel-in-progress: false
+    timeout-minutes: 180
+    env:
+      CUDA_VISIBLE_DEVICES: '0'
+      NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+      NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: '32'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          clean: false
+      - name: Freeze evidence and verify V100 availability
+        shell: bash
+        run: |
+          set -euo pipefail
+          results="$GITHUB_WORKSPACE/v100-sv5-handoff-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$results"
+          echo "SV5_RESULTS=$results" >> "$GITHUB_ENV"
+          git rev-parse HEAD > "$results/source-sha.txt"
+          free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits | tr -d '[:space:]')
+          if (( free_mib < 28000 )); then
+            echo "::error::V100 occupied: $free_mib MiB free. No processes were stopped."
+            exit 1
+          fi
+          test -r "$NINFER_WEIGHTS"
+          # Never put resident model symlinks in evidence: artifact upload follows links.
+          alias_path="$RUNNER_TEMP/v100-sv5-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer"
+          ln -s -- "$NINFER_WEIGHTS" "$alias_path"
+          test -r "$alias_path"
+          echo "SV5_MODEL_ALIAS=$alias_path" >> "$GITHUB_ENV"
+          stat "$NINFER_WEIGHTS" > "$results/model-stat.txt"
+          nvidia-smi -q > "$results/gpu.txt"
+          numactl --hardware > "$results/numa.txt"
+          /usr/local/cuda-12.8/bin/nvcc --version > "$results/cuda.txt"
+      - name: Download previously validated identity-bound expert profile
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: v100-sv2-37270512213-1
+          run-id: 37270512213
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/v100-sv5-profile
+      - name: Build the frozen NInfer source only once
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-v100-sv5-perf -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-v100-sv5-perf --target ninfer-serve ninfer_qwen3_8_flash_next_route_handoff_test
+          cp build-v100-sv5-perf/CMakeCache.txt "$SV5_RESULTS/CMakeCache.txt"
+      - name: Check route-handoff CUDA event lifetime and arithmetic fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          build-v100-sv5-perf/tests/ninfer_qwen3_8_flash_next_route_handoff_test > "$SV5_RESULTS/route-handoff-fixture.log" 2>&1
+      - name: ABBA serial versus early handoff in production HTTP prefill and MTP
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/diagnostics/v100_sv2_serve.py \
+            --executable build-v100-sv5-perf/apps/ninfer-serve \
+            --artifact "$SV5_MODEL_ALIAS" \
+            --profile "$RUNNER_TEMP/v100-sv5-profile/sv2-static-profile.json" \
+            --output "$SV5_RESULTS/campaign" \
+            --repeats 3 --route-handoff-screen --route-handoff-policy prefill \
+            | tee "$SV5_RESULTS/console.log"
+          cat "$SV5_RESULTS/campaign/report.txt" >> "$GITHUB_STEP_SUMMARY"
+      - name: Guard uploaded diagnostics and refuse symlinks or >=1GiB
+        id: safe_upload
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          folder="$GITHUB_WORKSPACE/v100-sv5-handoff-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [[ ! -d "$folder" ]]; then echo "safe=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          find "$folder" -type l -print -delete
+          bytes=$(du -sb -- "$folder" | cut -f1)
+          echo "Evidence directory: $bytes bytes"
+          if (( bytes >= 1073741824 )); then
+            echo "::error::SV5 evidence >=1 GiB, refusing upload."
+            echo "safe=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "safe=true" >> "$GITHUB_OUTPUT"
+      - name: Preserve small completed or partial benchmark evidence
+        if: ${{ always() && steps.safe_upload.outputs.safe == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-sv5-handoff-perf-${{ github.run_id }}-${{ github.run_attempt }}
+          path: v100-sv5-handoff-${{ github.run_id }}-${{ github.run_attempt }}/
+          retention-days: 30
+          if-no-files-found: warn
