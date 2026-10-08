@@ -14,6 +14,7 @@ class ABV100Tests(unittest.TestCase):
         self.assertEqual(names[:2], [('ninfer', 'baseline'), ('strata', 'baseline')])
         self.assertIn(('ninfer', 'cache-off'), names)
         self.assertIn(('strata', 'cache-off'), names)
+        self.assertIn(('strata', 'cache-4096'), names)
         self.assertIn(('ninfer', 'cache-lru'), names)
         self.assertIn(('ninfer', 'workers-16'), names)
         self.assertIn(('strata', 'workers-16'), names)
