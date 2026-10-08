@@ -1,3 +1,4 @@
+"""Qualification harness regression tests; hosted-only, no GPU campaign."""
 import json
 from pathlib import Path
 import tempfile
