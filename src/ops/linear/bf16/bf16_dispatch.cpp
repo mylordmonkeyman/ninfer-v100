@@ -80,8 +80,18 @@ Bf16Launch select_bf16_launch(std::int32_t n, std::int32_t k, std::int32_t t, Li
 }
 
 void bf16_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
-                   cudaStream_t stream) {
+                   WorkspaceArena* workspace, cudaStream_t stream) {
     const Bf16Launch launch = select_bf16_launch(weight.n, weight.k, x.ne[1], policy);
+#if defined(NINFER_VOLTA_BUILD)
+    // Experimental rounded/saturated BF16 -> FP16 TensorOp, never enabled by
+    // default. No standalone workspace means the original BF16 path wins.
+    // Nonfinite inputs and weights are checked by the candidate itself.
+    if (workspace && bf16_volta_fp16_tc_enabled() &&
+        bf16_volta_fp16_tc_supported(weight.n, weight.k, x.ne[1])) {
+        launch_bf16_volta_fp16_tc(x, weight, out, *workspace, stream);
+        return;
+    }
+#endif
     if (active_bf16_timing) active_bf16_timing->launch(launch, x, weight, out, stream);
     else launch(x, weight, out, stream);
 }
