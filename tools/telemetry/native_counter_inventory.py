@@ -17,7 +17,7 @@ def inventory(archive, engine, level=1):
     relative = f'matrix/qualification-{engine}-l{level}/'
     log = relative + ('server.log' if engine == 'ninfer' else 'native-engine.log')
     totals, phases, widths, jobs = Counter(), Counter(), Counter(), Counter()
-    rounds, layer_observations, routes_covered = 0, 0, 0
+    rounds, layer_observations, routes_covered, classified_routes = 0, 0, 0, 0
     with archive.open(log) as stream:
         for line_no, raw in enumerate(stream, 1):
             if SCHEMA not in raw:
@@ -43,6 +43,7 @@ def inventory(archive, engine, level=1):
                     if counters['total_routes'] != sum(counters[k] for k in ROUTES[1:]):
                         raise ValueError(f'{log}:{line_no}: route conservation failed')
                     routes_covered += 1
+                    classified_routes += counters['total_routes']
                 for worker in layer.get('workers_compact', []):
                     if not isinstance(worker, list) or len(worker) != 7:
                         raise ValueError(f'{log}:{line_no}: malformed compact worker')
@@ -56,13 +57,15 @@ def inventory(archive, engine, level=1):
                 rounds=rounds, phases=dict(phases), input_width_rounds=dict(widths),
                 observed_layers=layer_observations, route_complete_layer_observations=routes_covered,
                 all_layer_route_coverage=complete,
+                classified_route_total=classified_routes,
+                classification_route_fraction=(classified_routes / route_total if route_total else None),
                 counter_totals={name: totals[name] for name in (*ROUTES, *WEIGHT_COUNTERS)},
                 worker_jobs=dict(jobs),
-                resident_route_fraction_among_observed=(totals['resident_routes'] / route_total if route_total else None),
-                cpu_route_fraction_among_observed=(totals['cpu_routes'] / route_total if route_total else None),
+                resident_route_fraction_among_observed=(totals['resident_routes'] / classified_routes if classified_routes else None),
+                cpu_route_fraction_among_observed=(totals['cpu_routes'] / classified_routes if classified_routes else None),
                 route_fraction_complete=complete,
                 notes=['Cumulative counters are sums of observed round/layer work including prefill and verify.',
                        'Route totals are not normalized by accepted tokens, model quantization or prompt tokens.',
                        'cpu_weight_read_bytes is an engine counter, not measured physical memory bandwidth.',
-                       'Route fractions use only layers with observed route counts; coverage is explicitly reported.',
+                       'Route fractions use only fully classified route work, never unclassified prefill total routes; coverage is reported separately.',
                        'Missing layers/routes or asynchronous cache events cannot be inferred from the totals.'])
