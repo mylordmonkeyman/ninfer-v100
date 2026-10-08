@@ -139,7 +139,7 @@ def require_gpu_headroom():
 def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                prefill_screen=False, cpu_group_screen=False, route_handoff_screen=False,
                route_handoff_policy="all", qsa_score_screen=False, diagnostic=False, qsa_score_attribution=False,
-               sv7_tc_screen=False):
+               sv7_tc_screen=False, sv7_stage_screen=False):
     require_gpu_headroom()
     name = f'{mode}-mtp{int(mtp)}-{repeat}'
     log_path, request_path = output/f'{name}.log', output/f'{name}-requests.jsonl'
@@ -153,7 +153,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                 key.startswith('NINFER_V100_PLE_') or
                 key == 'NINFER_FLASH_NEXT_QSA_PREFILL_MMA'):
             env.pop(key)
-    large_prefill = prefill_screen or cpu_group_screen or route_handoff_screen or qsa_score_screen or sv7_tc_screen
+    large_prefill = prefill_screen or cpu_group_screen or route_handoff_screen or qsa_score_screen or sv7_tc_screen or sv7_stage_screen
     env.update(NINFER_V100_ROUTE_HANDOFF=('prefill' if route_handoff_policy == 'prefill' else '1')
                if route_handoff_screen and mode == 'handoff' else '0',
                NINFER_V100_DEVICE_ROUTE_COMBINE='1' if large_prefill or mode == 'device' else '0',
@@ -164,13 +164,13 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                NINFER_FLASH_NEXT_EXPERT_CACHE_SERIAL='0',NINFER_FLASH_NEXT_EXPERT_CACHE_PREFILL='1',
                NINFER_FLASH_NEXT_EXPERT_CACHE_BATCHED_DECODE='0',
                NINFER_FLASH_NEXT_EXPERT_CACHE_GROUPED_PREFILL='1',
-               NINFER_V100_TELEMETRY='1' if diagnostic else '0',NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING='0',
+               NINFER_V100_TELEMETRY='1' if diagnostic or sv7_stage_screen else '0',NINFER_FLASH_NEXT_EXPERT_CACHE_TIMING='0',
                NINFER_V100_QSA_SCORE_MMA='1' if qsa_score_screen and mode=='score-mma' else '0',
                NINFER_V100_QSA_SCORE_MMA_MIN_QSA='6' if qsa_score_screen and mode=='score-mma' else '0',
                NINFER_V100_QSA_SCORE_COMPARE='1' if qsa_score_attribution else '0',
                NINFER_V100_PLE_IO='mmap',
                NINFER_V100_SV7_FP16_TC=('1' if mode == 'fp16-tc' else '0') if sv7_tc_screen else env.get('NINFER_V100_SV7_FP16_TC','0'),
-               NINFER_FLASH_NEXT_STAGE_LEDGER='0',NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT='0',
+               NINFER_FLASH_NEXT_STAGE_LEDGER='1' if sv7_stage_screen else '0',NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT='0',
                NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE='0')
     # Bind only a loopback port. The subprocess is the only process this tool stops.
     with socket.socket() as probe:
@@ -239,10 +239,12 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
     events=[json.loads(line) for line in request_path.read_text().splitlines() if line.strip()]
     done=validate_events(events,responses,mtp,large_prefill)
     text=log_path.read_text()
-    if sv7_tc_screen:
+    if sv7_tc_screen or sv7_stage_screen:
         actual = 'sv7.fp16_tc.dispatch=1' in text
         if actual != (mode == 'fp16-tc'):
             raise ValueError(f'{name}: SV7 FP16 TC actual dispatch={actual}; expected={mode == "fp16-tc"}')
+    if sv7_stage_screen and '"kind":"prefill_stage_ledger"' not in text:
+        raise ValueError(f'{name}: missing stage ledger prefill evidence')
     dispatch=validate_qsa_dispatch(text,mode) if qsa_score_screen and diagnostic else None
     comparisons=validate_qsa_comparisons(text,dispatch) if qsa_score_attribution else None
     slots=re.findall(r'phase13.cache.slots_per_layer=(\d+)',text)
@@ -277,6 +279,8 @@ def main():
                         help='compare serial/route-ready with grouping enabled in both arms')
     parser.add_argument('--route-handoff-policy',choices=('all','prefill'),default='all',
                         help='phase eligibility for the route-ready candidate; serial control remains off')
+    parser.add_argument('--sv7-stage-screen',action='store_true',
+                        help='two-process, bounded stage-level production cold-prefill attribution')
     parser.add_argument('--sv7-tc-screen',action='store_true',
                         help='compare opt-in FP16 tensor-core BF16 projection against SIMT in production HTTP')
     parser.add_argument('--qsa-score-screen',action='store_true',
@@ -287,7 +291,7 @@ def main():
     args=parser.parse_args()
     if args.artifact.suffix != '.ninfer' or not args.artifact.is_file():
         parser.error('--artifact requires an explicit readable .ninfer file')
-    if sum((args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,args.qsa_score_screen,args.qsa_score_attribution,args.sv7_tc_screen)) > 1:
+    if sum((args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,args.qsa_score_screen,args.qsa_score_attribution,args.sv7_tc_screen,args.sv7_stage_screen)) > 1:
         parser.error('performance screen flags are mutually exclusive')
     if args.repeats<3: parser.error('need three fresh-process observations per arm')
     args.output.mkdir(parents=True,exist_ok=True)
@@ -303,7 +307,9 @@ def main():
                                  'failed exact continuation screen remains failed; no timing or MTP qualification']))
         print(f"Same-input real QSA sampled FP64 checks passed: {len(row['qsa_comparisons'])} eligible calls; no serving qualification",flush=True)
         return
-    if args.sv7_tc_screen:
+    if args.sv7_stage_screen:
+        modes=('bf16-simt','fp16-tc')
+    elif args.sv7_tc_screen:
         modes=('bf16-simt','fp16-tc')
     elif args.qsa_score_screen:
         modes=('simt','score-mma')
@@ -313,6 +319,40 @@ def main():
         modes=('single','grouped')
     else:
         modes=('cpu-cache','stream') if args.prefill_screen else ('legacy','device')
+    if args.sv7_stage_screen:
+        summaries = {}
+        for mode in modes:
+            row = run_server(args.executable,args.artifact,args.profile,args.output,
+                             mode,False,0,sv7_stage_screen=True)
+            log = (args.output/f'{mode}-mtp0-0.log').read_text()
+            events = []
+            for line in log.splitlines():
+                try: obj = json.loads(line)
+                except json.JSONDecodeError: continue
+                if obj.get('kind') == 'prefill_stage_ledger': events.append(obj)
+            if not events:
+                raise ValueError(f'{mode}: no stage events')
+            summary = {'chunks':len(events),'total_ms':sum(e['total_chunk_ms'] for e in events),
+                       'stages':{}}
+            for event in events:
+                for stage in event['stages']:
+                    key=stage['stage']
+                    item=summary['stages'].setdefault(key,{'calls':0,'ms':0.0})
+                    item['calls']+=stage['calls']
+                    item['ms']+=stage['interval_ms']
+            summaries[mode]=summary
+        atomic_json(args.output/'stage-attribution.json',
+                    dict(schema=1,scope='instrumented_single_cold_prefill_per_mode',
+                         results=summaries,limitations=[
+                             'CUDA event stage ledger is invasive; timings are diagnostic not a throughput benchmark',
+                             'stage intervals may include CPU stalls and stream waits, not pure GPU kernel time',
+                             'one fresh server per arm; production defaults unchanged']))
+        print('Stage attribution (instrumented; no performance claim):')
+        for mode, summary in summaries.items():
+            print(mode, 'total_ms',round(summary['total_ms'],2))
+            for name, value in sorted(summary['stages'].items(),key=lambda x:-x[1]['ms'])[:12]:
+                print(' ',name,round(value['ms'],2),'ms',value['calls'],'calls')
+        return
     observations=[]
     diagnostic_cross_path_exact=None
     if args.qsa_score_screen:
