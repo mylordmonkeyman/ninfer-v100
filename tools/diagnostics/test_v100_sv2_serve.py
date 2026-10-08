@@ -23,15 +23,15 @@ class ProductionEvidenceTest(unittest.TestCase):
         return events,responses
 
     def test_optional_v100_gpu_memory_guard_for_each_fresh_process(self):
-        with mock.patch.dict('os.environ', {}, clear=True), \\
-             mock.patch('v100_sv2_serve.subprocess.check_output') as query:
+        with (mock.patch.dict('os.environ', {}, clear=True),
+              mock.patch('v100_sv2_serve.subprocess.check_output') as query):
             require_gpu_headroom()
             query.assert_not_called()
-        with mock.patch.dict('os.environ', {'NINFER_V100_AB_MIN_FREE_GPU_MIB':'28000'}), \\
-             mock.patch('v100_sv2_serve.subprocess.check_output', return_value='30000'):
+        with (mock.patch.dict('os.environ', {'NINFER_V100_AB_MIN_FREE_GPU_MIB':'28000'}),
+              mock.patch('v100_sv2_serve.subprocess.check_output', return_value='30000')):
             require_gpu_headroom()
-        with mock.patch.dict('os.environ', {'NINFER_V100_AB_MIN_FREE_GPU_MIB':'28000'}), \\
-             mock.patch('v100_sv2_serve.subprocess.check_output', return_value='27999'):
+        with (mock.patch.dict('os.environ', {'NINFER_V100_AB_MIN_FREE_GPU_MIB':'28000'}),
+              mock.patch('v100_sv2_serve.subprocess.check_output', return_value='27999')):
             with self.assertRaisesRegex(RuntimeError, 'unrelated processes were not stopped'):
                 require_gpu_headroom()
         with mock.patch.dict('os.environ', {'NINFER_V100_AB_MIN_FREE_GPU_MIB':'-1'}):
