@@ -1,6 +1,7 @@
 name: V100 NInfer Held-out Policy Quality
 # Three policies, twenty objective tasks x two repeats each; still not a general accuracy benchmark.
 # Single hardware job, same weights/quantization and expert cache capacity.
+# Initial 8-task suite passed 48/48 across three policies; this extends to 20 tasks.
 on:
   workflow_dispatch:
   push:
