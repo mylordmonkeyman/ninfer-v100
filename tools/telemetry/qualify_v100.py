@@ -171,22 +171,42 @@ def report(rows):
     for engine in ('ninfer', 'strata'):
         cells = {level: [r for r in rows if r['engine'] == engine and r['level'] == level and r['phase'] == 'measured']
                  for level in (0, 1, 2)}
-        reference = {r['output_sha256'] for r in cells[0]}
+        hashes = {level: {r['output_sha256'] for r in cell} for level, cell in cells.items()}
+        reference = hashes[0]
         stable = len(reference) == 1
-        equivalent = stable and all({r['output_sha256'] for r in cells[level]} == reference for level in (1, 2))
+        equivalent = stable and all(hashes[level] == reference for level in (1, 2))
         fidelity &= equivalent
         medians = {level: statistics.median(r['wall_us'] for r in cell) for level, cell in cells.items()}
         spread = {level: (max(r['wall_us'] for r in cell)-min(r['wall_us'] for r in cell))/medians[level]
                   for level, cell in cells.items()}
         overhead = medians[1]/medians[0]-1
+        # A baseline can be nondeterministic *before* telemetry is enabled.
+        # Never call that telemetry-induced drift or silently accept it as fidelity.
+        novel = {level: len(hashes[level] - reference) for level in (1, 2)}
+        failure_reason = (None if equivalent else
+                          'baseline_nondeterministic' if not stable else
+                          'telemetry_level_output_mismatch')
+        traces = {level: [r['wall_us'] for r in cell] for level, cell in cells.items()}
+        trend = {level: cell[-1]['wall_us'] / cell[0]['wall_us'] - 1
+                 for level, cell in cells.items()}
+        drift = any(abs(value) > .05 for value in trend.values())
         results.append(dict(engine=engine, baseline_output_stable=stable,
-            observed_http_outputs_equal_across_levels=equivalent, median_http_wall_us=medians,
+            observed_http_outputs_equal_across_levels=equivalent,
+            output_fidelity_failure_reason=failure_reason,
+            unique_output_hashes_per_level={level: len(values) for level, values in hashes.items()},
+            new_output_hashes_vs_baseline=novel,
+            median_http_wall_us=medians,
+            measured_http_wall_us=traces,
+            first_to_last_measured_wall_change_fraction=trend,
+            measured_request_drift_exceeds_5pct=drift,
             relative_sample_range=spread, level_1_overhead_fraction=overhead,
-            overhead_qualified=overhead < .02 and all(value <= .05 for value in spread.values())))
+            overhead_qualified=(overhead < .02 and all(value <= .05 for value in spread.values())
+                                and not drift)))
     return dict(schema='ninfer-strata-v100-first-qualification-v1', software_output_fidelity_passed=fidelity,
         comprehensive_attribution_ready=False, engines=results,
         limitations=['Output fidelity is exact HTTP content/reasoning/tool payload equality within each engine, not cross-quant equality.',
                      'This is fresh-prompt HTTP wall overhead, not isolated decode throughput or teacher-forced equality.',
+                     'Baseline nondeterminism and cache-warmup drift are reported separately; neither is a fidelity pass or an isolated overhead estimate.',
                      'System sampler observes the server PID; Strata native child CPU/memory sampling is not yet joined.',
                      'Observer log offsets bracket requests; asynchronous log flushing may cross a boundary.',
                      'Native full request IDs, teacher-forced input traces, GPU intervals/launches and complete MTP costs remain coverage gaps.',
