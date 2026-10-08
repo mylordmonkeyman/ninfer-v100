@@ -23,14 +23,15 @@ CASES = [
     ('ninfer', 'baseline', {}),
     ('strata', 'baseline', {}),
     ('ninfer', 'cache-off', {'NINFER_FLASH_NEXT_EXPERT_CACHE': '0'}),
+    ('ninfer', 'cache-lru', {'NINFER_V100_EXPERT_POLICY': 'lru'}),
     ('strata', 'cache-off', {'cache': '0'}),
     ('ninfer', 'workers-16', {'NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS': '16'}),
     ('strata', 'workers-16', {'workers': '16'}),
     ('ninfer', 'prefill-no-group', {'NINFER_FLASH_NEXT_EXPERT_CACHE_GROUPED_PREFILL': '0'}),
     ('strata', 'prefill-256', {'prefill': '256'}),
-    ('strata', 'mtp-window-1', {'spec': '1'}),
-    ('ninfer', 'numa-node0', {'numa': 'node0'}),
-    ('strata', 'numa-node0', {'numa': 'node0'}),
+    ('strata', 'mtp-window-2', {'spec': '2'}),
+    ('ninfer', 'cpu-node0', {'affinity': 'node0'}),
+    ('strata', 'cpu-node0', {'affinity': 'node0'}),
     ('ninfer', 'baseline-repeat', {}),
     ('strata', 'baseline-repeat', {}),
 ]
@@ -76,6 +77,27 @@ def release_gpu():
             return
         time.sleep(2)
     raise RuntimeError('V100 still occupied after terminating our process; stop campaign')
+
+
+def node0_allowed_cpus():
+    # Cgroup-bound GitHub Actions containers cannot call set_mempolicy
+    # (--preferred=0 fails EPERM). Limit CPU placement only, and name the
+    # control accurately. Do not claim that memory affinity is enforced.
+    allowed = os.sched_getaffinity(0)
+    cpulist = Path('/sys/devices/system/node/node0/cpulist').read_text().strip()
+    cpus = set()
+    for segment in cpulist.split(','):
+        bounds = segment.split('-')
+        if len(bounds) == 1:
+            cpus.add(int(bounds[0]))
+        elif len(bounds) == 2:
+            cpus.update(range(int(bounds[0]), int(bounds[1]) + 1))
+        else:
+            raise ValueError('invalid node0 CPU range')
+    subset = sorted(allowed & cpus)
+    if len(subset) < 2:
+        raise RuntimeError('node0 contains fewer than 2 allowed CPUs in this container')
+    return subset
 
 
 def native_ninfer_requests(path):
@@ -142,9 +164,8 @@ def run_case(args, engine, variant, overrides):
         flags = option(cfg['args'], '--prompt-cache', '0')
         if 'cache' in overrides:
             flags = option(flags, '--expert-cache', overrides['cache'])
-            if overrides['cache'] == '0':
-                # A profile is meaningless when its cache is disabled.
-                flags = remove_option(flags, '--expert-profile')
+            # Keep the static expert profile even with cache disabled:
+            # Strata's resident-CPU expert mode requires that ranking.
         if 'workers' in overrides:
             flags = option(flags, '--pool-workers', overrides['workers'])
         if 'prefill' in overrides:
@@ -157,10 +178,11 @@ def run_case(args, engine, variant, overrides):
         cmd = [str(args.strata_python.absolute()), str(args.strata_server.resolve()),
                '--engine', 'strata', '--config', str(config_path.resolve()),
                '--host', '127.0.0.1', '--port', str(port)]
-    if overrides.get('numa') == 'node0':
-        if not shutil.which('numactl'):
-            raise RuntimeError('numactl is unavailable')
-        cmd = ['numactl', '--cpunodebind=0', '--preferred=0'] + cmd
+    if overrides.get('affinity') == 'node0':
+        if not shutil.which('taskset'):
+            raise RuntimeError('taskset is unavailable')
+        node0 = node0_allowed_cpus()
+        cmd = ['taskset', '-c', ','.join(str(n) for n in node0)] + cmd
     (folder/'launch.json').write_text(json.dumps(dict(command=cmd,
         overrides=overrides, env={k:v for k,v in env.items() if
             k.startswith(('NINFER_', 'V100_', 'CUDA_', 'STRATA_'))}),
@@ -246,17 +268,26 @@ def main():
     p.add_argument('--gpu-uuid',required=True)
     p.add_argument('--warmups',type=int,default=5)
     p.add_argument('--repeats',type=int,default=3)
+    p.add_argument('--case',action='append',metavar='ENGINE/VARIANT',default=[],
+                   help='Repeat to run only specified controls, in original matrix order.')
     a=p.parse_args()
     if a.warmups<2 or a.repeats<2:
         p.error('at least 2 warmups and 2 measured repetitions required')
     a.output.mkdir(parents=True,exist_ok=True)
-    (a.output/'matrix.json').write_text(json.dumps(dict(cases=CASES,warmups=a.warmups,
+    selection = set(a.case)
+    available = {engine+'/'+variant for engine,variant,_ in CASES}
+    if selection - available:
+        p.error('unknown A/B case(s): '+', '.join(sorted(selection-available)))
+    cases = [c for c in CASES if not selection or c[0]+'/'+c[1] in selection]
+    if not all((e,'baseline') in [(x[0],x[1]) for x in cases] for e in ('ninfer','strata')):
+        p.error('both engines require their baseline for a controlled comparison')
+    (a.output/'matrix.json').write_text(json.dumps(dict(cases=cases,warmups=a.warmups,
         repeats=a.repeats,cross_quant_perf_is_not_controlled=True,
         main_config='same model and quantization within each engine',
         absolute_baseline_comparison='descriptive only'),indent=2)+'\n')
     results=[]
     try:
-        for engine,variant,overrides in CASES:
+        for engine,variant,overrides in cases:
             if gpu_free_mib()<28000:
                 raise RuntimeError('GPU occupied before A/B case; no process was killed')
             try:
