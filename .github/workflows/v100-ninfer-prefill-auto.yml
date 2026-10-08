@@ -1,5 +1,6 @@
 name: V100 NInfer Auto Prefill Crossover
 # Five fixed NInfer-only controls: static, LRU, always-stream, auto256, repeat.
+# 63-token short input should avoid streaming; 585-token long input should stream.
 # Campaign 1: 13 sequential controlled cases; one GPU runner; no concurrent models.
 on:
   workflow_dispatch:
