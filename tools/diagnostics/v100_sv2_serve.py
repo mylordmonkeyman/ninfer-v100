@@ -169,7 +169,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                NINFER_V100_QSA_SCORE_MMA_MIN_QSA='6' if qsa_score_screen and mode=='score-mma' else '0',
                NINFER_V100_QSA_SCORE_COMPARE='1' if qsa_score_attribution else '0',
                NINFER_V100_PLE_IO='mmap',
-               NINFER_V100_SV7_FP16_TC=('1' if mode == 'fp16-tc' else '0') if sv7_tc_screen else env.get('NINFER_V100_SV7_FP16_TC','0'),
+               NINFER_V100_SV7_FP16_TC=('1' if mode == 'fp16-tc' else '0') if (sv7_tc_screen or sv7_stage_screen) else env.get('NINFER_V100_SV7_FP16_TC','0'),
                NINFER_FLASH_NEXT_STAGE_LEDGER='1' if sv7_stage_screen else '0',NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT='0',
                NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE='0')
     # Bind only a loopback port. The subprocess is the only process this tool stops.
