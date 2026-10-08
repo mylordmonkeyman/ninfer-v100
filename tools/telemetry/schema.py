@@ -106,6 +106,25 @@ def validate(record):
                 raise ValueError(f'unknown stage {key}')
             number(value, key)
         for window in layer.get('cache_windows', []): validate_cache(window, record['level'])
+        # Normalize lossless Level-1 packed workers into the public named schema.
+        # Keep all configured and zero-claim worker observations, not just active jobs.
+        if 'workers_compact' in layer:
+            if 'workers' in layer or record['level'] != 1:
+                raise ValueError('compact workers are Level-1 only and mutually exclusive')
+            packed = layer.pop('workers_compact')
+            if not isinstance(packed, list): raise ValueError('invalid compact worker array')
+            named = []
+            for values in packed:
+                if not isinstance(values, list) or len(values) != 7:
+                    raise ValueError('invalid compact worker tuple width')
+                pool, worker_id, host, configured, full, gate_up, down = values
+                if type(host) is not int or host not in (0, 1):
+                    raise ValueError('invalid compact worker role')
+                named.append(dict(pool_id=pool, worker_id=worker_id,
+                                  role='host' if host else 'worker',
+                                  configured_workers=configured, full_jobs=full,
+                                  gate_up_jobs=gate_up, down_jobs=down))
+            layer['workers'] = named
         workers_seen = set()
         for worker in layer.get('workers', []):
             pool = number(worker.get('pool_id'), 'pool_id', True)
