@@ -6,6 +6,9 @@
 #include "ops/op_tester.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <iomanip>
 #include <cmath>
 #include <cstdint>
 #include <exception>
@@ -275,6 +278,56 @@ int run_selector_linear() {
     return failures;
 }
 
+
+int run_sv7_bench() {
+    // End-to-end isolated projection wall time includes weight/activation
+    // conversion, CUTLASS setup, host sentinel synchronization, and GEMM.
+    // Output is CSV and can be paired between two fresh processes.
+    constexpr int warmups = 2;
+    constexpr int repeats = 5;
+    std::cout << "shape,tokens,repeat,wall_ms,workspace_bytes\\n";
+    struct Shape { int n, k; unsigned seed; const char* name; };
+    for (const Shape shape : {
+            Shape{640, 2560, 423U, "qsa_indexer"},
+            Shape{2560, 2560, 421U, "ple_value"},
+            Shape{2560, 640, 424U, "shared_down"},
+            Shape{10240, 2560, 419U, "ple_key"}}) {
+        DeviceWeight weight(make_patterned(shape.n, shape.k, shape.seed));
+        for (int tokens : {128, 512, 1024}) {
+            const auto input_bits = make_activation_bits(shape.k, tokens);
+            DeviceBuffer input = to_device(input_bits);
+            DeviceBuffer output(static_cast<std::size_t>(shape.n) * tokens * 2);
+            Tensor x(input.p, DType::BF16, {shape.k, tokens});
+            Tensor y(output.p, DType::BF16, {shape.n, tokens});
+            const auto capacity = ops::linear_workspace_capacity_bytes(
+                QType::BF16_CTRL, shape.n, shape.k,
+                ops::LinearPolicy::A16Only, tokens, tokens);
+            DeviceArena scratch(std::max<std::size_t>(capacity, 256));
+            for (int rep = -warmups; rep < repeats; ++rep) {
+                cuda_synchronize();
+                const auto begin = std::chrono::steady_clock::now();
+                ops::linear(x, weight.view(), y, ops::LinearPolicy::A16Only,
+                            scratch, nullptr);
+                cuda_synchronize();
+                const auto end = std::chrono::steady_clock::now();
+                if (rep >= 0) {
+                    const double ms =
+                        std::chrono::duration<double, std::milli>(end - begin).count();
+                    std::cout << shape.name << ',' << tokens << ',' << rep
+                              << ',' << std::fixed << std::setprecision(5) << ms
+                              << ',' << capacity << '\\n';
+                }
+                if (scratch.used() != 0 || scratch.peak_used() > capacity) {
+                    std::cerr << "SV7 workspace capacity violated for " << shape.name
+                              << " T=" << tokens << '\\n';
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 int run_bf16_linear() {
     int failures = 0;
     DeviceWeight attention_weight(make_patterned(14336, 5120, 401U));
@@ -358,7 +411,9 @@ int main(int argc, char** argv) {
 
     try {
         int failures = 0;
-        if (argc == 2 && std::string_view(argv[1]) == "--sv7-pilot-only") {
+        if (argc == 2 && std::string_view(argv[1]) == "--sv7-bench-only") {
+            return run_sv7_bench();
+        } else if (argc == 2 && std::string_view(argv[1]) == "--sv7-pilot-only") {
             // Small real registered BF16 projection shapes. Run separately
             // with NINFER_V100_SV7_FP16_TC=0 and =1, retaining existing FP64
             // sampled-row reduction criteria and guards.
