@@ -32,6 +32,38 @@ class QualificationTests(unittest.TestCase):
         data[0]['output_sha256'] = 'different'
         self.assertFalse(report(data)['software_output_fidelity_passed'])
 
+    def test_nondeterministic_baseline_is_not_misclassified_as_telemetry_drift(self):
+        data = rows()
+        # Strata naturally produces two output variants at Level 0.
+        # Both variants recur when instrumentation is enabled.
+        for row in data:
+            if row['engine'] == 'strata':
+                row['output_sha256'] = 'variant-a' if row['level'] != 1 else 'variant-b'
+        data[13]['output_sha256'] = 'variant-b'
+        data[16]['output_sha256'] = 'variant-a'
+        result = report(data)
+        strata = next(row for row in result['engines'] if row['engine'] == 'strata')
+        self.assertFalse(result['software_output_fidelity_passed'])
+        self.assertFalse(strata['baseline_output_stable'])
+        self.assertEqual(strata['output_fidelity_failure_reason'], 'baseline_nondeterministic')
+        self.assertEqual(strata['new_output_hashes_vs_baseline'][1], 0)
+        self.assertEqual(strata['new_output_hashes_vs_baseline'][2], 0)
+
+    def test_latency_drift_is_reported_without_weakening_output_gate(self):
+        data = rows()
+        # The measured cells trend systematically downward as caches warm.
+        for engine in ('ninfer', 'strata'):
+            for level in (0, 1, 2):
+                matching = [r for r in data if r['engine'] == engine and r['level'] == level]
+                for row, wall in zip(matching, (1250, 1100, 1000)):
+                    row['wall_us'] = wall
+        result = report(data)
+        self.assertTrue(result['software_output_fidelity_passed'])
+        for row in result['engines']:
+            self.assertTrue(row['measured_request_drift_exceeds_5pct'])
+            self.assertFalse(row['overhead_qualified'])
+            self.assertLess(row['first_to_last_measured_wall_change_fraction'][0], -.05)
+
     def test_installed_config_preserved_and_native_instrumentation_overridden(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)/'installed.json'
