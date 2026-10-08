@@ -9,6 +9,7 @@
 
 #include "core/layout.h"
 #include "targets/qwen3_8_flash_next/impl/cpu_expert_pool.h"
+#include "targets/qwen3_8_flash_next/impl/cpu_group_policy.h"
 #include "targets/qwen3_8_flash_next/impl/moe_kernels.h"
 #include "targets/qwen3_8_flash_next/impl/moe_route.h"
 #include "targets/qwen3_8_flash_next/impl/moe_workspace.h"
@@ -76,11 +77,9 @@ bool resolve_shared_fp32_intermediate_diagnostic() {
     return env != nullptr && env[0] != '\0' && std::string_view(env) != "0";
 }
 
-bool resolve_cpu_expert_grouping() {
-    const char* env = std::getenv("NINFER_V100_CPU_EXPERT_GROUP");
-    if (env == nullptr || env[0] == '\0' || std::string_view(env) == "0") { return false; }
-    if (std::string_view(env) == "1") { return true; }
-    throw std::invalid_argument("NINFER_V100_CPU_EXPERT_GROUP must be 0 or 1");
+bool resolve_cpu_expert_grouping(bool prefill) {
+    return flash_next_cpu_expert_grouping_enabled(
+        std::getenv("NINFER_V100_CPU_EXPERT_GROUP"), prefill);
 }
 
 bool resolve_route_handoff(bool prefill) {
@@ -682,7 +681,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     if (!cpu.tasks.empty()) {
         try {
 #if defined(NINFER_VOLTA_BUILD)
-            grouped_cpu_experts = tokens > 1 && resolve_cpu_expert_grouping();
+            grouped_cpu_experts = tokens > 1 && resolve_cpu_expert_grouping(prefill);
 #endif
             cpu_batch = host_expert_worker_pool().run(cpu.tasks, grouped_cpu_experts, layer);
             if (observe_host && !grouped_cpu_experts) {

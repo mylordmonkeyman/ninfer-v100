@@ -1,6 +1,7 @@
 #include "artifact/reader.h"
 #include "targets/qwen3_8_flash_next/impl/cpu_expert_pool.h"
 #include "targets/qwen3_8_flash_next/impl/cpu_expert_reference.h"
+#include "targets/qwen3_8_flash_next/impl/cpu_group_policy.h"
 
 #include <array>
 #include <bit>
@@ -86,6 +87,20 @@ std::uint16_t float_to_bf16(float value) {
 
 int main() {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    if (flash_next_cpu_expert_grouping_enabled(nullptr, true) ||
+        flash_next_cpu_expert_grouping_enabled("0", true) ||
+        !flash_next_cpu_expert_grouping_enabled("1", true) ||
+        !flash_next_cpu_expert_grouping_enabled("1", false) ||
+        !flash_next_cpu_expert_grouping_enabled("prefill", true) ||
+        flash_next_cpu_expert_grouping_enabled("prefill", false)) {
+        throw std::runtime_error("CPU expert grouping phase policy mismatch");
+    }
+    bool invalid_policy_rejected = false;
+    try { (void)flash_next_cpu_expert_grouping_enabled("decode", true); }
+    catch (const std::invalid_argument&) { invalid_policy_rejected = true; }
+    if (!invalid_policy_rejected) {
+        throw std::runtime_error("invalid CPU expert grouping policy accepted");
+    }
     std::optional<v100_compare::Round> telemetry;
     if (v100_compare::level()) telemetry.emplace("ninfer", "cpu-group-fixture", "verify");
     if (!flash_next_cpu_nvfp4_avx2_available()) {

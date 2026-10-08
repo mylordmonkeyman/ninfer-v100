@@ -43,6 +43,12 @@ class ABV100Tests(unittest.TestCase):
                          ['NINFER_V100_PREFILL_EXPERT_STREAM_FRACTION'],'0.60')
         self.assertEqual(controls['lru-auto256-gpu50']
                          ['NINFER_V100_PREFILL_EXPERT_STREAM_FRACTION'],'0.50')
+        self.assertEqual(controls['lru-auto256-gpu50-group-prefill']
+                         ['NINFER_V100_CPU_EXPERT_GROUP'],'prefill')
+        self.assertEqual(controls['lru-auto256-gpu60-group-prefill']
+                         ['NINFER_V100_CPU_EXPERT_GROUP'],'prefill')
+        self.assertEqual(controls['lru-auto256-gpu50-repeat'],
+                         controls['lru-auto256-gpu50'])
         self.assertEqual(controls['lru-auto256-repeat'],
                          controls['lru-prefill-auto256'])
         self.assertIn(('ninfer', 'profile-prior-50'), names)
@@ -74,7 +80,9 @@ class ABV100Tests(unittest.TestCase):
                         'lru-auto256-repeat','lru-auto256-ring8','lru-auto256-busy-first',
                          'lru-auto256-pipelined-reuse','lru-auto256-gpu90',
                          'lru-auto256-gpu75','lru-auto256-gpu70','lru-auto256-gpu60',
-                         'lru-auto256-gpu50','profile-prior-50',
+                         'lru-auto256-gpu60-group-prefill','lru-auto256-gpu50',
+                         'lru-auto256-gpu50-group-prefill','lru-auto256-gpu50-repeat',
+                         'profile-prior-50',
                          'profile-prior-50-auto256'):
                 self.assertIn('NINFER_V100_EXPERT_POLICY', overrides)
             else:
