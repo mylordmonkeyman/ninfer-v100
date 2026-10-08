@@ -2,6 +2,7 @@ name: V100 NInfer MTP Decode Performance A/B
 # Five sequential within-engine controls: auto256 MTP1 reference, MTP2, MTP3,
 # decode GPU expert hybrid streaming, and MTP1 reference repeat.
 # Same NInfer weights and quantization; 192 output tokens for robust decode signal.
+# Runner-wide concurrency serializes this campaign after any healthy in-flight GPU job.
 
 on:
   workflow_dispatch:
