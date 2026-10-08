@@ -41,6 +41,7 @@ jobs:
       CUDA_VISIBLE_DEVICES: '0'
       NINFER_WEIGHTS: /models/qwen3-8b-flash-next
       NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: '32'
+      NINFER_V100_AB_MIN_FREE_GPU_MIB: '28000'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
