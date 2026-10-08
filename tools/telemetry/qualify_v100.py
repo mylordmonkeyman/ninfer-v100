@@ -174,8 +174,31 @@ def run_cell(a, engine, level):
 def report(rows):
     results = []
     fidelity = True
+    paired_parity = True
     for engine in ('ninfer', 'strata'):
-        cells = {level: [r for r in rows if r['engine'] == engine and r['level'] == level and r['phase'] == 'measured']
+        # Compare the SAME request position across telemetry levels, including
+        # warmups, rather than treating normal baseline variability as drift.
+        # Order is the exact request order produced by run_cell; do not sort by
+        # text, digest, or timestamp.
+        requests = {level: [r for r in rows if r['engine'] == engine and r['level'] == level]
+                    for level in (0, 1, 2)}
+        baseline_requests = requests[0]
+        pairs = {}
+        for level in (1, 2):
+            comparison = requests[level]
+            mismatches = []
+            if not baseline_requests or len(comparison) != len(baseline_requests):
+                mismatches.append('request_count_or_missing_baseline')
+            else:
+                for index, (baseline, measured) in enumerate(zip(baseline_requests, comparison)):
+                    if (baseline['phase'] != measured['phase']
+                            or baseline.get('request_payload') != measured.get('request_payload')
+                            or baseline['output_sha256'] != measured['output_sha256']):
+                        mismatches.append(index)
+            pairs[level] = mismatches
+        indexed_equal = not any(pairs.values())
+        paired_parity &= indexed_equal
+        cells = {level: [r for r in requests[level] if r['phase'] == 'measured']
                  for level in (0, 1, 2)}
         hashes = {level: {r['output_sha256'] for r in cell} for level, cell in cells.items()}
         reference = hashes[0]
@@ -198,6 +221,9 @@ def report(rows):
         drift = any(abs(value) > .05 for value in trend.values())
         results.append(dict(engine=engine, baseline_output_stable=stable,
             observed_http_outputs_equal_across_levels=equivalent,
+            indexed_request_output_parity_passed=indexed_equal,
+            compared_request_positions=len(baseline_requests),
+            indexed_request_mismatches={level: mismatches for level, mismatches in pairs.items()},
             output_fidelity_failure_reason=failure_reason,
             unique_output_hashes_per_level={level: len(values) for level, values in hashes.items()},
             new_output_hashes_vs_baseline=novel,
@@ -209,9 +235,13 @@ def report(rows):
             overhead_qualified=(overhead < .02 and all(value <= .05 for value in spread.values())
                                 and not drift)))
     return dict(schema='ninfer-strata-v100-first-qualification-v1', software_output_fidelity_passed=fidelity,
+        indexed_telemetry_output_parity_observed=paired_parity,
+        strict_baseline_repeatability_and_parity_passed=fidelity,
         comprehensive_attribution_ready=False, engines=results,
         limitations=['Output fidelity is exact HTTP content/reasoning/tool payload equality within each engine, not cross-quant equality.',
                      'This is fresh-prompt HTTP wall overhead, not isolated decode throughput or teacher-forced equality.',
+                     'Indexed parity compares each repeated request position across levels, including warmups; it is observational, not a teacher-forced or deterministic replay.',
+                     'Strict baseline repeatability remains a separate gate and is not waived by indexed parity.',
                      'Baseline nondeterminism and cache-warmup drift are reported separately; neither is a fidelity pass or an isolated overhead estimate.',
                      'System sampler observes the server PID; Strata native child CPU/memory sampling is not yet joined.',
                      'Observer log offsets bracket requests; asynchronous log flushing may cross a boundary.',
