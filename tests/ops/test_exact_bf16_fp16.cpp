@@ -61,7 +61,7 @@ int main() {
         using Kind = ninfer::ops::detail::Bf16Fp16ConversionClass;
         if (exp == 255U) {
             if (converted.category != Kind::NonfiniteRejected) {
-                std::cerr << "BF16 nonfinite should be rejected at " << bits << '\\n';
+                std::cerr << "BF16 nonfinite should be rejected at " << bits << '\n';
                 return 1;
             }
             ++nonfinite;
@@ -104,7 +104,7 @@ int main() {
         if (converted.category != kind || converted.bits != expected ||
             converted.nonzero_to_zero != expected_zeroed) {
             std::cerr << "BF16 RNE/saturating FP16 mismatch at " << bits
-                      << " expected " << expected << " got " << converted.bits << '\\n';
+                      << " expected " << expected << " got " << converted.bits << '\n';
             return 1;
         }
         zeroed += expected_zeroed;
