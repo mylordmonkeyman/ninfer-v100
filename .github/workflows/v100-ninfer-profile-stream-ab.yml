@@ -1,6 +1,6 @@
-name: V100 NInfer Profile Prior + Auto256 Prefill A/B
-# Three serial controls: LRU+auto256, profile-prior-50+auto256, LRU+auto256 repeat.
-# Same frozen model, quantization, expert cache slot count, and MTP; only GPU expert residency policy changes.
+name: V100 NInfer Expert H2D Reduction A/B
+# Five serial controls: baseline, profile-prior-50, hybrid GPU90, hybrid GPU75, baseline repeat.
+# Same frozen weights, quant, profile and cache slots; change expert residency or prefill transfer split.
 # Do not launch concurrently with another V100 hardware job or modify the resident model.
 
 on:
@@ -86,7 +86,7 @@ jobs:
                 > "$AB_RESULTS/${fixture}-l${level}.log" 2>&1
             done
           done
-      - name: Run three serial LRU/profile-prior/LRU GPU controls
+      - name: Run five serial baseline/profile/hybrid/hybrid/baseline controls
         shell: bash
         run: |
           set -euo pipefail
@@ -102,7 +102,7 @@ jobs:
             --strata-config /opt/ai/strata/strata-unsloth-ud-q4_k_xl.json \
             --strata-binary build-strata-ninfer-prefill-auto/strata \
             --gpu-uuid "$(cat "$AB_RESULTS/gpu-uuid.txt")" \
-            --output "$AB_RESULTS/campaign" --warmups 5 --repeats 3 --max-output-tokens 64 --reference-variant lru-prefill-auto256 --case ninfer/lru-prefill-auto256 --case ninfer/profile-prior-50-auto256 --case ninfer/lru-auto256-repeat \
+            --output "$AB_RESULTS/campaign" --warmups 5 --repeats 3 --max-output-tokens 64 --reference-variant lru-prefill-auto256 --case ninfer/lru-prefill-auto256 --case ninfer/profile-prior-50-auto256 --case ninfer/lru-auto256-gpu90 --case ninfer/lru-auto256-gpu75 --case ninfer/lru-auto256-repeat \
             | tee "$AB_RESULTS/console.log"
           python3 - <<'PYREPORT'
           import json,os
@@ -115,7 +115,7 @@ jobs:
               print('|---|---|---|---:|---:|',file=f)
               for r in ratios:
                   print(f"| {r['engine']} | {r['variant']} | {r['prompt']} | {r['median_wall_s']:.2f} | {r['speedup_vs_same_engine_baseline']:.3f}x |",file=f)
-              print('Same NInfer model, cache slots, MTP depth and four-slot stream ring; only persistent GPU expert residency policy changes.',file=f)
+              print('Same NInfer weights, cache slots, MTP and GPU ring; only expert residency or CPU/GPU prefill split changes.',file=f)
           PYREPORT
       - name: Guard uploaded evidence against large files and symlinks
         id: upload_guard
