@@ -28,22 +28,31 @@ bool flash_next_decode_expert_stream_requested() {
     return flash_next_decode_expert_stream_min_routes() != 0;
 }
 
+unsigned flash_next_expert_stream_ring_slots() {
+    const char* env = std::getenv("NINFER_V100_EXPERT_STREAM_RING_SLOTS");
+    if (env == nullptr || !*env || std::string_view(env) == "4") return 4;
+    if (std::string_view(env) == "8") return 8;
+    throw std::invalid_argument("NINFER_V100_EXPERT_STREAM_RING_SLOTS must be 4 or 8");
+}
+
 std::size_t flash_next_expert_stream_device_bytes(unsigned maximum_routes) {
     if (!maximum_routes || maximum_routes > 8192U * 10U)
         throw std::invalid_argument("invalid prefill stream route capacity");
     const std::size_t descriptors =
         ((std::size_t(maximum_routes) + 3) / 4) * sizeof(FlashNextCachedExpertGroup);
-    return 4 * (kExpertSlotBytes + std::size_t(maximum_routes) * 640 * 2 + descriptors);
+    return flash_next_expert_stream_ring_slots() *
+        (kExpertSlotBytes + std::size_t(maximum_routes) * 640 * 2 + descriptors);
 }
 
 FlashNextExpertStream::FlashNextExpertStream(unsigned maximum_routes)
-    : maximum_routes_(maximum_routes) {
+    : maximum_routes_(maximum_routes), ring_slots_(flash_next_expert_stream_ring_slots()) {
     if (!maximum_routes || maximum_routes > 8192U*10U)
         throw std::invalid_argument("invalid prefill stream route capacity");
     const std::size_t descriptors = ((std::size_t(maximum_routes)+3)/4)*sizeof(FlashNextCachedExpertGroup);
     try {
         CUDA_CHECK(cudaStreamCreateWithFlags(&transfer_,cudaStreamNonBlocking));
-        for (auto& s : slots_) {
+        for (unsigned i = 0; i < ring_slots_; ++i) {
+            auto& s = slots_[i];
             s.weights=std::make_unique<DeviceBuffer>(kExpertSlotBytes);
             s.activations=std::make_unique<DeviceBuffer>(std::size_t(maximum_routes)*640*2);
             s.groups=std::make_unique<DeviceBuffer>(descriptors);
@@ -122,7 +131,7 @@ void FlashNextExpertStream::submit(const HostNvfp4ExpertPairView& expert,
         cudaStreamSynchronize(compute);
         throw;
     }
-    ++submitted_; next_=(next_+1)%slots_.size();
+    ++submitted_; next_=(next_+1)%ring_slots_;
 }
 void FlashNextExpertStream::finish() {
     for(auto& s:slots_) if(s.pending) {
