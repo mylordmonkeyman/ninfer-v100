@@ -1,6 +1,6 @@
 """Hosted-only tests for objective, fixed-policy quality smoke suite."""
 import unittest
-from quality_v100 import TASKS, POLICIES, FILLER, score, grade
+from quality_v100 import TASKS, EXTENDED_TASKS, POLICIES, FILLER, score, grade
 
 
 class QualityTests(unittest.TestCase):
@@ -13,6 +13,19 @@ class QualityTests(unittest.TestCase):
         for t in TASKS:
             self.assertIn(t['kind'],('text','json'))
             self.assertTrue(t['expected'])
+
+    def test_extended_heldout_tasks_have_distinct_ids_and_valid_sizes(self):
+        all_tasks=TASKS+EXTENDED_TASKS
+        self.assertEqual(len(all_tasks),20)
+        self.assertEqual(len({t['id'] for t in all_tasks}),20)
+        self.assertEqual(sum(t['size']=='short' for t in all_tasks),10)
+        self.assertEqual(sum(t['size']=='long' for t in all_tasks),10)
+        for task in all_tasks:
+            self.assertIn(task['kind'],('text','json'))
+            self.assertTrue(task['prompt'])
+            self.assertTrue(task['expected'])
+            if task['size']=='long':
+                self.assertGreater(len(task['prompt'].split()),256)
 
     def test_policies_change_only_expert_execution(self):
         self.assertEqual([x[0] for x in POLICIES],['static','lru','lru-auto256'])
