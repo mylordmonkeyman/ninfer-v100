@@ -31,6 +31,8 @@ class ABV100Tests(unittest.TestCase):
                          ['NINFER_V100_EXPERT_STREAM_RING_SLOTS'],'8')
         self.assertEqual(controls['lru-auto256-busy-first']
                          ['NINFER_V100_STREAM_EXPERT_ORDER'],'busy-first')
+        self.assertEqual(controls['lru-auto256-pipelined-reuse']
+                         ['NINFER_V100_EXPERT_STREAM_SLOT_REUSE'],'pipelined')
         self.assertEqual(controls['lru-auto256-repeat'],
                          controls['lru-prefill-auto256'])
         self.assertIn(('ninfer', 'profile-prior-50'), names)
@@ -47,7 +49,8 @@ class ABV100Tests(unittest.TestCase):
             self.assertEqual(bool(overrides), name not in ('baseline', 'baseline-repeat'))
             if name in ('lru-admission-2','lru-prefill-stream','lru-prefill-auto256',
                         'lru-auto256-mtp2','lru-auto256-mtp3','lru-auto256-decode-hybrid',
-                        'lru-auto256-repeat','lru-auto256-ring8','lru-auto256-busy-first','profile-prior-50'):
+                        'lru-auto256-repeat','lru-auto256-ring8','lru-auto256-busy-first',
+                         'lru-auto256-pipelined-reuse','profile-prior-50'):
                 self.assertIn('NINFER_V100_EXPERT_POLICY', overrides)
             else:
                 self.assertLessEqual(len(overrides), 1)
