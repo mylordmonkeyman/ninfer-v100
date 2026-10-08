@@ -1,5 +1,6 @@
 name: V100 NInfer SV5 Early Handoff Performance A/B
 # Isolates the existing SV5 event-based router handoff against serial CPU-cache execution.
+# Staging commit validates hosted syntax and tests; benchmark launch uses separate guarded commit.
 # Frozen model, identical cache budget, device combine, grouped AVX2 and MTP controls.
 # No model writes, no unrelated process stops, no competing GPU jobs.
 on:
