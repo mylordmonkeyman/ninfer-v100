@@ -82,7 +82,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: mylordmonkeyman/Strata-V100
-          ref: 831355769b8f6e2c24e4f95ad8bd7183692293ae
+          ref: 0430d397d907032fc9ab83c8bb7acff48a935b53
           path: strata-cpu-source
           persist-credentials: false
       - name: Check Strata round ownership and native token traces
@@ -101,7 +101,11 @@ jobs:
           assert Path('/tmp/strata-round-0.jsonl').read_text() == ''
           for level in (1, 2):
               records = read_records(f'/tmp/strata-round-{level}.jsonl')
-              assert [r['status'] for r in records] == ['ok', 'failed', 'failed']
+              assert [r['status'] for r in records] == ['ok', 'ok', 'failed', 'failed']
+              assert records[1]['phase'] == 'prefill'
+              routed = records[1]['layers'][0]['counters']
+              assert routed['routed_tokens'] == 2 and routed['total_routes'] == 20
+              assert not any(k in routed for k in ('resident_routes', 'cpu_routes', 'nonresident_gpu_routes'))
               assert records[0]['round_id'].startswith('strata:caller:')
               context = records[0]['context']
               assert context['spans'][0]['first_token_index'] == 42
@@ -162,7 +166,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: mylordmonkeyman/Strata-V100
-          ref: 831355769b8f6e2c24e4f95ad8bd7183692293ae
+          ref: 0430d397d907032fc9ab83c8bb7acff48a935b53
           path: strata-telemetry-source
           persist-credentials: false
       - name: Check shared schema and compile Strata telemetry
