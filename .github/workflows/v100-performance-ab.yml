@@ -1,4 +1,5 @@
 name: V100 Controlled NInfer-Strata Performance A/B
+# Campaign 1: 13 sequential controlled cases; one GPU runner; no concurrent models.
 on:
   workflow_dispatch:
   push:
