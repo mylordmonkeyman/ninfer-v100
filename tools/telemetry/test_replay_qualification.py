@@ -79,6 +79,9 @@ class ReplayTests(unittest.TestCase):
                 self.assertEqual(native['counter_totals']['total_routes'],
                                  30 if native['engine'] == 'strata' else 10)
                 self.assertEqual(native['classified_route_total'], 10)
+                self.assertEqual(native['route_complete_layer_observations'], 1)
+                self.assertEqual(native['observed_layers'],
+                                 2 if native['engine'] == 'strata' else 1)
                 self.assertEqual(native['resident_route_fraction_among_observed'], .6)
                 self.assertEqual(native['route_fraction_complete'],
                                  native['engine'] == 'ninfer')
