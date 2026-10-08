@@ -1,6 +1,7 @@
 name: V100 NInfer Pipelined Stream Slot Reuse A/B
 # Three serial controls: blocking slot reuse default, asynchronous pipelined reuse, blocking repeat.
 # Identical four-slot GPU stream ring across cases; only host synchronization on slot reuse changes.
+# Previous busy-first ordering A/B completed; this is the only active V100 performance campaign.
 # Four-versus-eight ring A/B is complete; keep four slots and test busy-first ordering.
 # No quantization changes or unrelated hardware jobs.
 # Benchmarks launch only after MTP and hosted ring software validation passed.
