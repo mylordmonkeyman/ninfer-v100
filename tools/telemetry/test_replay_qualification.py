@@ -55,6 +55,8 @@ class ReplayTests(unittest.TestCase):
             self.assertTrue(result['frozen_strict_fidelity_agreed'])
             self.assertFalse(result['analysis']['software_output_fidelity_passed'])
             self.assertTrue(result['analysis']['indexed_telemetry_output_parity_observed'])
+            self.assertEqual([row['compared_request_positions'] for row in
+                              result['analysis']['engines']], [5, 5])
             self.assertFalse(result['analysis']['comprehensive_attribution_ready'])
             strata = next(x for x in result['analysis']['engines'] if x['engine'] == 'strata')
             self.assertFalse(strata['baseline_output_stable'])
