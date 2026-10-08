@@ -2,6 +2,7 @@ name: V100 NInfer GPU Stream Ring Performance A/B
 # Three serial controls: 4-slot adaptive LRU+auto256, 8-slot, 4-slot repeat.
 # Bounded CUDA H2D/compute ring slots; exact VRAM change accounted in engine plan.
 # No quantization changes or unrelated hardware jobs.
+# Benchmarks launch only after MTP and hosted ring software validation passed.
 
 on:
   workflow_dispatch:
