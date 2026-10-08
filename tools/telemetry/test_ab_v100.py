@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from ab_v100 import CASES, option, remove_option, native_ninfer_requests, summary_for
+from ab_v100 import CASES, option, remove_option, native_ninfer_requests, summary_for, node0_allowed_cpus
 
 
 class ABV100Tests(unittest.TestCase):
@@ -14,13 +14,14 @@ class ABV100Tests(unittest.TestCase):
         self.assertEqual(names[:2], [('ninfer', 'baseline'), ('strata', 'baseline')])
         self.assertIn(('ninfer', 'cache-off'), names)
         self.assertIn(('strata', 'cache-off'), names)
+        self.assertIn(('ninfer', 'cache-lru'), names)
         self.assertIn(('ninfer', 'workers-16'), names)
         self.assertIn(('strata', 'workers-16'), names)
         self.assertIn(('ninfer', 'prefill-no-group'), names)
         self.assertIn(('strata', 'prefill-256'), names)
-        self.assertIn(('strata', 'mtp-window-1'), names)
-        self.assertIn(('ninfer', 'numa-node0'), names)
-        self.assertIn(('strata', 'numa-node0'), names)
+        self.assertIn(('strata', 'mtp-window-2'), names)
+        self.assertIn(('ninfer', 'cpu-node0'), names)
+        self.assertIn(('strata', 'cpu-node0'), names)
         self.assertEqual(names[-2:],
                          [('ninfer', 'baseline-repeat'), ('strata', 'baseline-repeat')])
         for _, name, overrides in CASES:
@@ -41,6 +42,16 @@ class ABV100Tests(unittest.TestCase):
                          ['--pool-workers','16'])
         self.assertEqual(option(baseline,'--prefill','256')[
                          baseline.index('--prefill')+1],'256')
+
+    def test_affinity_is_only_allowed_node0_cpu_set(self):
+        from unittest.mock import patch
+        with patch('ab_v100.os.sched_getaffinity',return_value={0,1,3,7}), \
+             patch('ab_v100.Path.read_text',return_value='0-3,6-7\\n'):
+            self.assertEqual(node0_allowed_cpus(),[0,1,3,7])
+        with patch('ab_v100.os.sched_getaffinity',return_value={7}), \
+             patch('ab_v100.Path.read_text',return_value='0-7\\n'):
+            with self.assertRaisesRegex(RuntimeError,'fewer than 2'):
+                node0_allowed_cpus()
 
     def test_saved_native_request_timing_and_speculation(self):
         with tempfile.TemporaryDirectory() as d:
