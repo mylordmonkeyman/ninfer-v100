@@ -105,6 +105,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # On failure, print native engine details before the artifact upload step.
+          trap 'rc=$?; echo "::error::Native qualification failed (exit $rc)"; tail -100 "$QUALIFICATION_RESULTS/matrix-summary.log" 2>/dev/null || true; find "$QUALIFICATION_RESULTS/matrix" -maxdepth 2 -name server.log -type f -print -exec tail -n 35 {} \\; 2>/dev/null || true; exit "$rc"' ERR
           python3 tools/telemetry/qualify_v100.py \
             --ninfer build-telemetry-qualification/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" --profile telemetry-profile-source/sv2-static-profile.json \
@@ -116,8 +118,30 @@ jobs:
             --output "$QUALIFICATION_RESULTS/matrix" --warmups 2 --repeats 3 \
             > "$QUALIFICATION_RESULTS/matrix-summary.log" 2>&1
           cat "$QUALIFICATION_RESULTS/matrix-summary.log" >> "$GITHUB_STEP_SUMMARY"
-      - name: Preserve all evidence including partial failures
+      - name: Guard uploaded evidence against large files and symlinks
+        id: upload_guard
         if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          folder="$GITHUB_WORKSPACE/telemetry-qualification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [[ ! -d "$folder" ]]; then
+            echo "safe=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No evidence directory was created."
+            exit 0
+          fi
+          # Symlinks are never needed in a diagnostic artifact; never dereference a model.
+          find "$folder" -type l -print -delete
+          bytes="$(du -sb -- "$folder" | cut -f1)"
+          echo "Diagnostic artifact source size: ${bytes} bytes"
+          if (( bytes >= 1073741824 )); then
+            echo "safe=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Diagnostic bundle exceeds the 1 GiB safety limit; refusing upload."
+            exit 0
+          fi
+          echo "safe=true" >> "$GITHUB_OUTPUT"
+      - name: Preserve all evidence including partial failures
+        if: ${{ always() && steps.upload_guard.outputs.safe == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: v100-telemetry-qualification-${{ github.run_id }}-${{ github.run_attempt }}
