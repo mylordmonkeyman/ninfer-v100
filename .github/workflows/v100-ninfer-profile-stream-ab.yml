@@ -2,6 +2,7 @@ name: V100 NInfer Expert H2D Reduction A/B
 # Five serial controls: baseline, profile-prior-50, hybrid GPU90, hybrid GPU75, baseline repeat.
 # Same frozen weights, quant, profile and cache slots; change expert residency or prefill transfer split.
 # Do not launch concurrently with another V100 hardware job or modify the resident model.
+# Hosted Python, CPU, and CUDA host checks passed; one protected GPU run.
 
 on:
   workflow_dispatch:
