@@ -1,5 +1,6 @@
 name: V100 NInfer Expert Policy Quality
 # Three policies, eight objective tasks x two repeats each; never treat this as general accuracy.
+# Single hardware job, same weights/quantization and expert cache capacity.
 on:
   workflow_dispatch:
   push:
