@@ -164,7 +164,7 @@ def run_policy(args, name, overrides):
                     time.sleep(1)
             if not model:
                 raise TimeoutError(f'{name}: server readiness exceeded 600s')
-            schedule=[('warmup',TASKS[0]),('warmup',TASKS[4])]
+            schedule=[('warmup',TASKS[0]),('warmup',TASKS[-1])]
             schedule += [('measured',task) for repeat in range(args.repeats)
                          for task in TASKS]
             with (directory/'requests.jsonl').open('w') as out:
