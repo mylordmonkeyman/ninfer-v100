@@ -34,6 +34,18 @@ def make_zip(path, corrupt=False):
                 rows.append(row)
             files[f'matrix/qualification-{engine}-l{level}/requests.jsonl'] = (
                 ''.join(json.dumps(r) + '\n' for r in samples))
+    for engine in ('ninfer', 'strata'):
+        layer = dict(layer=0,
+                     counters=dict(total_routes=10, resident_routes=6,
+                                   cpu_routes=4, nonresident_gpu_routes=0,
+                                   cpu_weight_read_bytes=123),
+                     host_us={},
+                     workers_compact=[[0, 0, 0, 1, 1, 2, 3]])
+        raw = dict(schema='ninfer-strata-v100-telemetry-v1', kind='round',
+                   engine=engine, level=1, phase='verify', layers=[layer],
+                   context=dict(input_columns=1))
+        log_name = ('server.log' if engine == 'ninfer' else 'native-engine.log')
+        files[f'matrix/qualification-{engine}-l1/{log_name}'] = json.dumps(raw) + '\\n'
     files['matrix/manifest.json'] = json.dumps(dict(warmups=warmups, repeats=repeats))
     files['matrix/summary.json'] = json.dumps(report(rows if not corrupt else [
         dict(r, output_sha256=hashlib.sha256(json.dumps(
@@ -53,6 +65,11 @@ class ReplayTests(unittest.TestCase):
             result = replay(path)
             self.assertEqual(result['requests_verified'], 30)
             self.assertTrue(result['frozen_strict_fidelity_agreed'])
+            self.assertEqual(len(result['native_route_inventory']), 2)
+            for native in result['native_route_inventory']:
+                self.assertEqual(native['counter_totals']['total_routes'], 10)
+                self.assertEqual(native['resident_route_fraction_among_observed'], .6)
+                self.assertEqual(native['worker_jobs']['gate_up_jobs'], 2)
             self.assertFalse(result['analysis']['software_output_fidelity_passed'])
             self.assertTrue(result['analysis']['indexed_telemetry_output_parity_observed'])
             self.assertEqual([row['compared_request_positions'] for row in
