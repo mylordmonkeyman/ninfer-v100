@@ -124,6 +124,10 @@ def run_cell(a, engine, level):
                 for index in range(a.warmups+a.repeats):
                     payload = dict(model=model, messages=[dict(role='user', content=PROMPT)],
                         max_tokens=64, temperature=0, top_p=1, seed=42, enable_thinking=False)
+                    if engine == 'strata':
+                        # Strata's frontend only reads chat_template_kwargs for
+                        # enable_thinking; the top-level convention is ignored.
+                        payload['chat_template_kwargs'] = {'enable_thinking': False}
                     begin_offset = native_log.stat().st_size if native_log.exists() else 0
                     start = time.monotonic_ns()
                     response = api(base, '/v1/chat/completions', payload)
@@ -135,6 +139,8 @@ def run_cell(a, engine, level):
                     content = message.get('content') or ''
                     reasoning = message.get('reasoning_content') or message.get('reasoning') or ''
                     if not content and not reasoning: raise ValueError(f'{run_id}: empty response')
+                    if engine == 'strata' and not content:
+                        raise ValueError(f'{run_id}: no answer content after requesting no-thinking; check Strata template contract')
                     identity = dict(content=content, reasoning=reasoning, tool_calls=message.get('tool_calls'))
                     row = dict(schema='ninfer-strata-v100-qualification-request-v1', engine=engine,
                         run_id=run_id, level=level, observer_request_id=f'{run_id}:{index}',
