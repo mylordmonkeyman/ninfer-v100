@@ -66,7 +66,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: mylordmonkeyman/Strata-V100
-          ref: 831355769b8f6e2c24e4f95ad8bd7183692293ae
+          ref: 0430d397d907032fc9ab83c8bb7acff48a935b53
           path: telemetry-strata-source
           persist-credentials: false
       - name: Download existing validated resident profile
@@ -81,7 +81,7 @@ jobs:
         run: |
           set -euo pipefail
           git -C telemetry-strata-source rev-parse HEAD > "$QUALIFICATION_RESULTS/strata-sha.txt"
-          test "$(cat "$QUALIFICATION_RESULTS/strata-sha.txt")" = 831355769b8f6e2c24e4f95ad8bd7183692293ae
+          test "$(cat "$QUALIFICATION_RESULTS/strata-sha.txt")" = 0430d397d907032fc9ab83c8bb7acff48a935b53
           cmp docs/v100-cross-engine-telemetry-spec.md telemetry-strata-source/docs/v100-cross-engine-telemetry-spec.md
           cmake -S . -B build-telemetry-qualification -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70 \
