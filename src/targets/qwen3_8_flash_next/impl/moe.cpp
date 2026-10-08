@@ -2,6 +2,7 @@
 #include "targets/qwen3_8_flash_next/impl/expert_cache.h"
 #include "targets/qwen3_8_flash_next/impl/expert_stream.h"
 #include "targets/qwen3_8_flash_next/impl/stream_order.h"
+#include "targets/qwen3_8_flash_next/impl/stream_fraction.h"
 #include "targets/qwen3_8_flash_next/impl/route_handoff.h"
 #include "targets/qwen3_8_flash_next/impl/route_handoff_policy.h"
 #include "targets/qwen3_8_flash_next/impl/stream_diagnostics.h"
@@ -104,16 +105,14 @@ bool resolve_device_route_combine() {
 }
 
 double resolve_decode_expert_stream_fraction(bool prefill, bool stream_experts) {
-    if (prefill || !stream_experts) return 1.0;
-    const char* env = std::getenv("NINFER_V100_DECODE_EXPERT_STREAM_FRACTION");
-    if (env == nullptr || env[0] == '\0') return 1.0;
-    char* end = nullptr;
-    const double value = std::strtod(env, &end);
-    if (end == env || *end != '\0' || !std::isfinite(value) || value <= 0.0 || value > 1.0) {
-        throw std::invalid_argument(
-            "NINFER_V100_DECODE_EXPERT_STREAM_FRACTION must be in (0, 1]");
-    }
-    return value;
+    if (!stream_experts) return 1.0;
+    // Prefill stays GPU-only by default. Opt-in hybrid prefill streams the
+    // busiest nonresident experts while the CPU computes the remaining groups.
+    // The existing decode fraction retains exactly its prior behavior.
+    const char* name = prefill
+        ? "NINFER_V100_PREFILL_EXPERT_STREAM_FRACTION"
+        : "NINFER_V100_DECODE_EXPERT_STREAM_FRACTION";
+    return flash_next_parse_expert_stream_fraction(std::getenv(name), name);
 }
 
 bool resolve_avx2_backend() {
