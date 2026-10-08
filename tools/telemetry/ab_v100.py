@@ -33,6 +33,22 @@ CASES = [
                                      'NINFER_V100_PREFILL_EXPERT_POLICY': 'auto',
                                      'NINFER_V100_PREFILL_STREAM_MIN_TOKENS': '256',
                                      'NINFER_V100_DEVICE_ROUTE_COMBINE': '1'}),
+    ('ninfer','lru-auto256-mtp2',{'NINFER_V100_EXPERT_POLICY': 'lru',
+        'NINFER_V100_PREFILL_EXPERT_POLICY': 'auto',
+        'NINFER_V100_PREFILL_STREAM_MIN_TOKENS': '256',
+        'NINFER_V100_DEVICE_ROUTE_COMBINE': '1','draft_tokens':'2'}),
+    ('ninfer','lru-auto256-mtp3',{'NINFER_V100_EXPERT_POLICY': 'lru',
+        'NINFER_V100_PREFILL_EXPERT_POLICY': 'auto',
+        'NINFER_V100_PREFILL_STREAM_MIN_TOKENS': '256',
+        'NINFER_V100_DEVICE_ROUTE_COMBINE': '1','draft_tokens':'3'}),
+    ('ninfer','lru-auto256-decode-hybrid',{'NINFER_V100_EXPERT_POLICY': 'lru',
+        'NINFER_V100_PREFILL_EXPERT_POLICY': 'auto',
+        'NINFER_V100_PREFILL_STREAM_MIN_TOKENS': '256',
+        'NINFER_V100_DEVICE_ROUTE_COMBINE': '1','NINFER_V100_DECODE_EXPERT_POLICY':'hybrid'}),
+    ('ninfer','lru-auto256-repeat',{'NINFER_V100_EXPERT_POLICY': 'lru',
+        'NINFER_V100_PREFILL_EXPERT_POLICY': 'auto',
+        'NINFER_V100_PREFILL_STREAM_MIN_TOKENS': '256',
+        'NINFER_V100_DEVICE_ROUTE_COMBINE': '1'}),
     ('ninfer', 'profile-prior-50', {'NINFER_V100_EXPERT_POLICY': 'profile',
                                    'NINFER_V100_EXPERT_PRIOR_WEIGHT': '50'}),
     ('strata', 'cache-off', {'cache': '0'}),
@@ -166,8 +182,11 @@ def run_case(args, engine, variant, overrides):
         for key, value in overrides.items():
             if key.startswith('NINFER_'):
                 env[key] = value
+        flags = NINFER_FLAGS
+        if 'draft_tokens' in overrides:
+            flags = option(flags, '--draft-tokens', overrides['draft_tokens'])
         cmd = ([str(args.ninfer.resolve()), str(args.artifact.absolute()),
-                '--host', '127.0.0.1', '--port', str(port)] + NINFER_FLAGS +
+                '--host', '127.0.0.1', '--port', str(port)] + flags +
                ['--request-log-jsonl', str((folder/'native-requests.jsonl').resolve())])
         native_log = folder/'server.log'
     else:
@@ -230,7 +249,7 @@ def run_case(args, engine, variant, overrides):
                 for index, (phase, which) in enumerate(schedule):
                     payload = dict(model=model, messages=[dict(
                         role='user', content=PROMPT if which == 'long' else SHORT)],
-                        max_tokens=64, temperature=0, top_p=1, seed=42,
+                        max_tokens=args.max_output_tokens, temperature=0, top_p=1, seed=42,
                         enable_thinking=False)
                     if engine == 'strata':
                         payload['chat_template_kwargs'] = {'enable_thinking': False}
@@ -280,9 +299,13 @@ def main():
     p.add_argument('--gpu-uuid',required=True)
     p.add_argument('--warmups',type=int,default=5)
     p.add_argument('--repeats',type=int,default=3)
+    p.add_argument('--max-output-tokens',type=int,default=64)
+    p.add_argument('--reference-variant',default='baseline')
     p.add_argument('--case',action='append',metavar='ENGINE/VARIANT',default=[],
                    help='Repeat to run only specified controls, in original matrix order.')
     a=p.parse_args()
+    if a.max_output_tokens<16 or a.max_output_tokens>1024:
+        p.error('max-output-tokens must be in [16,1024]')
     if a.warmups<2 or a.repeats<2:
         p.error('at least 2 warmups and 2 measured repetitions required')
     a.output.mkdir(parents=True,exist_ok=True)
@@ -292,10 +315,12 @@ def main():
         p.error('unknown A/B case(s): '+', '.join(sorted(selection-available)))
     cases = [c for c in CASES if not selection or c[0]+'/'+c[1] in selection]
     selected_engines = {e for e, _, _ in cases}
-    if not all((e,'baseline') in [(x[0],x[1]) for x in cases] for e in selected_engines):
-        p.error('each selected engine requires its own baseline for a controlled comparison')
+    if not all((e,a.reference_variant) in [(x[0],x[1]) for x in cases]
+               for e in selected_engines):
+        p.error('each selected engine requires its selected reference variant')
     (a.output/'matrix.json').write_text(json.dumps(dict(cases=cases,warmups=a.warmups,
-        repeats=a.repeats,cross_quant_perf_is_not_controlled=True,
+        repeats=a.repeats,max_output_tokens=a.max_output_tokens,
+        reference_variant=a.reference_variant,cross_quant_perf_is_not_controlled=True,
         main_config='same model and quantization within each engine',
         absolute_baseline_comparison='descriptive only'),indent=2)+'\n')
     results=[]
@@ -309,7 +334,7 @@ def main():
                 row=dict(engine=engine,variant=variant,overrides=overrides,status='failed',
                          error=str(error),traceback=traceback.format_exc())
                 print('A/B cell FAILED: '+engine+'/'+variant+': '+str(error),flush=True)
-                if variant=='baseline':
+                if variant==a.reference_variant:
                     results.append(row)
                     raise
             results.append(row)
@@ -317,7 +342,7 @@ def main():
             release_gpu()
     finally:
         (a.output/'summary.json').write_text(json.dumps(results,indent=2,allow_nan=False)+'\n')
-    baselines={e:next((x for x in results if x['engine']==e and x['variant']=='baseline'
+    baselines={e:next((x for x in results if x['engine']==e and x['variant']==a.reference_variant
                          and x['status']=='ok'),None) for e in ('ninfer','strata')}
     ratios=[]
     for r in results:
