@@ -49,8 +49,7 @@ class ABV100Tests(unittest.TestCase):
                          ['NINFER_V100_CPU_EXPERT_GROUP'],'prefill')
         self.assertEqual(controls['lru-auto256-gpu50-repeat'],
                          controls['lru-auto256-gpu50'])
-        self.assertEqual(controls['lru-auto256-gpu50-group-prefill-repeat',
-                         'lru-auto256-gpu50-group-prefill-hot-admit'],
+        self.assertEqual(controls['lru-auto256-gpu50-group-prefill-repeat'],
                          controls['lru-auto256-gpu50-group-prefill'])
         hot_admit=controls['lru-auto256-gpu50-group-prefill-hot-admit']
         self.assertEqual(hot_admit['NINFER_V100_PREFILL_STREAM_ADMIT'],'hot')
@@ -100,6 +99,7 @@ class ABV100Tests(unittest.TestCase):
                          'lru-auto256-minroutes10-group-prefill',
                          'lru-auto256-minroutes12-group-prefill',
                          'lru-auto256-minroutes14-group-prefill',
+                         'lru-auto256-gpu50-group-prefill-hot-admit',
                          'profile-prior-50',
                          'profile-prior-50-auto256'):
                 self.assertIn('NINFER_V100_EXPERT_POLICY', overrides)
