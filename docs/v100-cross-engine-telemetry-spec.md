@@ -128,6 +128,26 @@ draft/verify/commit/head/sampling time and memory. Never derive acceptance from
 verify token count alone. CUDA API/launch/transfer counts and busy/idle interval
 unions require explicit measurement coverage.
 
+## Strata prefill routing visibility (Level 1/2/3)
+
+The Strata prefill GPU router is enqueued once per MoE layer/chunk with `T`
+tokens and `K=10` chosen experts per token. The native telemetry records
+`routed_tokens=T` and `total_routes=T*K` on the existing owner, with no new
+GPU-to-host copy or stream synchronization. On the GPU-fused prefill route,
+the selected expert IDs and their per-route residency are unavailable to this
+host observer. Therefore `resident_routes`, `cpu_routes` and
+`nonresident_gpu_routes` must be **absent, not zero**. A later level-2/3
+trace may qualify them if an already-existing collection mechanism exposes the
+classification; instrumentation must not silently disable the fused path to
+make counters available. If the round fails, its totals are failed observations,
+not valid throughput.
+
+Do not divide classified resident/CPU routes by an inclusive denominator
+that contains unclassified prefill routes. Report classified-route coverage
+and its denominator alongside any CPU/GPU residency fraction. NInfer currently
+covers prefill as well as verify in the route counters; raw aggregate
+residency percentages between engines are otherwise incomparable.
+
 ## CPU worker observations
 
 Observed layers may contain `workers`, keyed by engine/process-local `pool_id`,
