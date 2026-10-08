@@ -1,4 +1,5 @@
 name: V100 NInfer SV5 Early Handoff Performance A/B
+# Triggering one hosted-check-gated SV5 production A/B on validated SHA 70702325b277df3f7e59820203e2e22709bcde6b.
 # Isolates the existing SV5 event-based router handoff against serial CPU-cache execution.
 # Staging commit validates hosted syntax and tests; benchmark launch uses separate guarded commit.
 # Frozen model, identical cache budget, device combine, grouped AVX2 and MTP controls.
