@@ -1,0 +1,49 @@
+name: V100 SV7 Rounded FP16 Conversion Checks
+on:
+  push:
+    branches: [perf/v100-strata-derived]
+    paths:
+      - '.github/workflows/v100-sv7-rounded-fp16-checks.yml'
+      - 'src/ops/common/exact_bf16_fp16.h'
+      - 'src/ops/common/rounded_bf16_fp16.h'
+      - 'tests/ops/test_exact_bf16_fp16.cpp'
+      - 'tools/diagnostics/v100_sv7_weight_eligibility.cpp'
+      - 'docs/v100-sv7-rounded-fp16-revision.md'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  conversion-host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exhaust all BF16 patterns against independent FP64 oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          g++ -std=c++20 -O2 -Wall -Wextra -Werror -Isrc \
+            tests/ops/test_exact_bf16_fp16.cpp -o /tmp/ninfer-sv7-fp16-policy
+          /tmp/ninfer-sv7-fp16-policy
+      - name: Compile read-only real-model conversion inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          g++ -std=c++20 -O2 -Wall -Wextra -Werror -Isrc -Ithird_party \
+            tools/diagnostics/v100_sv7_weight_eligibility.cpp \
+            src/artifact/reader.cpp src/artifact/storage_layouts.cpp \
+            -o /tmp/ninfer-sv7-weight-inventory
+      - name: Ensure full-model SV7 qualification has not been relaxed
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path("docs/v100-sv7-rounded-fp16-revision.md").read_text()
+          assert "Phase 11" in s and "Never relax acceptance thresholds" in s
+          assert "NaN/Inf" in s and "Nonfinite" not in s[:1]
+          assert "opt-in" in s and "fallback" in s
+          PY
+          git diff --check
