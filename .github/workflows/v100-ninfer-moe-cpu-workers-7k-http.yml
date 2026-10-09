@@ -29,7 +29,7 @@ jobs:
           python3 -m unittest discover -s tools/diagnostics -p 'test_v100*.py'
           python3 -m unittest discover -s tools/telemetry -p 'test_*.py'
           python3 tools/diagnostics/v100_sv2_serve.py --help | grep -q -- '--cpu-workers-long-screen'
-          grep -q 'def validate_events(events, responses, mtp, large_prefill=False, multichunk_prefill=False)' tools/diagnostics/v100_sv2_serve.py
+          grep -q 'def validate_events(events, responses, mtp, large_prefill=False, multichunk_prefill=False,' tools/diagnostics/v100_sv2_serve.py
           grep -q "modes=('cpu-workers32','cpu-workers64')" tools/diagnostics/v100_sv2_serve.py
           grep -q 'expected_records=(192 if args.cpu_workers_long_screen else' tools/diagnostics/v100_sv2_serve.py
           git diff --check
