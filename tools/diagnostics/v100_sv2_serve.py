@@ -30,7 +30,8 @@ def response_signature(response):
                 completion_tokens=response['usage']['completion_tokens'])
 
 
-def validate_events(events, responses, mtp, large_prefill=False, multichunk_prefill=False):
+def validate_events(events, responses, mtp, large_prefill=False, multichunk_prefill=False,
+                    long_context_prefill=False):
     done = [e for e in events if e.get('event') == 'request_done']
     if any(e.get('event') in ('request_error','request_rejected') for e in events):
         raise ValueError('server reported request failure')
@@ -64,7 +65,11 @@ def validate_events(events, responses, mtp, large_prefill=False, multichunk_pref
     elif any(e['speculative']['drafted_tokens'] for e in done):
         raise ValueError('non-MTP control drafted tokens')
     prompt_tokens = done[0]['result']['prompt_tokens']
-    if multichunk_prefill:
+    if long_context_prefill:
+        # Exercise four prefill chunks, preserving 8K context headroom.
+        if not 6400 <= prompt_tokens <= 7600:
+            raise ValueError('long-context prefill must contain 6400..7600 tokens')
+    elif multichunk_prefill:
         # Two chunks must be exercised; the final continuation still fits the
         # fixed 4096-token context after the 64-token first completion.
         if not 2560 <= prompt_tokens <= 3500:
@@ -147,10 +152,12 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                route_handoff_policy="all", qsa_score_screen=False, diagnostic=False, qsa_score_attribution=False,
                sv7_tc_screen=False, sv7_stage_screen=False, moe_policy_screen=False, ple_io_screen=False,
                moe_minroutes_screen=False, moe_long_prefill_screen=False,
-               moe_threshold_sweep_screen=False, cpu_workers_screen=False):
+               moe_threshold_sweep_screen=False, cpu_workers_screen=False,
+               cpu_workers_long_screen=False):
     require_gpu_headroom()
     minroutes_screen = (moe_minroutes_screen or moe_long_prefill_screen or
-                        moe_threshold_sweep_screen or cpu_workers_screen)
+                        moe_threshold_sweep_screen or cpu_workers_screen or
+                        cpu_workers_long_screen)
     name = f'{mode}-mtp{int(mtp)}-{repeat}'
     log_path, request_path = output/f'{name}.log', output/f'{name}-requests.jsonl'
     env = os.environ.copy()
@@ -170,12 +177,13 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                NINFER_V100_PREFILL_EXPERT_POLICY=mode if prefill_screen else (('auto' if mode == 'auto-grouped' else 'stream') if (sv7_stage_screen or moe_policy_screen) and mode in ('stream-grouped','auto-grouped') else 'auto' if ple_io_screen or minroutes_screen else 'cpu-cache'),
                NINFER_V100_PREFILL_STREAM_MIN_TOKENS='256' if (moe_policy_screen and mode == 'auto-grouped') or ple_io_screen or minroutes_screen else '',
                NINFER_V100_PREFILL_EXPERT_STREAM_MIN_ROUTES=(
-                    '20' if cpu_workers_screen else
+                    '20' if cpu_workers_screen or cpu_workers_long_screen else
                     {'auto-min14':'14','auto-min20':'20','auto-min28':'28'}.get(mode,'')
                     if minroutes_screen else ''),
                NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS=(
                     {'cpu-workers32':'32','cpu-workers48':'48','cpu-workers64':'64'}[mode]
-                    if cpu_workers_screen else env.get('NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS','32')),
+                    if cpu_workers_screen or cpu_workers_long_screen else
+                     env.get('NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS','32')),
                NINFER_V100_CPU_EXPERT_GROUP='1' if sv7_tc_screen or route_handoff_screen or (cpu_group_screen and mode == 'grouped') or ((sv7_stage_screen or moe_policy_screen) and mode in ('cpu-cache-grouped','stream-grouped','auto-grouped')) or ple_io_screen or minroutes_screen else '0',
                NINFER_V100_EXPERT_PROFILE=str(profile.resolve()),NINFER_V100_EXPERT_POLICY='static',
                NINFER_FLASH_NEXT_EXPERT_CACHE='1',NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS='64',
@@ -197,7 +205,8 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
         probe.bind(('127.0.0.1',0)); port=probe.getsockname()[1]
     # Preserve the .ninfer alias: resolve() would strip the suffix of the mounted file.
     command=[str(executable.resolve()),str(artifact.absolute()),'--host','127.0.0.1',
-             '--port',str(port),'--max-context','4096','--kv-capacity','4096',
+             '--port',str(port),'--max-context','8192' if cpu_workers_long_screen else '4096',
+              '--kv-capacity','8192' if cpu_workers_long_screen else '4096',
              '--max-concurrency','1','--prefill-chunk','2048' if large_prefill else '128','--kv-dtype','fp8' if qsa_score_screen else 'bf16',
              '--device-state-slots','2','--host-state-slots','2','--host-kv-mib','256',
              '--max-private-continuations','2','--max-shared-prefixes','2',
@@ -228,7 +237,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                         if time.monotonic()>deadline: raise TimeoutError('server readiness timeout')
                         time.sleep(1)
                 model=models['data'][0]['id']
-                paragraphs=' '.join(f'Record {i}: the solar station stores energy during daylight and supplies the village after sunset.' for i in range(160 if moe_long_prefill_screen or moe_threshold_sweep_screen or cpu_workers_screen else 64 if large_prefill else 16))
+                paragraphs=' '.join(f'Record {i}: the solar station stores energy during daylight and supplies the village after sunset.' for i in range(360 if cpu_workers_long_screen else 160 if moe_long_prefill_screen or moe_threshold_sweep_screen or cpu_workers_screen else 64 if large_prefill else 16))
                 messages=[{'role':'user','content':paragraphs+' Explain how its battery storage works in detail.'}]
                 payload=dict(model=model,messages=messages,max_tokens=64,temperature=0,seed=42,enable_thinking=False)
                 for readonly in (False,True):
@@ -258,7 +267,8 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
         raise ValueError('production thermal evidence missing or throttled')
     events=[json.loads(line) for line in request_path.read_text().splitlines() if line.strip()]
     done=validate_events(events,responses,mtp,large_prefill,
-                         moe_long_prefill_screen or moe_threshold_sweep_screen or cpu_workers_screen)
+                         moe_long_prefill_screen or moe_threshold_sweep_screen or cpu_workers_screen,
+                          long_context_prefill=cpu_workers_long_screen)
     text=log_path.read_text()
     if sv7_tc_screen or sv7_stage_screen:
         actual = 'sv7.fp16_tc.dispatch=1' in text
