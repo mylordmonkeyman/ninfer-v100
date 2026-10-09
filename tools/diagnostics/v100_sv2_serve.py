@@ -140,8 +140,9 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                prefill_screen=False, cpu_group_screen=False, route_handoff_screen=False,
                route_handoff_policy="all", qsa_score_screen=False, diagnostic=False, qsa_score_attribution=False,
                sv7_tc_screen=False, sv7_stage_screen=False, moe_policy_screen=False, ple_io_screen=False,
-               moe_minroutes_screen=False):
+               moe_minroutes_screen=False, moe_long_prefill_screen=False):
     require_gpu_headroom()
+    minroutes_screen = moe_minroutes_screen or moe_long_prefill_screen
     name = f'{mode}-mtp{int(mtp)}-{repeat}'
     log_path, request_path = output/f'{name}.log', output/f'{name}-requests.jsonl'
     env = os.environ.copy()
@@ -154,14 +155,14 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                 key.startswith('NINFER_V100_PLE_') or
                 key == 'NINFER_FLASH_NEXT_QSA_PREFILL_MMA'):
             env.pop(key)
-    large_prefill = prefill_screen or cpu_group_screen or route_handoff_screen or qsa_score_screen or sv7_tc_screen or sv7_stage_screen or moe_policy_screen or ple_io_screen or moe_minroutes_screen
+    large_prefill = prefill_screen or cpu_group_screen or route_handoff_screen or qsa_score_screen or sv7_tc_screen or sv7_stage_screen or moe_policy_screen or ple_io_screen or minroutes_screen
     env.update(NINFER_V100_ROUTE_HANDOFF=('prefill' if route_handoff_policy == 'prefill' else '1')
                if route_handoff_screen and mode == 'handoff' else '0',
                NINFER_V100_DEVICE_ROUTE_COMBINE='1' if large_prefill or mode == 'device' else '0',
-               NINFER_V100_PREFILL_EXPERT_POLICY=mode if prefill_screen else (('auto' if mode == 'auto-grouped' else 'stream') if (sv7_stage_screen or moe_policy_screen) and mode in ('stream-grouped','auto-grouped') else 'auto' if ple_io_screen or moe_minroutes_screen else 'cpu-cache'),
-               NINFER_V100_PREFILL_STREAM_MIN_TOKENS='256' if (moe_policy_screen and mode == 'auto-grouped') or ple_io_screen or moe_minroutes_screen else '',
-               NINFER_V100_PREFILL_EXPERT_STREAM_MIN_ROUTES='14' if moe_minroutes_screen and mode == 'auto-min14' else '',
-               NINFER_V100_CPU_EXPERT_GROUP='1' if sv7_tc_screen or route_handoff_screen or (cpu_group_screen and mode == 'grouped') or ((sv7_stage_screen or moe_policy_screen) and mode in ('cpu-cache-grouped','stream-grouped','auto-grouped')) or ple_io_screen or moe_minroutes_screen else '0',
+               NINFER_V100_PREFILL_EXPERT_POLICY=mode if prefill_screen else (('auto' if mode == 'auto-grouped' else 'stream') if (sv7_stage_screen or moe_policy_screen) and mode in ('stream-grouped','auto-grouped') else 'auto' if ple_io_screen or minroutes_screen else 'cpu-cache'),
+               NINFER_V100_PREFILL_STREAM_MIN_TOKENS='256' if (moe_policy_screen and mode == 'auto-grouped') or ple_io_screen or minroutes_screen else '',
+               NINFER_V100_PREFILL_EXPERT_STREAM_MIN_ROUTES='14' if minroutes_screen and mode == 'auto-min14' else '',
+               NINFER_V100_CPU_EXPERT_GROUP='1' if sv7_tc_screen or route_handoff_screen or (cpu_group_screen and mode == 'grouped') or ((sv7_stage_screen or moe_policy_screen) and mode in ('cpu-cache-grouped','stream-grouped','auto-grouped')) or ple_io_screen or minroutes_screen else '0',
                NINFER_V100_EXPERT_PROFILE=str(profile.resolve()),NINFER_V100_EXPERT_POLICY='static',
                NINFER_FLASH_NEXT_EXPERT_CACHE='1',NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS='64',
                NINFER_FLASH_NEXT_EXPERT_CACHE_SERIAL='0',NINFER_FLASH_NEXT_EXPERT_CACHE_PREFILL='1',
@@ -213,7 +214,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                         if time.monotonic()>deadline: raise TimeoutError('server readiness timeout')
                         time.sleep(1)
                 model=models['data'][0]['id']
-                paragraphs=' '.join(f'Record {i}: the solar station stores energy during daylight and supplies the village after sunset.' for i in range(64 if large_prefill else 16))
+                paragraphs=' '.join(f'Record {i}: the solar station stores energy during daylight and supplies the village after sunset.' for i in range(160 if moe_long_prefill_screen else 64 if large_prefill else 16))
                 messages=[{'role':'user','content':paragraphs+' Explain how its battery storage works in detail.'}]
                 payload=dict(model=model,messages=messages,max_tokens=64,temperature=0,seed=42,enable_thinking=False)
                 for readonly in (False,True):
@@ -286,6 +287,8 @@ def main():
                         help='phase eligibility for the route-ready candidate; serial control remains off')
     parser.add_argument('--moe-policy-screen',action='store_true',
                         help='end-to-end HTTP three-arm grouped CPU, GPU stream, adaptive auto256 performance A/B/C')
+    parser.add_argument('--moe-long-prefill-screen',action='store_true',
+                        help='production HTTP 3K-token multi-chunk auto256 baseline vs grouped minroutes14')
     parser.add_argument('--moe-minroutes-screen',action='store_true',
                         help='production HTTP auto256: all streaming versus opt-in >=14 routes per expert')
     parser.add_argument('--ple-io-screen',action='store_true',
@@ -302,7 +305,7 @@ def main():
     args=parser.parse_args()
     if args.artifact.suffix != '.ninfer' or not args.artifact.is_file():
         parser.error('--artifact requires an explicit readable .ninfer file')
-    if sum((args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,args.qsa_score_screen,args.qsa_score_attribution,args.sv7_tc_screen,args.sv7_stage_screen,args.moe_policy_screen,args.ple_io_screen,args.moe_minroutes_screen)) > 1:
+    if sum((args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,args.qsa_score_screen,args.qsa_score_attribution,args.sv7_tc_screen,args.sv7_stage_screen,args.moe_policy_screen,args.ple_io_screen,args.moe_minroutes_screen,args.moe_long_prefill_screen)) > 1:
         parser.error('performance screen flags are mutually exclusive')
     if args.repeats<3: parser.error('need three fresh-process observations per arm')
     args.output.mkdir(parents=True,exist_ok=True)
@@ -324,7 +327,7 @@ def main():
         modes=('cpu-cache-grouped','stream-grouped','auto-grouped')
     elif args.ple_io_screen:
         modes=('ple-mmap','ple-direct')
-    elif args.moe_minroutes_screen:
+    elif args.moe_minroutes_screen or args.moe_long_prefill_screen:
         modes=('auto-all','auto-min14')
     elif args.sv7_tc_screen:
         modes=('bf16-simt','fp16-tc')
@@ -402,22 +405,26 @@ def main():
                             'actual_direct_page_reads':sum(row.get('coalesced_pages',0) for row in rows)}
             atomic_json(args.output/'ple-backend-dispatch.json',dispatch)
         print('SV6 mmap/direct storage backends verified separately from timing',flush=True)
-    if args.moe_minroutes_screen:
+    if args.moe_minroutes_screen or args.moe_long_prefill_screen:
         # Inspect one uninstrumented-equivalent prompt under explicit telemetry
         # separately from all timing observations; no stage ledger or broad profiling.
         traffic={}
         for mode in modes:
             run_server(args.executable,args.artifact,args.profile,args.output,mode,False,
-                       -1,moe_minroutes_screen=True,diagnostic=True)
+                       -1,moe_minroutes_screen=args.moe_minroutes_screen,
+                       moe_long_prefill_screen=args.moe_long_prefill_screen,diagnostic=True)
             lines=(args.output/f'{mode}-mtp0--1.log').read_text().splitlines()
             records=[]
+            minimum_tokens=256 if args.moe_long_prefill_screen else 1024
             for line in lines:
                 try: entry=json.loads(line)
                 except json.JSONDecodeError: continue
-                if entry.get('kind')=='expert_layer' and entry.get('prefill') is True and entry.get('tokens',0)>=1024:
+                if entry.get('kind')=='expert_layer' and entry.get('prefill') is True and entry.get('tokens',0)>=minimum_tokens:
                     records.append(entry)
-            if len(records)!=48:
-                raise ValueError(f'{mode}: expected 48 large MoE layer telemetry records; got {len(records)}')
+            # 3K tokens fit in two 2048-token chunks; each has 48 MoE layers.
+            expected_records=96 if args.moe_long_prefill_screen else 48
+            if len(records)!=expected_records:
+                raise ValueError(f'{mode}: expected {expected_records} large MoE layer telemetry records; got {len(records)}')
             traffic[mode]={
                 'layers':len(records),
                 'stream_expert_h2d_bytes':sum(row['stream_expert_h2d_bytes'] for row in records),
@@ -449,14 +456,15 @@ def main():
                                args.route_handoff_policy,qsa_score_screen=args.qsa_score_screen,
                                sv7_tc_screen=args.sv7_tc_screen,moe_policy_screen=args.moe_policy_screen,
                                ple_io_screen=args.ple_io_screen,
-                               moe_minroutes_screen=args.moe_minroutes_screen)
+                               moe_minroutes_screen=args.moe_minroutes_screen,
+                               moe_long_prefill_screen=args.moe_long_prefill_screen)
                 observations.append(row); atomic_json(args.output/'observations.json',observations)
                 peers=[r for r in observations if r['mtp']==mtp]
                 same_mode=[r for r in peers if r['mode']==mode]
                 if any(r['response_signatures']!=same_mode[0]['response_signatures']
                        for r in same_mode):
                     raise ValueError('same-path fresh-process greedy response or finish accounting differs')
-                if (not (args.qsa_score_screen or args.sv7_tc_screen or args.moe_policy_screen or args.moe_minroutes_screen) and
+                if (not (args.qsa_score_screen or args.sv7_tc_screen or args.moe_policy_screen or args.moe_minroutes_screen or args.moe_long_prefill_screen) and
                         any(r['response_signatures']!=peers[0]['response_signatures'] for r in peers)):
                     raise ValueError('cross-path greedy production response or finish accounting differs')
                 if args.route_handoff_screen:
@@ -477,7 +485,7 @@ def main():
                         dict(drafted=e['speculative']['drafted_tokens'],
                              accepted=e['speculative']['accepted_tokens'])
                         for e in r['requests']] for r in pair}))
-    if args.moe_policy_screen or args.moe_minroutes_screen:
+    if args.moe_policy_screen or args.moe_minroutes_screen or args.moe_long_prefill_screen:
         for repeat in range(args.repeats):
             for mtp in (False,True):
                 arms=[r for r in observations if r['repeat']==repeat and r['mtp']==mtp]
@@ -521,11 +529,13 @@ def main():
         milestone='SV6';scope='production_http_warm_mmap_vs_strict_direct_ple_auto256_prefix_mtp_screen'
     if args.moe_minroutes_screen:
         milestone='MoE';scope='production_http_auto256_all_stream_vs_minroutes14_grouped_prefix_mtp_screen'
+    if args.moe_long_prefill_screen:
+        milestone='MoE';scope='production_http_three_k_multichunk_auto256_all_vs_minroutes14_prefix_mtp_screen'
     report=dict(schema=1,milestone=milestone,scope=scope,qualified=False,
                 route_handoff_policy=args.route_handoff_policy if args.route_handoff_screen else None,
                 candidate_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),results=results,
                 exact_compared_responses=(all(x['exact'] for x in cross_path_response_matches)
-                                          if args.qsa_score_screen or args.sv7_tc_screen or args.moe_policy_screen or args.moe_minroutes_screen else True),
+                                          if args.qsa_score_screen or args.sv7_tc_screen or args.moe_policy_screen or args.moe_minroutes_screen or args.moe_long_prefill_screen else True),
                 diagnostic_cross_path_exact=diagnostic_cross_path_exact,
                 cross_path_response_matches=cross_path_response_matches,
                 limitations=[
@@ -546,6 +556,11 @@ def main():
                       '48 cold large-chunk MoE layers inspected per arm only in separate telemetry diagnostics; not included in timing',
                       'within-policy outputs/replay must match; cross-policy greedy differences diagnostic, independent Phase11 numerical gate unchanged']
                      if args.moe_minroutes_screen else []) +
+                    (['~3K initial prompt crosses exactly two 2048-token prefill chunks within 4096 context',
+                      'auto256 held fixed, per-expert >=14 routed-token selective GPU stream versus stream all misses',
+                      'both large prefill chunks separately instrumented for expert H2D and CPU weights, 96 expert-layer records per arm',
+                      'repeated one-topic synthetic prompt and one active request; numerical Phase11 gates unchanged, no default promotion']
+                     if args.moe_long_prefill_screen else []) +
                     (['route handoff remains opt-in; both arms use grouped CPU experts; no concurrent-request matrix']
                      if args.route_handoff_screen else []) +
                     (['attention remains opt-in; dispatch diagnostics are excluded from timing; paired 4096-position accuracy admission is separate',
