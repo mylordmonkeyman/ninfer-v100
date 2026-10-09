@@ -2,7 +2,7 @@ name: V100 MoE 3K CPU Expert Worker A/B/C
 # Three-arm 3K HTTP: fixed minroutes20 and compare 32, 48, 64 CPU expert workers.
 # Two-chunk traffic diagnostic per arm; then 3 fresh timing servers per arm with MTP off/on.
 # Only one V100 hardware run, source/model immutable, evidence bounded <1 GiB.
-# Execute hosted validation for worker-count A/B; GPU hardware remains gated until a subsequent explicit marker.
+# Hosted tests had passed but a stale hardcoded grep failed in 37882397783; corrected here. Hardware remains gated.
 on:
   workflow_dispatch:
   push:
@@ -31,7 +31,7 @@ jobs:
           python3 tools/diagnostics/v100_sv2_serve.py --help | grep -q -- '--cpu-workers-screen'
           grep -q 'def validate_events(events, responses, mtp, large_prefill=False, multichunk_prefill=False)' tools/diagnostics/v100_sv2_serve.py
           grep -q "modes=('cpu-workers32','cpu-workers48','cpu-workers64')" tools/diagnostics/v100_sv2_serve.py
-          grep -q 'expected_records=96 if args.moe_long_prefill_screen or args.moe_threshold_sweep_screen else 48' tools/diagnostics/v100_sv2_serve.py
+          grep -q 'expected_records=96 if args.moe_long_prefill_screen or args.moe_threshold_sweep_screen or args.cpu_workers_screen else 48' tools/diagnostics/v100_sv2_serve.py
           git diff --check
   hardware:
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[v100:moe-cpu-workers-http]')) }}
