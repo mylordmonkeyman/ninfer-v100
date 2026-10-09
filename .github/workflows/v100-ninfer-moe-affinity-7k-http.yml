@@ -34,7 +34,7 @@ jobs:
           grep -q 'expected_records=(192 if args.cpu_workers_long_screen else' tools/diagnostics/v100_sv2_serve.py
           git diff --check
   hardware:
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[v100:moe-physical-workers-7k-http]')) }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[v100:moe-physical-workers-saturation-7k-http]')) }}
     needs: checks
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:
