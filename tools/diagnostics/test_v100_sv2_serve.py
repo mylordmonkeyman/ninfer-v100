@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
-from v100_sv2_serve import run_server, validate_events, validate_handoff_peers, validate_qsa_dispatch, validate_qsa_comparisons, require_gpu_headroom
+from v100_sv2_serve import physical_core_cpus, run_server, validate_events, validate_handoff_peers, validate_qsa_dispatch, validate_qsa_comparisons, require_gpu_headroom
 
 
 class ProductionEvidenceTest(unittest.TestCase):
@@ -340,14 +340,25 @@ class ProductionEvidenceTest(unittest.TestCase):
                 self.assertNotIn('Record 160:',prompt)
 
 
+    def test_physical_core_cpu_selection_respects_socket_and_allowed_mask(self):
+        topology = [dict(cpu=cpu,core=cpu%2,socket=(cpu//2)%2)
+                    for cpu in range(8)]
+        self.assertEqual(physical_core_cpus(topology,set(range(8))),[0,1,2,3])
+        self.assertEqual(physical_core_cpus(topology,{4,5,6,7}),[4,5,6,7])
+        with self.assertRaises(ValueError):
+            physical_core_cpus(topology,set())
+
     def test_numa_launcher_keeps_workload_fixed_and_records_placement(self):
         import os
-        for policy in ('default', 'interleave'):
+        for policy in ('default', 'interleave', 'physical-cores'):
             with tempfile.TemporaryDirectory() as directory, \
                     mock.patch('v100_sv2_serve.gpu_snapshot', return_value={}), \
                     mock.patch('v100_sv2_serve.subprocess.Popen') as popen, \
                     mock.patch('v100_sv2_serve.request') as api, \
-                    mock.patch('v100_sv2_serve.Path.read_text', return_value='observed placement'):
+                    mock.patch('v100_sv2_serve.Path.read_text', return_value='observed placement'), \
+                    mock.patch('v100_sv2_serve.os.sched_getaffinity',return_value=set(range(64))), \
+                    mock.patch('v100_sv2_serve.subprocess.check_output',return_value=__import__('json').dumps(
+                        {'cpus':[dict(cpu=i,core=i%16,socket=(i//16)%2) for i in range(64)]})):
                 process = popen.return_value
                 process.pid = os.getpid()
                 process.poll.return_value = None
@@ -360,6 +371,8 @@ class ProductionEvidenceTest(unittest.TestCase):
                 cmd = popen.call_args.args[0]
                 if policy == 'interleave':
                     self.assertEqual(cmd[:2], ['numactl', '--interleave=all'])
+                elif policy == 'physical-cores':
+                    self.assertEqual(cmd[:3], ['taskset','--cpu-list',','.join(map(str,range(32)))])
                 else:
                     self.assertEqual(cmd[0], '/usr/bin/true')
                 self.assertEqual(cmd[cmd.index('--max-context')+1], '8192')

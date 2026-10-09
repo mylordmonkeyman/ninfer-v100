@@ -147,6 +147,19 @@ def require_gpu_headroom():
                            f'need {requested}; unrelated processes were not stopped')
 
 
+def physical_core_cpus(topology, allowed):
+    """Choose one allowed logical CPU per physical core, across all sockets."""
+    cores = {}
+    for row in topology:
+        cpu, core, socket = int(row['cpu']), int(row['core']), int(row['socket'])
+        if cpu in allowed:
+            key = (socket, core)
+            cores[key] = min(cpu, cores.get(key, cpu))
+    if not cores:
+        raise ValueError('no allowed physical cores')
+    return sorted(cores.values())
+
+
 def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                prefill_screen=False, cpu_group_screen=False, route_handoff_screen=False,
                route_handoff_policy="all", qsa_score_screen=False, diagnostic=False, qsa_score_attribution=False,
@@ -215,6 +228,13 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
              '--request-log-jsonl',str(request_path)]
     if numa_policy == 'interleave':
         command = ['numactl', '--interleave=all'] + command
+    elif numa_policy == 'physical-cores':
+        topology = json.loads(subprocess.check_output(
+            ['lscpu','--json','--extended=CPU,CORE,SOCKET'],text=True))['cpus']
+        cpus = physical_core_cpus(topology, os.sched_getaffinity(0))
+        if len(cpus) != 32:
+            raise ValueError(f'expected this host to expose 32 physical cores, got {len(cpus)}')
+        command = ['taskset','--cpu-list',','.join(map(str,cpus))] + command
     elif numa_policy not in (None, 'default'):
         raise ValueError(f'unsupported NUMA policy: {numa_policy}')
     if mtp:
@@ -325,6 +345,8 @@ def main():
                         help='end-to-end HTTP three-arm grouped CPU, GPU stream, adaptive auto256 performance A/B/C')
     parser.add_argument('--cpu-workers-screen',action='store_true',
                         help='production 3K HTTP fixed minroutes20 with 32/48/64 CPU expert workers')
+    parser.add_argument('--cpu-affinity-screen',action='store_true',
+                        help='7K HTTP fixed64 workers: all logical CPUs versus one thread per core')
     parser.add_argument('--cpu-numa-screen',action='store_true',
                         help='7K HTTP fixed 64 workers: inherited memory policy versus interleave-all')
     parser.add_argument('--cpu-workers-long-screen',action='store_true',
@@ -350,8 +372,10 @@ def main():
     if args.artifact.suffix != '.ninfer' or not args.artifact.is_file():
         parser.error('--artifact requires an explicit readable .ninfer file')
     if sum((args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,args.qsa_score_screen,args.qsa_score_attribution,args.sv7_tc_screen,args.sv7_stage_screen,args.moe_policy_screen,args.ple_io_screen,args.moe_minroutes_screen,args.moe_long_prefill_screen,args.moe_threshold_sweep_screen,args.cpu_workers_screen,
-            args.cpu_workers_long_screen,args.cpu_numa_screen)) > 1:
+            args.cpu_workers_long_screen,args.cpu_numa_screen,args.cpu_affinity_screen)) > 1:
         parser.error('performance screen flags are mutually exclusive')
+    if args.cpu_affinity_screen:
+        args.cpu_workers_long_screen = True
     if args.cpu_numa_screen:
         args.cpu_workers_long_screen = True
         # Probe permission before loading a model; fail instead of silently falling back.
@@ -382,6 +406,8 @@ def main():
         modes=('auto-min14','auto-min20','auto-min28')
     elif args.cpu_workers_screen:
         modes=('cpu-workers32','cpu-workers48','cpu-workers64')
+    elif args.cpu_affinity_screen:
+        modes=('affinity-all','affinity-physical')
     elif args.cpu_numa_screen:
         modes=('numa-default','numa-interleave')
     elif args.cpu_workers_long_screen:
@@ -473,7 +499,8 @@ def main():
                        moe_threshold_sweep_screen=args.moe_threshold_sweep_screen,
                        cpu_workers_screen=args.cpu_workers_screen,
                         cpu_workers_long_screen=args.cpu_workers_long_screen,diagnostic=True,
-                       numa_policy=('interleave' if mode=='numa-interleave' else 'default') if args.cpu_numa_screen else None)
+                       numa_policy=(('interleave' if mode=='numa-interleave' else 'default') if args.cpu_numa_screen
+                                    else ('physical-cores' if mode=='affinity-physical' else 'default') if args.cpu_affinity_screen else None))
             lines=(args.output/f'{mode}-mtp0--1.log').read_text().splitlines()
             records=[]
             minimum_tokens=256 if args.moe_long_prefill_screen or args.moe_threshold_sweep_screen or args.cpu_workers_screen or args.cpu_workers_long_screen else 1024
@@ -540,7 +567,8 @@ def main():
                                moe_threshold_sweep_screen=args.moe_threshold_sweep_screen,
                                cpu_workers_screen=args.cpu_workers_screen,
                                 cpu_workers_long_screen=args.cpu_workers_long_screen,
-                                numa_policy=('interleave' if mode=='numa-interleave' else 'default') if args.cpu_numa_screen else None)
+                                numa_policy=(('interleave' if mode=='numa-interleave' else 'default') if args.cpu_numa_screen
+                                    else ('physical-cores' if mode=='affinity-physical' else 'default') if args.cpu_affinity_screen else None))
                 observations.append(row); atomic_json(args.output/'observations.json',observations)
                 peers=[r for r in observations if r['mtp']==mtp]
                 same_mode=[r for r in peers if r['mode']==mode]
@@ -620,13 +648,14 @@ def main():
         milestone='MoE';scope='production_http_three_k_multichunk_minroutes20_cpu_workers32_48_64_screen'
     if args.cpu_workers_long_screen:
         milestone='MoE';scope='production_http_seven_k_four_chunk_minroutes20_cpu_workers32_64_screen'
-    if args.cpu_numa_screen:
-        scope='production_http_seven_k_workers64_default_vs_interleave_memory_policy'
+    if args.cpu_numa_screen or args.cpu_affinity_screen:
+        scope=('production_http_seven_k_workers64_all_vs_physical_cpu_affinity' if args.cpu_affinity_screen
+               else 'production_http_seven_k_workers64_default_vs_interleave_memory_policy')
         if not all(x['exact'] for x in cross_path_response_matches):
-            raise ValueError('NUMA-only arms changed deterministic response signatures')
+            raise ValueError('Placement-only arms changed deterministic response signatures')
         conserved=('layers','stream_expert_h2d_bytes','stream_routes','cpu_miss_routes','cpu_weight_read_bytes')
         if any(traffic[modes[0]][k] != traffic[modes[1]][k] for k in conserved):
-            raise ValueError('NUMA-only arms changed expert workload')
+            raise ValueError('Placement-only arms changed expert workload')
     report=dict(schema=1,milestone=milestone,scope=scope,qualified=False,
                 route_handoff_policy=args.route_handoff_policy if args.route_handoff_screen else None,
                 candidate_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),results=results,
@@ -663,9 +692,9 @@ def main():
                       'cold and continuation MTP/no-MTP outputs compared diagnostically; independent Phase11 qualification remains required']
                      if args.moe_threshold_sweep_screen else []) +
                     (['~7K cold input crosses four 2048-token prefill chunks in 8192-token context',
-                      '64 workers; inherited versus interleave-all memory policy' if args.cpu_numa_screen else '32/64 workers with fixed minroutes20, auto256 and BF16 KV',
+                      '64 workers; all logical CPUs versus one logical CPU per physical core' if args.cpu_affinity_screen else '64 workers; inherited versus interleave-all memory policy' if args.cpu_numa_screen else '32/64 workers with fixed minroutes20, auto256 and BF16 KV',
                       'same static 64 GPU expert slots, four-chunk telemetry separated from timed HTTP',
-                      'CPU affinity unchanged; shared file-cache pages are not migrated or evicted; proc placement snapshots at readiness only' if args.cpu_numa_screen else 'no NUMA pinning, single request, unchanged Phase11 numerical gates']
+                      'memory policy unchanged; 64 workers on 64 versus 32 allowed CPUs; proc snapshots at readiness only, no file-cache migration or eviction' if args.cpu_affinity_screen else 'CPU affinity unchanged; shared file-cache pages are not migrated or evicted; proc placement snapshots at readiness only' if args.cpu_numa_screen else 'no NUMA pinning, single request, unchanged Phase11 numerical gates']
                      if args.cpu_workers_long_screen else []) +
                     (['fixed minroutes20 and auto256; vary only CPU expert workers 32/48/64',
                       '3111-token two-chunk prompt, 4096 context, static 64 expert slots per layer, BF16 KV, mmap PLE',
