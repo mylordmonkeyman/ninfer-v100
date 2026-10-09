@@ -157,8 +157,9 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
     env.update(NINFER_V100_ROUTE_HANDOFF=('prefill' if route_handoff_policy == 'prefill' else '1')
                if route_handoff_screen and mode == 'handoff' else '0',
                NINFER_V100_DEVICE_ROUTE_COMBINE='1' if large_prefill or mode == 'device' else '0',
-               NINFER_V100_PREFILL_EXPERT_POLICY=mode if prefill_screen else ('stream' if (sv7_stage_screen or moe_policy_screen) and mode == 'stream-grouped' else 'cpu-cache'),
-               NINFER_V100_CPU_EXPERT_GROUP='1' if sv7_tc_screen or route_handoff_screen or (cpu_group_screen and mode == 'grouped') or ((sv7_stage_screen or moe_policy_screen) and mode in ('cpu-cache-grouped','stream-grouped')) else '0',
+               NINFER_V100_PREFILL_EXPERT_POLICY=mode if prefill_screen else (('auto' if mode == 'auto-grouped' else 'stream') if (sv7_stage_screen or moe_policy_screen) and mode in ('stream-grouped','auto-grouped') else 'cpu-cache'),
+               NINFER_V100_PREFILL_STREAM_MIN_TOKENS='256' if moe_policy_screen and mode == 'auto-grouped' else '',
+               NINFER_V100_CPU_EXPERT_GROUP='1' if sv7_tc_screen or route_handoff_screen or (cpu_group_screen and mode == 'grouped') or ((sv7_stage_screen or moe_policy_screen) and mode in ('cpu-cache-grouped','stream-grouped','auto-grouped')) else '0',
                NINFER_V100_EXPERT_PROFILE=str(profile.resolve()),NINFER_V100_EXPERT_POLICY='static',
                NINFER_FLASH_NEXT_EXPERT_CACHE='1',NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS='64',
                NINFER_FLASH_NEXT_EXPERT_CACHE_SERIAL='0',NINFER_FLASH_NEXT_EXPERT_CACHE_PREFILL='1',
@@ -280,7 +281,7 @@ def main():
     parser.add_argument('--route-handoff-policy',choices=('all','prefill'),default='all',
                         help='phase eligibility for the route-ready candidate; serial control remains off')
     parser.add_argument('--moe-policy-screen',action='store_true',
-                        help='end-to-end HTTP three-arm CPU single, grouped, and streamed-grouped performance A/B/C')
+                        help='end-to-end HTTP four-arm CPU single, grouped, streamed-grouped, auto-grouped performance A/B/C/D')
     parser.add_argument('--sv7-stage-screen',action='store_true',
                         help='two-process, bounded stage-level production cold-prefill attribution')
     parser.add_argument('--sv7-tc-screen',action='store_true',
@@ -309,8 +310,10 @@ def main():
                                  'failed exact continuation screen remains failed; no timing or MTP qualification']))
         print(f"Same-input real QSA sampled FP64 checks passed: {len(row['qsa_comparisons'])} eligible calls; no serving qualification",flush=True)
         return
-    if args.sv7_stage_screen or args.moe_policy_screen:
+    if args.sv7_stage_screen:
         modes=('cpu-cache-single','cpu-cache-grouped','stream-grouped')
+    elif args.moe_policy_screen:
+        modes=('cpu-cache-single','cpu-cache-grouped','stream-grouped','auto-grouped')
     elif args.sv7_tc_screen:
         modes=('bf16-simt','fp16-tc')
     elif args.qsa_score_screen:
@@ -447,7 +450,7 @@ def main():
                     'no independent oracle thresholds changed; accepted baseline numerical failure remains separate'] +
                     (['grouped CPU experts remain opt-in; no concurrent-request matrix in this screen']
                      if args.cpu_group_screen else []) +
-                    (['three-arm MoE policies remain opt-in; streaming may alter resident expert cache behavior']
+                    (['four-arm MoE policies remain opt-in; auto streams only >=256-token chunks; streaming may alter resident expert cache behavior']
                      if args.moe_policy_screen else []) +
                     (['route handoff remains opt-in; both arms use grouped CPU experts; no concurrent-request matrix']
                      if args.route_handoff_screen else []) +
