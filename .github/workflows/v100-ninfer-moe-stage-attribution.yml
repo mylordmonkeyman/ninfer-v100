@@ -2,6 +2,7 @@ name: V100 NInfer MoE CPU Grouping vs Streaming Attribution
 # Stage ledger A/B/C: CPU cache single, CPU cache grouped, grouped plus streamed misses.
 # FP16 TensorOp held OFF; quantify MoE stage time and host/PCIe telemetry, not CUDA-only time.
 # Only one V100 hardware run, source/model immutable, evidence bounded <1 GiB.
+# One-shot hardware A/B/C approved after hosted checks 37863456926 passed.
 on:
   workflow_dispatch:
   push:
