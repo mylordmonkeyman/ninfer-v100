@@ -2,7 +2,7 @@ name: V100 MoE 3K CPU Expert Worker A/B/C
 # Three-arm 3K HTTP: fixed minroutes20 and compare 32, 48, 64 CPU expert workers.
 # Two-chunk traffic diagnostic per arm; then 3 fresh timing servers per arm with MTP off/on.
 # Only one V100 hardware run, source/model immutable, evidence bounded <1 GiB.
-# Host-only validation for CPU worker 32/48/64 runs first; V100 requires explicit later approval marker.
+# Execute hosted validation for worker-count A/B; GPU hardware remains gated until a subsequent explicit marker.
 on:
   workflow_dispatch:
   push:
