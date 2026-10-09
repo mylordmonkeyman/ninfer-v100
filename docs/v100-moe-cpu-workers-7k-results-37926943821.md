@@ -84,3 +84,18 @@ All six three-arm HTTP comparisons matched exactly. Each 192-layer diagnostic co
 Eighty workers is the best overall setting tested: compared with 64, cold decode improves 2.3% without MTP and 17.1% with MTP, while continuation MTP decode improves 8.9%. Ninety-six workers reduces CPU-branch time and marginally improves prefill, but scheduling overhead lowers decode versus 80. Treat 80 as the current experimental reference; production defaults remain unchanged.
 
 Next: one narrow 72/80/88 refinement on the identical physical-core mask. This is the final worker-count sweep unless it materially displaces 80.
+
+
+## Physical-core worker peak refinement — run 37964348309 attempt 2
+
+The first attempt stopped in the GPU-headroom preflight with only 2,291 MiB free and did not build or load the model. The retry completed on the same source and preserved the 32-physical-CPU mask, inherited memory policy, warm existing file cache, minroutes20/auto256 grouped CPU fallback, 64 fixed GPU expert slots/layer, BF16 KV, mmap PLE, CUDA Graph off, and SV7 TensorOp off.
+
+| Workers | Cold decode, MTP off (tok/s) | Cold decode, MTP on (tok/s) | Continuation decode, MTP on (tok/s) | Cold prefill, MTP on (tok/s) | CPU branch (s) |
+|---:|---:|---:|---:|---:|---:|
+| 72 | 13.408 | 14.495 | 15.213 | 131.454 | 6.020 |
+| 80 | 12.923 | 15.186 | 15.528 | 131.340 | 5.133 |
+| 88 | 12.684 | 16.028 | 16.519 | 131.610 | 5.073 |
+
+All six timed cross-arm response comparisons were exact. Each separate 192-layer traffic diagnostic conserved 71,158,716,160 GPU H2D bytes, 2,653,326 streamed routes, 181,474 CPU-miss routes, and 162,222,344,592 CPU weight-read bytes. Readiness evidence kept CPUs 0–31 and memory nodes 0–1 in every arm.
+
+The optimum is mode-dependent: 72 workers led non-MTP cold decode, while 88 workers led MTP cold and continuation decode. Further worker-count subdivision is not warranted. Production defaults remain unchanged. The next bounded comparison fixes the MTP-oriented 88-worker peak and physical-core placement, varying only CUDA Graph off versus on.
