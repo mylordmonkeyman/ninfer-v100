@@ -2,7 +2,7 @@ name: V100 NInfer MoE Adaptive Policy Production HTTP A/B/C
 # Three-arm uninstrumented production HTTP: grouped CPU, all streaming, adaptive auto256.
 # Compare 3 fresh servers per arm with/without MTP; no stage ledger or broad quality campaign.
 # Only one V100 hardware run, source/model immutable, evidence bounded <1 GiB.
-# Hardware requires explicit commit marker after hosted CI succeeds; no automatic dispatch.
+# One protected hardware comparison authorized after hosted checks run 37868907153 SUCCESS.
 on:
   workflow_dispatch:
   push:
