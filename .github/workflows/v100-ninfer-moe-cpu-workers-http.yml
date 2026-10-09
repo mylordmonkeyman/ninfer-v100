@@ -2,7 +2,7 @@ name: V100 MoE 3K CPU Expert Worker A/B/C
 # Three-arm 3K HTTP: fixed minroutes20 and compare 32, 48, 64 CPU expert workers.
 # Two-chunk traffic diagnostic per arm; then 3 fresh timing servers per arm with MTP off/on.
 # Only one V100 hardware run, source/model immutable, evidence bounded <1 GiB.
-# Hosted tests had passed but a stale hardcoded grep failed in 37882397783; corrected here. Hardware remains gated.
+# Single protected V100 worker-count benchmark authorized after corrected hosted checks 37882446427 SUCCESS; no concurrent hardware jobs.
 on:
   workflow_dispatch:
   push:
