@@ -1,0 +1,140 @@
+name: V100 MoE 3K Minimum-Routes Threshold Sweep
+# Three-arm 3K HTTP: compare >=14, >=20, >=28 expert routes for GPU stream admission.
+# Two-chunk traffic diagnostic per arm; then 3 fresh timing servers per arm with MTP off/on.
+# Only one V100 hardware run, source/model immutable, evidence bounded <1 GiB.
+# Hardware gated behind explicit marker after this workflow's hosted CI; staging never starts V100.
+on:
+  workflow_dispatch:
+  push:
+    branches: [perf/v100-strata-derived]
+    paths: ['.github/workflows/v100-ninfer-moe-route-threshold-sweep.yml']
+permissions:
+  contents: read
+  actions: read
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 32
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Validate three 3K route threshold policies and Python tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m compileall -q tools/diagnostics tools/telemetry
+          python3 -m unittest discover -s tools/diagnostics -p 'test_v100*.py'
+          python3 -m unittest discover -s tools/telemetry -p 'test_*.py'
+          python3 tools/diagnostics/v100_sv2_serve.py --help | grep -q -- '--moe-threshold-sweep-screen'
+          grep -q 'def validate_events(events, responses, mtp, large_prefill=False, multichunk_prefill=False)' tools/diagnostics/v100_sv2_serve.py
+          grep -q "modes=('auto-min14','auto-min20','auto-min28')" tools/diagnostics/v100_sv2_serve.py
+          grep -q 'expected_records=96 if args.moe_long_prefill_screen or args.moe_threshold_sweep_screen else 48' tools/diagnostics/v100_sv2_serve.py
+          git diff --check
+  hardware:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[v100:moe-route-threshold-sweep]')) }}
+    needs: checks
+    runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
+    concurrency:
+      group: v100-sv0-hardware
+      cancel-in-progress: false
+    timeout-minutes: 180
+    env:
+      CUDA_VISIBLE_DEVICES: '0'
+      NINFER_WEIGHTS: /models/qwen3-8b-flash-next
+      NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: '32'
+      NINFER_V100_AB_MIN_FREE_GPU_MIB: '28000'
+      NINFER_V100_SV7_FP16_TC: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          clean: false
+      - name: Freeze evidence and verify V100 availability
+        shell: bash
+        run: |
+          set -euo pipefail
+          results="$GITHUB_WORKSPACE/v100-moe-route-threshold-sweep-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$results"
+          echo "THRESHOLD_RESULTS=$results" >> "$GITHUB_ENV"
+          git rev-parse HEAD > "$results/source-sha.txt"
+          free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits | tr -d '[:space:]')
+          if (( free_mib < 28000 )); then
+            echo "::error::V100 occupied: $free_mib MiB free. No processes were stopped."
+            exit 1
+          fi
+          test -r "$NINFER_WEIGHTS"
+          # Never put resident model symlinks in evidence: artifact upload follows links.
+          alias_path="$RUNNER_TEMP/v100-route-threshold-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer"
+          ln -s -- "$NINFER_WEIGHTS" "$alias_path"
+          test -r "$alias_path"
+          echo "THRESHOLD_MODEL_ALIAS=$alias_path" >> "$GITHUB_ENV"
+          stat "$NINFER_WEIGHTS" > "$results/model-stat.txt"
+          nvidia-smi -q > "$results/gpu.txt"
+          numactl --hardware > "$results/numa.txt"
+          /usr/local/cuda-12.8/bin/nvcc --version > "$results/cuda.txt"
+      - name: Download previously validated identity-bound expert profile
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: v100-sv2-37270512213-1
+          run-id: 37270512213
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/v100-route-threshold-profile
+      - name: Build the frozen NInfer source only once
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-v100-moe-route-threshold-sweep -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
+            -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
+          cmake --build build-v100-moe-route-threshold-sweep --target ninfer-serve
+          cp build-v100-moe-route-threshold-sweep/CMakeCache.txt "$THRESHOLD_RESULTS/CMakeCache.txt"
+      - name: Compare three 3K threshold policies and verify monotonic expert H2D reductions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/diagnostics/v100_sv2_serve.py \
+            --executable build-v100-moe-route-threshold-sweep/apps/ninfer-serve \
+            --artifact "$THRESHOLD_MODEL_ALIAS" \
+            --profile "$RUNNER_TEMP/v100-route-threshold-profile/sv2-static-profile.json" \
+            --output "$THRESHOLD_RESULTS/campaign" \
+            --repeats 3 --moe-threshold-sweep-screen \
+            | tee "$THRESHOLD_RESULTS/console.log"
+          cat "$THRESHOLD_RESULTS/console.log" >> "$GITHUB_STEP_SUMMARY"
+      - name: Compress bounded logs before artifact guard
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          folder="$GITHUB_WORKSPACE/v100-moe-route-threshold-sweep-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [[ -d "$folder" ]]; then
+            find "$folder" -type f -name '*.log' -print0 | xargs -0 -r gzip -1
+          fi
+      - name: Guard uploaded diagnostics and refuse symlinks or >=1GiB
+        id: safe_upload
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          folder="$GITHUB_WORKSPACE/v100-moe-route-threshold-sweep-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [[ ! -d "$folder" ]]; then echo "safe=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          find "$folder" -type l -print -delete
+          bytes=$(du -sb -- "$folder" | cut -f1)
+          echo "Evidence directory: $bytes bytes"
+          if (( bytes >= 1073741824 )); then
+            echo "::error::Threshold-sweep evidence >=1 GiB, refusing upload."
+            echo "safe=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "safe=true" >> "$GITHUB_OUTPUT"
+      - name: Preserve small completed or partial benchmark evidence
+        if: ${{ always() && steps.safe_upload.outputs.safe == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v100-moe-route-threshold-sweep-${{ github.run_id }}-${{ github.run_attempt }}
+          path: v100-moe-route-threshold-sweep-${{ github.run_id }}-${{ github.run_attempt }}/
+          retention-days: 30
+          if-no-files-found: warn
