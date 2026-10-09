@@ -2,7 +2,7 @@ name: V100 MoE Multichunk Minroutes14 Production HTTP A/B
 # Two-arm 3K-token, two-prefill-chunk HTTP: auto256 all-stream vs grouped CPU fallback below 14 routes.
 # Two-chunk H2D/CPU diagnostic per arm, then 3 fresh-process timing servers per arm with MTP off/on.
 # Only one V100 hardware run, source/model immutable, evidence bounded <1 GiB.
-# Previous hardware run 37875821807 found an old single-chunk test check; corrected in 6f15315 and covered by new unit test. Await current hosted checks before rerun.
+# Protected V100 rerun authorized after corrected multi-chunk hosted checks 37876757925 SUCCESS; no concurrent hardware runs.
 on:
   workflow_dispatch:
   push:
