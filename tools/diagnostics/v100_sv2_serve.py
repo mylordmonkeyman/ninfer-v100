@@ -139,7 +139,7 @@ def require_gpu_headroom():
 def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                prefill_screen=False, cpu_group_screen=False, route_handoff_screen=False,
                route_handoff_policy="all", qsa_score_screen=False, diagnostic=False, qsa_score_attribution=False,
-               sv7_tc_screen=False, sv7_stage_screen=False, moe_policy_screen=False):
+               sv7_tc_screen=False, sv7_stage_screen=False, moe_policy_screen=False, ple_io_screen=False):
     require_gpu_headroom()
     name = f'{mode}-mtp{int(mtp)}-{repeat}'
     log_path, request_path = output/f'{name}.log', output/f'{name}-requests.jsonl'
@@ -153,13 +153,13 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                 key.startswith('NINFER_V100_PLE_') or
                 key == 'NINFER_FLASH_NEXT_QSA_PREFILL_MMA'):
             env.pop(key)
-    large_prefill = prefill_screen or cpu_group_screen or route_handoff_screen or qsa_score_screen or sv7_tc_screen or sv7_stage_screen or moe_policy_screen
+    large_prefill = prefill_screen or cpu_group_screen or route_handoff_screen or qsa_score_screen or sv7_tc_screen or sv7_stage_screen or moe_policy_screen or ple_io_screen
     env.update(NINFER_V100_ROUTE_HANDOFF=('prefill' if route_handoff_policy == 'prefill' else '1')
                if route_handoff_screen and mode == 'handoff' else '0',
                NINFER_V100_DEVICE_ROUTE_COMBINE='1' if large_prefill or mode == 'device' else '0',
-               NINFER_V100_PREFILL_EXPERT_POLICY=mode if prefill_screen else (('auto' if mode == 'auto-grouped' else 'stream') if (sv7_stage_screen or moe_policy_screen) and mode in ('stream-grouped','auto-grouped') else 'cpu-cache'),
-               NINFER_V100_PREFILL_STREAM_MIN_TOKENS='256' if moe_policy_screen and mode == 'auto-grouped' else '',
-               NINFER_V100_CPU_EXPERT_GROUP='1' if sv7_tc_screen or route_handoff_screen or (cpu_group_screen and mode == 'grouped') or ((sv7_stage_screen or moe_policy_screen) and mode in ('cpu-cache-grouped','stream-grouped','auto-grouped')) else '0',
+               NINFER_V100_PREFILL_EXPERT_POLICY=mode if prefill_screen else (('auto' if mode == 'auto-grouped' else 'stream') if (sv7_stage_screen or moe_policy_screen) and mode in ('stream-grouped','auto-grouped') else 'auto' if ple_io_screen else 'cpu-cache'),
+               NINFER_V100_PREFILL_STREAM_MIN_TOKENS='256' if (moe_policy_screen and mode == 'auto-grouped') or ple_io_screen else '',
+               NINFER_V100_CPU_EXPERT_GROUP='1' if sv7_tc_screen or route_handoff_screen or (cpu_group_screen and mode == 'grouped') or ((sv7_stage_screen or moe_policy_screen) and mode in ('cpu-cache-grouped','stream-grouped','auto-grouped')) or ple_io_screen else '0',
                NINFER_V100_EXPERT_PROFILE=str(profile.resolve()),NINFER_V100_EXPERT_POLICY='static',
                NINFER_FLASH_NEXT_EXPERT_CACHE='1',NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS='64',
                NINFER_FLASH_NEXT_EXPERT_CACHE_SERIAL='0',NINFER_FLASH_NEXT_EXPERT_CACHE_PREFILL='1',
@@ -169,7 +169,9 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                NINFER_V100_QSA_SCORE_MMA='1' if qsa_score_screen and mode=='score-mma' else '0',
                NINFER_V100_QSA_SCORE_MMA_MIN_QSA='6' if qsa_score_screen and mode=='score-mma' else '0',
                NINFER_V100_QSA_SCORE_COMPARE='1' if qsa_score_attribution else '0',
-               NINFER_V100_PLE_IO='mmap',
+               NINFER_V100_PLE_IO='direct' if ple_io_screen and mode == 'ple-direct' else 'mmap',
+               NINFER_V100_PLE_STRICT_DIRECT='1' if ple_io_screen and mode == 'ple-direct' else '0',
+               NINFER_V100_PLE_QUEUE_DEPTH='64',
                NINFER_V100_SV7_FP16_TC=('1' if mode == 'fp16-tc' else '0') if sv7_tc_screen else '0' if sv7_stage_screen else env.get('NINFER_V100_SV7_FP16_TC','0'),
                NINFER_FLASH_NEXT_STAGE_LEDGER='1' if sv7_stage_screen else '0',NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT='0',
                NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE='0')
@@ -282,6 +284,8 @@ def main():
                         help='phase eligibility for the route-ready candidate; serial control remains off')
     parser.add_argument('--moe-policy-screen',action='store_true',
                         help='end-to-end HTTP three-arm grouped CPU, GPU stream, adaptive auto256 performance A/B/C')
+    parser.add_argument('--ple-io-screen',action='store_true',
+                        help='SV6 strict direct PLE I/O versus warm mmap in identical auto256 MoE production HTTP')
     parser.add_argument('--sv7-stage-screen',action='store_true',
                         help='two-process, bounded stage-level production cold-prefill attribution')
     parser.add_argument('--sv7-tc-screen',action='store_true',
@@ -294,7 +298,7 @@ def main():
     args=parser.parse_args()
     if args.artifact.suffix != '.ninfer' or not args.artifact.is_file():
         parser.error('--artifact requires an explicit readable .ninfer file')
-    if sum((args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,args.qsa_score_screen,args.qsa_score_attribution,args.sv7_tc_screen,args.sv7_stage_screen,args.moe_policy_screen)) > 1:
+    if sum((args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,args.qsa_score_screen,args.qsa_score_attribution,args.sv7_tc_screen,args.sv7_stage_screen,args.moe_policy_screen,args.ple_io_screen)) > 1:
         parser.error('performance screen flags are mutually exclusive')
     if args.repeats<3: parser.error('need three fresh-process observations per arm')
     args.output.mkdir(parents=True,exist_ok=True)
@@ -314,6 +318,8 @@ def main():
         modes=('cpu-cache-single','cpu-cache-grouped','stream-grouped')
     elif args.moe_policy_screen:
         modes=('cpu-cache-grouped','stream-grouped','auto-grouped')
+    elif args.ple_io_screen:
+        modes=('ple-mmap','ple-direct')
     elif args.sv7_tc_screen:
         modes=('bf16-simt','fp16-tc')
     elif args.qsa_score_screen:
@@ -362,6 +368,34 @@ def main():
         return
     observations=[]
     diagnostic_cross_path_exact=None
+    if args.ple_io_screen:
+        # Verify the actual PLE storage backend once per arm before uninstrumented timing.
+        # Strict-direct must not fall back to mmap. The diagnostic servers are excluded
+        # from timings, and neither arm evicts or changes the model's page cache.
+        dispatch={}
+        for mode in modes:
+            run_server(args.executable,args.artifact,args.profile,args.output,mode,False,
+                       -1,ple_io_screen=True,diagnostic=True)
+            text=(args.output/f'{mode}-mtp0--1.log').read_text()
+            rows=[]
+            for line in text.splitlines():
+                try: entry=json.loads(line)
+                except json.JSONDecodeError: continue
+                if entry.get('kind')=='ple_gather' and entry.get('compressed'):
+                    rows.append(entry)
+            backend='direct' if mode=='ple-direct' else 'mmap'
+            if not rows or any(row.get('storage_backend')!=backend or
+                               row.get('storage_fallback') for row in rows):
+                raise ValueError(f'{mode}: failed to verify strict {backend} PLE backend')
+            if backend=='direct' and not any(row.get('coalesced_pages',0)>0
+                                             and row.get('page_read_us') is not None
+                                             for row in rows):
+                raise ValueError('strict direct PLE dispatched no page reads')
+            dispatch[mode]={'backend':backend,'ple_gather_calls':len(rows),
+                            'max_tokens':max(row['tokens'] for row in rows),
+                            'actual_direct_page_reads':sum(row.get('coalesced_pages',0) for row in rows)}
+            atomic_json(args.output/'ple-backend-dispatch.json',dispatch)
+        print('SV6 mmap/direct storage backends verified separately from timing',flush=True)
     if args.qsa_score_screen:
         # Hard dispatch/accounting/replay failures still stop. Arithmetic cross-path
         # text differences are preserved as diagnostics after paired accuracy admission.
@@ -378,7 +412,8 @@ def main():
                 row=run_server(args.executable,args.artifact,args.profile,args.output,mode,mtp,
                                repeat,args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,
                                args.route_handoff_policy,qsa_score_screen=args.qsa_score_screen,
-                               sv7_tc_screen=args.sv7_tc_screen,moe_policy_screen=args.moe_policy_screen)
+                               sv7_tc_screen=args.sv7_tc_screen,moe_policy_screen=args.moe_policy_screen,
+                               ple_io_screen=args.ple_io_screen)
                 observations.append(row); atomic_json(args.output/'observations.json',observations)
                 peers=[r for r in observations if r['mtp']==mtp]
                 same_mode=[r for r in peers if r['mode']==mode]
@@ -446,6 +481,8 @@ def main():
         milestone='SV7';scope='production_http_bf16_fp16_tc_prefix_mtp_screen'
     if args.moe_policy_screen:
         milestone='MoE';scope='production_http_cpu_grouped_streamed_auto256_prefix_mtp_screen'
+    if args.ple_io_screen:
+        milestone='SV6';scope='production_http_warm_mmap_vs_strict_direct_ple_auto256_prefix_mtp_screen'
     report=dict(schema=1,milestone=milestone,scope=scope,qualified=False,
                 route_handoff_policy=args.route_handoff_policy if args.route_handoff_screen else None,
                 candidate_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),results=results,
@@ -463,6 +500,10 @@ def main():
                     (['three-arm MoE policies remain opt-in; auto streams only >=256-token chunks; streaming may alter resident expert cache behavior',
                       'cross-path greedy output differences are diagnostic and are not numerical qualification; same-mode replay and accounting remain hard gates']
                      if args.moe_policy_screen else []) +
+                    (['SV6 strict-direct backend validated in separate diagnostic processes; no file cold eviction or model copy',
+                      'warm mmap vs strict O_DIRECT only; kernel page residency is not equalized and startup times are not the measured TTFT',
+                      'adaptive prefill auto256 held fixed in both arms, CPU grouping on, 64 device expert slots/layer']
+                     if args.ple_io_screen else []) +
                     (['route handoff remains opt-in; both arms use grouped CPU experts; no concurrent-request matrix']
                      if args.route_handoff_screen else []) +
                     (['attention remains opt-in; dispatch diagnostics are excluded from timing; paired 4096-position accuracy admission is separate',
