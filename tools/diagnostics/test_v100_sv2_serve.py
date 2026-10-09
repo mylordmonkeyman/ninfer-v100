@@ -189,4 +189,39 @@ class ProductionEvidenceTest(unittest.TestCase):
             self.assertEqual(command[command.index('--prefill-chunk')+1],'2048')
 
 
+    def test_sv6_ple_screen_isolates_strict_direct_and_auto256(self):
+        for mode, backend, strict in (('ple-mmap','mmap','0'),
+                                      ('ple-direct','direct','1')):
+            with tempfile.TemporaryDirectory() as directory, \
+                    mock.patch('v100_sv2_serve.gpu_snapshot', return_value={
+                        'thermal_status_observed': True, 'thermal_throttled': False}), \
+                    mock.patch('v100_sv2_serve.subprocess.Popen') as popen, \
+                    mock.patch('v100_sv2_serve.request') as request_call, \
+                    mock.patch.dict('os.environ', {'NINFER_V100_PLE_IO':'auto',
+                                                  'NINFER_V100_PLE_STRICT_DIRECT':'0',
+                                                  'NINFER_V100_PREFILL_EXPERT_POLICY':'cpu-cache',
+                                                  'NINFER_V100_SV7_FP16_TC':'0'}):
+                process=popen.return_value
+                process.poll.return_value=None
+                process.wait.return_value=0
+                request_call.side_effect=[{'data':[{'id':'model'}]},RuntimeError('stop')]
+                output=Path(directory)
+                with self.assertRaisesRegex(RuntimeError,'stop'):
+                    run_server(Path('/bin/true'),output/'model.ninfer',output/'profile.json',
+                               output,mode,False,0,ple_io_screen=True)
+                env=popen.call_args.kwargs['env']
+                self.assertEqual(env['NINFER_V100_PLE_IO'],backend)
+                self.assertEqual(env['NINFER_V100_PLE_STRICT_DIRECT'],strict)
+                self.assertEqual(env['NINFER_V100_PLE_QUEUE_DEPTH'],'64')
+                self.assertEqual(env['NINFER_V100_PREFILL_EXPERT_POLICY'],'auto')
+                self.assertEqual(env['NINFER_V100_PREFILL_STREAM_MIN_TOKENS'],'256')
+                self.assertEqual(env['NINFER_V100_CPU_EXPERT_GROUP'],'1')
+                self.assertEqual(env['NINFER_V100_DEVICE_ROUTE_COMBINE'],'1')
+                self.assertEqual(env['NINFER_V100_SV7_FP16_TC'],'0')
+                self.assertEqual(env['NINFER_FLASH_NEXT_STAGE_LEDGER'],'0')
+                cmd=popen.call_args.args[0]
+                self.assertEqual(cmd[cmd.index('--prefill-chunk')+1],'2048')
+                self.assertIn('--no-cuda-graph',cmd)
+
+
 if __name__=='__main__': unittest.main()
