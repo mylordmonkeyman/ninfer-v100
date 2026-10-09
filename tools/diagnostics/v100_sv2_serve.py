@@ -160,17 +160,30 @@ def physical_core_cpus(topology, allowed):
     return sorted(cores.values())
 
 
+def validate_cache_allocation(text, expected_slots):
+    slots = re.findall(r'phase13.cache.slots_per_layer=(\d+)', text)
+    size = re.findall(r'phase13.cache.bytes=(\d+)', text)
+    seeded = re.findall(r'v100.profile.seeded=(\d+)', text)
+    # Canonical expert payload, 256-byte slot alignment, 48 independent layers.
+    expected_bytes = ((2_764_808 + 255) // 256 * 256) * 48 * expected_slots
+    if (slots != [str(expected_slots)] or size != [str(expected_bytes)] or
+            seeded != [str(expected_slots * 48)]):
+        raise ValueError('server did not publish expected fully seeded resident expert cache')
+    return expected_bytes
+
+
 def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                prefill_screen=False, cpu_group_screen=False, route_handoff_screen=False,
                route_handoff_policy="all", qsa_score_screen=False, diagnostic=False, qsa_score_attribution=False,
                sv7_tc_screen=False, sv7_stage_screen=False, moe_policy_screen=False, ple_io_screen=False,
                moe_minroutes_screen=False, moe_long_prefill_screen=False,
                moe_threshold_sweep_screen=False, cpu_workers_screen=False,
-               cpu_workers_long_screen=False, cuda_graph_screen=False, mtp_draft_screen=False, numa_policy=None):
+               cpu_workers_long_screen=False, cuda_graph_screen=False, mtp_draft_screen=False, cache_budget_screen=False, numa_policy=None):
     require_gpu_headroom()
+    cache_slots = {'cache64':'64','cache128':'128'}[mode] if cache_budget_screen else '64'
     minroutes_screen = (moe_minroutes_screen or moe_long_prefill_screen or
                         moe_threshold_sweep_screen or cpu_workers_screen or
-                        cpu_workers_long_screen or cuda_graph_screen or mtp_draft_screen)
+                        cpu_workers_long_screen or cuda_graph_screen or mtp_draft_screen or cache_budget_screen)
     name = f'{mode}-mtp{int(mtp)}-{repeat}'
     log_path, request_path = output/f'{name}.log', output/f'{name}-requests.jsonl'
     env = os.environ.copy()
@@ -194,7 +207,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                     {'auto-min14':'14','auto-min20':'20','auto-min28':'28'}.get(mode,'')
                     if minroutes_screen else ''),
                NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS=(
-                    '88' if cuda_graph_screen or mtp_draft_screen else
+                    '88' if cuda_graph_screen or mtp_draft_screen or cache_budget_screen else
                     {'physical-workers72':'72','physical-workers80':'80','physical-workers88':'88'}[mode]
                     if mode in ('physical-workers72','physical-workers80','physical-workers88') else
                     '64' if numa_policy is not None else
@@ -203,7 +216,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                      env.get('NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS','32')),
                NINFER_V100_CPU_EXPERT_GROUP='1' if sv7_tc_screen or route_handoff_screen or (cpu_group_screen and mode == 'grouped') or ((sv7_stage_screen or moe_policy_screen) and mode in ('cpu-cache-grouped','stream-grouped','auto-grouped')) or ple_io_screen or minroutes_screen else '0',
                NINFER_V100_EXPERT_PROFILE=str(profile.resolve()),NINFER_V100_EXPERT_POLICY='static',
-               NINFER_FLASH_NEXT_EXPERT_CACHE='1',NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS='64',
+               NINFER_FLASH_NEXT_EXPERT_CACHE='1',NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS=cache_slots,
                NINFER_FLASH_NEXT_EXPERT_CACHE_SERIAL='0',NINFER_FLASH_NEXT_EXPERT_CACHE_PREFILL='1',
                NINFER_FLASH_NEXT_EXPERT_CACHE_BATCHED_DECODE='0',
                NINFER_FLASH_NEXT_EXPERT_CACHE_GROUPED_PREFILL='1',
@@ -243,13 +256,20 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
     elif numa_policy not in (None, 'default'):
         raise ValueError(f'unsupported NUMA policy: {numa_policy}')
     if mtp:
-        draft_tokens = {'mtp-draft1':'1','mtp-draft2':'2','mtp-draft3':'3','mtp-draft4':'4'}.get(mode,'3')
+        draft_tokens = '2' if cache_budget_screen else {'mtp-draft1':'1','mtp-draft2':'2','mtp-draft3':'3','mtp-draft4':'4'}.get(mode,'3')
         command += ['--spec','mtp','--draft-tokens',draft_tokens,'--lm-head-draft']
-    snapshots, monitor_errors = [gpu_snapshot()], []
+    def capture_snapshot():
+        snapshot = gpu_snapshot()
+        if cache_budget_screen:
+            snapshot['gpu_memory_used_mib'] = int(subprocess.check_output(
+                ['nvidia-smi','--id=0','--query-gpu=memory.used',
+                 '--format=csv,noheader,nounits'],text=True).strip())
+        return snapshot
+    snapshots, monitor_errors = [capture_snapshot()], []
     stopped=threading.Event()
     def monitor():
         while not stopped.wait(5):
-            try: snapshots.append(gpu_snapshot())
+            try: snapshots.append(capture_snapshot())
             except Exception as error: monitor_errors.append(str(error))
     worker=threading.Thread(target=monitor); worker.start()
     responses=[]
@@ -295,7 +315,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                         process.kill(); process.wait(timeout=10)
     finally:
         stopped.set(); worker.join()
-        snapshots.append(gpu_snapshot())
+        snapshots.append(capture_snapshot())
         atomic_json(output/f'{name}-hardware.json',dict(snapshots=snapshots,errors=monitor_errors,
                     command=command,environment={k:v for k,v in env.items() if k.startswith('NINFER_')}))
         atomic_json(output/f'{name}-responses.json',responses)
@@ -314,11 +334,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
         raise ValueError(f'{name}: missing stage ledger prefill evidence')
     dispatch=validate_qsa_dispatch(text,mode) if qsa_score_screen and diagnostic else None
     comparisons=validate_qsa_comparisons(text,dispatch) if qsa_score_attribution else None
-    slots=re.findall(r'phase13.cache.slots_per_layer=(\d+)',text)
-    size=re.findall(r'phase13.cache.bytes=(\d+)',text)
-    seeded=re.findall(r'v100.profile.seeded=(\d+)',text)
-    if slots!=['64'] or len(size)!=1 or seeded!=[str(64*48)]:
-        raise ValueError('server did not publish expected fixed resident expert cache')
+    cache_bytes = validate_cache_allocation(text, int(cache_slots))
     if 'v100.profile.save_failed=' in text:
         raise ValueError('unexpected profile save failure')
     startup=[e for e in events if e.get('event')=='server_start']
@@ -328,8 +344,9 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
         raise ValueError(f'{name}: CUDA Graph state does not match requested arm')
     result=dict(name=name,mode=mode,mtp=mtp,repeat=repeat,diagnostic=diagnostic,
                 numa_policy=numa_policy,command=command,
-                qsa_dispatch=dispatch,qsa_comparisons=comparisons,cache_slots_per_layer=64,
-                cache_bytes=int(size[0]),startup=startup[0],requests=done,
+                qsa_dispatch=dispatch,qsa_comparisons=comparisons,cache_slots_per_layer=int(cache_slots),
+                gpu_memory_used_mib_max=max((x.get('gpu_memory_used_mib',0) for x in snapshots),default=0) if cache_budget_screen else None,
+                cache_bytes=cache_bytes,startup=startup[0],requests=done,
                 response_signatures=[response_signature(r) for r in responses])
     print(f'{name}: production prefix/continuation and drafting checks passed',flush=True)
     return result
@@ -359,6 +376,8 @@ def main():
                         help='7K HTTP physical-core affinity: 72/80/88 expert-worker peak refinement')
     parser.add_argument('--cuda-graph-screen',action='store_true',
                         help='7K HTTP physical-core affinity with 88 workers: CUDA Graph off versus on')
+    parser.add_argument('--cache-budget-screen',action='store_true',
+                        help='7K HTTP fixed 88 workers/MTP2: static GPU expert residency 64 versus 128 slots/layer')
     parser.add_argument('--mtp-draft-screen',action='store_true',
                         help='7K HTTP physical-core affinity with 88 workers: MTP draft windows 1/2 final check')
     parser.add_argument('--cpu-numa-screen',action='store_true',
@@ -386,9 +405,9 @@ def main():
     if args.artifact.suffix != '.ninfer' or not args.artifact.is_file():
         parser.error('--artifact requires an explicit readable .ninfer file')
     if sum((args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,args.qsa_score_screen,args.qsa_score_attribution,args.sv7_tc_screen,args.sv7_stage_screen,args.moe_policy_screen,args.ple_io_screen,args.moe_minroutes_screen,args.moe_long_prefill_screen,args.moe_threshold_sweep_screen,args.cpu_workers_screen,
-            args.cpu_workers_long_screen,args.cpu_numa_screen,args.cpu_affinity_screen,args.cpu_affinity_workers_screen,args.cuda_graph_screen,args.mtp_draft_screen)) > 1:
+            args.cpu_workers_long_screen,args.cpu_numa_screen,args.cpu_affinity_screen,args.cpu_affinity_workers_screen,args.cuda_graph_screen,args.mtp_draft_screen,args.cache_budget_screen)) > 1:
         parser.error('performance screen flags are mutually exclusive')
-    if args.cpu_affinity_screen or args.cpu_affinity_workers_screen or args.cuda_graph_screen or args.mtp_draft_screen:
+    if args.cpu_affinity_screen or args.cpu_affinity_workers_screen or args.cuda_graph_screen or args.mtp_draft_screen or args.cache_budget_screen:
         args.cpu_workers_long_screen = True
     if args.cpu_numa_screen:
         args.cpu_workers_long_screen = True
@@ -426,6 +445,8 @@ def main():
         modes=('physical-workers72','physical-workers80','physical-workers88')
     elif args.cuda_graph_screen:
         modes=('graph-off','graph-on')
+    elif args.cache_budget_screen:
+        modes=('cache64','cache128')
     elif args.mtp_draft_screen:
         modes=('mtp-draft1','mtp-draft2')
     elif args.cpu_numa_screen:
@@ -442,7 +463,7 @@ def main():
         modes=('single','grouped')
     else:
         modes=('cpu-cache','stream') if args.prefill_screen else ('legacy','device')
-    mtp_states=(True,) if args.mtp_draft_screen else (False,True)
+    mtp_states=(True,) if args.mtp_draft_screen or args.cache_budget_screen else (False,True)
     if args.sv7_stage_screen:
         summaries = {}
         for mode in modes:
@@ -514,18 +535,18 @@ def main():
         # separately from all timing observations; no stage ledger or broad profiling.
         traffic={}
         for mode in modes:
-            run_server(args.executable,args.artifact,args.profile,args.output,mode,False,
+            run_server(args.executable,args.artifact,args.profile,args.output,mode,args.cache_budget_screen,
                        -1,moe_minroutes_screen=args.moe_minroutes_screen,
                        moe_long_prefill_screen=args.moe_long_prefill_screen,
                        moe_threshold_sweep_screen=args.moe_threshold_sweep_screen,
                        cpu_workers_screen=args.cpu_workers_screen,
                         cpu_workers_long_screen=args.cpu_workers_long_screen,
                        cuda_graph_screen=args.cuda_graph_screen,
-                       mtp_draft_screen=args.mtp_draft_screen,diagnostic=True,
+                       mtp_draft_screen=args.mtp_draft_screen,cache_budget_screen=args.cache_budget_screen,diagnostic=True,
                        numa_policy=(('interleave' if mode=='numa-interleave' else 'default') if args.cpu_numa_screen
                                     else ('physical-cores' if mode=='affinity-physical' else 'default') if args.cpu_affinity_screen
-                                    else 'physical-cores' if args.cpu_affinity_workers_screen or args.cuda_graph_screen or args.mtp_draft_screen else None))
-            lines=(args.output/f'{mode}-mtp0--1.log').read_text().splitlines()
+                                    else 'physical-cores' if args.cpu_affinity_workers_screen or args.cuda_graph_screen or args.mtp_draft_screen or args.cache_budget_screen else None))
+            lines=(args.output/f'{mode}-mtp{int(args.cache_budget_screen)}--1.log').read_text().splitlines()
             records=[]
             minimum_tokens=256 if args.moe_long_prefill_screen or args.moe_threshold_sweep_screen or args.cpu_workers_screen or args.cpu_workers_long_screen else 1024
             for line in lines:
@@ -540,6 +561,9 @@ def main():
                 raise ValueError(f'{mode}: expected {expected_records} large MoE layer telemetry records; got {len(records)}')
             traffic[mode]={
                 'layers':len(records),
+                'routes':sum(row['routes'] for row in records),
+                'gpu_hit_routes':sum(row['gpu_hit_routes'] for row in records),
+                'cpu_miss_h2d_bytes':sum(row['cpu_miss_h2d_bytes'] for row in records),
                 'stream_expert_h2d_bytes':sum(row['stream_expert_h2d_bytes'] for row in records),
                 'stream_routes':sum(row['stream_routes'] for row in records),
                 'cpu_miss_routes':sum(row['cpu_miss_routes'] for row in records),
@@ -552,7 +576,7 @@ def main():
             expected=list(modes)
             if list(traffic)!=expected or len({traffic[m]['layers'] for m in modes})!=1:
                 raise ValueError('worker screen missing comparable 96-layer traces')
-            atomic_json(args.output/'cpu-worker-traffic.json',traffic)
+            atomic_json(args.output/('cache-budget-traffic.json' if args.cache_budget_screen else 'cpu-worker-traffic.json'),traffic)
             print(f'CPU expert worker {modes} traffic diagnostics captured',flush=True)
         elif args.moe_threshold_sweep_screen:
             gpu=[traffic[m]['stream_expert_h2d_bytes'] for m in modes]
@@ -592,10 +616,10 @@ def main():
                                cpu_workers_screen=args.cpu_workers_screen,
                                 cpu_workers_long_screen=args.cpu_workers_long_screen,
                        cuda_graph_screen=args.cuda_graph_screen,
-                       mtp_draft_screen=args.mtp_draft_screen,
+                       mtp_draft_screen=args.mtp_draft_screen,cache_budget_screen=args.cache_budget_screen,
                                 numa_policy=(('interleave' if mode=='numa-interleave' else 'default') if args.cpu_numa_screen
                                     else ('physical-cores' if mode=='affinity-physical' else 'default') if args.cpu_affinity_screen
-                                    else 'physical-cores' if args.cpu_affinity_workers_screen or args.cuda_graph_screen or args.mtp_draft_screen else None))
+                                    else 'physical-cores' if args.cpu_affinity_workers_screen or args.cuda_graph_screen or args.mtp_draft_screen or args.cache_budget_screen else None))
                 observations.append(row); atomic_json(args.output/'observations.json',observations)
                 peers=[r for r in observations if r['mtp']==mtp]
                 same_mode=[r for r in peers if r['mode']==mode]
@@ -607,7 +631,7 @@ def main():
                     raise ValueError('cross-path greedy production response or finish accounting differs')
                 if args.route_handoff_screen:
                     validate_handoff_peers(peers)
-                if len({r['cache_bytes'] for r in peers})!=1:
+                if not args.cache_budget_screen and len({r['cache_bytes'] for r in peers})!=1:
                     raise ValueError('production cache capacity differs between paths')
     cross_path_response_matches=[]
     if args.qsa_score_screen or args.sv7_tc_screen:
@@ -689,7 +713,13 @@ def main():
         conserved=('layers','stream_expert_h2d_bytes','stream_routes','cpu_miss_routes','cpu_weight_read_bytes')
         if any(len({traffic[mode][k] for mode in modes}) != 1 for k in conserved):
             raise ValueError('Placement-only arms changed expert workload')
+    if args.cache_budget_screen:
+        milestone='SV1/SV3'
+        scope='production_http_seven_k_workers88_mtp2_static_cache64_128'
     report=dict(schema=1,milestone=milestone,scope=scope,qualified=False,
+                cache_budget_observations=[dict(mode=r['mode'],repeat=r['repeat'],
+                    slots_per_layer=r['cache_slots_per_layer'],bytes=r['cache_bytes'],
+                    sampled_peak_gpu_mib=r['gpu_memory_used_mib_max']) for r in observations] if args.cache_budget_screen else None,
                 route_handoff_policy=args.route_handoff_policy if args.route_handoff_screen else None,
                 candidate_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),results=results,
                 exact_compared_responses=(all(x['exact'] for x in cross_path_response_matches)
@@ -697,7 +727,7 @@ def main():
                 diagnostic_cross_path_exact=diagnostic_cross_path_exact,
                 cross_path_response_matches=cross_path_response_matches,
                 limitations=[
-                    f'fixed 64 slots per layer, {"FP8" if args.qsa_score_screen else "BF16"} KV, one active request, {"8192" if args.cpu_workers_long_screen else "4096"} context',
+                    f'fixed {"64/128" if args.cache_budget_screen else "64"} slots per layer, {"FP8" if args.qsa_score_screen else "BF16"} KV, one active request, {"8192" if args.cpu_workers_long_screen else "4096"} context',
                     'small two-turn corpus; no concurrent cancellation, long context, vision or full production matrix',
                     'MTP drafting required; acceptance counts retained, no minimum acceptance coefficient imposed',
                     'no independent oracle thresholds changed; accepted baseline numerical failure remains separate'] +
@@ -725,9 +755,9 @@ def main():
                       'cold and continuation MTP/no-MTP outputs compared diagnostically; independent Phase11 qualification remains required']
                      if args.moe_threshold_sweep_screen else []) +
                     (['~7K cold input crosses four 2048-token prefill chunks in 8192-token context',
-                      '64 workers; all logical CPUs versus one logical CPU per physical core' if args.cpu_affinity_screen else '72/80/88 workers on the same 32 physical CPUs' if args.cpu_affinity_workers_screen else '88 workers; CUDA Graph off versus on' if args.cuda_graph_screen else '88 workers; MTP draft windows 1/2' if args.mtp_draft_screen else '64 workers; inherited versus interleave-all memory policy' if args.cpu_numa_screen else '32/64 workers with fixed minroutes20, auto256 and BF16 KV',
-                      'same static 64 GPU expert slots, four-chunk telemetry separated from timed HTTP',
-                      'memory policy unchanged; 64 workers on 64 versus 32 allowed CPUs; proc snapshots at readiness only, no file-cache migration or eviction' if args.cpu_affinity_screen else 'memory policy and physical-core affinity fixed; 72/80/88 workers share the same 32 CPUs' if args.cpu_affinity_workers_screen else 'memory policy, physical-core affinity and 88 workers fixed; vary CUDA Graph state only' if args.cuda_graph_screen else 'memory policy, physical-core affinity, CUDA Graph off and 88 workers fixed; vary MTP draft window only' if args.mtp_draft_screen else 'CPU affinity unchanged; shared file-cache pages are not migrated or evicted; proc placement snapshots at readiness only' if args.cpu_numa_screen else 'no NUMA pinning, single request, unchanged Phase11 numerical gates']
+                      '64 workers; all logical CPUs versus one logical CPU per physical core' if args.cpu_affinity_screen else '72/80/88 workers on the same 32 physical CPUs' if args.cpu_affinity_workers_screen else '88 workers; CUDA Graph off versus on' if args.cuda_graph_screen else '88 workers; MTP draft windows 1/2' if args.mtp_draft_screen else '64 workers; inherited versus interleave-all memory policy' if args.cpu_numa_screen else 'static64/128 GPU expert slots per layer; 88 workers/MTP2 fixed' if args.cache_budget_screen else '32/64 workers with fixed minroutes20, auto256 and BF16 KV',
+                      'same profile ranking with static 64/128 GPU expert slots; four-chunk telemetry separated from timed HTTP' if args.cache_budget_screen else 'same static 64 GPU expert slots, four-chunk telemetry separated from timed HTTP',
+                      'memory policy unchanged; 64 workers on 64 versus 32 allowed CPUs; proc snapshots at readiness only, no file-cache migration or eviction' if args.cpu_affinity_screen else 'memory policy and physical-core affinity fixed; 72/80/88 workers share the same 32 CPUs' if args.cpu_affinity_workers_screen else 'memory policy, physical-core affinity and 88 workers fixed; vary CUDA Graph state only' if args.cuda_graph_screen else 'memory policy, physical-core affinity, CUDA Graph off and 88 workers fixed; vary MTP draft window only' if args.mtp_draft_screen else 'CPU affinity unchanged; shared file-cache pages are not migrated or evicted; proc placement snapshots at readiness only' if args.cpu_numa_screen else 'physical-core affinity fixed; sampled GPU memory every 5 seconds is not an exact high-water mark; cache changes may change CPU/GPU arithmetic' if args.cache_budget_screen else 'no NUMA pinning, single request, unchanged Phase11 numerical gates']
                      if args.cpu_workers_long_screen else []) +
                     (['fixed minroutes20 and auto256; vary only CPU expert workers 32/48/64',
                       '3111-token two-chunk prompt, 4096 context, static 64 expert slots per layer, BF16 KV, mmap PLE',
