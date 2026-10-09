@@ -157,8 +157,8 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
     env.update(NINFER_V100_ROUTE_HANDOFF=('prefill' if route_handoff_policy == 'prefill' else '1')
                if route_handoff_screen and mode == 'handoff' else '0',
                NINFER_V100_DEVICE_ROUTE_COMBINE='1' if large_prefill or mode == 'device' else '0',
-               NINFER_V100_PREFILL_EXPERT_POLICY=mode if prefill_screen else 'cpu-cache',
-               NINFER_V100_CPU_EXPERT_GROUP='1' if sv7_tc_screen or route_handoff_screen or (cpu_group_screen and mode == 'grouped') else '0',
+               NINFER_V100_PREFILL_EXPERT_POLICY=mode if prefill_screen else ('stream' if sv7_stage_screen and mode == 'stream-grouped' else 'cpu-cache'),
+               NINFER_V100_CPU_EXPERT_GROUP='1' if sv7_tc_screen or route_handoff_screen or (cpu_group_screen and mode == 'grouped') or (sv7_stage_screen and mode in ('cpu-cache-grouped','stream-grouped')) else '0',
                NINFER_V100_EXPERT_PROFILE=str(profile.resolve()),NINFER_V100_EXPERT_POLICY='static',
                NINFER_FLASH_NEXT_EXPERT_CACHE='1',NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS='64',
                NINFER_FLASH_NEXT_EXPERT_CACHE_SERIAL='0',NINFER_FLASH_NEXT_EXPERT_CACHE_PREFILL='1',
@@ -169,7 +169,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                NINFER_V100_QSA_SCORE_MMA_MIN_QSA='6' if qsa_score_screen and mode=='score-mma' else '0',
                NINFER_V100_QSA_SCORE_COMPARE='1' if qsa_score_attribution else '0',
                NINFER_V100_PLE_IO='mmap',
-               NINFER_V100_SV7_FP16_TC=('1' if mode == 'fp16-tc' else '0') if (sv7_tc_screen or sv7_stage_screen) else env.get('NINFER_V100_SV7_FP16_TC','0'),
+               NINFER_V100_SV7_FP16_TC=('1' if mode == 'fp16-tc' else '0') if sv7_tc_screen else '0' if sv7_stage_screen else env.get('NINFER_V100_SV7_FP16_TC','0'),
                NINFER_FLASH_NEXT_STAGE_LEDGER='1' if sv7_stage_screen else '0',NINFER_FLASH_NEXT_FP32_MOE_ROUTED_INPUT='0',
                NINFER_FLASH_NEXT_CPU_EXPERT_FP32_INTERMEDIATE='0')
     # Bind only a loopback port. The subprocess is the only process this tool stops.
@@ -308,7 +308,7 @@ def main():
         print(f"Same-input real QSA sampled FP64 checks passed: {len(row['qsa_comparisons'])} eligible calls; no serving qualification",flush=True)
         return
     if args.sv7_stage_screen:
-        modes=('bf16-simt','fp16-tc')
+        modes=('cpu-cache-single','cpu-cache-grouped','stream-grouped')
     elif args.sv7_tc_screen:
         modes=('bf16-simt','fp16-tc')
     elif args.qsa_score_screen:
@@ -342,11 +342,13 @@ def main():
                     item['ms']+=stage['interval_ms']
             summaries[mode]=summary
         atomic_json(args.output/'stage-attribution.json',
-                    dict(schema=1,scope='instrumented_single_cold_prefill_per_mode',
+                    dict(schema=2,scope='instrumented_prefill_and_followup_cpu_moe_policy_attribution',
                          results=summaries,limitations=[
                              'CUDA event stage ledger is invasive; timings are diagnostic not a throughput benchmark',
                              'stage intervals may include CPU stalls and stream waits, not pure GPU kernel time',
-                             'one fresh server per arm; production defaults unchanged']))
+                             'one fresh server per arm; production defaults unchanged',
+                              'stage ledger includes multiple prefill/continuation chunks; do not interpret stage total as cold TTFT',
+                              'compare cpu-cache-single vs cpu-cache-grouped vs stream-grouped, BF16 projection path fixed']))
         print('Stage attribution (instrumented; no performance claim):')
         for mode, summary in summaries.items():
             print(mode, 'total_ms',round(summary['total_ms'],2))
