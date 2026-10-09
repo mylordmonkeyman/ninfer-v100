@@ -385,7 +385,7 @@ def main():
                 if any(r['response_signatures']!=same_mode[0]['response_signatures']
                        for r in same_mode):
                     raise ValueError('same-path fresh-process greedy response or finish accounting differs')
-                if (not (args.qsa_score_screen or args.sv7_tc_screen) and
+                if (not (args.qsa_score_screen or args.sv7_tc_screen or args.moe_policy_screen) and
                         any(r['response_signatures']!=peers[0]['response_signatures'] for r in peers)):
                     raise ValueError('cross-path greedy production response or finish accounting differs')
                 if args.route_handoff_screen:
@@ -406,6 +406,16 @@ def main():
                         dict(drafted=e['speculative']['drafted_tokens'],
                              accepted=e['speculative']['accepted_tokens'])
                         for e in r['requests']] for r in pair}))
+    if args.moe_policy_screen:
+        for repeat in range(args.repeats):
+            for mtp in (False,True):
+                arms=[r for r in observations if r['repeat']==repeat and r['mtp']==mtp]
+                if len(arms)!=len(modes) or {r['mode'] for r in arms}!=set(modes):
+                    raise ValueError('missing complete MoE production crossover')
+                cross_path_response_matches.append(dict(
+                    repeat=repeat,mtp=mtp,
+                    exact=all(r['response_signatures']==arms[0]['response_signatures'] for r in arms),
+                    modes=[r['mode'] for r in arms]))
     results=[]
     labels=('cold','prefix-replay','continuation','continuation-replay')
     for mtp in (False,True):
@@ -440,7 +450,7 @@ def main():
                 route_handoff_policy=args.route_handoff_policy if args.route_handoff_screen else None,
                 candidate_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),results=results,
                 exact_compared_responses=(all(x['exact'] for x in cross_path_response_matches)
-                                          if args.qsa_score_screen or args.sv7_tc_screen else True),
+                                          if args.qsa_score_screen or args.sv7_tc_screen or args.moe_policy_screen else True),
                 diagnostic_cross_path_exact=diagnostic_cross_path_exact,
                 cross_path_response_matches=cross_path_response_matches,
                 limitations=[
@@ -450,7 +460,8 @@ def main():
                     'no independent oracle thresholds changed; accepted baseline numerical failure remains separate'] +
                     (['grouped CPU experts remain opt-in; no concurrent-request matrix in this screen']
                      if args.cpu_group_screen else []) +
-                    (['three-arm MoE policies remain opt-in; auto streams only >=256-token chunks; streaming may alter resident expert cache behavior']
+                    (['three-arm MoE policies remain opt-in; auto streams only >=256-token chunks; streaming may alter resident expert cache behavior',
+                      'cross-path greedy output differences are diagnostic and are not numerical qualification; same-mode replay and accounting remain hard gates']
                      if args.moe_policy_screen else []) +
                     (['route handoff remains opt-in; both arms use grouped CPU experts; no concurrent-request matrix']
                      if args.route_handoff_screen else []) +
