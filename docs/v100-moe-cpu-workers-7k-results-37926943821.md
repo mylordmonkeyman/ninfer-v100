@@ -43,3 +43,24 @@ All six cross-arm HTTP response comparisons matched exactly. Both 192-layer diag
 The physical-core mask is the better experimental scheduling policy on this host. This remains an opt-in within-NInfer result; no production default, installed Strata setting, quantization claim, or Phase 11 numerical gate changed.
 
 Next: compare 32 versus 64 expert workers while pinning both arms to the identical 32-physical-core mask. That isolates whether the 64-worker pool itself helps when scheduling/SMT placement is held fixed.
+
+
+## Fixed physical-core worker result — run 37946839739
+
+[Workflow run 37946839739](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37946839739) completed successfully on the V100. Both arms used CPUs 0–31, retained both NUMA memory nodes, and differed only in expert-worker count.
+
+| Metric | 32 workers | 64 workers | Improvement |
+|---|---:|---:|---:|
+| Cold TTFT, MTP off | 54.154 s | 53.010 s | 2.1% lower |
+| Cold prefill, MTP off | 131.337 tok/s | 134.166 tok/s | 2.2% higher |
+| Cold decode, MTP off | 9.328 tok/s | 12.655 tok/s | 35.7% higher |
+| Cold decode, MTP on | 9.966 tok/s | 13.603 tok/s | 36.5% higher |
+| Continuation decode, MTP off | 9.199 tok/s | 12.807 tok/s | 39.2% higher |
+| Continuation decode, MTP on | 10.279 tok/s | 15.013 tok/s | 46.1% higher |
+| CPU expert branch diagnostic | 7.074 s | 5.392 s | 23.8% lower |
+
+All six cross-arm HTTP response comparisons matched exactly. Both 192-layer diagnostics conserved GPU H2D bytes (71,158,716,160), stream routes (2,653,326), CPU misses (181,474), and CPU weight reads (162,222,344,592). Both process snapshots reported `Cpus_allowed_list: 0-31` and `Mems_allowed_list: 0-1`.
+
+This isolates worker-pool parallelism from CPU-affinity policy: even on the same 32 physical CPUs, 64 expert workers substantially outperform 32. The result supports 64 as the current experimental reference but does not establish that 64 is the optimum.
+
+Next: a bounded 64/80/96-worker saturation sweep on the identical physical-core mask, with the same 7K workload, route policy, cache, BF16 KV, MTP states, traffic conservation, and three-repeat crossover.

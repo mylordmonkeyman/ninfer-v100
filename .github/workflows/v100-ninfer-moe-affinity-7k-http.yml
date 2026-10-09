@@ -1,5 +1,5 @@
-name: V100 MoE 7K Physical-Core Worker A/B
-# Two-arm 7K HTTP: 32 versus 64 workers on the identical 32-physical-core CPU mask.
+name: V100 MoE 7K Physical-Core Worker Saturation
+# Three-arm 7K HTTP: 64/80/96 workers on the identical 32-physical-core CPU mask.
 # Four-chunk traffic diagnostic per arm; then 3 fresh servers/arm with MTP off/on.
 # Only one V100 hardware run, source/model immutable, evidence bounded <1 GiB.
 # Only this explicit marker allocates a GPU; hosted checks gate the hardware job.
@@ -30,7 +30,7 @@ jobs:
           python3 -m unittest discover -s tools/telemetry -p 'test_*.py'
           python3 tools/diagnostics/v100_sv2_serve.py --help | grep -q -- '--cpu-affinity-workers-screen'
           grep -q 'def validate_events(events, responses, mtp, large_prefill=False, multichunk_prefill=False,' tools/diagnostics/v100_sv2_serve.py
-          grep -q "modes=('physical-workers32','physical-workers64')" tools/diagnostics/v100_sv2_serve.py
+          grep -q "modes=('physical-workers64','physical-workers80','physical-workers96')" tools/diagnostics/v100_sv2_serve.py
           grep -q 'expected_records=(192 if args.cpu_workers_long_screen else' tools/diagnostics/v100_sv2_serve.py
           git diff --check
   hardware:
@@ -56,7 +56,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          results="$GITHUB_WORKSPACE/v100-moe-physical-workers-7k-http-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          results="$GITHUB_WORKSPACE/v100-moe-physical-workers-saturation-7k-http-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$results"
           echo "CPU_WORKERS_RESULTS=$results" >> "$GITHUB_ENV"
           git rev-parse HEAD > "$results/source-sha.txt"
@@ -88,18 +88,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cmake -S . -B build-v100-moe-physical-workers-7k-http -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          cmake -S . -B build-v100-moe-physical-workers-saturation-7k-http -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
             -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
             -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-v100-moe-physical-workers-7k-http --target ninfer-serve
-          cp build-v100-moe-physical-workers-7k-http/CMakeCache.txt "$CPU_WORKERS_RESULTS/CMakeCache.txt"
-      - name: Compare 32 and 64 workers on the same 32 physical CPUs
+          cmake --build build-v100-moe-physical-workers-saturation-7k-http --target ninfer-serve
+          cp build-v100-moe-physical-workers-saturation-7k-http/CMakeCache.txt "$CPU_WORKERS_RESULTS/CMakeCache.txt"
+      - name: Compare 64, 80 and 96 workers on the same 32 physical CPUs
         shell: bash
         run: |
           set -euo pipefail
           python3 tools/diagnostics/v100_sv2_serve.py \
-            --executable build-v100-moe-physical-workers-7k-http/apps/ninfer-serve \
+            --executable build-v100-moe-physical-workers-saturation-7k-http/apps/ninfer-serve \
             --artifact "$CPU_WORKERS_MODEL_ALIAS" \
             --profile "$RUNNER_TEMP/v100-physical-workers-7k-profile/sv2-static-profile.json" \
             --output "$CPU_WORKERS_RESULTS/campaign" \
@@ -111,7 +111,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          folder="$GITHUB_WORKSPACE/v100-moe-physical-workers-7k-http-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          folder="$GITHUB_WORKSPACE/v100-moe-physical-workers-saturation-7k-http-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           if [[ -d "$folder" ]]; then
             find "$folder" -type f -name '*.log' -print0 | xargs -0 -r gzip -1
           fi
@@ -121,7 +121,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          folder="$GITHUB_WORKSPACE/v100-moe-physical-workers-7k-http-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          folder="$GITHUB_WORKSPACE/v100-moe-physical-workers-saturation-7k-http-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           if [[ ! -d "$folder" ]]; then echo "safe=false" >> "$GITHUB_OUTPUT"; exit 0; fi
           find "$folder" -type l -print -delete
           bytes=$(du -sb -- "$folder" | cut -f1)
@@ -136,7 +136,7 @@ jobs:
         if: ${{ always() && steps.safe_upload.outputs.safe == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: v100-moe-physical-workers-7k-http-${{ github.run_id }}-${{ github.run_attempt }}
-          path: v100-moe-physical-workers-7k-http-${{ github.run_id }}-${{ github.run_attempt }}/
+          name: v100-moe-physical-workers-saturation-7k-http-${{ github.run_id }}-${{ github.run_attempt }}
+          path: v100-moe-physical-workers-saturation-7k-http-${{ github.run_id }}-${{ github.run_attempt }}/
           retention-days: 30
           if-no-files-found: warn
