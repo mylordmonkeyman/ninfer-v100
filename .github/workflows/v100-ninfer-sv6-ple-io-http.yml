@@ -2,7 +2,7 @@ name: V100 SV6 PLE mmap vs strict direct Production HTTP A/B
 # Two-arm production HTTP: mmap versus strict O_DIRECT PLE I/O; auto256 grouped MoE fixed.
 # One backend diagnostic per arm plus 3 fresh timing servers/arm with MTP on/off; no page eviction/copy.
 # Only one V100 hardware run, source/model immutable, evidence bounded <1 GiB.
-# One protected hardware comparison authorized after hosted checks run 37868907153 SUCCESS.
+# Hardware remains gated until this SV6 workflow's own hosted checks pass.
 on:
   workflow_dispatch:
   push:
@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Validate existing MoE performance harness and Python tests
+      - name: Validate SV6 PLE I/O performance harness and Python tests
         shell: bash
         run: |
           set -euo pipefail
@@ -122,7 +122,7 @@ jobs:
           bytes=$(du -sb -- "$folder" | cut -f1)
           echo "Evidence directory: $bytes bytes"
           if (( bytes >= 1073741824 )); then
-            echo "::error::MoE evidence >=1 GiB, refusing upload."
+            echo "::error::SV6 evidence >=1 GiB, refusing upload."
             echo "safe=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
