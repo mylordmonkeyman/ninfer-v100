@@ -22,3 +22,24 @@ Next: one controlled inherited-memory-policy versus `numactl --interleave=all` A
 The interleave-memory experiment [37938856797](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37938856797) stopped in its preflight: `set_mempolicy: Operation not permitted`. No model build or inference ran, and no performance claim follows. The current runner cannot apply that launch policy. Do not retry it unchanged or modify container security automatically.
 
 The next available experiment instead keeps 64 workers and inherited memory policy fixed, comparing all allowed logical CPUs against one logical CPU per physical core across both sockets. This tests scheduling under Hyper-Threading, including 64 workers sharing 32 CPUs in the physical-core arm; it is not an isolated measure of NUMA memory locality. The launcher derives the CPU mask from actual socket/core topology and preserves process affinity/placement evidence. One protected workflow `.github/workflows/v100-ninfer-moe-affinity-7k-http.yml` runs the same three-repeat 7K HTTP screen, requiring unchanged outputs and expert traffic.
+
+
+## Physical-core affinity result — run 37939319091
+
+[Workflow run 37939319091](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37939319091) completed successfully on the V100. It held 64 expert workers and inherited memory policy fixed, comparing all 64 logical CPUs with CPUs 0–31: one logical CPU per physical core across both sockets. Process evidence confirmed `Cpus_allowed_list: 0-63` versus `0-31`; both arms retained `Mems_allowed_list: 0-1`.
+
+| Metric | All logical CPUs | One logical CPU/core | Change |
+|---|---:|---:|---:|
+| Cold TTFT, MTP off | 53.863 s | 53.000 s | 1.6% lower |
+| Cold prefill, MTP off | 132.044 tok/s | 134.186 tok/s | 1.6% higher |
+| Cold decode, MTP off | 11.640 tok/s | 12.371 tok/s | 6.3% higher |
+| Cold decode, MTP on | 12.195 tok/s | 13.576 tok/s | 11.3% higher |
+| Continuation decode, MTP off | 11.660 tok/s | 12.824 tok/s | 10.0% higher |
+| Continuation decode, MTP on | 12.501 tok/s | 15.086 tok/s | 20.7% higher |
+| CPU expert branch diagnostic | 6.312 s | 5.347 s | 15.3% lower |
+
+All six cross-arm HTTP response comparisons matched exactly. Both 192-layer diagnostics conserved GPU H2D bytes (71,158,716,160), stream routes (2,653,326), CPU misses (181,474), and CPU weight reads (162,222,344,592). No thermal throttling was observed.
+
+The physical-core mask is the better experimental scheduling policy on this host. This remains an opt-in within-NInfer result; no production default, installed Strata setting, quantization claim, or Phase 11 numerical gate changed.
+
+Next: compare 32 versus 64 expert workers while pinning both arms to the identical 32-physical-core mask. That isolates whether the 64-worker pool itself helps when scheduling/SMT placement is held fixed.
