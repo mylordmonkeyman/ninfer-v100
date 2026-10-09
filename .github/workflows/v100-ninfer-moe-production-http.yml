@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
   push:
     branches: [perf/v100-strata-derived]
-    paths: ['.github/workflows/v100-ninfer-moe-stage-attribution.yml']
+    paths: ['.github/workflows/v100-ninfer-moe-production-http.yml']
 permissions:
   contents: read
   actions: read
