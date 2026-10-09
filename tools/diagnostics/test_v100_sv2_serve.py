@@ -257,5 +257,34 @@ class ProductionEvidenceTest(unittest.TestCase):
                 self.assertEqual(cmd[cmd.index('--prefill-chunk')+1],'2048')
                 self.assertEqual(cmd[cmd.index('--kv-dtype')+1],'bf16')
 
+    def test_moe_long_multichunk_uses_3k_prompt_and_same_policy_controls(self):
+        for mode,threshold in (('auto-all',''),('auto-min14','14')):
+            with tempfile.TemporaryDirectory() as directory, \
+                    mock.patch('v100_sv2_serve.gpu_snapshot', return_value={
+                        'thermal_status_observed': True, 'thermal_throttled': False}), \
+                    mock.patch('v100_sv2_serve.subprocess.Popen') as popen, \
+                    mock.patch('v100_sv2_serve.request') as request_call:
+                process=popen.return_value
+                process.poll.return_value=None
+                request_call.side_effect=[{'data':[{'id':'model'}]},RuntimeError('stop')]
+                output=Path(directory)
+                with self.assertRaisesRegex(RuntimeError,'stop'):
+                    run_server(Path('/bin/true'),output/'model.ninfer',output/'profile.json',
+                               output,mode,False,0,moe_long_prefill_screen=True)
+                env=popen.call_args.kwargs['env']
+                self.assertEqual(env['NINFER_V100_PREFILL_EXPERT_POLICY'],'auto')
+                self.assertEqual(env['NINFER_V100_PREFILL_STREAM_MIN_TOKENS'],'256')
+                self.assertEqual(env['NINFER_V100_PREFILL_EXPERT_STREAM_MIN_ROUTES'],threshold)
+                self.assertEqual(env['NINFER_V100_CPU_EXPERT_GROUP'],'1')
+                self.assertEqual(env['NINFER_V100_DEVICE_ROUTE_COMBINE'],'1')
+                self.assertEqual(env['NINFER_V100_PLE_IO'],'mmap')
+                self.assertEqual(env['NINFER_FLASH_NEXT_STAGE_LEDGER'],'0')
+                cmd=popen.call_args.args[0]
+                self.assertEqual(cmd[cmd.index('--max-context')+1],'4096')
+                self.assertEqual(cmd[cmd.index('--prefill-chunk')+1],'2048')
+                message=request_call.call_args.args[2]['messages'][0]['content']
+                self.assertIn('Record 159:',message)
+                self.assertNotIn('Record 160:',message)
+
 
 if __name__=='__main__': unittest.main()
