@@ -42,6 +42,7 @@ jobs:
       NINFER_WEIGHTS: /models/qwen3-8b-flash-next
       NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS: '32'
       NINFER_V100_AB_MIN_FREE_GPU_MIB: '28000'
+      NINFER_V100_SV7_FP16_TC: '0'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -51,7 +52,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          results="$GITHUB_WORKSPACE/v100-policy-policy-http-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          results="$GITHUB_WORKSPACE/v100-moe-policy-http-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$results"
           echo "POLICY_RESULTS=$results" >> "$GITHUB_ENV"
           git rev-parse HEAD > "$results/source-sha.txt"
@@ -81,18 +82,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cmake -S . -B build-v100-policy-policy-http -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          cmake -S . -B build-v100-moe-policy-http -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
             -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
             -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-v100-policy-policy-http --target ninfer-serve
-          cp build-v100-policy-policy-http/CMakeCache.txt "$POLICY_RESULTS/CMakeCache.txt"
+          cmake --build build-v100-moe-policy-http --target ninfer-serve
+          cp build-v100-moe-policy-http/CMakeCache.txt "$POLICY_RESULTS/CMakeCache.txt"
       - name: Compare grouped CPU, streaming, and auto256 policy in production HTTP
         shell: bash
         run: |
           set -euo pipefail
           python3 tools/diagnostics/v100_sv2_serve.py \
-            --executable build-v100-policy-policy-http/apps/ninfer-serve \
+            --executable build-v100-moe-policy-http/apps/ninfer-serve \
             --artifact "$POLICY_MODEL_ALIAS" \
             --profile "$RUNNER_TEMP/v100-policy-profile/sv2-static-profile.json" \
             --output "$POLICY_RESULTS/campaign" \
@@ -114,7 +115,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          folder="$GITHUB_WORKSPACE/v100-policy-policy-http-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          folder="$GITHUB_WORKSPACE/v100-moe-policy-http-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           if [[ ! -d "$folder" ]]; then echo "safe=false" >> "$GITHUB_OUTPUT"; exit 0; fi
           find "$folder" -type l -print -delete
           bytes=$(du -sb -- "$folder" | cut -f1)
@@ -129,7 +130,7 @@ jobs:
         if: ${{ always() && steps.safe_upload.outputs.safe == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: v100-policy-policy-http-${{ github.run_id }}-${{ github.run_attempt }}
-          path: v100-policy-policy-http-${{ github.run_id }}-${{ github.run_attempt }}/
+          name: v100-moe-policy-http-${{ github.run_id }}-${{ github.run_attempt }}
+          path: v100-moe-policy-http-${{ github.run_id }}-${{ github.run_attempt }}/
           retention-days: 30
           if-no-files-found: warn
