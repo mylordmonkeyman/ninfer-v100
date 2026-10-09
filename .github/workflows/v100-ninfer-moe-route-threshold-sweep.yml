@@ -2,7 +2,7 @@ name: V100 MoE 3K Minimum-Routes Threshold Sweep
 # Three-arm 3K HTTP: compare >=14, >=20, >=28 expert routes for GPU stream admission.
 # Two-chunk traffic diagnostic per arm; then 3 fresh timing servers per arm with MTP off/on.
 # Only one V100 hardware run, source/model immutable, evidence bounded <1 GiB.
-# Hardware gated behind explicit marker after this workflow's hosted CI; staging never starts V100.
+# Stage hosted checks for the three-arm 14/20/28 threshold sweep; hardware stays marker-gated.
 on:
   workflow_dispatch:
   push:
