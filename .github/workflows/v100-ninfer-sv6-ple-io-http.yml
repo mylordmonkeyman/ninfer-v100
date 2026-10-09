@@ -2,7 +2,7 @@ name: V100 SV6 PLE mmap vs strict direct Production HTTP A/B
 # Two-arm production HTTP: mmap versus strict O_DIRECT PLE I/O; auto256 grouped MoE fixed.
 # One backend diagnostic per arm plus 3 fresh timing servers/arm with MTP on/off; no page eviction/copy.
 # Only one V100 hardware run, source/model immutable, evidence bounded <1 GiB.
-# Hardware remains gated until this SV6 workflow's own hosted checks pass.
+# SV6 protected hardware A/B approved after staged checks 37871502359 and focused hosted Python checks SUCCESS.
 on:
   workflow_dispatch:
   push:
