@@ -380,4 +380,55 @@ class ProductionEvidenceTest(unittest.TestCase):
                 self.assertNotIn('Record 160:',prompt)
 
 
+    def test_seven_k_prefill_requires_four_chunks_and_context_headroom(self):
+        events,responses=self.fixtures(False)
+        for event,response in zip(events,responses):
+            event['result']['prompt_tokens']=6900
+            response['usage']['prompt_tokens']=6900
+        self.assertEqual(len(validate_events(
+            events,responses,False,True,False,long_context_prefill=True)),4)
+        with self.assertRaisesRegex(ValueError,'single large prefill chunk'):
+            validate_events(events,responses,False,True)
+        for bad in (4096,6300,7601,8192):
+            for event,response in zip(events,responses):
+                event['result']['prompt_tokens']=bad
+                response['usage']['prompt_tokens']=bad
+            with self.assertRaisesRegex(ValueError,'6400..7600'):
+                validate_events(events,responses,False,True,False,
+                                long_context_prefill=True)
+
+    def test_seven_k_worker_screen_sets_context_and_unchanged_policy(self):
+        for mode,workers in (('cpu-workers32','32'),('cpu-workers64','64')):
+            with tempfile.TemporaryDirectory() as directory, \
+                    mock.patch('v100_sv2_serve.gpu_snapshot', return_value={
+                        'thermal_status_observed': True, 'thermal_throttled': False}), \
+                    mock.patch('v100_sv2_serve.subprocess.Popen') as popen, \
+                    mock.patch('v100_sv2_serve.request') as request_call, \
+                    mock.patch.dict('os.environ', {
+                        'NINFER_V100_PREFILL_EXPERT_STREAM_MIN_ROUTES':'7',
+                        'NINFER_V100_PREFILL_EXPERT_STREAM_FRACTION':'0.5',
+                        'NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS':'99'}):
+                process=popen.return_value
+                process.poll.return_value=None
+                request_call.side_effect=[{'data':[{'id':'model'}]},RuntimeError('stop')]
+                output=Path(directory)
+                with self.assertRaisesRegex(RuntimeError,'stop'):
+                    run_server(Path('/bin/true'),output/'model.ninfer',output/'profile.json',
+                               output,mode,False,0,cpu_workers_long_screen=True)
+                env=popen.call_args.kwargs['env']
+                self.assertEqual(env['NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS'],workers)
+                self.assertEqual(env['NINFER_V100_PREFILL_EXPERT_STREAM_MIN_ROUTES'],'20')
+                self.assertEqual(env['NINFER_V100_PREFILL_EXPERT_POLICY'],'auto')
+                self.assertEqual(env['NINFER_V100_CPU_EXPERT_GROUP'],'1')
+                self.assertNotIn('NINFER_V100_PREFILL_EXPERT_STREAM_FRACTION',env)
+                cmd=popen.call_args.args[0]
+                self.assertEqual(cmd[cmd.index('--max-context')+1],'8192')
+                self.assertEqual(cmd[cmd.index('--kv-capacity')+1],'8192')
+                self.assertEqual(cmd[cmd.index('--prefill-chunk')+1],'2048')
+                self.assertEqual(cmd[cmd.index('--kv-dtype')+1],'bf16')
+                prompt=request_call.call_args.args[2]['messages'][0]['content']
+                self.assertIn('Record 359:',prompt)
+                self.assertNotIn('Record 360:',prompt)
+
+
 if __name__=='__main__': unittest.main()
