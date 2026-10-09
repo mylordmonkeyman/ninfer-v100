@@ -2,7 +2,7 @@ name: V100 MoE Adaptive Prefill Minroutes14 HTTP A/B
 # Two-arm production HTTP: auto256 GPU stream all misses vs >=14 routes with grouped CPU fallback.
 # One bounded H2D/CPU traffic diagnostic per arm, then 3 fresh timing servers/arm with MTP off/on.
 # Only one V100 hardware run, source/model immutable, evidence bounded <1 GiB.
-# SV6 protected hardware A/B approved after staged checks 37871502359 and focused hosted Python checks SUCCESS.
+# Hardware is marker-gated pending this workflow's hosted checks; staging alone never occupies the V100.
 on:
   workflow_dispatch:
   push:
