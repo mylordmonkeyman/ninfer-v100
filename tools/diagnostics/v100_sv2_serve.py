@@ -30,7 +30,7 @@ def response_signature(response):
                 completion_tokens=response['usage']['completion_tokens'])
 
 
-def validate_events(events, responses, mtp, large_prefill=False):
+def validate_events(events, responses, mtp, large_prefill=False, multichunk_prefill=False):
     done = [e for e in events if e.get('event') == 'request_done']
     if any(e.get('event') in ('request_error','request_rejected') for e in events):
         raise ValueError('server reported request failure')
@@ -63,7 +63,13 @@ def validate_events(events, responses, mtp, large_prefill=False):
             raise ValueError('no actual MTP drafting occurred')
     elif any(e['speculative']['drafted_tokens'] for e in done):
         raise ValueError('non-MTP control drafted tokens')
-    if large_prefill and not 1024 <= done[0]["result"]["prompt_tokens"] <= 2048:
+    prompt_tokens = done[0]['result']['prompt_tokens']
+    if multichunk_prefill:
+        # Two chunks must be exercised; the final continuation still fits the
+        # fixed 4096-token context after the 64-token first completion.
+        if not 2560 <= prompt_tokens <= 3500:
+            raise ValueError('production multi-chunk prompt outside bounded 2560..3500 tokens')
+    elif large_prefill and not 1024 <= prompt_tokens <= 2048:
         raise ValueError("production prompt did not exercise a single large prefill chunk")
     return done
 
@@ -243,7 +249,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
     if monitor_errors or any(not s['thermal_status_observed'] or s['thermal_throttled'] for s in snapshots):
         raise ValueError('production thermal evidence missing or throttled')
     events=[json.loads(line) for line in request_path.read_text().splitlines() if line.strip()]
-    done=validate_events(events,responses,mtp,large_prefill)
+    done=validate_events(events,responses,mtp,large_prefill,moe_long_prefill_screen)
     text=log_path.read_text()
     if sv7_tc_screen or sv7_stage_screen:
         actual = 'sv7.fp16_tc.dispatch=1' in text
