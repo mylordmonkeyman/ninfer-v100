@@ -117,3 +117,18 @@ The guarded 4.9 MB artifact independently confirmed that every server used CPUs 
 All six cross-arm response comparisons were exact. Both separate 192-layer diagnostics conserved 71,158,716,160 GPU H2D bytes, 2,653,326 streamed routes, 181,474 CPU-miss routes, and 162,222,344,592 CPU weight-read bytes.
 
 CUDA Graph is effectively neutral in this CPU-expert-bound workload and does not justify changing the existing graph-off experimental baseline. Production defaults remain unchanged. The next bounded comparison fixes graph-off, 88 workers, placement and workload while testing the supported Flash-Next MTP draft windows 2, 3 and 4.
+
+
+## Flash-Next MTP draft-window sweep — run 37980713153
+
+The guarded 7.2 MB artifact verified actual MTP draft counts 2/3/4, CUDA Graph off, CPUs 0–31, memory nodes 0–1, 88 expert workers, and the unchanged four-chunk workload.
+
+| Draft window | Cold decode (tok/s) | Continuation decode (tok/s) | Cold accepted / drafted | Continuation accepted / drafted |
+|---:|---:|---:|---:|---:|
+| 2 | **16.597** | **17.941** | 33 / 58 | 35 / 54 |
+| 3 | 15.126 | 15.701 | 37 / 74 | 38 / 72 |
+| 4 | 13.607 | 14.797 | 38 / 93 | 40 / 87 |
+
+MTP2 was 9.7% faster than MTP3 for cold decode and 14.3% faster for continuation decode. MTP4 reduced verification rounds slightly but its additional draft verification cost outweighed the extra accepted tokens. All three timed cross-arm comparisons were exact, and each 192-layer diagnostic conserved 71,158,716,160 GPU H2D bytes, 2,653,326 streamed routes, 181,474 CPU-miss routes, and 162,222,344,592 CPU weight-read bytes.
+
+MTP2 is the current performance leader, but draft window 1 remains untested. The final bounded draft-window comparison therefore holds the full workload fixed and tests MTP1 versus MTP2. Production defaults remain unchanged.

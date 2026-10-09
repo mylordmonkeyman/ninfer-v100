@@ -243,7 +243,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
     elif numa_policy not in (None, 'default'):
         raise ValueError(f'unsupported NUMA policy: {numa_policy}')
     if mtp:
-        draft_tokens = {'mtp-draft2':'2','mtp-draft3':'3','mtp-draft4':'4'}.get(mode,'3')
+        draft_tokens = {'mtp-draft1':'1','mtp-draft2':'2','mtp-draft3':'3','mtp-draft4':'4'}.get(mode,'3')
         command += ['--spec','mtp','--draft-tokens',draft_tokens,'--lm-head-draft']
     snapshots, monitor_errors = [gpu_snapshot()], []
     stopped=threading.Event()
@@ -360,7 +360,7 @@ def main():
     parser.add_argument('--cuda-graph-screen',action='store_true',
                         help='7K HTTP physical-core affinity with 88 workers: CUDA Graph off versus on')
     parser.add_argument('--mtp-draft-screen',action='store_true',
-                        help='7K HTTP physical-core affinity with 88 workers: MTP draft windows 2/3/4')
+                        help='7K HTTP physical-core affinity with 88 workers: MTP draft windows 1/2 final check')
     parser.add_argument('--cpu-numa-screen',action='store_true',
                         help='7K HTTP fixed 64 workers: inherited memory policy versus interleave-all')
     parser.add_argument('--cpu-workers-long-screen',action='store_true',
@@ -427,7 +427,7 @@ def main():
     elif args.cuda_graph_screen:
         modes=('graph-off','graph-on')
     elif args.mtp_draft_screen:
-        modes=('mtp-draft2','mtp-draft3','mtp-draft4')
+        modes=('mtp-draft1','mtp-draft2')
     elif args.cpu_numa_screen:
         modes=('numa-default','numa-interleave')
     elif args.cpu_workers_long_screen:
@@ -681,7 +681,7 @@ def main():
                if args.cpu_affinity_workers_screen
                else 'production_http_seven_k_physical_affinity_workers88_cuda_graph_off_vs_on'
                if args.cuda_graph_screen
-               else 'production_http_seven_k_physical_affinity_workers88_mtp_draft2_3_4'
+               else 'production_http_seven_k_physical_affinity_workers88_mtp_draft1_2'
                if args.mtp_draft_screen
                else 'production_http_seven_k_workers64_default_vs_interleave_memory_policy')
         if not all(x['exact'] for x in cross_path_response_matches):
@@ -725,7 +725,7 @@ def main():
                       'cold and continuation MTP/no-MTP outputs compared diagnostically; independent Phase11 qualification remains required']
                      if args.moe_threshold_sweep_screen else []) +
                     (['~7K cold input crosses four 2048-token prefill chunks in 8192-token context',
-                      '64 workers; all logical CPUs versus one logical CPU per physical core' if args.cpu_affinity_screen else '72/80/88 workers on the same 32 physical CPUs' if args.cpu_affinity_workers_screen else '88 workers; CUDA Graph off versus on' if args.cuda_graph_screen else '88 workers; MTP draft windows 2/3/4' if args.mtp_draft_screen else '64 workers; inherited versus interleave-all memory policy' if args.cpu_numa_screen else '32/64 workers with fixed minroutes20, auto256 and BF16 KV',
+                      '64 workers; all logical CPUs versus one logical CPU per physical core' if args.cpu_affinity_screen else '72/80/88 workers on the same 32 physical CPUs' if args.cpu_affinity_workers_screen else '88 workers; CUDA Graph off versus on' if args.cuda_graph_screen else '88 workers; MTP draft windows 1/2' if args.mtp_draft_screen else '64 workers; inherited versus interleave-all memory policy' if args.cpu_numa_screen else '32/64 workers with fixed minroutes20, auto256 and BF16 KV',
                       'same static 64 GPU expert slots, four-chunk telemetry separated from timed HTTP',
                       'memory policy unchanged; 64 workers on 64 versus 32 allowed CPUs; proc snapshots at readiness only, no file-cache migration or eviction' if args.cpu_affinity_screen else 'memory policy and physical-core affinity fixed; 72/80/88 workers share the same 32 CPUs' if args.cpu_affinity_workers_screen else 'memory policy, physical-core affinity and 88 workers fixed; vary CUDA Graph state only' if args.cuda_graph_screen else 'memory policy, physical-core affinity, CUDA Graph off and 88 workers fixed; vary MTP draft window only' if args.mtp_draft_screen else 'CPU affinity unchanged; shared file-cache pages are not migrated or evicted; proc placement snapshots at readiness only' if args.cpu_numa_screen else 'no NUMA pinning, single request, unchanged Phase11 numerical gates']
                      if args.cpu_workers_long_screen else []) +
