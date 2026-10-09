@@ -47,3 +47,23 @@ Within each arm, fresh-process HTTP response signatures are repeatable; finish r
 ## Software-only infrastructure status
 
 [Software run 37991802757](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37991802757): Python/telemetry checks **passed**. One isolated CUDA syntax job failed on initial Docker Hub container pull and **failed again at container initialization after one specifically requested job retry**; checkout and compiler did not execute. This is not evidence of a CUDA compiler or kernel regression. Do not repeatedly retry unchanged pulls; do not modify source or start an extra hardware job to address an external Docker Hub error.
+
+
+## Static cache32 versus cache64 — run 37994576174
+
+The guarded 3.4 MB artifact verified every diagnostic and timed process actually allocated and fully seeded its requested cache: cache32 used 4,247,126,016 bytes with 1,536 seeded layer-expert entries, while cache64 used 8,494,252,032 bytes with 3,072 seeded entries. Every process used CPUs 0–31 and memory nodes 0–1; CUDA Graph remained off, MTP2 was active, and no thermal throttling occurred.
+
+| Metric | Cache32 | Cache64 | Cache64 change |
+|---|---:|---:|---:|
+| Sampled GPU memory | 14,740 MiB | 18,790 MiB | +4,050 MiB |
+| Cold TTFT | 54.181 s | 53.920 s | -0.5% |
+| Cold prefill | 131.267 | 131.903 tok/s | +0.5% |
+| Cold decode | 15.231 | 16.629 tok/s | +9.2% |
+| Prefix-replay decode | 15.167 | 16.778 tok/s | +10.6% |
+| Continuation TTFT | 1.409 | 1.307 s | -7.2% |
+| Continuation decode | 15.315 | 18.041 tok/s | +17.8% |
+| Continuation-replay decode | 15.309 | 17.723 tok/s | +15.8% |
+
+Across the separate 192-layer diagnostics, cache64 increased resident-hit routes from 341,627 to 575,120 (+68.3%), reduced streamed expert H2D bytes from 77,305,435,648 to 71,158,716,160 (-8.0%), reduced CPU-miss routes from 196,582 to 181,474 (-7.7%), reduced CPU weight reads from 175,678,665,128 to 162,222,344,592 bytes (-7.7%), and reduced inclusive CPU-branch time from 5.513 to 5.006 seconds (-9.2%).
+
+Each arm was internally reproducible, but cross-cache response text differed in all three pairs, as expected when residency changes the CPU/GPU arithmetic path. This is performance evidence only, not numerical qualification. Cache64 dominates cache32 for this workload and remains faster than cache128 from run 37991802825. The next bounded experiment checks cache48/64/80 to locate the local performance peak and quantify the adjacent VRAM tradeoff. Production defaults remain unchanged.
