@@ -462,7 +462,7 @@ def main():
                 except json.JSONDecodeError: continue
                 if entry.get('kind')=='expert_layer' and entry.get('prefill') is True and entry.get('tokens',0)>=minimum_tokens:
                     records.append(entry)
-            # 3K tokens fit in two 2048-token chunks; each has 48 MoE layers.
+            # 3K uses two chunks and 7K uses four, with 48 MoE layers each.
             expected_records=(192 if args.cpu_workers_long_screen else
                 96 if args.moe_long_prefill_screen or args.moe_threshold_sweep_screen or args.cpu_workers_screen else 48)
             if len(records)!=expected_records:
@@ -607,7 +607,7 @@ def main():
                 diagnostic_cross_path_exact=diagnostic_cross_path_exact,
                 cross_path_response_matches=cross_path_response_matches,
                 limitations=[
-                    f'fixed 64 slots per layer, {"FP8" if args.qsa_score_screen else "BF16"} KV, one active request, short 4096 context',
+                    f'fixed 64 slots per layer, {"FP8" if args.qsa_score_screen else "BF16"} KV, one active request, {"8192" if args.cpu_workers_long_screen else "4096"} context',
                     'small two-turn corpus; no concurrent cancellation, long context, vision or full production matrix',
                     'MTP drafting required; acceptance counts retained, no minimum acceptance coefficient imposed',
                     'no independent oracle thresholds changed; accepted baseline numerical failure remains separate'] +
@@ -634,6 +634,11 @@ def main():
                       '96 expert-layer traffic records per arm collected only in separate telemetry processes',
                       'cold and continuation MTP/no-MTP outputs compared diagnostically; independent Phase11 qualification remains required']
                      if args.moe_threshold_sweep_screen else []) +
+                    (['~7K cold input crosses four 2048-token prefill chunks in 8192-token context',
+                      '32/64 workers with fixed minroutes20, auto256 and BF16 KV',
+                      'same static 64 GPU expert slots, four-chunk telemetry separated from timed HTTP',
+                      'no NUMA pinning, single request, unchanged Phase11 numerical gates']
+                     if args.cpu_workers_long_screen else []) +
                     (['fixed minroutes20 and auto256; vary only CPU expert workers 32/48/64',
                       '3111-token two-chunk prompt, 4096 context, static 64 expert slots per layer, BF16 KV, mmap PLE',
                       'traffic diagnostics from separate processes, not the uninstrumented timed HTTP processes',
