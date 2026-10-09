@@ -153,7 +153,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                sv7_tc_screen=False, sv7_stage_screen=False, moe_policy_screen=False, ple_io_screen=False,
                moe_minroutes_screen=False, moe_long_prefill_screen=False,
                moe_threshold_sweep_screen=False, cpu_workers_screen=False,
-               cpu_workers_long_screen=False):
+               cpu_workers_long_screen=False, numa_policy=None):
     require_gpu_headroom()
     minroutes_screen = (moe_minroutes_screen or moe_long_prefill_screen or
                         moe_threshold_sweep_screen or cpu_workers_screen or
@@ -181,6 +181,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                     {'auto-min14':'14','auto-min20':'20','auto-min28':'28'}.get(mode,'')
                     if minroutes_screen else ''),
                NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS=(
+                    '64' if numa_policy is not None else
                     {'cpu-workers32':'32','cpu-workers48':'48','cpu-workers64':'64'}[mode]
                     if cpu_workers_screen or cpu_workers_long_screen else
                      env.get('NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS','32')),
@@ -212,6 +213,10 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
              '--max-private-continuations','2','--max-shared-prefixes','2',
              '--no-cuda-graph','--qsa-prefill-mma' if qsa_score_screen else '--no-qsa-prefill-mma','--no-thinking',
              '--request-log-jsonl',str(request_path)]
+    if numa_policy == 'interleave':
+        command = ['numactl', '--interleave=all'] + command
+    elif numa_policy not in (None, 'default'):
+        raise ValueError(f'unsupported NUMA policy: {numa_policy}')
     if mtp:
         command += ['--spec','mtp','--draft-tokens','3','--lm-head-draft']
     snapshots, monitor_errors = [gpu_snapshot()], []
@@ -236,6 +241,11 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                     except (urllib.error.URLError,TimeoutError,ConnectionResetError):
                         if time.monotonic()>deadline: raise TimeoutError('server readiness timeout')
                         time.sleep(1)
+                if numa_policy is not None:
+                    # Observe actual placement; shared file-cache pages are not migrated.
+                    for leaf in ('status', 'numa_maps'):
+                        (output/f'{name}-proc-{leaf}.txt').write_text(
+                            Path(f'/proc/{process.pid}/{leaf}').read_text())
                 model=models['data'][0]['id']
                 paragraphs=' '.join(f'Record {i}: the solar station stores energy during daylight and supplies the village after sunset.' for i in range(360 if cpu_workers_long_screen else 160 if moe_long_prefill_screen or moe_threshold_sweep_screen or cpu_workers_screen else 64 if large_prefill else 16))
                 messages=[{'role':'user','content':paragraphs+' Explain how its battery storage works in detail.'}]
@@ -289,6 +299,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
     if len(startup)!=1 or not startup[0]['engine']['prefix_reuse']:
         raise ValueError('missing production Engine/prefix capability record')
     result=dict(name=name,mode=mode,mtp=mtp,repeat=repeat,diagnostic=diagnostic,
+                numa_policy=numa_policy,command=command,
                 qsa_dispatch=dispatch,qsa_comparisons=comparisons,cache_slots_per_layer=64,
                 cache_bytes=int(size[0]),startup=startup[0],requests=done,
                 response_signatures=[response_signature(r) for r in responses])
@@ -314,6 +325,8 @@ def main():
                         help='end-to-end HTTP three-arm grouped CPU, GPU stream, adaptive auto256 performance A/B/C')
     parser.add_argument('--cpu-workers-screen',action='store_true',
                         help='production 3K HTTP fixed minroutes20 with 32/48/64 CPU expert workers')
+    parser.add_argument('--cpu-numa-screen',action='store_true',
+                        help='7K HTTP fixed 64 workers: inherited memory policy versus interleave-all')
     parser.add_argument('--cpu-workers-long-screen',action='store_true',
                         help='production ~7K/four-chunk HTTP fixed minroutes20 with 32/64 CPU workers')
     parser.add_argument('--moe-threshold-sweep-screen',action='store_true',
@@ -337,8 +350,12 @@ def main():
     if args.artifact.suffix != '.ninfer' or not args.artifact.is_file():
         parser.error('--artifact requires an explicit readable .ninfer file')
     if sum((args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,args.qsa_score_screen,args.qsa_score_attribution,args.sv7_tc_screen,args.sv7_stage_screen,args.moe_policy_screen,args.ple_io_screen,args.moe_minroutes_screen,args.moe_long_prefill_screen,args.moe_threshold_sweep_screen,args.cpu_workers_screen,
-            args.cpu_workers_long_screen)) > 1:
+            args.cpu_workers_long_screen,args.cpu_numa_screen)) > 1:
         parser.error('performance screen flags are mutually exclusive')
+    if args.cpu_numa_screen:
+        args.cpu_workers_long_screen = True
+        # Probe permission before loading a model; fail instead of silently falling back.
+        subprocess.run(['numactl','--interleave=all','true'],check=True)
     if args.repeats<3: parser.error('need three fresh-process observations per arm')
     args.output.mkdir(parents=True,exist_ok=True)
     profile=json.loads(args.profile.read_text())
@@ -365,6 +382,8 @@ def main():
         modes=('auto-min14','auto-min20','auto-min28')
     elif args.cpu_workers_screen:
         modes=('cpu-workers32','cpu-workers48','cpu-workers64')
+    elif args.cpu_numa_screen:
+        modes=('numa-default','numa-interleave')
     elif args.cpu_workers_long_screen:
         modes=('cpu-workers32','cpu-workers64')
     elif args.sv7_tc_screen:
@@ -453,7 +472,8 @@ def main():
                        moe_long_prefill_screen=args.moe_long_prefill_screen,
                        moe_threshold_sweep_screen=args.moe_threshold_sweep_screen,
                        cpu_workers_screen=args.cpu_workers_screen,
-                        cpu_workers_long_screen=args.cpu_workers_long_screen,diagnostic=True)
+                        cpu_workers_long_screen=args.cpu_workers_long_screen,diagnostic=True,
+                       numa_policy=('interleave' if mode=='numa-interleave' else 'default') if args.cpu_numa_screen else None)
             lines=(args.output/f'{mode}-mtp0--1.log').read_text().splitlines()
             records=[]
             minimum_tokens=256 if args.moe_long_prefill_screen or args.moe_threshold_sweep_screen or args.cpu_workers_screen or args.cpu_workers_long_screen else 1024
@@ -519,7 +539,8 @@ def main():
                                moe_long_prefill_screen=args.moe_long_prefill_screen,
                                moe_threshold_sweep_screen=args.moe_threshold_sweep_screen,
                                cpu_workers_screen=args.cpu_workers_screen,
-                                cpu_workers_long_screen=args.cpu_workers_long_screen)
+                                cpu_workers_long_screen=args.cpu_workers_long_screen,
+                                numa_policy=('interleave' if mode=='numa-interleave' else 'default') if args.cpu_numa_screen else None)
                 observations.append(row); atomic_json(args.output/'observations.json',observations)
                 peers=[r for r in observations if r['mtp']==mtp]
                 same_mode=[r for r in peers if r['mode']==mode]
@@ -599,6 +620,13 @@ def main():
         milestone='MoE';scope='production_http_three_k_multichunk_minroutes20_cpu_workers32_48_64_screen'
     if args.cpu_workers_long_screen:
         milestone='MoE';scope='production_http_seven_k_four_chunk_minroutes20_cpu_workers32_64_screen'
+    if args.cpu_numa_screen:
+        scope='production_http_seven_k_workers64_default_vs_interleave_memory_policy'
+        if not all(x['exact'] for x in cross_path_response_matches):
+            raise ValueError('NUMA-only arms changed deterministic response signatures')
+        conserved=('layers','stream_expert_h2d_bytes','stream_routes','cpu_miss_routes','cpu_weight_read_bytes')
+        if any(traffic[modes[0]][k] != traffic[modes[1]][k] for k in conserved):
+            raise ValueError('NUMA-only arms changed expert workload')
     report=dict(schema=1,milestone=milestone,scope=scope,qualified=False,
                 route_handoff_policy=args.route_handoff_policy if args.route_handoff_screen else None,
                 candidate_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),results=results,
@@ -635,9 +663,9 @@ def main():
                       'cold and continuation MTP/no-MTP outputs compared diagnostically; independent Phase11 qualification remains required']
                      if args.moe_threshold_sweep_screen else []) +
                     (['~7K cold input crosses four 2048-token prefill chunks in 8192-token context',
-                      '32/64 workers with fixed minroutes20, auto256 and BF16 KV',
+                      '64 workers; inherited versus interleave-all memory policy' if args.cpu_numa_screen else '32/64 workers with fixed minroutes20, auto256 and BF16 KV',
                       'same static 64 GPU expert slots, four-chunk telemetry separated from timed HTTP',
-                      'no NUMA pinning, single request, unchanged Phase11 numerical gates']
+                      'CPU affinity unchanged; shared file-cache pages are not migrated or evicted; proc placement snapshots at readiness only' if args.cpu_numa_screen else 'no NUMA pinning, single request, unchanged Phase11 numerical gates']
                      if args.cpu_workers_long_screen else []) +
                     (['fixed minroutes20 and auto256; vary only CPU expert workers 32/48/64',
                       '3111-token two-chunk prompt, 4096 context, static 64 expert slots per layer, BF16 KV, mmap PLE',

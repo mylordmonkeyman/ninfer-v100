@@ -340,6 +340,35 @@ class ProductionEvidenceTest(unittest.TestCase):
                 self.assertNotIn('Record 160:',prompt)
 
 
+    def test_numa_launcher_keeps_workload_fixed_and_records_placement(self):
+        import os
+        for policy in ('default', 'interleave'):
+            with tempfile.TemporaryDirectory() as directory, \
+                    mock.patch('v100_sv2_serve.gpu_snapshot', return_value={}), \
+                    mock.patch('v100_sv2_serve.subprocess.Popen') as popen, \
+                    mock.patch('v100_sv2_serve.request') as api, \
+                    mock.patch('v100_sv2_serve.Path.read_text', return_value='observed placement'):
+                process = popen.return_value
+                process.pid = os.getpid()
+                process.poll.return_value = None
+                api.side_effect = [{'data': [{'id': 'model'}]}, RuntimeError('stop')]
+                output = Path(directory)
+                with self.assertRaisesRegex(RuntimeError, 'stop'):
+                    run_server(Path('/bin/true'), output/'model.ninfer', output/'profile.json',
+                               output, f'numa-{policy}', True, 0,
+                               cpu_workers_long_screen=True, numa_policy=policy)
+                cmd = popen.call_args.args[0]
+                if policy == 'interleave':
+                    self.assertEqual(cmd[:2], ['numactl', '--interleave=all'])
+                else:
+                    self.assertEqual(cmd[0], '/usr/bin/true')
+                self.assertEqual(cmd[cmd.index('--max-context')+1], '8192')
+                self.assertEqual(cmd[cmd.index('--draft-tokens')+1], '3')
+                env = popen.call_args.kwargs['env']
+                self.assertEqual(env['NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS'], '64')
+                self.assertEqual(env['NINFER_V100_PREFILL_EXPERT_STREAM_MIN_ROUTES'], '20')
+                self.assertTrue((output/f'numa-{policy}-mtp1-0-proc-numa_maps.txt').is_file())
+
     def test_moe_cpu_worker_screen_keeps_min20_and_varies_only_pool_count(self):
         for mode, workers in (('cpu-workers32','32'),('cpu-workers48','48'),
                               ('cpu-workers64','64')):

@@ -1,5 +1,7 @@
 # V100 NInfer 7K (four prefill chunks) CPU worker-count performance screen
 
+**Completed:** [7K results](v100-moe-cpu-workers-7k-results-37926943821.md) confirm the 64-worker benefit with identical outputs and expert traffic. The next isolated test compares inherited versus interleave-all memory policy at 64 workers through `.github/workflows/v100-ninfer-moe-numa-7k-http.yml`; CPU affinity remains unchanged and existing file-cache pages are not migrated.
+
 **Purpose:** Validate whether the reproducible 3K win from 64 versus 32 AVX2 CPU expert workers extends to larger, multi-chunk prefill; use performance data, not a broad model-quality campaign.
 
 [Prior 3K worker A/B](v100-moe-cpu-workers-3k-results-37882498281.md) found cold TTFT improvements of **4.03% without MTP / 3.68% with MTP**, and **28.9% / 52.5%** higher cold decode tok/s. The V100 route counts and all GPU expert H2D work were identical. 64 workers is the experimental reference, not a global default.
