@@ -386,6 +386,42 @@ class ProductionEvidenceTest(unittest.TestCase):
         self.assertEqual(*launches)
 
 
+    def test_prefill_chunk_launcher_varies_chunk_and_preserves_cache_mtp_policy(self):
+        import json,os
+        launches=[]
+        def query(cmd,**kwargs):
+            if cmd[0]=='nvidia-smi':return '12000'
+            return json.dumps({'cpus':[dict(cpu=i,core=i%16,socket=(i//16)%2) for i in range(64)]})
+        for mode,chunk in (('chunk2048','2048'),('chunk4096','4096')):
+            with tempfile.TemporaryDirectory() as directory, \
+                    mock.patch('v100_sv2_serve.gpu_snapshot',return_value={}), \
+                    mock.patch('v100_sv2_serve.subprocess.Popen') as popen, \
+                    mock.patch('v100_sv2_serve.request') as api, \
+                    mock.patch('v100_sv2_serve.Path.read_text',return_value='placement'), \
+                    mock.patch('v100_sv2_serve.os.sched_getaffinity',return_value=set(range(64))), \
+                    mock.patch('v100_sv2_serve.subprocess.check_output',side_effect=query):
+                popen.return_value.pid=os.getpid()
+                popen.return_value.poll.return_value=None
+                api.side_effect=[{'data':[{'id':'model'}]},RuntimeError('stop')]
+                output=Path(directory)
+                with self.assertRaisesRegex(RuntimeError,'stop'):
+                    run_server(Path('/bin/true'),output/'model.ninfer',output/'profile.json',
+                               output,mode,True,0,cpu_workers_long_screen=True,
+                               prefill_chunk_screen=True,numa_policy='physical-cores')
+                cmd=popen.call_args.args[0];env=popen.call_args.kwargs['env']
+                self.assertEqual(cmd[:3],['taskset','--cpu-list',','.join(map(str,range(32)))])
+                self.assertEqual(cmd[cmd.index('--draft-tokens')+1],'2')
+                self.assertIn('--no-cuda-graph',cmd)
+                self.assertEqual(cmd[cmd.index('--prefill-chunk')+1],chunk)
+                self.assertEqual(env['NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS'],'64')
+                self.assertEqual(env['NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS'],'88')
+                self.assertEqual(env['NINFER_V100_PREFILL_EXPERT_STREAM_MIN_ROUTES'],'20')
+                self.assertEqual(env['NINFER_V100_EXPERT_POLICY'],'static')
+                launches.append({k:v for k,v in env.items() if k.startswith('NINFER_') and
+                                 k not in ('NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS','NINFER_V100_EXPERT_PROFILE')})
+        self.assertEqual(*launches)
+
+
     def test_cache_budget_low_launcher_uses_32_slots_and_preserves_policy(self):
         import json,os
         def query(cmd,**kwargs):

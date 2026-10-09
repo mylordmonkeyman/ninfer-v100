@@ -1,6 +1,6 @@
-name: V100 MoE 7K Expert Cache Refinement
-# Three-arm 7K HTTP: static GPU expert cache48/64/80 with MTP2 and 88 workers on the same 32-physical-core CPU mask.
-# Four-chunk traffic diagnostic per arm; then 3 fresh MTP2 servers per cache budget.
+name: V100 MoE 7K Prefill Chunk A/B
+# Two-arm 7K HTTP: prefill chunks 2048/4096, static cache64, MTP2 and 88 workers on the same 32-physical-core CPU mask.
+# Four/two-chunk traffic diagnostic per arm; then 3 fresh MTP2 servers per chunk size.
 # Only one V100 hardware run, source/model immutable, evidence bounded <1 GiB.
 # Only this explicit marker allocates a GPU; hosted checks gate the hardware job.
 on:
@@ -21,20 +21,19 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Validate 7K cache48/64/80 comparison and Python tests
+      - name: Validate 7K prefill chunk2048/4096 comparison and Python tests
         shell: bash
         run: |
           set -euo pipefail
           python3 -m compileall -q tools/diagnostics tools/telemetry
           python3 -m unittest discover -s tools/diagnostics -p 'test_v100*.py'
           python3 -m unittest discover -s tools/telemetry -p 'test_*.py'
-          python3 tools/diagnostics/v100_sv2_serve.py --help | grep -q -- '--cache-budget-screen'
+          python3 tools/diagnostics/v100_sv2_serve.py --help | grep -q -- '--prefill-chunk-screen'
           grep -q 'def validate_events(events, responses, mtp, large_prefill=False, multichunk_prefill=False,' tools/diagnostics/v100_sv2_serve.py
-          grep -Fq "('cache48','cache64','cache80')" tools/diagnostics/v100_sv2_serve.py
-          grep -q 'expected_records=(192 if args.cpu_workers_long_screen else' tools/diagnostics/v100_sv2_serve.py
+          grep -Fq "('chunk2048','chunk4096')" tools/diagnostics/v100_sv2_serve.py
           git diff --check
   hardware:
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[v100:moe-cache-refine-7k-http]')) }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[v100:prefill-chunk-7k-http]')) }}
     needs: checks
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:
@@ -56,7 +55,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          results="$GITHUB_WORKSPACE/v100-moe-cache-budget-refine-7k-http-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          results="$GITHUB_WORKSPACE/v100-moe-prefill-chunk-7k-http-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$results"
           echo "CPU_WORKERS_RESULTS=$results" >> "$GITHUB_ENV"
           git rev-parse HEAD > "$results/source-sha.txt"
@@ -67,7 +66,7 @@ jobs:
           fi
           test -r "$NINFER_WEIGHTS"
           # Never put resident model symlinks in evidence: artifact upload follows links.
-          alias_path="$RUNNER_TEMP/v100-cache-budget-refine-7k-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer"
+          alias_path="$RUNNER_TEMP/v100-prefill-chunk-7k-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer"
           ln -s -- "$NINFER_WEIGHTS" "$alias_path"
           test -r "$alias_path"
           echo "CPU_WORKERS_MODEL_ALIAS=$alias_path" >> "$GITHUB_ENV"
@@ -83,27 +82,27 @@ jobs:
           name: v100-sv2-37270512213-1
           run-id: 37270512213
           github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/v100-cache-budget-refine-7k-profile
+          path: ${{ runner.temp }}/v100-prefill-chunk-7k-profile
       - name: Build the frozen NInfer source only once
         shell: bash
         run: |
           set -euo pipefail
-          cmake -S . -B build-v100-moe-cache-budget-refine-7k-http -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          cmake -S . -B build-v100-moe-prefill-chunk-7k-http -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
             -DCMAKE_CUDA_ARCHITECTURES=70 -DNINFER_BUILD_MEDIA=OFF \
             -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-v100-moe-cache-budget-refine-7k-http --target ninfer-serve
-          cp build-v100-moe-cache-budget-refine-7k-http/CMakeCache.txt "$CPU_WORKERS_RESULTS/CMakeCache.txt"
-      - name: Compare 48/64/80 static expert slots with 88 workers on physical cores and MTP2
+          cmake --build build-v100-moe-prefill-chunk-7k-http --target ninfer-serve
+          cp build-v100-moe-prefill-chunk-7k-http/CMakeCache.txt "$CPU_WORKERS_RESULTS/CMakeCache.txt"
+      - name: Compare 2048/4096 prefill chunks with 88 workers on physical cores and MTP2
         shell: bash
         run: |
           set -euo pipefail
           python3 tools/diagnostics/v100_sv2_serve.py \
-            --executable build-v100-moe-cache-budget-refine-7k-http/apps/ninfer-serve \
+            --executable build-v100-moe-prefill-chunk-7k-http/apps/ninfer-serve \
             --artifact "$CPU_WORKERS_MODEL_ALIAS" \
-            --profile "$RUNNER_TEMP/v100-cache-budget-refine-7k-profile/sv2-static-profile.json" \
+            --profile "$RUNNER_TEMP/v100-prefill-chunk-7k-profile/sv2-static-profile.json" \
             --output "$CPU_WORKERS_RESULTS/campaign" \
-            --repeats 3 --cache-budget-refine-screen \
+            --repeats 3 --prefill-chunk-screen \
             | tee "$CPU_WORKERS_RESULTS/console.log"
           cat "$CPU_WORKERS_RESULTS/console.log" >> "$GITHUB_STEP_SUMMARY"
       - name: Compress bounded logs before artifact guard
@@ -111,7 +110,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          folder="$GITHUB_WORKSPACE/v100-moe-cache-budget-refine-7k-http-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          folder="$GITHUB_WORKSPACE/v100-moe-prefill-chunk-7k-http-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           if [[ -d "$folder" ]]; then
             find "$folder" -type f -name '*.log' -print0 | xargs -0 -r gzip -1
           fi
@@ -121,7 +120,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          folder="$GITHUB_WORKSPACE/v100-moe-cache-budget-refine-7k-http-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          folder="$GITHUB_WORKSPACE/v100-moe-prefill-chunk-7k-http-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           if [[ ! -d "$folder" ]]; then echo "safe=false" >> "$GITHUB_OUTPUT"; exit 0; fi
           find "$folder" -type l -print -delete
           bytes=$(du -sb -- "$folder" | cut -f1)
@@ -136,7 +135,7 @@ jobs:
         if: ${{ always() && steps.safe_upload.outputs.safe == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: v100-moe-cache-budget-refine-7k-http-${{ github.run_id }}-${{ github.run_attempt }}
-          path: v100-moe-cache-budget-refine-7k-http-${{ github.run_id }}-${{ github.run_attempt }}/
+          name: v100-moe-prefill-chunk-7k-http-${{ github.run_id }}-${{ github.run_attempt }}
+          path: v100-moe-prefill-chunk-7k-http-${{ github.run_id }}-${{ github.run_attempt }}/
           retention-days: 30
           if-no-files-found: warn

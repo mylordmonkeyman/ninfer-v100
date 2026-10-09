@@ -67,3 +67,22 @@ The guarded 3.4 MB artifact verified every diagnostic and timed process actually
 Across the separate 192-layer diagnostics, cache64 increased resident-hit routes from 341,627 to 575,120 (+68.3%), reduced streamed expert H2D bytes from 77,305,435,648 to 71,158,716,160 (-8.0%), reduced CPU-miss routes from 196,582 to 181,474 (-7.7%), reduced CPU weight reads from 175,678,665,128 to 162,222,344,592 bytes (-7.7%), and reduced inclusive CPU-branch time from 5.513 to 5.006 seconds (-9.2%).
 
 Each arm was internally reproducible, but cross-cache response text differed in all three pairs, as expected when residency changes the CPU/GPU arithmetic path. This is performance evidence only, not numerical qualification. Cache64 dominates cache32 for this workload and remains faster than cache128 from run 37991802825. The next bounded experiment checks cache48/64/80 to locate the local performance peak and quantify the adjacent VRAM tradeoff. Production defaults remain unchanged.
+
+
+## Cache48/64/80 refinement — run 37999785844
+
+[Hardware run 37999785844](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37999785844) and software checks passed. Artifact 11649792456 (5.0 MB) independently read. Requested capacity was fully allocated and seeded; sampled memory was 16,764 / 18,790 / 20,814 MiB for cache48/64/80.
+
+| Metric | Cache48 | Cache64 | Cache80 |
+|---|---:|---:|---:|
+| Cold TTFT | 54.012 s | 53.956 s | 53.832 s |
+| Cold decode | 15.398 tok/s | **16.702 tok/s** | 15.195 tok/s |
+| Continuation decode | 14.985 tok/s | **17.986 tok/s** | 17.850 tok/s |
+| Expert-weight H2D over 192 layers | 74.438 GB | 71.159 GB | 67.854 GB |
+| Inclusive CPU branch | 5.295 s | 5.026 s | 4.951 s |
+
+Cache64 remains the decode-oriented reference. Cache80 buys only 0.23% lower cold TTFT while cold decode falls 9.0%; cache48 falls 7.8% in cold decode and 16.7% in continuation. Same-arm responses remain reproducible; cross-arm text differs and does not establish numerical qualification. Stop cache-size sweeps for this workload.
+
+## Next isolated SV3 comparison: prefill chunk 2048 versus 4096
+
+Keep cache64, MTP2, 88 workers, physical-core affinity, 8192 context, BF16 KV, auto256/minroutes20, grouped CPU fallback, mmap PLE and graph-off fixed. Reuse the same 7111-token cold prompt. Larger chunks may avoid repeated expert-weight staging; this is a hypothesis until measured. Two separate diagnostic servers must cover four versus two large chunks (192/96 layer rows) with identical summed layer-token totals. Three alternating fresh timed servers per arm measure cold TTFT, decode, prefix/continuation and sampled memory. Chunk size may change route-group eligibility and floating-point arithmetic, so compare cross-arm outputs diagnostically while preserving same-arm replay/accounting gates. Validate the actual startup chunk option and actual cache allocation; preserve the existing allocator reserve and partial artifacts if memory is insufficient. No runtime defaults, kernels or weights change.
