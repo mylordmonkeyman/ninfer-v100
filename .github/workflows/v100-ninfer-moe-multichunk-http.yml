@@ -2,7 +2,7 @@ name: V100 MoE Multichunk Minroutes14 Production HTTP A/B
 # Two-arm 3K-token, two-prefill-chunk HTTP: auto256 all-stream vs grouped CPU fallback below 14 routes.
 # Two-chunk H2D/CPU diagnostic per arm, then 3 fresh-process timing servers per arm with MTP off/on.
 # Only one V100 hardware run, source/model immutable, evidence bounded <1 GiB.
-# Single protected V100 multi-chunk benchmark authorized after hosted CI run 37875774693 SUCCESS.
+# Previous hardware run 37875821807 found an old single-chunk test check; corrected in 6f15315 and covered by new unit test. Await current hosted checks before rerun.
 on:
   workflow_dispatch:
   push:
@@ -29,6 +29,7 @@ jobs:
           python3 -m unittest discover -s tools/diagnostics -p 'test_v100*.py'
           python3 -m unittest discover -s tools/telemetry -p 'test_*.py'
           python3 tools/diagnostics/v100_sv2_serve.py --help | grep -q -- '--moe-long-prefill-screen'
+          grep -q 'def validate_events(events, responses, mtp, large_prefill=False, multichunk_prefill=False)' tools/diagnostics/v100_sv2_serve.py
           grep -q 'expected_records=96 if args.moe_long_prefill_screen else 48' tools/diagnostics/v100_sv2_serve.py
           git diff --check
   hardware:
