@@ -1,5 +1,5 @@
 name: V100 NInfer SV7 Stage-Level Prefill Attribution
-# Stage attribution follows successful production HTTP A/B run 37858456604.
+# Protected one-shot stage attribution follows successful production HTTP A/B run 37858456604.
 # Compares instrumented BF16 SIMT versus opt-in FP16 TensorOp, one cold-prefill process each.
 # Staging commit validates hosted syntax and tests; benchmark launch uses separate guarded commit.
 # Frozen model, identical cache budget, device combine, grouped AVX2 and MTP controls.
