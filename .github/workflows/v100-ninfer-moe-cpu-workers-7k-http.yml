@@ -2,7 +2,7 @@ name: V100 MoE 7K Four-Chunk CPU Worker A/B
 # Two-arm ~7K HTTP: fixed minroutes20 and compare 32 versus 64 CPU expert workers.
 # Four-chunk traffic diagnostic per arm; then 3 fresh servers/arm with MTP off/on.
 # Only one V100 hardware run, source/model immutable, evidence bounded <1 GiB.
-# Prepared only: require hosted tests to pass and no existing hardware jobs before trigger.
+# Hosted source checks #37926698148 succeeded; no active V100 hardware jobs at trigger.
 on:
   workflow_dispatch:
   push:
