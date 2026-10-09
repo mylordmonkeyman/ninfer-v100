@@ -166,11 +166,11 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                sv7_tc_screen=False, sv7_stage_screen=False, moe_policy_screen=False, ple_io_screen=False,
                moe_minroutes_screen=False, moe_long_prefill_screen=False,
                moe_threshold_sweep_screen=False, cpu_workers_screen=False,
-               cpu_workers_long_screen=False, cuda_graph_screen=False, numa_policy=None):
+               cpu_workers_long_screen=False, cuda_graph_screen=False, mtp_draft_screen=False, numa_policy=None):
     require_gpu_headroom()
     minroutes_screen = (moe_minroutes_screen or moe_long_prefill_screen or
                         moe_threshold_sweep_screen or cpu_workers_screen or
-                        cpu_workers_long_screen or cuda_graph_screen)
+                        cpu_workers_long_screen or cuda_graph_screen or mtp_draft_screen)
     name = f'{mode}-mtp{int(mtp)}-{repeat}'
     log_path, request_path = output/f'{name}.log', output/f'{name}-requests.jsonl'
     env = os.environ.copy()
@@ -194,7 +194,7 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                     {'auto-min14':'14','auto-min20':'20','auto-min28':'28'}.get(mode,'')
                     if minroutes_screen else ''),
                NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS=(
-                    '88' if cuda_graph_screen else
+                    '88' if cuda_graph_screen or mtp_draft_screen else
                     {'physical-workers72':'72','physical-workers80':'80','physical-workers88':'88'}[mode]
                     if mode in ('physical-workers72','physical-workers80','physical-workers88') else
                     '64' if numa_policy is not None else
@@ -243,7 +243,8 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
     elif numa_policy not in (None, 'default'):
         raise ValueError(f'unsupported NUMA policy: {numa_policy}')
     if mtp:
-        command += ['--spec','mtp','--draft-tokens','3','--lm-head-draft']
+        draft_tokens = {'mtp-draft2':'2','mtp-draft3':'3','mtp-draft4':'4'}.get(mode,'3')
+        command += ['--spec','mtp','--draft-tokens',draft_tokens,'--lm-head-draft']
     snapshots, monitor_errors = [gpu_snapshot()], []
     stopped=threading.Event()
     def monitor():
@@ -358,6 +359,8 @@ def main():
                         help='7K HTTP physical-core affinity: 72/80/88 expert-worker peak refinement')
     parser.add_argument('--cuda-graph-screen',action='store_true',
                         help='7K HTTP physical-core affinity with 88 workers: CUDA Graph off versus on')
+    parser.add_argument('--mtp-draft-screen',action='store_true',
+                        help='7K HTTP physical-core affinity with 88 workers: MTP draft windows 2/3/4')
     parser.add_argument('--cpu-numa-screen',action='store_true',
                         help='7K HTTP fixed 64 workers: inherited memory policy versus interleave-all')
     parser.add_argument('--cpu-workers-long-screen',action='store_true',
@@ -383,9 +386,9 @@ def main():
     if args.artifact.suffix != '.ninfer' or not args.artifact.is_file():
         parser.error('--artifact requires an explicit readable .ninfer file')
     if sum((args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,args.qsa_score_screen,args.qsa_score_attribution,args.sv7_tc_screen,args.sv7_stage_screen,args.moe_policy_screen,args.ple_io_screen,args.moe_minroutes_screen,args.moe_long_prefill_screen,args.moe_threshold_sweep_screen,args.cpu_workers_screen,
-            args.cpu_workers_long_screen,args.cpu_numa_screen,args.cpu_affinity_screen,args.cpu_affinity_workers_screen,args.cuda_graph_screen)) > 1:
+            args.cpu_workers_long_screen,args.cpu_numa_screen,args.cpu_affinity_screen,args.cpu_affinity_workers_screen,args.cuda_graph_screen,args.mtp_draft_screen)) > 1:
         parser.error('performance screen flags are mutually exclusive')
-    if args.cpu_affinity_screen or args.cpu_affinity_workers_screen or args.cuda_graph_screen:
+    if args.cpu_affinity_screen or args.cpu_affinity_workers_screen or args.cuda_graph_screen or args.mtp_draft_screen:
         args.cpu_workers_long_screen = True
     if args.cpu_numa_screen:
         args.cpu_workers_long_screen = True
@@ -423,6 +426,8 @@ def main():
         modes=('physical-workers72','physical-workers80','physical-workers88')
     elif args.cuda_graph_screen:
         modes=('graph-off','graph-on')
+    elif args.mtp_draft_screen:
+        modes=('mtp-draft2','mtp-draft3','mtp-draft4')
     elif args.cpu_numa_screen:
         modes=('numa-default','numa-interleave')
     elif args.cpu_workers_long_screen:
@@ -437,6 +442,7 @@ def main():
         modes=('single','grouped')
     else:
         modes=('cpu-cache','stream') if args.prefill_screen else ('legacy','device')
+    mtp_states=(True,) if args.mtp_draft_screen else (False,True)
     if args.sv7_stage_screen:
         summaries = {}
         for mode in modes:
@@ -514,10 +520,11 @@ def main():
                        moe_threshold_sweep_screen=args.moe_threshold_sweep_screen,
                        cpu_workers_screen=args.cpu_workers_screen,
                         cpu_workers_long_screen=args.cpu_workers_long_screen,
-                       cuda_graph_screen=args.cuda_graph_screen,diagnostic=True,
+                       cuda_graph_screen=args.cuda_graph_screen,
+                       mtp_draft_screen=args.mtp_draft_screen,diagnostic=True,
                        numa_policy=(('interleave' if mode=='numa-interleave' else 'default') if args.cpu_numa_screen
                                     else ('physical-cores' if mode=='affinity-physical' else 'default') if args.cpu_affinity_screen
-                                    else 'physical-cores' if args.cpu_affinity_workers_screen or args.cuda_graph_screen else None))
+                                    else 'physical-cores' if args.cpu_affinity_workers_screen or args.cuda_graph_screen or args.mtp_draft_screen else None))
             lines=(args.output/f'{mode}-mtp0--1.log').read_text().splitlines()
             records=[]
             minimum_tokens=256 if args.moe_long_prefill_screen or args.moe_threshold_sweep_screen or args.cpu_workers_screen or args.cpu_workers_long_screen else 1024
@@ -572,7 +579,7 @@ def main():
         diagnostic_cross_path_exact=(diagnostics[0]['response_signatures']==
                                      diagnostics[1]['response_signatures'])
     for repeat in range(args.repeats):
-        for mtp in (False,True):
+        for mtp in mtp_states:
             for mode in (modes if repeat%2==0 else tuple(reversed(modes))):
                 row=run_server(args.executable,args.artifact,args.profile,args.output,mode,mtp,
                                repeat,args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,
@@ -585,9 +592,10 @@ def main():
                                cpu_workers_screen=args.cpu_workers_screen,
                                 cpu_workers_long_screen=args.cpu_workers_long_screen,
                        cuda_graph_screen=args.cuda_graph_screen,
+                       mtp_draft_screen=args.mtp_draft_screen,
                                 numa_policy=(('interleave' if mode=='numa-interleave' else 'default') if args.cpu_numa_screen
                                     else ('physical-cores' if mode=='affinity-physical' else 'default') if args.cpu_affinity_screen
-                                    else 'physical-cores' if args.cpu_affinity_workers_screen or args.cuda_graph_screen else None))
+                                    else 'physical-cores' if args.cpu_affinity_workers_screen or args.cuda_graph_screen or args.mtp_draft_screen else None))
                 observations.append(row); atomic_json(args.output/'observations.json',observations)
                 peers=[r for r in observations if r['mtp']==mtp]
                 same_mode=[r for r in peers if r['mode']==mode]
@@ -604,7 +612,7 @@ def main():
     cross_path_response_matches=[]
     if args.qsa_score_screen or args.sv7_tc_screen:
         for repeat in range(args.repeats):
-            for mtp in (False,True):
+            for mtp in mtp_states:
                 pair=[r for r in observations if r['repeat']==repeat and r['mtp']==mtp]
                 if len(pair)!=2:
                     raise ValueError('missing QSA A/B observation pair')
@@ -617,7 +625,7 @@ def main():
                         for e in r['requests']] for r in pair}))
     if args.moe_policy_screen or args.moe_minroutes_screen or args.moe_long_prefill_screen or args.moe_threshold_sweep_screen or args.cpu_workers_screen or args.cpu_workers_long_screen:
         for repeat in range(args.repeats):
-            for mtp in (False,True):
+            for mtp in mtp_states:
                 arms=[r for r in observations if r['repeat']==repeat and r['mtp']==mtp]
                 if len(arms)!=len(modes) or {r['mode'] for r in arms}!=set(modes):
                     raise ValueError('missing complete MoE production crossover')
@@ -627,7 +635,7 @@ def main():
                     modes=[r['mode'] for r in arms]))
     results=[]
     labels=('cold','prefix-replay','continuation','continuation-replay')
-    for mtp in (False,True):
+    for mtp in mtp_states:
         for mode in modes:
             rows=[r for r in observations if r['mtp']==mtp and r['mode']==mode]
             for index,label in enumerate(labels):
@@ -667,12 +675,14 @@ def main():
         milestone='MoE';scope='production_http_three_k_multichunk_minroutes20_cpu_workers32_48_64_screen'
     if args.cpu_workers_long_screen:
         milestone='MoE';scope='production_http_seven_k_four_chunk_minroutes20_cpu_workers32_64_screen'
-    if args.cpu_numa_screen or args.cpu_affinity_screen or args.cpu_affinity_workers_screen or args.cuda_graph_screen:
+    if args.cpu_numa_screen or args.cpu_affinity_screen or args.cpu_affinity_workers_screen or args.cuda_graph_screen or args.mtp_draft_screen:
         scope=('production_http_seven_k_workers64_all_vs_physical_cpu_affinity' if args.cpu_affinity_screen
                else 'production_http_seven_k_physical_affinity_workers72_80_88'
                if args.cpu_affinity_workers_screen
                else 'production_http_seven_k_physical_affinity_workers88_cuda_graph_off_vs_on'
                if args.cuda_graph_screen
+               else 'production_http_seven_k_physical_affinity_workers88_mtp_draft2_3_4'
+               if args.mtp_draft_screen
                else 'production_http_seven_k_workers64_default_vs_interleave_memory_policy')
         if not all(x['exact'] for x in cross_path_response_matches):
             raise ValueError('Placement-only arms changed deterministic response signatures')
@@ -715,9 +725,9 @@ def main():
                       'cold and continuation MTP/no-MTP outputs compared diagnostically; independent Phase11 qualification remains required']
                      if args.moe_threshold_sweep_screen else []) +
                     (['~7K cold input crosses four 2048-token prefill chunks in 8192-token context',
-                      '64 workers; all logical CPUs versus one logical CPU per physical core' if args.cpu_affinity_screen else '72/80/88 workers on the same 32 physical CPUs' if args.cpu_affinity_workers_screen else '88 workers; CUDA Graph off versus on' if args.cuda_graph_screen else '64 workers; inherited versus interleave-all memory policy' if args.cpu_numa_screen else '32/64 workers with fixed minroutes20, auto256 and BF16 KV',
+                      '64 workers; all logical CPUs versus one logical CPU per physical core' if args.cpu_affinity_screen else '72/80/88 workers on the same 32 physical CPUs' if args.cpu_affinity_workers_screen else '88 workers; CUDA Graph off versus on' if args.cuda_graph_screen else '88 workers; MTP draft windows 2/3/4' if args.mtp_draft_screen else '64 workers; inherited versus interleave-all memory policy' if args.cpu_numa_screen else '32/64 workers with fixed minroutes20, auto256 and BF16 KV',
                       'same static 64 GPU expert slots, four-chunk telemetry separated from timed HTTP',
-                      'memory policy unchanged; 64 workers on 64 versus 32 allowed CPUs; proc snapshots at readiness only, no file-cache migration or eviction' if args.cpu_affinity_screen else 'memory policy and physical-core affinity fixed; 72/80/88 workers share the same 32 CPUs' if args.cpu_affinity_workers_screen else 'memory policy, physical-core affinity and 88 workers fixed; vary CUDA Graph state only' if args.cuda_graph_screen else 'CPU affinity unchanged; shared file-cache pages are not migrated or evicted; proc placement snapshots at readiness only' if args.cpu_numa_screen else 'no NUMA pinning, single request, unchanged Phase11 numerical gates']
+                      'memory policy unchanged; 64 workers on 64 versus 32 allowed CPUs; proc snapshots at readiness only, no file-cache migration or eviction' if args.cpu_affinity_screen else 'memory policy and physical-core affinity fixed; 72/80/88 workers share the same 32 CPUs' if args.cpu_affinity_workers_screen else 'memory policy, physical-core affinity and 88 workers fixed; vary CUDA Graph state only' if args.cuda_graph_screen else 'memory policy, physical-core affinity, CUDA Graph off and 88 workers fixed; vary MTP draft window only' if args.mtp_draft_screen else 'CPU affinity unchanged; shared file-cache pages are not migrated or evicted; proc placement snapshots at readiness only' if args.cpu_numa_screen else 'no NUMA pinning, single request, unchanged Phase11 numerical gates']
                      if args.cpu_workers_long_screen else []) +
                     (['fixed minroutes20 and auto256; vary only CPU expert workers 32/48/64',
                       '3111-token two-chunk prompt, 4096 context, static 64 expert slots per layer, BF16 KV, mmap PLE',

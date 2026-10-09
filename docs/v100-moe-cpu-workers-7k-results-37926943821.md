@@ -99,3 +99,21 @@ The first attempt stopped in the GPU-headroom preflight with only 2,291 MiB free
 All six timed cross-arm response comparisons were exact. Each separate 192-layer traffic diagnostic conserved 71,158,716,160 GPU H2D bytes, 2,653,326 streamed routes, 181,474 CPU-miss routes, and 162,222,344,592 CPU weight-read bytes. Readiness evidence kept CPUs 0–31 and memory nodes 0–1 in every arm.
 
 The optimum is mode-dependent: 72 workers led non-MTP cold decode, while 88 workers led MTP cold and continuation decode. Further worker-count subdivision is not warranted. Production defaults remain unchanged. The next bounded comparison fixes the MTP-oriented 88-worker peak and physical-core placement, varying only CUDA Graph off versus on.
+
+
+## CUDA Graph off/on at the 88-worker MTP peak — run 37977137136
+
+The guarded 4.9 MB artifact independently confirmed that every server used CPUs 0–31, memory nodes 0–1, 88 expert workers, inherited memory policy, BF16 KV, minroutes20/auto256 grouped CPU fallback, mmap PLE, and identical 7,111-token traffic. Server startup records reported CUDA Graph disabled in the off arm and enabled in the on arm.
+
+| Metric | Graph off | Graph on | Graph-on change |
+|---|---:|---:|---:|
+| Cold prefill, MTP off | 135.095 | 134.903 tok/s | -0.1% |
+| Cold decode, MTP off | 12.699 | 12.736 tok/s | +0.3% |
+| Continuation decode, MTP off | 12.577 | 12.777 tok/s | +1.6% |
+| Cold decode, MTP on | 15.124 | 15.189 tok/s | +0.4% |
+| Continuation decode, MTP on | 15.696 | 15.703 tok/s | +0.0% |
+| CPU expert branch | 5.200 | 5.048 s | -2.9% |
+
+All six cross-arm response comparisons were exact. Both separate 192-layer diagnostics conserved 71,158,716,160 GPU H2D bytes, 2,653,326 streamed routes, 181,474 CPU-miss routes, and 162,222,344,592 CPU weight-read bytes.
+
+CUDA Graph is effectively neutral in this CPU-expert-bound workload and does not justify changing the existing graph-off experimental baseline. Production defaults remain unchanged. The next bounded comparison fixes graph-off, 88 workers, placement and workload while testing the supported Flash-Next MTP draft windows 2, 3 and 4.
