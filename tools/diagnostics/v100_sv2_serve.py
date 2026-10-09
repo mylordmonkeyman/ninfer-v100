@@ -314,6 +314,8 @@ def main():
                         help='end-to-end HTTP three-arm grouped CPU, GPU stream, adaptive auto256 performance A/B/C')
     parser.add_argument('--cpu-workers-screen',action='store_true',
                         help='production 3K HTTP fixed minroutes20 with 32/48/64 CPU expert workers')
+    parser.add_argument('--cpu-workers-long-screen',action='store_true',
+                        help='production ~7K/four-chunk HTTP fixed minroutes20 with 32/64 CPU workers')
     parser.add_argument('--moe-threshold-sweep-screen',action='store_true',
                         help='production 3K HTTP auto256: grouped minimum expert routes 14/20/28')
     parser.add_argument('--moe-long-prefill-screen',action='store_true',
@@ -334,7 +336,8 @@ def main():
     args=parser.parse_args()
     if args.artifact.suffix != '.ninfer' or not args.artifact.is_file():
         parser.error('--artifact requires an explicit readable .ninfer file')
-    if sum((args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,args.qsa_score_screen,args.qsa_score_attribution,args.sv7_tc_screen,args.sv7_stage_screen,args.moe_policy_screen,args.ple_io_screen,args.moe_minroutes_screen,args.moe_long_prefill_screen,args.moe_threshold_sweep_screen,args.cpu_workers_screen)) > 1:
+    if sum((args.prefill_screen,args.cpu_group_screen,args.route_handoff_screen,args.qsa_score_screen,args.qsa_score_attribution,args.sv7_tc_screen,args.sv7_stage_screen,args.moe_policy_screen,args.ple_io_screen,args.moe_minroutes_screen,args.moe_long_prefill_screen,args.moe_threshold_sweep_screen,args.cpu_workers_screen,
+            args.cpu_workers_long_screen)) > 1:
         parser.error('performance screen flags are mutually exclusive')
     if args.repeats<3: parser.error('need three fresh-process observations per arm')
     args.output.mkdir(parents=True,exist_ok=True)
@@ -362,6 +365,8 @@ def main():
         modes=('auto-min14','auto-min20','auto-min28')
     elif args.cpu_workers_screen:
         modes=('cpu-workers32','cpu-workers48','cpu-workers64')
+    elif args.cpu_workers_long_screen:
+        modes=('cpu-workers32','cpu-workers64')
     elif args.sv7_tc_screen:
         modes=('bf16-simt','fp16-tc')
     elif args.qsa_score_screen:
@@ -438,7 +443,7 @@ def main():
                             'actual_direct_page_reads':sum(row.get('coalesced_pages',0) for row in rows)}
             atomic_json(args.output/'ple-backend-dispatch.json',dispatch)
         print('SV6 mmap/direct storage backends verified separately from timing',flush=True)
-    if args.moe_minroutes_screen or args.moe_long_prefill_screen or args.moe_threshold_sweep_screen or args.cpu_workers_screen:
+    if args.moe_minroutes_screen or args.moe_long_prefill_screen or args.moe_threshold_sweep_screen or args.cpu_workers_screen or args.cpu_workers_long_screen:
         # Inspect one uninstrumented-equivalent prompt under explicit telemetry
         # separately from all timing observations; no stage ledger or broad profiling.
         traffic={}
@@ -447,17 +452,19 @@ def main():
                        -1,moe_minroutes_screen=args.moe_minroutes_screen,
                        moe_long_prefill_screen=args.moe_long_prefill_screen,
                        moe_threshold_sweep_screen=args.moe_threshold_sweep_screen,
-                       cpu_workers_screen=args.cpu_workers_screen,diagnostic=True)
+                       cpu_workers_screen=args.cpu_workers_screen,
+                        cpu_workers_long_screen=args.cpu_workers_long_screen,diagnostic=True)
             lines=(args.output/f'{mode}-mtp0--1.log').read_text().splitlines()
             records=[]
-            minimum_tokens=256 if args.moe_long_prefill_screen or args.moe_threshold_sweep_screen or args.cpu_workers_screen else 1024
+            minimum_tokens=256 if args.moe_long_prefill_screen or args.moe_threshold_sweep_screen or args.cpu_workers_screen or args.cpu_workers_long_screen else 1024
             for line in lines:
                 try: entry=json.loads(line)
                 except json.JSONDecodeError: continue
                 if entry.get('kind')=='expert_layer' and entry.get('prefill') is True and entry.get('tokens',0)>=minimum_tokens:
                     records.append(entry)
             # 3K tokens fit in two 2048-token chunks; each has 48 MoE layers.
-            expected_records=96 if args.moe_long_prefill_screen or args.moe_threshold_sweep_screen or args.cpu_workers_screen else 48
+            expected_records=(192 if args.cpu_workers_long_screen else
+                96 if args.moe_long_prefill_screen or args.moe_threshold_sweep_screen or args.cpu_workers_screen else 48)
             if len(records)!=expected_records:
                 raise ValueError(f'{mode}: expected {expected_records} large MoE layer telemetry records; got {len(records)}')
             traffic[mode]={
@@ -468,14 +475,14 @@ def main():
                 'cpu_weight_read_bytes':sum(row['cpu_weight_read_bytes'] for row in records),
                 'cpu_branch_us_total':sum(row.get('cpu_branch_us',0) for row in records)}
             atomic_json(args.output/'minroutes-traffic.json',traffic)
-        if args.cpu_workers_screen:
+        if args.cpu_workers_screen or args.cpu_workers_long_screen:
             # A worker-count A/B must keep route policy, GPU cache and weight
             # traffic fixed. These diagnostic counters are not the HTTP timing.
-            expected=['cpu-workers32','cpu-workers48','cpu-workers64']
+            expected=list(modes)
             if list(traffic)!=expected or len({traffic[m]['layers'] for m in modes})!=1:
                 raise ValueError('worker screen missing comparable 96-layer traces')
             atomic_json(args.output/'cpu-worker-traffic.json',traffic)
-            print('CPU expert worker 32/48/64 traffic diagnostics captured',flush=True)
+            print(f'CPU expert worker {modes} traffic diagnostics captured',flush=True)
         elif args.moe_threshold_sweep_screen:
             gpu=[traffic[m]['stream_expert_h2d_bytes'] for m in modes]
             cpu=[traffic[m]['cpu_miss_routes'] for m in modes]
@@ -511,14 +518,15 @@ def main():
                                moe_minroutes_screen=args.moe_minroutes_screen,
                                moe_long_prefill_screen=args.moe_long_prefill_screen,
                                moe_threshold_sweep_screen=args.moe_threshold_sweep_screen,
-                               cpu_workers_screen=args.cpu_workers_screen)
+                               cpu_workers_screen=args.cpu_workers_screen,
+                                cpu_workers_long_screen=args.cpu_workers_long_screen)
                 observations.append(row); atomic_json(args.output/'observations.json',observations)
                 peers=[r for r in observations if r['mtp']==mtp]
                 same_mode=[r for r in peers if r['mode']==mode]
                 if any(r['response_signatures']!=same_mode[0]['response_signatures']
                        for r in same_mode):
                     raise ValueError('same-path fresh-process greedy response or finish accounting differs')
-                if (not (args.qsa_score_screen or args.sv7_tc_screen or args.moe_policy_screen or args.moe_minroutes_screen or args.moe_long_prefill_screen or args.moe_threshold_sweep_screen or args.cpu_workers_screen) and
+                if (not (args.qsa_score_screen or args.sv7_tc_screen or args.moe_policy_screen or args.moe_minroutes_screen or args.moe_long_prefill_screen or args.moe_threshold_sweep_screen or args.cpu_workers_screen or args.cpu_workers_long_screen) and
                         any(r['response_signatures']!=peers[0]['response_signatures'] for r in peers)):
                     raise ValueError('cross-path greedy production response or finish accounting differs')
                 if args.route_handoff_screen:
@@ -539,7 +547,7 @@ def main():
                         dict(drafted=e['speculative']['drafted_tokens'],
                              accepted=e['speculative']['accepted_tokens'])
                         for e in r['requests']] for r in pair}))
-    if args.moe_policy_screen or args.moe_minroutes_screen or args.moe_long_prefill_screen or args.moe_threshold_sweep_screen or args.cpu_workers_screen:
+    if args.moe_policy_screen or args.moe_minroutes_screen or args.moe_long_prefill_screen or args.moe_threshold_sweep_screen or args.cpu_workers_screen or args.cpu_workers_long_screen:
         for repeat in range(args.repeats):
             for mtp in (False,True):
                 arms=[r for r in observations if r['repeat']==repeat and r['mtp']==mtp]
@@ -589,11 +597,13 @@ def main():
         milestone='MoE';scope='production_http_three_k_multichunk_minroutes14_20_28_prefix_mtp_screen'
     if args.cpu_workers_screen:
         milestone='MoE';scope='production_http_three_k_multichunk_minroutes20_cpu_workers32_48_64_screen'
+    if args.cpu_workers_long_screen:
+        milestone='MoE';scope='production_http_seven_k_four_chunk_minroutes20_cpu_workers32_64_screen'
     report=dict(schema=1,milestone=milestone,scope=scope,qualified=False,
                 route_handoff_policy=args.route_handoff_policy if args.route_handoff_screen else None,
                 candidate_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),results=results,
                 exact_compared_responses=(all(x['exact'] for x in cross_path_response_matches)
-                                          if args.qsa_score_screen or args.sv7_tc_screen or args.moe_policy_screen or args.moe_minroutes_screen or args.moe_long_prefill_screen or args.moe_threshold_sweep_screen or args.cpu_workers_screen else True),
+                                          if args.qsa_score_screen or args.sv7_tc_screen or args.moe_policy_screen or args.moe_minroutes_screen or args.moe_long_prefill_screen or args.moe_threshold_sweep_screen or args.cpu_workers_screen or args.cpu_workers_long_screen else True),
                 diagnostic_cross_path_exact=diagnostic_cross_path_exact,
                 cross_path_response_matches=cross_path_response_matches,
                 limitations=[
