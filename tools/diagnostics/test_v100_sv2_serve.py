@@ -111,6 +111,21 @@ class ProductionEvidenceTest(unittest.TestCase):
             response['usage']['prompt_tokens']=1536
         self.assertEqual(len(validate_events(events,responses,False,True)),4)
 
+    def test_multichunk_prefill_accepts_3111_tokens_and_rejects_short_or_oversize(self):
+        events,responses=self.fixtures(False)
+        for event,response in zip(events,responses):
+            event['result']['prompt_tokens']=3111
+            response['usage']['prompt_tokens']=3111
+        self.assertEqual(len(validate_events(events,responses,False,True,True)),4)
+        with self.assertRaisesRegex(ValueError,'single large prefill chunk'):
+            validate_events(events,responses,False,True)
+        for bad in (2048,4096):
+            for event,response in zip(events,responses):
+                event['result']['prompt_tokens']=bad
+                response['usage']['prompt_tokens']=bad
+            with self.assertRaisesRegex(ValueError,'multi-chunk prompt outside'):
+                validate_events(events,responses,False,True,True)
+
     def test_real_drafting_reuse_and_replay_required(self):
         events,responses=self.fixtures()
         self.assertEqual(len(validate_events(events,responses,True)),4)
