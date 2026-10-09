@@ -1,5 +1,5 @@
-name: V100 NInfer MoE CPU Grouping vs Streaming Production HTTP A/B/C
-# Real production HTTP A/B/C: CPU single, CPU grouped, grouped plus streamed misses.
+name: V100 NInfer MoE CPU Grouping vs Streaming Production HTTP A/B/C/D
+# Real production HTTP A/B/C/D: CPU single, CPU grouped, grouped plus streamed misses.
 # 3 fresh processes per mode, MTP off/on, 4 requests per process, strict replay and thermal checks.
 # Protected single V100 hardware run; no model mutation; bounded evidence.
 # One-shot hardware A/B/C approved after hosted checks 37863456926 passed.
