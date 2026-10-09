@@ -194,8 +194,8 @@ def run_server(executable, artifact, profile, output, mode, mtp, repeat,
                     {'auto-min14':'14','auto-min20':'20','auto-min28':'28'}.get(mode,'')
                     if minroutes_screen else ''),
                NINFER_FLASH_NEXT_CPU_EXPERT_WORKERS=(
-                    {'physical-workers64':'64','physical-workers80':'80','physical-workers96':'96'}[mode]
-                    if mode in ('physical-workers64','physical-workers80','physical-workers96') else
+                    {'physical-workers72':'72','physical-workers80':'80','physical-workers88':'88'}[mode]
+                    if mode in ('physical-workers72','physical-workers80','physical-workers88') else
                     '64' if numa_policy is not None else
                     {'cpu-workers32':'32','cpu-workers48':'48','cpu-workers64':'64'}[mode]
                     if cpu_workers_screen or cpu_workers_long_screen else
@@ -350,7 +350,7 @@ def main():
     parser.add_argument('--cpu-affinity-screen',action='store_true',
                         help='7K HTTP fixed64 workers: all logical CPUs versus one thread per core')
     parser.add_argument('--cpu-affinity-workers-screen',action='store_true',
-                        help='7K HTTP physical-core affinity: 64/80/96 expert-worker saturation sweep')
+                        help='7K HTTP physical-core affinity: 72/80/88 expert-worker peak refinement')
     parser.add_argument('--cpu-numa-screen',action='store_true',
                         help='7K HTTP fixed 64 workers: inherited memory policy versus interleave-all')
     parser.add_argument('--cpu-workers-long-screen',action='store_true',
@@ -413,7 +413,7 @@ def main():
     elif args.cpu_affinity_screen:
         modes=('affinity-all','affinity-physical')
     elif args.cpu_affinity_workers_screen:
-        modes=('physical-workers64','physical-workers80','physical-workers96')
+        modes=('physical-workers72','physical-workers80','physical-workers88')
     elif args.cpu_numa_screen:
         modes=('numa-default','numa-interleave')
     elif args.cpu_workers_long_screen:
@@ -658,7 +658,7 @@ def main():
         milestone='MoE';scope='production_http_seven_k_four_chunk_minroutes20_cpu_workers32_64_screen'
     if args.cpu_numa_screen or args.cpu_affinity_screen or args.cpu_affinity_workers_screen:
         scope=('production_http_seven_k_workers64_all_vs_physical_cpu_affinity' if args.cpu_affinity_screen
-               else 'production_http_seven_k_physical_affinity_workers64_80_96'
+               else 'production_http_seven_k_physical_affinity_workers72_80_88'
                if args.cpu_affinity_workers_screen
                else 'production_http_seven_k_workers64_default_vs_interleave_memory_policy')
         if not all(x['exact'] for x in cross_path_response_matches):
@@ -702,9 +702,9 @@ def main():
                       'cold and continuation MTP/no-MTP outputs compared diagnostically; independent Phase11 qualification remains required']
                      if args.moe_threshold_sweep_screen else []) +
                     (['~7K cold input crosses four 2048-token prefill chunks in 8192-token context',
-                      '64 workers; all logical CPUs versus one logical CPU per physical core' if args.cpu_affinity_screen else '64/80/96 workers on the same 32 physical CPUs' if args.cpu_affinity_workers_screen else '64 workers; inherited versus interleave-all memory policy' if args.cpu_numa_screen else '32/64 workers with fixed minroutes20, auto256 and BF16 KV',
+                      '64 workers; all logical CPUs versus one logical CPU per physical core' if args.cpu_affinity_screen else '72/80/88 workers on the same 32 physical CPUs' if args.cpu_affinity_workers_screen else '64 workers; inherited versus interleave-all memory policy' if args.cpu_numa_screen else '32/64 workers with fixed minroutes20, auto256 and BF16 KV',
                       'same static 64 GPU expert slots, four-chunk telemetry separated from timed HTTP',
-                      'memory policy unchanged; 64 workers on 64 versus 32 allowed CPUs; proc snapshots at readiness only, no file-cache migration or eviction' if args.cpu_affinity_screen else 'memory policy and physical-core affinity fixed; 64/80/96 workers share the same 32 CPUs' if args.cpu_affinity_workers_screen else 'CPU affinity unchanged; shared file-cache pages are not migrated or evicted; proc placement snapshots at readiness only' if args.cpu_numa_screen else 'no NUMA pinning, single request, unchanged Phase11 numerical gates']
+                      'memory policy unchanged; 64 workers on 64 versus 32 allowed CPUs; proc snapshots at readiness only, no file-cache migration or eviction' if args.cpu_affinity_screen else 'memory policy and physical-core affinity fixed; 72/80/88 workers share the same 32 CPUs' if args.cpu_affinity_workers_screen else 'CPU affinity unchanged; shared file-cache pages are not migrated or evicted; proc placement snapshots at readiness only' if args.cpu_numa_screen else 'no NUMA pinning, single request, unchanged Phase11 numerical gates']
                      if args.cpu_workers_long_screen else []) +
                     (['fixed minroutes20 and auto256; vary only CPU expert workers 32/48/64',
                       '3111-token two-chunk prompt, 4096 context, static 64 expert slots per layer, BF16 KV, mmap PLE',

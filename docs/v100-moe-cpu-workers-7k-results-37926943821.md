@@ -64,3 +64,23 @@ All six cross-arm HTTP response comparisons matched exactly. Both 192-layer diag
 This isolates worker-pool parallelism from CPU-affinity policy: even on the same 32 physical CPUs, 64 expert workers substantially outperform 32. The result supports 64 as the current experimental reference but does not establish that 64 is the optimum.
 
 Next: a bounded 64/80/96-worker saturation sweep on the identical physical-core mask, with the same 7K workload, route policy, cache, BF16 KV, MTP states, traffic conservation, and three-repeat crossover.
+
+
+## Physical-core worker saturation — run 37953230669
+
+[Workflow run 37953230669](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/37953230669) completed successfully. All arms used CPUs 0–31 and both NUMA memory nodes.
+
+| Metric | 64 workers | 80 workers | 96 workers | Best |
+|---|---:|---:|---:|---|
+| Cold TTFT, MTP off | 52.961 s | 52.715 s | 52.561 s | 96 |
+| Cold prefill, MTP off | 134.290 | 134.918 | 135.313 tok/s | 96 |
+| Cold decode, MTP off | 12.421 | 12.708 | 12.573 tok/s | 80 |
+| Cold decode, MTP on | 13.520 | 15.835 | 15.211 tok/s | 80 |
+| Continuation decode, MTP on | 14.969 | 16.304 | 15.884 tok/s | 80 |
+| CPU expert branch diagnostic | 5.480 s | 5.153 s | 5.013 s | 96 |
+
+All six three-arm HTTP comparisons matched exactly. Each 192-layer diagnostic conserved GPU H2D bytes (71,158,716,160), stream routes (2,653,326), CPU misses (181,474), and CPU weight reads (162,222,344,592).
+
+Eighty workers is the best overall setting tested: compared with 64, cold decode improves 2.3% without MTP and 17.1% with MTP, while continuation MTP decode improves 8.9%. Ninety-six workers reduces CPU-branch time and marginally improves prefill, but scheduling overhead lowers decode versus 80. Treat 80 as the current experimental reference; production defaults remain unchanged.
+
+Next: one narrow 72/80/88 refinement on the identical physical-core mask. This is the final worker-count sweep unless it materially displaces 80.
