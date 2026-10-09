@@ -281,7 +281,7 @@ def main():
     parser.add_argument('--route-handoff-policy',choices=('all','prefill'),default='all',
                         help='phase eligibility for the route-ready candidate; serial control remains off')
     parser.add_argument('--moe-policy-screen',action='store_true',
-                        help='end-to-end HTTP four-arm CPU single, grouped, streamed-grouped, auto-grouped performance A/B/C/D')
+                        help='end-to-end HTTP three-arm grouped CPU, GPU stream, adaptive auto256 performance A/B/C')
     parser.add_argument('--sv7-stage-screen',action='store_true',
                         help='two-process, bounded stage-level production cold-prefill attribution')
     parser.add_argument('--sv7-tc-screen',action='store_true',
@@ -313,7 +313,7 @@ def main():
     if args.sv7_stage_screen:
         modes=('cpu-cache-single','cpu-cache-grouped','stream-grouped')
     elif args.moe_policy_screen:
-        modes=('cpu-cache-single','cpu-cache-grouped','stream-grouped','auto-grouped')
+        modes=('cpu-cache-grouped','stream-grouped','auto-grouped')
     elif args.sv7_tc_screen:
         modes=('bf16-simt','fp16-tc')
     elif args.qsa_score_screen:
@@ -435,7 +435,7 @@ def main():
     if args.sv7_tc_screen:
         milestone='SV7';scope='production_http_bf16_fp16_tc_prefix_mtp_screen'
     if args.moe_policy_screen:
-        milestone='MoE';scope='production_http_cpu_single_grouped_streamed_grouped_prefix_mtp_screen'
+        milestone='MoE';scope='production_http_cpu_grouped_streamed_auto256_prefix_mtp_screen'
     report=dict(schema=1,milestone=milestone,scope=scope,qualified=False,
                 route_handoff_policy=args.route_handoff_policy if args.route_handoff_screen else None,
                 candidate_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),results=results,
@@ -450,7 +450,7 @@ def main():
                     'no independent oracle thresholds changed; accepted baseline numerical failure remains separate'] +
                     (['grouped CPU experts remain opt-in; no concurrent-request matrix in this screen']
                      if args.cpu_group_screen else []) +
-                    (['four-arm MoE policies remain opt-in; auto streams only >=256-token chunks; streaming may alter resident expert cache behavior']
+                    (['three-arm MoE policies remain opt-in; auto streams only >=256-token chunks; streaming may alter resident expert cache behavior']
                      if args.moe_policy_screen else []) +
                     (['route handoff remains opt-in; both arms use grouped CPU experts; no concurrent-request matrix']
                      if args.route_handoff_screen else []) +
