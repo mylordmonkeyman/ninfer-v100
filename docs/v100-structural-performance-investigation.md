@@ -352,3 +352,18 @@ FP16 versus identical settings with early CPU misses. Three fresh servers per ar
 use the same cold/warmed workload and separate long diagnostics. Every timing
 request across both arms must have identical output hash, usage and native MTP
 accounting. New schedule benefit is unclaimed until this experiment passes.
+
+Run 38028087489 completed all timing arms with identical outputs, usage and MTP
+accounting. Warmed HTTP fell 43.659→40.290 s (7.7%) and prefill fell
+35.994→32.667 s (9.2%); decode remained effectively unchanged at
+7.707/7.639 s. The diagnostic observed 11.509 s of real CPU/stream-submission
+overlap across two long requests. The job failed only after measurement because
+its route-conservation assertion included the initial 13-token prefill (4,839 CPU
+routes) while the diagnostic emitted rows only for device-combine chunks. Artifact
+11662081424 preserves the complete measurements.
+
+The corrected diagnostic emits CPU route/timing rows for every requested prefill
+scope and marks whether that chunk was eligible for early execution. Ineligible
+small chunks report zero temporal overlap but remain in route conservation. This
+does not change execution or relax the strict cross-arm output/MTP equality gate;
+one protected rerun is required before promotion.
