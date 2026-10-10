@@ -456,7 +456,7 @@ On October 10 the user authorized executing the following performance plan, with
 each step identified and reported on completion. The prior structural-default
 milestone remains complete; this is a new investigation of the remaining gap.
 
-1. **Residency with qualified GEMM/overlap — in progress.** Compare static64 with
+1. **Residency with qualified GEMM/overlap — completed.** Compare static64 with
    adaptive LRU156, both explicitly selecting streamed/resident FP16 GEMM and early
    CPU overlap. Earlier cache-size conclusions used SIMT and need not apply after
    the compute change. This is a combined capacity/policy comparison, not isolated
@@ -466,12 +466,12 @@ milestone remains complete; this is a new investigation of the remaining gap.
    one measured request. Observe actual allocation/seeding and sampled memory;
    preserve allocator reserves. Record outputs and MTP work instead of asserting
    numerical equivalence from equal frontend counts. No default changes yet.
-2. **Remaining critical path — pending interpretation.** The same single protected
+2. **Remaining critical path — completed.** The same single protected
    job collects separate two-request 7K/32-output diagnostics for both arms with
    existing stage, streamed-expert and CPU-overlap ledgers. Use the winning arm's
    evidence first. Inclusive/overlapping intervals are not additive latency. Add
    another bounded diagnostic only if a missing observation changes the next design.
-3. **Expert pipeline — pending Step 2.** Implement the strongest measured remedy:
+3. **Expert pipeline — in progress.** Implement the strongest measured remedy:
    batching, staged dequantization/GEMM overlap, justified expanded-weight reuse,
    or recalibrated CPU/GPU routing. Qualify the affected operator/lifetime contract
    and measure request-level benefit; do not repeat old ring/chunk sweeps unchanged.
@@ -524,19 +524,54 @@ schedule gap: all resident consumers are submitted before CPU misses start. Thes
 measurements identify the expert pipeline as the next target; they do not establish
 how much the newly identified CPU-start gap costs.
 
-Step 3 implements an experimental CPU-before-resident schedule selected by
-`NINFER_V100_PREFILL_CPU_RESIDENT_OVERLAP=1` (unset/0 retains the qualified schedule).
-CPU tasks and output storage are finalized before asynchronous dispatch; resident
-leases and resident-before-streamed GPU ordering remain intact. Exception cleanup
-joins CPU work before releasing buffers or draining cache/stream owners. Arithmetic
-and deterministic route reduction are unchanged. Serial/ineligible scopes retain
-existing behavior. The new diagnostic fields measure resident host submission,
-its CPU overlap, and CPU join wait without adding CUDA synchronization.
+Step 3's first attempt, CPU-before-resident dispatch, was rejected by run
+[38063563801](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38063563801).
+All numerical fixtures and exact corresponding-request output/usage/MTP checks
+passed. Warmed HTTP medians were 35.6758 s resident-first and 35.7326 s CPU-first
+(+0.16%); prefill was 29.8730 versus 29.8941 s. Cold HTTP was 39.4639 versus
+39.7297 s. Extra CPU/resident overlap did not improve request throughput, so its
+experimental selector, scheduling branch and campaign mode have been removed.
+The earlier qualified CPU/stream overlap remains enabled.
 
-`--cpu-resident-overlap-ab` compares resident-first/CPU-first on adaptive156 with
-three alternating fresh servers per arm and the same six-request schedule. It
-requires exact output, usage and native MTP work across corresponding request
-ordinals, allowing normal adaptive cold-to-warm changes. Separate diagnostics
-validate dispatch and CPU route conservation. Defaults remain unchanged until
-request-level evidence supports adoption. Steps 4 (decode) and 5 (contemporary
-Strata/long-context comparison) remain pending Step 3 results.
+Across the two diagnostics, eligible resident-first layers had 905.577 ms host
+resident submission, 17,616.550 ms CPU work and 7,470.313 ms CPU join wait. CPU-first
+had 1,078.410 ms additional resident overlap and 6,722.192 ms join wait. These
+inclusive sums explain why simply starting CPU work sooner is insufficient;
+they do not add to request latency. Verification remained CPU-heavy (about
+1.81 s CPU in a 2.99 s inclusive MoE scope), retained for Step 4.
+
+Step 3 now tests staged streamed-weight expansion with
+`NINFER_V100_EXPERT_STREAM_STAGED_DEQUANT=1` (unset/0 retains compute-stream expansion).
+A dedicated preparation stream waits for each slot's compact H2D upload, then
+runs the same two FP16 expansion kernels while earlier GEMMs may execute. DMA
+remains on its own stream and can upload subsequent slots concurrently. Compute
+waits for expansion-ready; consumed protects compact weights, divisor pointers,
+descriptors and expanded weights from reuse. Completion and exception cleanup
+drain all three streams before freeing buffers. Resident execution, route order,
+represented scales, arithmetic, persistent cache and the >=32-route GEMM crossover
+are unchanged. Smaller groups retain SIMT.
+
+Each ring slot owns 9.375 MiB expanded weights; shared compute scratch no longer
+owns an unused expansion. Extra planned allocation is 28.125 MiB for four slots
+(65.625 MiB for eight), included in the existing stream memory plan and allocator
+reserve accounting. This is bounded temporary storage, not permanent expanded
+expert caching. No ring size, old slot-reuse flag, expert order or chunk sweep is
+repeated. Dequantization/preparation interval, transfer, compute wait and kernel
+interval are reported separately; preparation includes queue wait and cross-stream
+intervals remain overlapping, not additive wall time.
+
+`--staged-dequant-ab` compares compute-dequant/staged-dequant on adaptive156 using
+three alternating fresh servers per arm, cold + four warmups + measured requests,
+then separate two-request diagnostics. Exact output, usage and native MTP work
+must match corresponding request ordinals; normal adaptive cold-to-warm changes
+are allowed. Actual cache capacity/seeding and sampled GPU peak are retained.
+Diagnostics require conserved streamed routes and observed staged dispatch.
+
+The hardware gate checks prepared-weight GEMM directly against the independent
+FP32 oracle across extreme represented inputs/scales and route tails, with exact
+baseline/prepared parity. The stream fixture covers mixed SIMT/GEMM groups over
+multiple slot wraps, different expert/divisor replacement, guards, pending
+prepared-work destruction, and persistent-hit/streamed-miss coexistence. Both
+baseline and staged fixtures must pass before timing starts. The default stays
+off until request-level evidence supports adoption. Steps 4 (decode) and 5
+(contemporary Strata/long-context comparison) remain pending Step 3 results.

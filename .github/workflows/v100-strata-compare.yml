@@ -1,5 +1,5 @@
 name: V100 Structural Engine Comparison
-# Step 3: adaptive156 CPU dispatch before versus after resident submission.
+# Step 3: adaptive156 compute-stream versus dedicated-stream weight expansion.
 on:
   workflow_dispatch:
   push:
@@ -100,6 +100,11 @@ jobs:
             NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=1 \
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/qualified-cache-join-fixture.log"
+          # Qualify cross-stream expansion, multi-wrap slot lifetime, and joins.
+          NINFER_V100_PREFILL_EXPERT_GEMM=fp16 NINFER_V100_PREFILL_RESIDENT_GEMM=1 \
+            NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=1 NINFER_V100_EXPERT_STREAM_STAGED_DEQUANT=1 \
+            build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_stream_test 2>&1 \
+            | tee "$QUALIFICATION_RESULTS/staged-dequant-stream-oracle.log"
           cp build-structural-comparison/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
       - name: Record profiler availability without changing permissions
         shell: bash
@@ -108,11 +113,11 @@ jobs:
           { command -v nsys || true; nsys --version 2>&1 || true; } > "$QUALIFICATION_RESULTS/profiler-availability.txt"
           # Existing bounded CUDA event ledgers are used in separate diagnostics.
           # No profiler installation, ptrace changes, or security changes.
-      - name: Step 3 CPU resident overlap comparison and separate diagnostics
+      - name: Step 3 staged dequantization comparison and separate diagnostics
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --cpu-resident-overlap-ab \
+          python3 tools/telemetry/structural_v100.py --staged-dequant-ab \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \

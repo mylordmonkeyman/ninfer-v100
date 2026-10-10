@@ -44,19 +44,30 @@ bool flash_next_expert_stream_pipeline_reuse() {
         "NINFER_V100_EXPERT_STREAM_SLOT_REUSE must be blocking or pipelined");
 }
 
+bool flash_next_expert_stream_staged_dequant() {
+    const char* value=std::getenv("NINFER_V100_EXPERT_STREAM_STAGED_DEQUANT");
+    if (!value || !*value || std::string_view(value)=="0") return false;
+    if (std::string_view(value)=="1") return true;
+    throw std::invalid_argument("NINFER_V100_EXPERT_STREAM_STAGED_DEQUANT must be 0 or 1");
+}
+
 std::size_t flash_next_expert_stream_device_bytes(unsigned maximum_routes) {
     if (!maximum_routes || maximum_routes > 8192U * 10U)
         throw std::invalid_argument("invalid prefill stream route capacity");
     const std::size_t descriptors =
         ((std::size_t(maximum_routes) + 3) / 4) * sizeof(FlashNextCachedExpertGroup);
+    const bool gemm=flash_next_expert_gemm_requested();
+    const bool staged=gemm && flash_next_expert_stream_staged_dequant();
     return flash_next_expert_stream_ring_slots() *
-        (kExpertSlotBytes + std::size_t(maximum_routes) * 640 * 2 + descriptors)
-        + (flash_next_expert_gemm_requested() ? FlashNextExpertGemm::device_bytes : 0);
+        (kExpertSlotBytes + std::size_t(maximum_routes) * 640 * 2 + descriptors
+         + (staged ? FlashNextExpertGemm::expanded_weight_bytes : 0))
+        + (gemm ? (staged ? FlashNextExpertGemm::compute_bytes : FlashNextExpertGemm::device_bytes) : 0);
 }
 
 FlashNextExpertStream::FlashNextExpertStream(unsigned maximum_routes)
     : maximum_routes_(maximum_routes), ring_slots_(flash_next_expert_stream_ring_slots()),
-      pipeline_reuse_(flash_next_expert_stream_pipeline_reuse()) {
+      pipeline_reuse_(flash_next_expert_stream_pipeline_reuse()),
+      staged_dequant_(flash_next_expert_gemm_requested() && flash_next_expert_stream_staged_dequant()) {
     if (!maximum_routes || maximum_routes > 8192U*10U)
         throw std::invalid_argument("invalid prefill stream route capacity");
     const char* timing = std::getenv("NINFER_V100_EXPERT_STREAM_TIMING");
@@ -64,15 +75,22 @@ FlashNextExpertStream::FlashNextExpertStream(unsigned maximum_routes)
     const std::size_t descriptors = ((std::size_t(maximum_routes)+3)/4)*sizeof(FlashNextCachedExpertGroup);
     try {
         CUDA_CHECK(cudaStreamCreateWithFlags(&transfer_,cudaStreamNonBlocking));
+        if (staged_dequant_) CUDA_CHECK(cudaStreamCreateWithFlags(&preparation_,cudaStreamNonBlocking));
         for (unsigned i = 0; i < ring_slots_; ++i) {
             auto& s = slots_[i];
             s.weights=std::make_unique<DeviceBuffer>(kExpertSlotBytes);
             s.activations=std::make_unique<DeviceBuffer>(std::size_t(maximum_routes)*640*2);
             s.groups=std::make_unique<DeviceBuffer>(descriptors);
+            if (staged_dequant_) {
+                s.expanded_gate_up=std::make_unique<DeviceBuffer>(1280*2560*2ULL);
+                s.expanded_down=std::make_unique<DeviceBuffer>(2560*640*2ULL);
+                device_bytes_+=FlashNextExpertGemm::expanded_weight_bytes;
+            }
             s.host_weights=std::make_unique<PinnedHostBuffer>(kExpertSlotBytes);
             s.host_groups=std::make_unique<PinnedHostBuffer>(descriptors);
             CUDA_CHECK(cudaEventCreateWithFlags(&s.ready,timing_ ? cudaEventDefault : cudaEventDisableTiming));
             CUDA_CHECK(cudaEventCreateWithFlags(&s.consumed,timing_ ? cudaEventDefault : cudaEventDisableTiming));
+            CUDA_CHECK(cudaEventCreateWithFlags(&s.copy_done,timing_ ? cudaEventDefault : cudaEventDisableTiming));
             if (timing_) {
                 CUDA_CHECK(cudaEventCreate(&s.copy_start));
                 CUDA_CHECK(cudaEventCreate(&s.wait_start));
@@ -82,8 +100,8 @@ FlashNextExpertStream::FlashNextExpertStream(unsigned maximum_routes)
             pinned_bytes_+=kExpertSlotBytes+descriptors;
         }
         if (flash_next_expert_gemm_requested()) {
-            gemm_=std::make_unique<FlashNextExpertGemm>();
-            device_bytes_+=FlashNextExpertGemm::device_bytes;
+            gemm_=std::make_unique<FlashNextExpertGemm>(!staged_dequant_);
+            device_bytes_+=staged_dequant_ ? FlashNextExpertGemm::compute_bytes : FlashNextExpertGemm::device_bytes;
         }
         if (device_bytes_ != flash_next_expert_stream_device_bytes(maximum_routes_))
             throw std::logic_error("prefill stream device plan mismatch");
@@ -94,18 +112,21 @@ void FlashNextExpertStream::cleanup() noexcept {
     // Even an exception between upload and consumer submission cannot free pinned
     // or device slots while either stream still owns their contents.
     if (transfer_) cudaStreamSynchronize(transfer_);
+    if (preparation_) cudaStreamSynchronize(preparation_);
     for (auto& s : slots_) {
         if (s.pending) cudaEventSynchronize(s.consumed);
         if (s.ready) cudaEventDestroy(s.ready);
         if (s.consumed) cudaEventDestroy(s.consumed);
         if (s.copy_start) cudaEventDestroy(s.copy_start);
+        if (s.copy_done) cudaEventDestroy(s.copy_done);
         if (s.wait_start) cudaEventDestroy(s.wait_start);
         if (s.kernel_start) cudaEventDestroy(s.kernel_start);
-        s.copy_start=nullptr; s.wait_start=nullptr; s.kernel_start=nullptr;
+        s.copy_start=nullptr; s.copy_done=nullptr; s.wait_start=nullptr; s.kernel_start=nullptr;
         s.ready=nullptr; s.consumed=nullptr; s.pending=false;
     }
     if (transfer_) cudaStreamDestroy(transfer_);
-    transfer_=nullptr;
+    if (preparation_) cudaStreamDestroy(preparation_);
+    transfer_=nullptr; preparation_=nullptr;
 }
 void FlashNextExpertStream::submit(const HostNvfp4ExpertPairView& expert,
     std::span<const FlashNextStreamRoute> routes, cudaStream_t compute) {
@@ -165,14 +186,26 @@ void FlashNextExpertStream::submit(const HostNvfp4ExpertPairView& expert,
     if (timing_) CUDA_CHECK(cudaEventRecord(s.copy_start,transfer_));
     CUDA_CHECK(cudaMemcpyAsync(s.weights->p,host,kExpertSlotBytes,cudaMemcpyHostToDevice,transfer_));
     CUDA_CHECK(cudaMemcpyAsync(s.groups->p,groups,count*sizeof(*groups),cudaMemcpyHostToDevice,transfer_));
-    CUDA_CHECK(cudaEventRecord(s.ready,transfer_));
+    if (timing_ || staged_dequant_) CUDA_CHECK(cudaEventRecord(s.copy_done,transfer_));
+    // Expansion owns only this slot and can run ahead of earlier GEMMs. Reuse
+    // waits for consumed before replacing compact or expanded weights. Ready
+    // covers both upload and expansion, including partial-launch cleanup.
+    if (staged_dequant_ && routes.size()>=32) {
+        // A dedicated preparation stream leaves DMA free to upload later slots.
+        CUDA_CHECK(cudaStreamWaitEvent(preparation_,s.copy_done,0));
+        FlashNextExpertGemm::expand_weights(view,s.expanded_gate_up->p,s.expanded_down->p,preparation_);
+        CUDA_CHECK(cudaEventRecord(s.ready,preparation_));
+    } else CUDA_CHECK(cudaEventRecord(s.ready,transfer_));
     if (timing_) CUDA_CHECK(cudaEventRecord(s.wait_start,compute));
     CUDA_CHECK(cudaStreamWaitEvent(compute,s.ready,0));
     if (timing_) CUDA_CHECK(cudaEventRecord(s.kernel_start,compute));
     try {
-        if (gemm_ && routes.size()>=32)
-            gemm_->launch(view,static_cast<const FlashNextCachedExpertGroup*>(s.groups->p),routes.size(),compute);
-        else
+        if (gemm_ && routes.size()>=32) {
+            const auto* device_groups=static_cast<const FlashNextCachedExpertGroup*>(s.groups->p);
+            if (staged_dequant_)
+                gemm_->launch_prepared(view,{s.expanded_gate_up->p,s.expanded_down->p},device_groups,routes.size(),compute);
+            else gemm_->launch(view,device_groups,routes.size(),compute);
+        } else
             flash_next_cached_expert_group_launch(static_cast<const FlashNextCachedExpertGroup*>(s.groups->p),count,compute);
         CUDA_CHECK(cudaEventRecord(s.consumed,compute));
         s.pending=true;
@@ -187,11 +220,12 @@ void FlashNextExpertStream::submit(const HostNvfp4ExpertPairView& expert,
 }
 void FlashNextExpertStream::collect_timing(Slot& s) {
     if (!s.timing_pending) return;
-    float copy = 0, wait = 0, kernel = 0;
-    CUDA_CHECK(cudaEventElapsedTime(&copy,s.copy_start,s.ready));
+    float copy = 0, dequant = 0, wait = 0, kernel = 0;
+    CUDA_CHECK(cudaEventElapsedTime(&copy,s.copy_start,s.copy_done));
+    CUDA_CHECK(cudaEventElapsedTime(&dequant,s.copy_done,s.ready));
     CUDA_CHECK(cudaEventElapsedTime(&wait,s.wait_start,s.kernel_start));
     CUDA_CHECK(cudaEventElapsedTime(&kernel,s.kernel_start,s.consumed));
-    copy_ms_ += copy; wait_ms_ += wait; kernel_ms_ += kernel;
+    copy_ms_ += copy; dequant_ms_ += dequant; wait_ms_ += wait; kernel_ms_ += kernel;
     ++timed_experts_; s.timing_pending=false;
 }
 void FlashNextExpertStream::finish() {
@@ -200,12 +234,13 @@ void FlashNextExpertStream::finish() {
         collect_timing(s); s.pending=false;
     }
     CUDA_CHECK(cudaStreamSynchronize(transfer_));
+    if (preparation_) CUDA_CHECK(cudaStreamSynchronize(preparation_));
     if (timing_ && timed_experts_) {
         // Separate streams overlap: these sums must never be added as a wall time.
-        std::fprintf(stderr,"{\"kind\":\"expert_stream_timing\",\"experts\":%llu,\"routes\":%llu,\"copy_ms\":%.6f,\"compute_wait_ms\":%.6f,\"kernel_interval_ms\":%.6f}\n",
+        std::fprintf(stderr,"{\"kind\":\"expert_stream_timing\",\"experts\":%llu,\"routes\":%llu,\"staged_dequant\":%s,\"copy_ms\":%.6f,\"dequant_ms\":%.6f,\"compute_wait_ms\":%.6f,\"kernel_interval_ms\":%.6f}\n",
             static_cast<unsigned long long>(timed_experts_),
-            static_cast<unsigned long long>(timed_routes_),copy_ms_,wait_ms_,kernel_ms_);
-        copy_ms_=wait_ms_=kernel_ms_=0; timed_experts_=timed_routes_=0;
+            static_cast<unsigned long long>(timed_routes_),staged_dequant_?"true":"false",copy_ms_,dequant_ms_,wait_ms_,kernel_ms_);
+        copy_ms_=dequant_ms_=wait_ms_=kernel_ms_=0; timed_experts_=timed_routes_=0;
     }
 }
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

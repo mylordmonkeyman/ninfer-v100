@@ -9,6 +9,7 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 [[nodiscard]] std::size_t flash_next_expert_stream_device_bytes(unsigned maximum_routes);
 [[nodiscard]] unsigned flash_next_expert_stream_ring_slots();
 [[nodiscard]] bool flash_next_expert_stream_pipeline_reuse();
+[[nodiscard]] bool flash_next_expert_stream_staged_dequant();
 
 struct FlashNextStreamRoute {
     const void* input_bf16;
@@ -32,19 +33,19 @@ public:
     [[nodiscard]] std::uint64_t expert_h2d_bytes() const { return submitted_ * kExpertSlotBytes; }
 private:
     struct Slot {
-        std::unique_ptr<DeviceBuffer> weights, activations, groups;
+        std::unique_ptr<DeviceBuffer> weights, activations, groups, expanded_gate_up, expanded_down;
         std::unique_ptr<PinnedHostBuffer> host_weights, host_groups;
         cudaEvent_t ready = nullptr, consumed = nullptr;
         bool pending = false;
-        cudaEvent_t copy_start = nullptr, wait_start = nullptr, kernel_start = nullptr;
+        cudaEvent_t copy_start = nullptr, copy_done = nullptr, wait_start = nullptr, kernel_start = nullptr;
         bool timing_pending = false;
     };
     std::unique_ptr<FlashNextExpertGemm> gemm_;
     std::array<Slot,8> slots_;  // Up to eight bounded in-flight H2D/compute slots.
-    cudaStream_t transfer_ = nullptr;
+    cudaStream_t transfer_ = nullptr, preparation_ = nullptr;
     unsigned maximum_routes_, next_ = 0, ring_slots_ = 4;
-    bool pipeline_reuse_ = false, timing_ = false;
-    double copy_ms_ = 0, wait_ms_ = 0, kernel_ms_ = 0;
+    bool pipeline_reuse_ = false, staged_dequant_ = false, timing_ = false;
+    double copy_ms_ = 0, dequant_ms_ = 0, wait_ms_ = 0, kernel_ms_ = 0;
     std::uint64_t timed_experts_ = 0, timed_routes_ = 0;
     void collect_timing(Slot& slot);
     std::size_t device_bytes_ = 0, pinned_bytes_ = 0;

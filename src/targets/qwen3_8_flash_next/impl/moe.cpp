@@ -76,14 +76,6 @@ bool resolve_fp32_intermediate_diagnostic() {
     return env != nullptr && env[0] != '\0' && std::string_view(env) != "0";
 }
 
-// Experimental schedule: start immutable CPU misses before resident submission.
-bool resolve_cpu_resident_overlap() {
-    const char* value = std::getenv("NINFER_V100_PREFILL_CPU_RESIDENT_OVERLAP");
-    if (!value || !*value || std::string_view(value) == "0") return false;
-    if (std::string_view(value) == "1") return true;
-    throw std::invalid_argument("NINFER_V100_PREFILL_CPU_RESIDENT_OVERLAP must be 0 or 1");
-}
-
 bool resolve_shared_fp32_intermediate_diagnostic() {
     const char* env = std::getenv("NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE");
     return env != nullptr && env[0] != '\0' && std::string_view(env) != "0";
@@ -537,7 +529,6 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     const bool early_cpu_requested=prefill && flash_next_cpu_stream_overlap_requested();
     const bool early_cpu=early_cpu_requested && stream_experts && device_route_combine &&
         !(cache && cache->serial_schedule());
-    const bool cpu_before_resident = early_cpu && resolve_cpu_resident_overlap();
     bool grouped_cpu_experts = false;
 #if defined(NINFER_VOLTA_BUILD)
     grouped_cpu_experts = tokens > 1 && resolve_cpu_expert_grouping(prefill);
@@ -546,14 +537,6 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     auto cpu_started=measure ? Clock::now() : Clock::time_point{};
     auto cpu_finished=cpu_started;
     auto stream_submit_started=cpu_started, stream_submit_finished=cpu_started;
-    auto resident_submit_started=cpu_started, resident_submit_finished=cpu_started;
-    auto cpu_join_started=cpu_started, cpu_join_finished=cpu_started;
-    const auto submit_resident = [&] {
-        resident_submit_started=measure ? Clock::now() : Clock::time_point{};
-        if (cache) cache->begin_device_results(stream);
-        stream_hits_submitted=true;
-        resident_submit_finished=measure ? Clock::now() : Clock::time_point{};
-    };
 
     // Independent routed expert pairs are computed concurrently. Each task writes
     // a private FP32 vector. Routing alpha is then accumulated below on this thread
@@ -647,7 +630,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
 
         // Submit grouped resident consumers before streaming selected nonresidents.
         // Their leases remain held until the common compute stream has completed.
-        if (!cpu_before_resident) submit_resident();
+        if (cache) cache->begin_device_results(stream);
+        stream_hits_submitted = true;
         std::array<std::size_t, 512> stream_route_counts{};
         for (std::size_t expert_id = 0; expert_id < streamed_routes.size(); ++expert_id)
             stream_route_counts[expert_id] = streamed_routes[expert_id].size();
@@ -701,9 +685,6 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                 } catch(...) {v100_compare::active=previous;throw;}
             });
         }
-        // CPU tasks use disjoint host outputs and immutable inputs. Resident leases
-        // and the resident-before-streamed GPU order remain unchanged.
-        if (cpu_before_resident) submit_resident();
         stream_submit_started=measure ? Clock::now() : Clock::time_point{};
         for(unsigned entry=0;entry<stream_order.size;++entry) {
             const std::size_t expert_id=stream_order.ids[entry];
@@ -757,11 +738,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     HostExpertBatchStats cpu_batch;
     if (!cpu.tasks.empty()) {
         try {
-            if(pending_cpu.valid()) {
-                cpu_join_started=measure ? Clock::now() : Clock::time_point{};
-                cpu_batch=pending_cpu.get();
-                cpu_join_finished=measure ? Clock::now() : Clock::time_point{};
-            }
+            if(pending_cpu.valid())cpu_batch=pending_cpu.get();
             else {
                 cpu_batch=host_expert_worker_pool().run(cpu.tasks,grouped_cpu_experts,layer);
                 cpu_finished=measure ? Clock::now() : Clock::time_point{};
@@ -780,13 +757,9 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         const auto overlap_begin=std::max(cpu_started,stream_submit_started);
         const auto overlap_end=std::min(cpu_finished,stream_submit_finished);
         const auto ms=[](auto end,auto begin) {return std::chrono::duration<double,std::milli>(end-begin).count();};
-        const auto resident_overlap_begin=std::max(cpu_started,resident_submit_started);
-        const auto resident_overlap_end=std::min(cpu_finished,resident_submit_finished);
-        std::fprintf(stderr,"{\"kind\":\"early_cpu_stream\",\"layer\":%u,\"eligible\":%s,\"cpu_before_resident\":%s,\"cpu_routes\":%zu,\"cpu_ms\":%.6f,\"resident_submit_ms\":%.6f,\"resident_overlap_ms\":%.6f,\"cpu_join_ms\":%.6f,\"stream_submit_ms\":%.6f,\"overlap_ms\":%.6f}\n",
-            layer,early_cpu?"true":"false",cpu_before_resident?"true":"false",cpu.tasks.size(),ms(cpu_finished,cpu_started),
-            ms(resident_submit_finished,resident_submit_started),std::max(0.0,ms(resident_overlap_end,resident_overlap_begin)),
-            ms(cpu_join_finished,cpu_join_started),ms(stream_submit_finished,stream_submit_started),
-            std::max(0.0,ms(overlap_end,overlap_begin)));
+        std::fprintf(stderr,"{\"kind\":\"early_cpu_stream\",\"layer\":%u,\"eligible\":%s,\"cpu_routes\":%zu,\"cpu_ms\":%.6f,\"stream_submit_ms\":%.6f,\"overlap_ms\":%.6f}\n",
+            layer,early_cpu?"true":"false",cpu.tasks.size(),ms(cpu_finished,cpu_started),
+            ms(stream_submit_finished,stream_submit_started),std::max(0.0,ms(overlap_end,overlap_begin)));
     }
     if (!serial) finish_hits();
     if (stream_experts && tokens >= 1024 && stream_diagnostics_enabled()) {

@@ -44,6 +44,8 @@ int main() {try {
     DeviceBuffer groups(descriptors.size()*sizeof(descriptors[0]));
     DeviceBuffer simt_activations(512*640*2ULL);
     FlashNextExpertGemm gemm;
+    FlashNextExpertGemm prepared(false);
+    DeviceBuffer expanded_gu(1280*2560*2ULL), expanded_down(2560*640*2ULL);
     CpuNvfp4ExpertReferenceScratch scratch;
     for(float divisor:{3.1415927F,64.F,.001F}) {
         std::memcpy(packed.data()+2'764'800,&divisor,4);
@@ -74,6 +76,16 @@ int main() {try {
             CUDA_CHECK(cudaStreamSynchronize(device.stream));
             std::vector<float> actual(count*2560+16);
             output.copy_to_host(actual.data(),actual.size()*4);
+            const auto baseline=actual;
+            CUDA_CHECK(cudaMemsetAsync(output.p,0xA5,output.bytes,device.stream));
+            FlashNextExpertGemm::expand_weights(gpu,expanded_gu.p,expanded_down.p,device.stream);
+            prepared.launch_prepared(gpu,{expanded_gu.p,expanded_down.p},
+                static_cast<const FlashNextCachedExpertGroup*>(groups.p),count,device.stream);
+            CUDA_CHECK(cudaStreamSynchronize(device.stream));
+            output.copy_to_host(actual.data(),actual.size()*4);
+            require(actual==baseline,"prepared expansion changed GEMM output or guard");
+            // Qualify prepared-weight arithmetic directly against the same independent
+            // FP32 oracle, including extreme represented inputs and scale codes.
             double worst=0,min_cosine=1;
             for(unsigned t=0;t<count;++t) {
                 double err=0,norm=0,dot=0,aa=0;
