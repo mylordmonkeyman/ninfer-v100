@@ -1,0 +1,427 @@
+{
+  "schema": "v100-resident-expert-gemm-result-v1",
+  "run_id": 38024956818,
+  "artifact_id": 11660616475,
+  "commit": "95937f67ba4a915e03db3d511f76a15934e5956b",
+  "workload": {
+    "prompt_tokens": 7111,
+    "emitted_tokens": 128,
+    "cached_tokens": 0,
+    "fresh_servers_per_arm": 3,
+    "warmups": 4,
+    "measured_per_server": 1,
+    "compact_cache": "static64",
+    "prefill_chunk": 2048
+  },
+  "timing": {
+    "ninfer/fp16/cold": {
+      "median_wall_seconds": 50.442342869,
+      "min_wall_seconds": 49.259845763,
+      "max_wall_seconds": 50.540669224,
+      "unique_outputs": 1,
+      "native_phase_medians_seconds": {
+        "prefill": 42.955503825,
+        "decode": 7.428429459
+      },
+      "speculative": {
+        "accepted_per_position": [
+          38,
+          32
+        ],
+        "accepted_tokens": 70,
+        "backend": "mtp",
+        "draft_window": 2,
+        "drafted_tokens": 114,
+        "fallback_steps": 0,
+        "rounds": 57
+      },
+      "output_hashes": [
+        "6422da4b0bcb18b509ac9762a9ab44c3704021c2eeb6dff782be5a4ee0a40ca0"
+      ]
+    },
+    "ninfer/fp16/measured": {
+      "median_wall_seconds": 47.947170552,
+      "min_wall_seconds": 46.628569844,
+      "max_wall_seconds": 48.179223873,
+      "unique_outputs": 1,
+      "native_phase_medians_seconds": {
+        "prefill": 40.548504998999995,
+        "decode": 7.389681670000002
+      },
+      "speculative": {
+        "accepted_per_position": [
+          38,
+          32
+        ],
+        "accepted_tokens": 70,
+        "backend": "mtp",
+        "draft_window": 2,
+        "drafted_tokens": 114,
+        "fallback_steps": 0,
+        "rounds": 57
+      },
+      "output_hashes": [
+        "6422da4b0bcb18b509ac9762a9ab44c3704021c2eeb6dff782be5a4ee0a40ca0"
+      ]
+    },
+    "ninfer/fp16-resident/cold": {
+      "median_wall_seconds": 45.307542347,
+      "min_wall_seconds": 44.615371213,
+      "max_wall_seconds": 46.390352058,
+      "unique_outputs": 1,
+      "native_phase_medians_seconds": {
+        "prefill": 37.50268543,
+        "decode": 7.722452586000003
+      },
+      "speculative": {
+        "accepted_per_position": [
+          39,
+          29
+        ],
+        "accepted_tokens": 68,
+        "backend": "mtp",
+        "draft_window": 2,
+        "drafted_tokens": 115,
+        "fallback_steps": 0,
+        "rounds": 59
+      },
+      "output_hashes": [
+        "73ac76409eea990ed6965f42251b5b4ccc79f325c6a2d3429b290a4f756691f6"
+      ]
+    },
+    "ninfer/fp16-resident/measured": {
+      "median_wall_seconds": 43.249256821,
+      "min_wall_seconds": 42.331244725,
+      "max_wall_seconds": 44.215583715,
+      "unique_outputs": 1,
+      "native_phase_medians_seconds": {
+        "prefill": 35.566867375,
+        "decode": 7.662750516999999
+      },
+      "speculative": {
+        "accepted_per_position": [
+          39,
+          29
+        ],
+        "accepted_tokens": 68,
+        "backend": "mtp",
+        "draft_window": 2,
+        "drafted_tokens": 115,
+        "fallback_steps": 0,
+        "rounds": 59
+      },
+      "output_hashes": [
+        "73ac76409eea990ed6965f42251b5b4ccc79f325c6a2d3429b290a4f756691f6"
+      ]
+    }
+  },
+  "memory": {
+    "fp16": {
+      "gpu_peak_mib": 18873.75,
+      "compact_cache_bytes": [
+        8494252032
+      ],
+      "cache_transfer_budget_bytes": [
+        244613120
+      ],
+      "cache_observed_device_bytes": [
+        8743026688
+      ]
+    },
+    "fp16-resident": {
+      "gpu_peak_mib": 18905.75,
+      "compact_cache_bytes": [
+        8494252032
+      ],
+      "cache_transfer_budget_bytes": [
+        264210432
+      ],
+      "cache_observed_device_bytes": [
+        8776581120
+      ]
+    }
+  },
+  "diagnostics": {
+    "fp16": {
+      "stream_totals": {
+        "experts": 51644,
+        "routes": 5309866,
+        "copy_ms": 13660.7952,
+        "compute_wait_ms": 11693.814495999999,
+        "kernel_interval_ms": 10199.28416
+      },
+      "resident_gemm": {
+        "experts": 0,
+        "routes": 0
+      },
+      "phases": {
+        "prefill": {
+          "rounds": 9,
+          "layers": 432,
+          "counters": {
+            "routed_tokens": 683280,
+            "total_routes": 6832800,
+            "resident_routes": 1151273,
+            "cpu_routes": 371661,
+            "nonresident_gpu_routes": 5309866,
+            "distinct_experts": 130771,
+            "resident_distinct_experts": 17835,
+            "distinct_missed_experts": 112936,
+            "cpu_groups": 98268,
+            "cpu_grouped_routes": 349031,
+            "cpu_weight_read_bytes": 334259757584,
+            "expert_h2d_bytes": 142798552064,
+            "route_d2h_bytes": 3525724800,
+            "output_d2h_bytes": 0,
+            "output_h2d_bytes": 3805808640
+          },
+          "host_spans_us": {
+            "layer": 81202799.46099998,
+            "gdn": 96183.42999999995,
+            "moe": 81032862.61699998,
+            "cpu_expert": 10561024.202999998,
+            "host_wait": 28977502.79000001,
+            "ple": 1401.21,
+            "qsa": 40293.33099999999
+          },
+          "final_cache_occupancy": {
+            "layers": 48,
+            "ready": 3072,
+            "uploading": 0
+          }
+        },
+        "verify": {
+          "rounds": 31,
+          "layers": 1488,
+          "counters": {
+            "routed_tokens": 4176,
+            "total_routes": 41760,
+            "resident_routes": 11221,
+            "cpu_routes": 30539,
+            "nonresident_gpu_routes": 0,
+            "distinct_experts": 29667,
+            "resident_distinct_experts": 7881,
+            "distinct_missed_experts": 21786,
+            "cpu_groups": 6481,
+            "cpu_grouped_routes": 15234,
+            "cpu_weight_read_bytes": 60234107088,
+            "expert_h2d_bytes": 0,
+            "route_d2h_bytes": 21548160,
+            "output_d2h_bytes": 0,
+            "output_h2d_bytes": 312719360
+          },
+          "host_spans_us": {
+            "layer": 3840488.8479999895,
+            "gdn": 53969.27900000004,
+            "moe": 3690993.179999996,
+            "cpu_expert": 2738421.901999998,
+            "host_wait": 609817.8029999998,
+            "ple": 1446.3010000000002,
+            "qsa": 50597.21199999995
+          },
+          "final_cache_occupancy": {
+            "layers": 48,
+            "ready": 3072,
+            "uploading": 0
+          }
+        }
+      },
+      "prefill_chunks": [
+        {
+          "tokens": 2048,
+          "chunk": 1,
+          "total_chunk_ms": 12462.7724609375,
+          "moe_reduce_ms": 8439.9755859375
+        },
+        {
+          "tokens": 2048,
+          "chunk": 2,
+          "total_chunk_ms": 11806.505859375,
+          "moe_reduce_ms": 7382.78515625
+        },
+        {
+          "tokens": 2048,
+          "chunk": 3,
+          "total_chunk_ms": 11268.3310546875,
+          "moe_reduce_ms": 6816.69091796875
+        },
+        {
+          "tokens": 2048,
+          "chunk": 5,
+          "total_chunk_ms": 11070.7509765625,
+          "moe_reduce_ms": 7046.93212890625
+        },
+        {
+          "tokens": 2048,
+          "chunk": 6,
+          "total_chunk_ms": 11148.337890625,
+          "moe_reduce_ms": 6732.81298828125
+        },
+        {
+          "tokens": 2048,
+          "chunk": 7,
+          "total_chunk_ms": 11290.7373046875,
+          "moe_reduce_ms": 6845.59716796875
+        }
+      ]
+    },
+    "fp16-resident": {
+      "stream_totals": {
+        "experts": 51468,
+        "routes": 5311550,
+        "copy_ms": 13649.267168,
+        "compute_wait_ms": 11660.890368,
+        "kernel_interval_ms": 10119.138528
+      },
+      "resident_gemm": {
+        "experts": 7334,
+        "routes": 1050616
+      },
+      "phases": {
+        "prefill": {
+          "rounds": 9,
+          "layers": 432,
+          "counters": {
+            "routed_tokens": 683280,
+            "total_routes": 6832800,
+            "resident_routes": 1150741,
+            "cpu_routes": 370509,
+            "nonresident_gpu_routes": 5311550,
+            "distinct_experts": 130277,
+            "resident_distinct_experts": 17761,
+            "distinct_missed_experts": 112516,
+            "cpu_groups": 98212,
+            "cpu_grouped_routes": 348309,
+            "cpu_weight_read_bytes": 332916060896,
+            "expert_h2d_bytes": 142311902208,
+            "route_d2h_bytes": 3525724800,
+            "output_d2h_bytes": 0,
+            "output_h2d_bytes": 3794012160
+          },
+          "host_spans_us": {
+            "layer": 72342523.66300002,
+            "gdn": 96296.53599999992,
+            "moe": 72174816.75900002,
+            "cpu_expert": 10659665.436999997,
+            "host_wait": 29041574.676000033,
+            "ple": 1494.2000000000005,
+            "qsa": 39224.113999999994
+          },
+          "final_cache_occupancy": {
+            "layers": 48,
+            "ready": 3072,
+            "uploading": 0
+          }
+        },
+        "verify": {
+          "rounds": 31,
+          "layers": 1488,
+          "counters": {
+            "routed_tokens": 4176,
+            "total_routes": 41760,
+            "resident_routes": 11113,
+            "cpu_routes": 30647,
+            "nonresident_gpu_routes": 0,
+            "distinct_experts": 29855,
+            "resident_distinct_experts": 7869,
+            "distinct_missed_experts": 21986,
+            "cpu_groups": 6395,
+            "cpu_grouped_routes": 15056,
+            "cpu_weight_read_bytes": 60787068688,
+            "expert_h2d_bytes": 0,
+            "route_d2h_bytes": 21548160,
+            "output_d2h_bytes": 0,
+            "output_h2d_bytes": 313825280
+          },
+          "host_spans_us": {
+            "layer": 3903544.7249999973,
+            "gdn": 56506.7230000001,
+            "moe": 3752092.577000006,
+            "cpu_expert": 2799636.535,
+            "host_wait": 612741.0120000006,
+            "ple": 1603.041,
+            "qsa": 50829.538
+          },
+          "final_cache_occupancy": {
+            "layers": 48,
+            "ready": 3072,
+            "uploading": 0
+          }
+        }
+      },
+      "prefill_chunks": [
+        {
+          "tokens": 2048,
+          "chunk": 1,
+          "total_chunk_ms": 11115.771484375,
+          "moe_reduce_ms": 7094.3349609375
+        },
+        {
+          "tokens": 2048,
+          "chunk": 2,
+          "total_chunk_ms": 10526.150390625,
+          "moe_reduce_ms": 6113.42919921875
+        },
+        {
+          "tokens": 2048,
+          "chunk": 3,
+          "total_chunk_ms": 9965.296875,
+          "moe_reduce_ms": 5520.30029296875
+        },
+        {
+          "tokens": 2048,
+          "chunk": 5,
+          "total_chunk_ms": 9645.9736328125,
+          "moe_reduce_ms": 5626.07666015625
+        },
+        {
+          "tokens": 2048,
+          "chunk": 6,
+          "total_chunk_ms": 9918.1181640625,
+          "moe_reduce_ms": 5503.6826171875
+        },
+        {
+          "tokens": 2048,
+          "chunk": 7,
+          "total_chunk_ms": 10026.193359375,
+          "moe_reduce_ms": 5582.45849609375
+        }
+      ]
+    }
+  },
+  "qualification": {
+    "expert-gemm-fp32-oracle": {
+      "passed": true,
+      "worst_printed_nrmse": 0.000225084,
+      "dispatch_lines": []
+    },
+    "gemm-resident-cache-fixture": {
+      "passed": true,
+      "worst_printed_nrmse": 0.00169476,
+      "dispatch_lines": [
+        "cache.group.fp32_oracle.tokens=63 gemm_routes=32",
+        "cache.group.fp32_oracle.tokens=64 gemm_routes=64",
+        "cache.group.fp32_oracle.tokens=65 gemm_routes=65",
+        "cache.group.fp32_oracle.tokens=128 gemm_routes=128"
+      ]
+    },
+    "gemm-resident-coexistence-fixture": {
+      "passed": true,
+      "worst_printed_nrmse": 0.00173574,
+      "dispatch_lines": [
+        "resident.gemm.routes=32730"
+      ]
+    },
+    "simt-resident-cache-fixture": {
+      "passed": true,
+      "worst_printed_nrmse": 2.30213e-05,
+      "dispatch_lines": []
+    }
+  },
+  "limits": [
+    "Arithmetic-changing resident expert operator; outputs differ across arms.",
+    "Decode change is confounded by changed output and native MTP work.",
+    "Concurrent copy/kernel and inclusive host sums are not additive.",
+    "Static64 isolates the resident extension; it is not the preferred global cache capacity."
+  ]
+}

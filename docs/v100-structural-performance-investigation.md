@@ -294,3 +294,61 @@ expert counts verify both dispatch conservation and each route's applicable
 formula. The protected job runs the entire cache fixture with resident GEMM off
 first, then on; neither the SIMT assertion nor the numerical thresholds are
 removed. Rerun the isolated resident A/B only after all these gates pass.
+
+
+## Resident GEMM qualified; next CPU/stream schedule
+
+[Run 38024956818](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38024956818)
+passed all direct operator, SIMT exact-parity, resident cache and coexistence
+gates, then the complete resident A/B. Artifact 11660616475 contains the measured
+workload; `v100-resident-gemm-38024956818.json` preserves compact evidence.
+
+| Same static64 workload | Stream-only FP16 | Stream + resident FP16 |
+|---|---:|---:|
+| Warmed HTTP median | 47.947 s | 43.249 s |
+| Warmed prefill median | 40.549 s | 35.567 s |
+| Warmed decode median | 7.390 s | 7.663 s |
+| GPU peak | 18873.75 MiB | 18905.75 MiB |
+
+Resident GEMM reduces warmed HTTP by 9.8% and prefill by 12.3%. The original
+SIMT baseline was 61.767 s / 53.442 s: combined reductions are about 30.0% /
+33.4% across successive runs, rather than one simultaneous three-arm experiment.
+Both arms conserve 7111 prompt, 128 emitted and zero cached tokens; each replays
+one output within its own trials. Outputs differ across arms. Stream-only accepts
+70/114 drafts in 57 rounds; resident accepts 68/115 in 59 rounds, confounding the
+3.7% decode increase. Compact cache remains 8,494,252,032 bytes; the resident
+scratch is included in the 19,597,312-byte transfer-budget increment and observed
+GPU peak rises 32 MiB including library/context effects.
+
+The independent FP32 operator gate still has worst NRMSE 0.000225084. Resident
+integration passes individual FP32-formula checks for 32/31, 32/32 and 33/32
+expert groups with unchanged limits. Separate diagnostics actually dispatch 7,334
+resident GEMMs for 1,050,616 routed inputs across two long requests; streamed
+copy/kernel/wait totals remain about 13.65 / 10.12 / 11.66 s. CPU inclusive work
+remains 10.66 s across the two requests. All simultaneous stream intervals and
+inclusive host scopes remain non-additive.
+
+Source inspection establishes a remaining scheduling boundary: the CPU fallback
+pool starts only after the host has submitted all streamed experts. Four-slot
+blocking reuse waits for prior GPU consumption during that submission loop, so
+most CPU work cannot overlap the streaming phase. Previous pipelined-slot tests
+provided little gain; do not repeat slot/chunk parameter sweeps.
+
+New opt-in `NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=1` (default 0) fully classifies
+misses and assigns pinned CPU destinations before starting the existing pool on
+one coordinator thread. The inference owner then submits the same GPU experts
+in the same order. The owner joins before inspecting pool results, merging,
+releasing host storage or advancing the round; exceptions also join before
+unwinding. Decode and explicit serial diagnostics retain the old schedule. No
+quantization, arithmetic, membership, route accumulation or cache capacity changes.
+During asynchronous submission the owner makes no round-ledger mutations;
+existing worker observations complete before the owner resumes ledger updates.
+Diagnostic `early_cpu_stream` rows preserve actual CPU routes, CPU duration,
+submission duration and their temporal overlap, without summing them as latency.
+
+The protected job qualifies existing operator/cache/coexistence gates plus early
+CPU/cache join parity before `--cpu-stream-overlap-ab`: qualified stream+resident
+FP16 versus identical settings with early CPU misses. Three fresh servers per arm
+use the same cold/warmed workload and separate long diagnostics. Every timing
+request across both arms must have identical output hash, usage and native MTP
+accounting. New schedule benefit is unclaimed until this experiment passes.

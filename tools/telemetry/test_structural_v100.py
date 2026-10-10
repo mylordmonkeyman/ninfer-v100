@@ -38,12 +38,14 @@ class StructuralTests(unittest.TestCase):
             (folder/'server.log').write_text(json.dumps(record)+'\n'+json.dumps(dict(
                 kind='prefill_stage_ledger', tokens=2048, total_chunk_ms=12, stages=[]))+'\n'+json.dumps(dict(
                 kind='expert_stream_timing', experts=2, routes=37, copy_ms=1, compute_wait_ms=2, kernel_interval_ms=5))+'\n'+json.dumps(dict(
-                kind='expert_resident_gemm', experts=2, routes=43))+'\n')
+                kind='expert_resident_gemm', experts=2, routes=43))+'\n'+json.dumps(dict(
+                kind='early_cpu_stream', cpu_routes=7, cpu_ms=5, stream_submit_ms=8, overlap_ms=4))+'\n')
             r = native_work(folder, 'ninfer')
             self.assertEqual(r['phases'][record['phase']]['host_spans_us'], {'moe':10, 'cpu_expert':8})
             self.assertEqual(r['ninfer_prefill_chunks'][0]['tokens'], 2048)
             self.assertEqual(r['expert_stream_timing'][0]['routes'], 37)
             self.assertEqual(r['expert_resident_gemm'][0], dict(kind='expert_resident_gemm', experts=2, routes=43))
+            self.assertEqual(r['early_cpu_stream'][0]['overlap_ms'],4)
             self.assertEqual(r['expert_stream_timing'][0]['kernel_interval_ms'], 5)
 
     def test_real_http_schedule_and_native_phase_timing_are_persisted(self):

@@ -118,6 +118,9 @@ jobs:
           NINFER_V100_PREFILL_RESIDENT_GEMM=1 \
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/gemm-resident-cache-fixture.log"
+          NINFER_V100_PREFILL_RESIDENT_GEMM=1 NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=1 \
+            build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
+            | tee "$QUALIFICATION_RESULTS/early-cpu-cache-fixture.log"
           cmake -S telemetry-strata-source -B build-strata-structural-comparison -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70
@@ -131,11 +134,11 @@ jobs:
           { command -v nsys || true; nsys --version 2>&1 || true; } > "$QUALIFICATION_RESULTS/profiler-availability.txt"
           # Existing bounded CUDA event ledgers are used in separate diagnostics.
           # No profiler installation, ptrace changes, or security changes.
-      - name: Compare resident expert GEMM with qualified stream-only GEMM
+      - name: Compare early CPU misses with qualified GEMM baseline
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --resident-gemm-ab \
+          python3 tools/telemetry/structural_v100.py --cpu-stream-overlap-ab \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \

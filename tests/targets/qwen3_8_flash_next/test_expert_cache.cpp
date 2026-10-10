@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <future>
 #include <iostream>
 #include <random>
 #include <stdexcept>
@@ -346,9 +347,13 @@ int main(){try{
                         .output = output.data()+path*2560});
                 }
             }
+            std::future<HostExpertBatchStats> pending;
+            const char* early=std::getenv("NINFER_V100_PREFILL_CPU_STREAM_OVERLAP");
+            if(concurrent && early && std::strcmp(early,"1")==0)
+                pending=std::async(std::launch::async,[&] {return pool.run(tasks);});
             cache.begin_download(output.size()*sizeof(float), device.stream);
             if (!concurrent) cache.finish_download(output, device.stream);
-            pool.run(tasks);
+            if(pending.valid())pending.get();else pool.run(tasks);
             if (concurrent) cache.finish_download(output, device.stream);
         }
         require(serial == overlap, "CPU/GPU join changed private expert outputs");
