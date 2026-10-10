@@ -797,3 +797,42 @@ comparison. A separate supported native no-spec route remains pending. Weight
 quantization, BF16/FP16 KV values, speculative algorithms and acceptance still
 prevent matched-quality/equal-work claims. Each report retains phase timings,
 usage, output hashes, accepted work and observed memory/cache evidence.
+
+
+## Step 6 initial result and corrected follow-up
+
+Run [38090951809](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38090951809)
+passed all gates, completing three fresh servers per engine with six requests each.
+Artifact 11684975614 retains the original controls and phase/output/work evidence.
+
+| Warmed medians | NInfer | Strata serving controls |
+|---|---:|---:|
+| HTTP | 36.9234 s | 21.2035 s |
+| Native prefill / response prompt | 31.0262 s | 18.9097 s |
+| Native decode / response predicted | 5.7742 s | 2.2482 s |
+
+These changed several Strata controls simultaneously; the reduced practical gap
+(1.74x HTTP) does not isolate a single cause or quantization quality. NInfer warmed
+MTP accepted/drafted 71/112 in 56 rounds; Strata 48/66 or 47/64, with different
+outputs. All requests retained 7111/128/zero-reuse frontend counts.
+
+The requested Strata count 6606 did **not** match the intended byte budget. Native
+cache planning multiplies the count by maximum blob size (3,993,600 B), then packs
+smaller ranked expert blobs into that budget: actual cache was 8405 slots / 24.53
+GiB, versus NInfer 7488 experts / 20,704,739,328 B (19.28 GiB). Nominal Strata spec2
+also includes the anchor, and default suffix lookup can increase the window.
+
+A focused `--controlled-strata-followup` therefore measures only three changed
+Strata fresh servers; valid NInfer measurements are reused from the preceding run.
+Request 5184 max-blob units = 20,702,822,400 B (0.0093% below NInfer), inspect actual
+ranked-cache allocation, set spec3/mtp-max-t3 for at most two MTP drafts, disable
+suffix lookup and probability truncation. Keep context8192, FP16KV, requested2048
+chunks and physical-core placement. This is a separately measured follow-up, not
+another contemporary alternating comparison or a matched-quality claim.
+
+Source inspection corrected the promised native no-spec route: the pinned engine's
+`native_pack` check in `src/program/generate.cpp` rejects `spec < 2` for native
+CLI as well as serving. A no-speculation comparison is unavailable with the
+preserved installed engine/pack. Do not launch a known-invalid CLI or claim draft
+acceptance disabled is speculation disabled. The initial assumption that CLI could
+provide this baseline was wrong; this concrete limitation bounds Step 6.

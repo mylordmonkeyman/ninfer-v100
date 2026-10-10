@@ -1,5 +1,5 @@
 name: V100 Structural Engine Comparison
-# Six-step follow-up, Step 6 initial serving controls.
+# Six-step follow-up, Step 6 corrected Strata budget and speculation controls.
 on:
   workflow_dispatch:
   push:
@@ -110,11 +110,19 @@ jobs:
           { command -v nsys || true; nsys --version 2>&1 || true; } > "$QUALIFICATION_RESULTS/profiler-availability.txt"
           # Existing bounded CUDA event ledgers are used in separate diagnostics.
           # No profiler installation, ptrace changes, or security changes.
-      - name: Step 6 controlled serving comparison
+      - name: Reuse valid NInfer serving comparison evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: v100-structural-comparison-38090951809-1
+          run-id: 38090951809
+          github-token: ${{ github.token }}
+          path: controlled-comparison-reference
+      - name: Step 6 corrected Strata controls
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --controlled-comparison \
+          python3 tools/telemetry/structural_v100.py --controlled-strata-followup \
+            --comparison-reference controlled-comparison-reference/matrix/controlled-comparison-report.json \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \

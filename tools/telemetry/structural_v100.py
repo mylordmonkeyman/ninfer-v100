@@ -282,7 +282,14 @@ def main():
                    help='six-step plan step 1: paired qualified adaptive156 timing and stage attribution')
     p.add_argument('--controlled-comparison', action='store_true',
                    help='step 6 initial serving controls: 8K capacity, 16-bit KV, 2048 chunk, MTP2, physical cores')
+    p.add_argument('--controlled-strata-followup', action='store_true',
+                   help='correct Strata byte budget/draft controls; reuse valid NInfer comparison reference')
+    p.add_argument('--comparison-reference', type=Path)
     a = p.parse_args()
+    if a.controlled_strata_followup:
+        if a.comparison_reference is None:
+            p.error('--controlled-strata-followup requires --comparison-reference')
+        a.controlled_comparison = True
     a.output.mkdir(parents=True, exist_ok=True)
     inventory(a)
     topology = json.loads(subprocess.check_output(['lscpu', '--json', '--extended=CPU,CORE,SOCKET'], text=True))['cpus']
@@ -322,6 +329,12 @@ def main():
         for key, value in [('--max-context','8192'),('--kv','fp16'),('--prefill','2048'),
                            ('--spec','2'),('--expert-cache','6606')]:
             flags = ab.option(flags,key,value)
+        if a.controlled_strata_followup:
+            # Strata count is multiplied by MAX native blob size before ranked
+            # smaller blobs are packed. 5184*3993600 nearly matches NInfer bytes.
+            for key,value in [('--expert-cache','5184'),('--spec','3'),
+                              ('--mtp-max-t','3'),('--suffix-draft','0'),('--spec-min-p','0')]:
+                flags = ab.option(flags,key,value)
         cfg['args'] = flags
         path = a.output/'controlled-strata-config.json'
         path.write_text(json.dumps(cfg,indent=2)+'\n')
@@ -342,6 +355,7 @@ def main():
         qualified_default_smoke=a.qualified_default_smoke,
         residency_gemm_ab=a.residency_gemm_ab, final_comparison=a.final_comparison,
         controlled_comparison=a.controlled_comparison,
+        controlled_strata_followup=a.controlled_strata_followup,
         timing_telemetry_level=0, diagnostic_telemetry_level=2,
         cache_budget='actual allocations logged; requested maxima are not equal-memory controls',
         cold_definition='first request after fresh server; host file cache preserved',
@@ -381,7 +395,8 @@ def main():
             (a.output/'summary.json').write_text(json.dumps(dict(cells=cells, timing=summarize(cells)), indent=2)+'\n')
         ab.release_gpu()
     if a.controlled_comparison:
-        arms=[('ninfer','adaptive156-qualified',residency_arms()[1][2]),ARMS[1]]
+        arms=([ARMS[1]] if a.controlled_strata_followup else
+              [('ninfer','adaptive156-qualified',residency_arms()[1][2]),ARMS[1]])
         for repeat in range(3):
             for engine,arm,flags in (arms if repeat!=1 else list(reversed(arms))):
                 run(engine,arm,flags,arm+'-controlled-r'+str(repeat),'timing')
@@ -391,13 +406,20 @@ def main():
             if c['engine']=='strata':
                 text=gzip.open(folder/'native-engine.log.gz','rt').read()
                 cache.append(dict(engine='strata',arm=c['arm'],
-                    requested_slots=6606, actual_cache_lines=[line for line in text.splitlines()
+                    requested_slots=5184 if a.controlled_strata_followup else 6606, actual_cache_lines=[line for line in text.splitlines()
                         if ('expert cache' in line.lower() or 'prompt chunk' in line.lower())
                         and ('slots' in line.lower() or 'chunk' in line.lower())],
                     sampled_peak_gpu_bytes=c['sampled_peak_gpu_bytes']))
             else:
                 cache.append(dict(engine='ninfer',arm=c['arm'],residency=c['residency']))
-        report=dict(step=6,status='serving_controls_complete',timing=summarize(cells),cache=cache,
+        timings=summarize(cells)
+        if a.controlled_strata_followup:
+            prior=json.loads(a.comparison_reference.read_text())
+            for key,value in prior['timing'].items():
+                if key.startswith('ninfer/'):
+                    timings[key]=value
+            cache.extend(c for c in prior['cache'] if c['engine']=='ninfer')
+        report=dict(step=6,status='serving_controls_complete',timing=timings,cache=cache,
             controls=dict(context=8192,kv_storage_bits=16,prefill_chunk_requested=2048,
                           draft_window_requested=2,physical_cpus=cpus,prompt_tokens=7111,
                           output_limit=128,prefix_reuse=False),
@@ -407,8 +429,19 @@ def main():
                          'Strata 6606 requested slots target about 20.7 GB using mean expert size; actual bytes in logs govern.',
                          'MTP algorithms/min-p and accepted work differ; decode is not equal-work.',
                          'Requested chunk size must be checked against actual Strata lending/fallback logs.'])
+        if a.controlled_strata_followup:
+            report['status']='controlled_followup_complete'
+            report['ninfer_reference_run']=38090951809
+            report['strata_controls']=dict(requested_slots=5184,requested_byte_budget=5184*3993600,
+                                          spec_window=3,max_mtp_drafts=2,suffix_draft=0,spec_min_p=0)
+            report['limitations']=[
+                'Installed native pack rejects spec<2 in BOTH serving and native CLI; no-spec comparison unavailable without engine change.',
+                'Strata window3 includes anchor and allows2 drafts; NInfer draft-tokens2 allows2 drafts. Algorithms/accepted work still differ.',
+                'NInfer reference reused from run38090951809; Strata changed controls measured separately, not alternating contemporaneously.',
+                'BF16/FP16 KV and expert quantization differ; matched storage width/budgets do not establish equal quality.',
+                'Strata count5184 times max_blob3993600 targets20702822400B versus NInfer20704739328B; actual ranked allocation logs govern.']
         (a.output/'controlled-comparison-report.json').write_text(json.dumps(report,indent=2)+'\n')
-        print('Step 6 serving controls complete; no-spec native comparison remains pending.',flush=True)
+        print('Step 6 serving control evidence retained; installed pack no-spec limitation recorded.',flush=True)
         return
     if a.prefill_breakdown:
         engine, arm, flags = ('ninfer', 'adaptive156-qualified', residency_arms()[1][2])
