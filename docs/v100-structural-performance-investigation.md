@@ -479,7 +479,7 @@ milestone remains complete; this is a new investigation of the remaining gap.
    verification separately; the qualified prefill GEMM crossover is 32 routes.
    Choose small-group GPU execution or CPU-miss improvements from observed costs.
    Different >=4-bit representations require independent numerical assessment.
-5. **Strata comparison and longer-context advantage — in progress.** Rebenchmark both
+5. **Strata comparison and longer-context feasibility — completed.** Rebenchmark both
    engines contemporaneously, disclose quantization/KV/MTP/memory differences, and
    evaluate residency, selected-block attention and speculation at larger contexts.
    Exceeding historical Strata time alone is not proof of a matched quality win.
@@ -612,3 +612,70 @@ longer context. They do not measure a full 262K prompt, isolate selected-block
 attention speed, demonstrate matched-quality superiority, or establish an untested
 long-context optimization advantage. The final comparison is retained even when
 requested capacity is infeasible. No deployment defaults change in this step.
+
+
+## Step 5 completed: remaining gap and capacity tradeoff
+
+[Run 38074752215](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38074752215)
+completed successfully on October 10, 2026. Artifact 11678572331 retains the full
+comparison and capacity evidence. All software checks and the unchanged independent
+FP32 GEMM, stream/coexistence and cache/join hardware gates passed. Worst independent
+GEMM NRMSE was 0.000225084; stream/coexistence remained within 0.002 NRMSE and
+0.99999 cosine. This does not close historical full-model drift qualification.
+
+Three alternating fresh servers per engine each ran cold + four warmups + measured
+requests. Every timing request used 7111 prompt / 128 output / zero cached tokens.
+Phase medians below are calculated independently, so their sum need not equal the
+HTTP median.
+
+| Warmed median | Qualified adaptive156 NInfer | Installed native Strata |
+|---|---:|---:|
+| HTTP request | 36.4183 s | 10.5422 s |
+| Native prefill / response prompt time | 30.2255 s | 8.1898 s |
+| Native decode / response predicted time | 5.7399 s | 2.2574 s |
+| Sampled peak GPU memory | 29.83 GiB | 31.71 GiB |
+
+NInfer HTTP was 3.45 times Strata's (warmed ranges 36.3498–36.4491 versus
+10.4966–10.7430 s). Cold HTTP medians were 39.7822 versus 16.5350 s; one NInfer
+cold request took 56.3483 s, so cold startup/request variability is retained in
+raw evidence. NInfer fully seeded 7488 experts (156/layer), 20,704,739,328 compact
+cache bytes, with the 2 GiB allocator reserve preserved.
+
+Measured NInfer requests repeat one output and MTP work: 71/112 accepted/drafted
+in 56 rounds. Measured Strata requests have two output hashes and 70/117 or 73/112
+accepted/drafted; cross-engine outputs differ. NInfer BF16KV/MTP2/original mixed
+weights and Strata int8KV/spec4/UD-Q4_K_XL/native placements are different practical
+configurations. Equal frontend counts do not imply equal arithmetic, model quality,
+speculative work or memory. **NInfer has not exceeded Strata in this comparison.**
+
+All three larger-request cases completed cold + warmup + measured requests with
+28311 prompt / 64 output / zero cached tokens. The table reports the single final
+measured request per case, not a three-server performance estimate.
+
+| Configuration | HTTP | Prefill | Decode | NInfer resident experts/layer | Peak GPU |
+|---|---:|---:|---:|---:|---:|
+| NInfer context/KV 32768 | 124.9823 s | 121.6967 s | 3.2509 s | 149 | 29.99 GiB |
+| NInfer context/KV 262144 | 128.3533 s | 124.9241 s | 3.2113 s | 101 | 29.92 GiB |
+| Strata native context 262144, resident KV 32768 | 31.0369 s | 29.5200 s | 1.3099 s | — | 31.71 GiB |
+
+NInfer retained its reserve while clipping requested 156-slot residency to 149
+(19,775,680,512 bytes, 7152 seeded experts) at 32K and 101 (13,404,991,488 bytes,
+4848 seeded experts) at 262K. The two NInfer measured outputs match; no cross-case
+arithmetic or work-equivalence claim follows. Both capacities are feasible for the
+observed 28K request. **A full 262K prompt and isolated selected-block attention
+performance remain untested.** Reserving larger KV displaces expert cache and
+provides no demonstrated long-context speed advantage here.
+
+All five authorized steps are complete. The qualified Volta GEMM/CPU-overlap
+defaults remain; adaptive156 remains an 8K screening reference. Both Step 3
+schedule experiments and the Step 4 CPU row cap were rejected and removed.
+No production defaults, model representations, installed Strata assets or original
+forwardport branch changed in this final comparison.
+
+The evidence directs subsequent work toward reducing actual expert execution and
+transfer/CPU-miss cost, with a qualified >=4-bit Volta expert representation and
+small-route execution as concrete candidates. Merely rearranging the same schedule
+has exhausted its tested benefit. Long-context work should address KV residency
+cost before assuming a 262K performance advantage; full-length measurement and
+selected-block attribution require a separate bounded investigation. These are
+next design directions, not measured wins or additional campaigns launched here.
