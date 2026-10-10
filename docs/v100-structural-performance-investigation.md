@@ -377,3 +377,38 @@ and native prefill 35.233→31.848 s (9.6%); decode medians were 7.543/7.977 s.
 The final accounting fix defines telemetry request scope from prefill plus the
 explicit overlap option, then separately marks execution eligibility from streaming,
 device combine and non-serial scheduling. It changes no work placement.
+
+## CPU/stream overlap qualified
+
+[Run 38038027788](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38038027788)
+passed every direct operator, SIMT, cache, resident, coexistence and early-join
+gate, then the complete corrected A/B. Artifact 11665148807 contains the full
+evidence; `v100-cpu-stream-overlap-38038027788.json` preserves the compact record.
+
+| Same 7111-prompt / 128-output workload | Stream + resident FP16 | + early CPU overlap |
+|---|---:|---:|
+| Warmed HTTP median | 43.391 s | 40.719 s |
+| Warmed prefill median | 35.505 s | 32.617 s |
+| Warmed decode median | 7.659 s | 7.870 s |
+| GPU peak | 18905.75 MiB | 18905.75 MiB |
+
+The schedule reduces warmed HTTP by 6.2% and prefill by 8.1%. Every timing
+request across both arms has the same output hash, usage and native MTP accounting:
+7111 prompt, 128 emitted, zero cached, 68/115 accepted/drafted tokens and 59
+rounds. The 2.8% decode increase therefore reflects run/phase drift rather than
+different generated work, and no decode benefit is claimed.
+
+The corrected diagnostic emits 432 early-CPU rows totaling 370,509 routes,
+exactly equal to the native prefill ledger. Of these, 384 eligible streaming
+rows cover 365,670 routes; 48 initial-scope rows cover the previously missing
+4,839 routes and correctly report zero overlap. Actual CPU/submission temporal
+overlap is 11.685 s across two long requests. Streamed and resident work is
+unchanged at 5,311,550 and 1,050,616 routes respectively. Inclusive CPU,
+submission and overlap intervals are not additive.
+
+The independent represented-NVFP4 FP32 gate remains at worst NRMSE 0.000225084;
+cache integration and coexistence maxima are 0.00169476 and 0.00173574, within
+the unchanged NRMSE 0.002 and cosine 0.99999 limits. The three structural paths
+are now qualified together. The next action is to select streamed FP16 GEMM,
+resident GEMM and CPU/stream overlap by default for Volta builds while retaining
+explicit legacy rollback values and validating the default-selected path once.

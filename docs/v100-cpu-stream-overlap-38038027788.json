@@ -1,0 +1,81 @@
+{
+  "schema": "ninfer.v100.cpu_stream_overlap_evidence.v1",
+  "run": {
+    "id": 38038027788,
+    "url": "https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38038027788",
+    "artifact_id": 11665148807,
+    "artifact_sha256": "17a7ef",
+    "commit": "6d40afa01de116f548f363f0641bbbf0e0922d54",
+    "conclusion": "success"
+  },
+  "workload": {
+    "frontend_prompt_tokens": 7111,
+    "completion_limit": 128,
+    "cached_tokens": 0,
+    "fresh_servers_per_arm": 3,
+    "requests_per_server": {"cold": 1, "warmup": 4, "measured": 1},
+    "prefix_reuse": false
+  },
+  "measured_seconds": {
+    "fp16_resident": {
+      "http": [44.147559017, 43.390562423, 42.472650553],
+      "http_median": 43.390562423,
+      "prefill": [36.238404531, 35.504614664, 34.822320207],
+      "prefill_median": 35.504614664,
+      "decode": [7.666683851, 7.659104562, 7.527411915],
+      "decode_median": 7.659104562
+    },
+    "fp16_resident_cpu_stream_overlap": {
+      "http": [40.719205362, 41.14094451, 39.965516813],
+      "http_median": 40.719205362,
+      "prefill": [32.617347154, 33.552799286, 32.084622825],
+      "prefill_median": 32.617347154,
+      "decode": [8.091539783, 7.579426246, 7.870271408],
+      "decode_median": 7.870271408
+    },
+    "relative_change": {
+      "http": -0.06156268,
+      "prefill": -0.08131947,
+      "decode": 0.02756836
+    }
+  },
+  "strict_work_equality": {
+    "output_sha256": "73ac76409eea990ed6965f42251b5b4ccc79f325c6a2d3429b290a4f756691f6",
+    "prompt_tokens": 7111,
+    "completion_tokens": 128,
+    "total_tokens": 7239,
+    "cached_tokens": 0,
+    "mtp": {"accepted": 68, "drafted": 115, "rounds": 59, "window": 2, "fallback": 0},
+    "distinct_timing_signatures_across_both_arms": 1
+  },
+  "diagnostic_two_request_totals": {
+    "early_cpu_rows": 432,
+    "early_cpu_routes": 370509,
+    "native_prefill_cpu_routes": 370509,
+    "eligible_rows": 384,
+    "eligible_routes": 365670,
+    "ineligible_rows": 48,
+    "ineligible_routes": 4839,
+    "ineligible_overlap_ms": 0.0,
+    "cpu_ms": 19845.76061,
+    "stream_submit_ms": 30916.89261,
+    "temporal_overlap_ms": 11685.083641,
+    "stream_experts": 51468,
+    "stream_routes": 5311550,
+    "resident_gemm_experts": 7334,
+    "resident_gemm_routes": 1050616
+  },
+  "qualification": {
+    "independent_fp32_formula_worst_nrmse": 0.000225084,
+    "cache_integration_worst_nrmse": 0.00169476,
+    "coexistence_worst_nrmse": 0.00173574,
+    "nrmse_limit": 0.002,
+    "cosine_limit": 0.99999,
+    "all_direct_and_integration_gates": "pass"
+  },
+  "memory": {
+    "fp16_resident_peak_gpu_mib": 18905.75,
+    "fp16_resident_cpu_stream_overlap_peak_gpu_mib": 18905.75
+  },
+  "interpretation": "Early CPU fallback overlaps the otherwise unchanged streamed expert submission schedule. Same-work equality is exact. HTTP and prefill medians improve; the small decode increase is noise or phase drift and is not attributed to the prefill-only scheduler. Inclusive and overlapping diagnostic times are not additive."
+}
