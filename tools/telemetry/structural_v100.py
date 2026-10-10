@@ -43,14 +43,15 @@ def residency_arms():
             for engine, arm, flags in (ARMS[0], ARMS[2])]
 
 
-def residency_observation(folder, output_tokens):
+def residency_observation(folder, output_tokens, expected_prompt_tokens=7111):
     rows = [json.loads(line) for line in (folder/'requests.jsonl').read_text().splitlines()]
     if not rows:
         raise ValueError('missing residency requests')
     for row in rows:
         usage = row['response']['usage']
         cached = usage.get('prompt_tokens_details', {}).get('cached_tokens', 0)
-        if (usage['prompt_tokens'] != 7111 or usage['completion_tokens'] != output_tokens
+        if ((expected_prompt_tokens is not None and usage['prompt_tokens'] != expected_prompt_tokens)
+                or usage['completion_tokens'] != output_tokens
                 or cached != 0 or row['response']['choices'][0]['finish_reason'] != 'length'):
             raise ValueError('residency request did not conserve the fixed frontend workload')
         timing = row.get('native_timing') or {}
@@ -125,7 +126,7 @@ def native_work(folder, engine):
             if layer.get('cache_windows'):
                 end = layer['cache_windows'][-1]['end']
                 dst['cache_last_by_layer'][str(layer['layer'])] = {k:v for k,v in end.items() if k != 'resident_ids'}
-    ledger, dispatch, stream_timing, resident_gemm, early_cpu, row_budget = [], [], [], [], [], []
+    ledger, dispatch, stream_timing, resident_gemm, early_cpu = [], [], [], [], []
     for line in log.read_text().splitlines():
         if '"prefill_stage_ledger"' in line:
             ledger.append(json.loads(line))
@@ -133,8 +134,6 @@ def native_work(folder, engine):
             stream_timing.append(json.loads(line))
         elif '"expert_resident_gemm"' in line:
             resident_gemm.append(json.loads(line))
-        elif '"cpu_row_budget"' in line:
-            row_budget.append(json.loads(line))
         elif '"early_cpu_stream"' in line:
             early_cpu.append(json.loads(line))
         elif engine == 'strata' and any(s in line.lower() for s in
@@ -142,7 +141,7 @@ def native_work(folder, engine):
             dispatch.append(line)
     return dict(phases=dict(phases), ninfer_prefill_chunks=ledger,
         strata_dispatch_and_phase_lines=dispatch, expert_stream_timing=stream_timing,
-        expert_resident_gemm=resident_gemm, early_cpu_stream=early_cpu, cpu_row_budget=row_budget,
+        expert_resident_gemm=resident_gemm, early_cpu_stream=early_cpu,
         limits=['Host spans are inclusive, not additive critical-path components.',
                 'CUDA stage intervals include stream waits and host gaps.',
                 'CPU weight-read counters are modeled reads, not hardware DRAM counters.',
@@ -195,8 +194,8 @@ def main():
                    help='one server with unset V100 selectors; require qualified default dispatch and replay')
     p.add_argument('--residency-gemm-ab', action='store_true',
                    help='step 1: static64 versus adaptive156, both with qualified GEMM and CPU overlap')
-    p.add_argument('--small-batch-cpu-ab', action='store_true',
-                   help='step 4: bound small-batch CPU row sharding while preserving large prefill')
+    p.add_argument('--final-comparison', action='store_true',
+                   help='step 5: qualified adaptive156 versus installed Strata; larger-context feasibility')
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=True)
     inventory(a)
@@ -212,8 +211,6 @@ def main():
         '--spec', 'mtp', '--draft-tokens', '2', '--lm-head-draft']
     a.long_prompt = LONG
     a.max_output_tokens = 128
-    if a.small_batch_cpu_ab:
-        a.max_output_tokens = 512
     a.warmups = 4; a.repeats = 1; a.telemetry_level = 0
     a.request_schedule = [('cold', 'long')]+[('warmup', 'long')]*4+[('measured', 'long')]
     gemm_arms = [('simt', dict(ARMS[0][2], NINFER_V100_PREFILL_EXPERT_GEMM='simt')),
@@ -228,15 +225,12 @@ def main():
                                   NINFER_V100_PREFILL_RESIDENT_GEMM='1',
                                   NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=value))
                      for backend,value in [('fp16-resident','0'),('fp16-resident-overlap','1')]]
-    if a.small_batch_cpu_ab:
-        base = residency_arms()[1][2]
-        gemm_arms = [(name, dict(base, NINFER_V100_SMALL_BATCH_CPU_ROW_BUDGET=value))
-                     for name, value in [('full-row-budget', '0'), ('physical-row-budget', '32')]]
     default_arm = ('ninfer', 'v100-default', dict(ARMS[0][2]))
     manifest_arms = ([default_arm] if a.qualified_default_smoke else
+                     [("ninfer", "adaptive156-qualified", residency_arms()[1][2]), ARMS[1]] if a.final_comparison else
                      residency_arms() if a.residency_gemm_ab else
                      [('ninfer', backend, flags) for backend, flags in gemm_arms]
-                     if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.small_batch_cpu_ab) else ARMS)
+                     if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab) else ARMS)
     (a.output/'manifest.json').write_text(json.dumps(dict(prompt=LONG, short_prompt=ab.SHORT,
         output_limit=32 if (a.stream_attribution_only or a.qualified_default_smoke) else a.max_output_tokens,
         physical_cpus=cpus,
@@ -244,12 +238,11 @@ def main():
         fresh_servers_per_arm=1 if (a.stream_attribution_only or a.qualified_default_smoke) else 3,
         stream_attribution_only=a.stream_attribution_only, expert_gemm_ab=a.expert_gemm_ab, resident_gemm_ab=a.resident_gemm_ab, cpu_stream_overlap_ab=a.cpu_stream_overlap_ab,
         qualified_default_smoke=a.qualified_default_smoke,
-        residency_gemm_ab=a.residency_gemm_ab, small_batch_cpu_ab=a.small_batch_cpu_ab,
+        residency_gemm_ab=a.residency_gemm_ab, final_comparison=a.final_comparison,
         timing_telemetry_level=0, diagnostic_telemetry_level=2,
         cache_budget='actual allocations logged; requested maxima are not equal-memory controls',
         cold_definition='first request after fresh server; host file cache preserved',
-        cross_quant_comparison='same artifact and arithmetic; small-batch CPU row partition only' if a.small_batch_cpu_ab else
-            'same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.residency_gemm_ab)
+        cross_quant_comparison='same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.residency_gemm_ab)
             else 'descriptive; source artifacts and frontend token counts differ',
         ninfer_flags=a.ninfer_flags), indent=2)+'\n')
     cells = []
@@ -262,8 +255,16 @@ def main():
             result = ab.run_case(a, engine, tag, overrides)
             folder = a.output/(engine+'-'+tag)
             cell = dict(engine=engine, arm=arm, mode=mode, folder=str(folder), result=result)
-            if a.residency_gemm_ab or a.small_batch_cpu_ab:
+            if a.residency_gemm_ab:
                 cell['residency'] = residency_observation(folder, a.max_output_tokens)
+            if a.final_comparison:
+                samples=[json.loads(line) for line in (folder/'system.jsonl').read_text().splitlines()]
+                peaks=[r.get('gpu',{}).get('metrics',{}).get('memory_used_bytes') for r in samples
+                       if r.get('kind')=='system_sample']
+                cell['sampled_peak_gpu_bytes']=max((v for v in peaks if v is not None),default=None)
+                if engine=='ninfer':
+                    cell['residency']=residency_observation(folder,a.max_output_tokens,
+                                                         7111 if mode=='timing' else None)
             if mode == 'diagnostic':
                 cell['work'] = native_work(folder, engine)
                 if engine == 'ninfer' and not cell['work']['ninfer_prefill_chunks']:
@@ -276,6 +277,47 @@ def main():
         finally:
             (a.output/'summary.json').write_text(json.dumps(dict(cells=cells, timing=summarize(cells)), indent=2)+'\n')
         ab.release_gpu()
+    if a.final_comparison:
+        arms=[('ninfer','adaptive156-qualified',residency_arms()[1][2]),ARMS[1]]
+        for repeat in range(3):
+            for engine,arm,flags in (arms if repeat!=1 else list(reversed(arms))):
+                run(engine,arm,flags,arm+'-final-r'+str(repeat),'timing')
+        report=dict(step=5,status='comparison_complete',timing=summarize(cells),
+            comparison='native practical configurations; different quantization, KV, context, MTP and output work',
+            memory=[dict(engine=c['engine'],arm=c['arm'],peak=c['sampled_peak_gpu_bytes'],
+                         residency=c.get('residency')) for c in cells])
+        (a.output/'final-comparison-report.json').write_text(json.dumps(report,indent=2)+'\n')
+        print(json.dumps(report,indent=2),flush=True)
+        # Measure a longer request at two NInfer capacity budgets, then installed
+        # Strata at its native 262K/int8/32K-resident settings. This does not claim
+        # to measure a full 262K prompt or isolate selected-block attention math.
+        a.long_prompt=' '.join(f'Record {i}: the solar station stores energy during daylight and supplies the village after sunset.'
+                               for i in range(1400))+' Explain how its battery storage works in detail.'
+        a.max_output_tokens=64; a.request_schedule=[('cold','long'),('warmup','long'),('measured','long')]
+        cases=[('ninfer','context32768',32768),('ninfer','context262144',262144),('strata','native262144',262144)]
+        capacity=[]
+        for engine,arm,context in cases:
+            if engine=='ninfer':
+                a.ninfer_flags=ab.option(a.ninfer_flags,'--max-context',str(context))
+                a.ninfer_flags=ab.option(a.ninfer_flags,'--kv-capacity',str(context))
+            flags=residency_arms()[1][2] if engine=='ninfer' else {}
+            try:
+                run(engine,arm,flags,arm+'-longer-request','capacity')
+                cells[-1]['requested_context']=context
+                capacity.append(cells[-1])
+            except Exception as error:
+                # A capacity failure must not erase the completed comparison.
+                folder=a.output/(engine+'-'+arm+'-longer-request')
+                if folder.exists(): compress_logs(folder)
+                failure=dict(engine=engine,arm=arm,requested_context=context,status='failed',error=str(error))
+                capacity.append(failure)
+                print(json.dumps(failure),flush=True)
+                ab.release_gpu()
+            (a.output/'capacity-report.json').write_text(json.dumps(capacity,indent=2)+'\n')
+        report['status']='complete'; report['capacity']=capacity
+        (a.output/'final-comparison-report.json').write_text(json.dumps(report,indent=2)+'\n')
+        print('Step 5 contemporary comparison and larger-context checks completed.',flush=True)
+        return
     if a.residency_gemm_ab:
         arms = residency_arms()
         for repeat in range(3):
@@ -360,24 +402,12 @@ def main():
             resident_gemm_routes=sum(row['routes'] for row in resident),
             streamed_routes=sum(row['routes'] for row in streamed)),indent=2),flush=True)
         return
-    if a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.small_batch_cpu_ab:
+    if a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab:
         engine, arm, overrides = ARMS[0]
         arms = gemm_arms
         for repeat in range(3):
             for backend, flags in (arms if repeat != 1 else list(reversed(arms))):
                 run(engine, backend, flags, backend+'-r'+str(repeat), 'timing')
-        if a.small_batch_cpu_ab:
-            # Adaptive cache warms across requests: compare each request ordinal
-            # across schedules, rather than requiring cold and warm arithmetic parity.
-            signatures = defaultdict(set)
-            for cell in cells:
-                if cell['mode'] != 'timing': continue
-                for ordinal, line in enumerate((Path(cell['folder'])/'requests.jsonl').read_text().splitlines()):
-                    row = json.loads(line)
-                    signatures[ordinal].add(json.dumps([row['output_sha256'], row['response']['usage'],
-                                                        row.get('native_speculative')], sort_keys=True))
-            if len(signatures) != 6 or any(len(values) != 1 for values in signatures.values()):
-                raise ValueError('CPU row-budget changed output, usage or MTP work at matching request ordinal')
         if a.cpu_stream_overlap_ab:
             signatures=set()
             for cell in cells:
@@ -394,15 +424,6 @@ def main():
             diagnostic=dict(flags, NINFER_FLASH_NEXT_STAGE_LEDGER='1',
                             NINFER_V100_EXPERT_STREAM_TIMING='1')
             run(engine,backend,diagnostic,backend+'-diagnostic','diagnostic')
-            if a.small_batch_cpu_ab:
-                work=cells[-1]['work']; rows=work['cpu_row_budget']
-                expected=work['phases']['verify']['counters'].get('cpu_routes',0)
-                selected=32 if backend=='physical-row-budget' else 0
-                if not rows or sum(r['cpu_routes'] for r in rows)!=expected:
-                    raise ValueError('Small-batch CPU diagnostics do not conserve verification routes')
-                if any(r['requested_budget']!=selected or r['effective_budget']!=(selected or 88)
-                       or r['row_jobs']>r['effective_budget'] for r in rows):
-                    raise ValueError('Small-batch CPU row budget was not respected')
             if a.cpu_stream_overlap_ab:
                 rows=cells[-1]['work']['early_cpu_stream']
                 if bool(rows)!=(backend=='fp16-resident-overlap'):

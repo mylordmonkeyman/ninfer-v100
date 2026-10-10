@@ -475,11 +475,11 @@ milestone remains complete; this is a new investigation of the remaining gap.
    batching, staged dequantization/GEMM overlap, justified expanded-weight reuse,
    or recalibrated CPU/GPU routing. Qualify the affected operator/lifetime contract
    and measure request-level benefit; do not repeat old ring/chunk sweeps unchanged.
-4. **Decode — in progress.** Investigate small routed groups and MTP
+4. **Decode — completed; row-budget experiment negative.** Investigate small routed groups and MTP
    verification separately; the qualified prefill GEMM crossover is 32 routes.
    Choose small-group GPU execution or CPU-miss improvements from observed costs.
    Different >=4-bit representations require independent numerical assessment.
-5. **Strata comparison and longer-context advantage — pending.** Rebenchmark both
+5. **Strata comparison and longer-context advantage — in progress.** Rebenchmark both
    engines contemporaneously, disclose quantization/KV/MTP/memory differences, and
    evaluate residency, selected-block attention and speculation at larger contexts.
    Exceeding historical Strata time alone is not proof of a matched quality win.
@@ -562,27 +562,53 @@ two-phase row sharding using the whole configured 88-worker budget on the fixed
 32-physical-core mask. Large prefill's 88-worker choice has separate measured
 support; it does not establish the best small verification schedule.
 
-The experimental `NINFER_V100_SMALL_BATCH_CPU_ROW_BUDGET=32` caps row-shard job
-creation for batches of up to eight tokens. Unset/0 retains the full pool budget;
-values 1..256 are capped to configured workers. Large prefill is unchanged. This
-is a row-job budget, not a new thread pool, CPU placement or cap on whole-expert
-jobs. Groups at or above the budget use whole-group jobs, while fewer groups use
-the existing work-balanced row partition with the smaller budget. Each output row
-keeps its original AVX2 arithmetic; group membership, route order, represented
-weights, cache residency, MTP state and reduction order are unchanged.
+Run [38070802684](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38070802684)
+completed successfully with numerical/cache fixtures, exact CPU partition tests,
+matching output/usage/MTP at corresponding request ordinals, and observed job
+budgets. **Step 4 completed with a negative result:** restricting row sharding to
+32 jobs for <=8-token batches was slower and has been removed along with its
+selector, statistics and campaign mode. The original worker schedule is retained.
 
-The existing grouped CPU fixture now varies the row budget and crosses whole-group
-versus split-row boundaries, requires exact original output bits after clearing
-output storage, unchanged route/group/weight-read accounting, and pool recovery.
-Separate diagnostics log effective row budget and row-job count with CPU routes.
-This schedule-only change uses exact parity; it changes no mathematical operator.
+| Warmed median, 7111 prompt / 512 output | Full row budget | 32-row-job budget |
+|---|---:|---:|
+| HTTP request | 55.2376 s | 56.2639 s |
+| Native prefill | 30.6047 s | 30.5371 s |
+| Native decode | 24.3942 s | 25.6913 s |
 
-`--small-batch-cpu-ab` compares full-row-budget/physical-row-budget on adaptive156
-with three alternating fresh servers each, cold + four warmups + measured request,
-using the same 7111-token prompt and **512 output tokens** to expose decode costs.
-Context8192, BF16KV, MTP2, 2048 chunks, 88 persistent workers, physical-core mask,
-qualified GEMM and CPU/stream overlap remain fixed. Corresponding request ordinals
-must have identical output, usage and native MTP work. Separate two-request 7K/32
-diagnostics require conserved verification CPU routes and observed job budgets.
-The selector remains off until hardware evidence supports adoption. Step 5's
-contemporary Strata and larger-context comparison follows Step 4 results.
+The cap worsened decode 5.32% and HTTP 1.86%; all warmed HTTP sample ranges were
+54.4870–55.3948 versus 56.1699–56.7868 s. Diagnostic verification CPU time grew
+1.8138 -> 2.2770 s while host GPU wait stayed 0.6637 -> 0.6577 s. Fewer row jobs
+increased CPU critical time despite the physical-core count. Neither this result
+nor the unchanged large-prefill timing supports altering the 88-worker reference.
+
+## Step 5: contemporary Strata and larger-context comparison
+
+`--final-comparison` compares qualified adaptive156 NInfer against the installed
+Strata executable `/opt/ai/strata/engine/strata` with its existing packs/config,
+without rebuilding or editing Strata. Three fresh servers per engine run in
+alternating order, each cold + four warmups + measured request, using identical
+prompt text, 128-output-token limit and zero prompt reuse. Actual frontend counts,
+outputs, native/response timings, startup and sampled GPU peak remain in evidence.
+
+This is a practical configuration comparison, not equal representation or equal
+memory: NInfer uses the original mixed artifact, BF16KV, MTP2 and 8192 capacity;
+installed Strata uses its UD-Q4_K_XL pack, int8KV, spec4/min-p0.5, 262144 maximum
+context, 32768 resident KV and native auto expert cache/prefill. Its working
+directory, expert profile, resident CPU budget and placements remain as previously
+configured; only generated request/log configs disable prompt/profile saving.
+No numerical equivalence or matched quality is inferred from cross-engine times.
+
+After preserving the 7K comparison, bounded longer-request checks use the same
+larger prompt text (1400 records; actual token counts recorded), 64-output-token
+limit, and cold + warmup + measured requests. NInfer is tested with 32768 and
+262144 context/KV capacity, still requesting at most 156 experts/layer with the
+existing allocator reserve authoritative; actual allocation/seeding is observed.
+Strata uses its native 262144/int8/32768-resident profile. A startup/capacity failure
+is recorded without erasing the completed comparison. Original weights/packs and
+installed profiles remain unchanged; no unrelated process is stopped.
+
+These checks measure larger prompt behavior and the memory cost of reserving
+longer context. They do not measure a full 262K prompt, isolate selected-block
+attention speed, demonstrate matched-quality superiority, or establish an untested
+long-context optimization advantage. The final comparison is retained even when
+requested capacity is infeasible. No deployment defaults change in this step.

@@ -3,7 +3,6 @@
 #include "targets/qwen3_8_flash_next/impl/cpu_expert_reference.h"
 #include "targets/qwen3_8_flash_next/impl/cpu_group_policy.h"
 
-#include <algorithm>
 #include <array>
 #include <bit>
 #include <chrono>
@@ -223,18 +222,6 @@ int main() {
             if (stats.grouped_pairs > count || stats.weight_read_bytes > count * 2'764'808ULL ||
                 (count >= 3 && stats.groups == 0)) {
                 throw std::runtime_error("grouped worker pool accounting mismatch");
-            }
-            // Change row partitioning and cross the whole-group boundary. Every
-            // original output row must still be written with identical arithmetic.
-            for (unsigned budget : {1U, std::min(8U, workers)}) {
-                for (auto& rows : actual) rows.fill(std::numeric_limits<float>::quiet_NaN());
-                const auto bounded=pool.run(tasks,true,0,budget);
-                if (bounded.row_jobs>budget || bounded.groups!=stats.groups ||
-                    bounded.grouped_pairs!=stats.grouped_pairs || bounded.weight_read_bytes!=stats.weight_read_bytes)
-                    throw std::runtime_error("bounded CPU row schedule changed work accounting");
-                for (unsigned i=0;i<count;++i)
-                    if (std::memcmp(actual[i].data(),expected[i].data(),sizeof(actual[i]))!=0)
-                        throw std::runtime_error("bounded CPU row partition changed output bits");
             }
             // Failure drains all submitted workers; the next valid batch must run.
             auto invalid = tasks;

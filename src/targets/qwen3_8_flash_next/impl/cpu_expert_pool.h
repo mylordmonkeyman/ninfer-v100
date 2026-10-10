@@ -32,7 +32,6 @@ struct HostExpertTaskGroup {
 
 struct HostExpertBatchStats {
     std::uint64_t groups = 0, grouped_pairs = 0, weight_read_bytes = 0;
-    unsigned row_job_budget = 0, row_jobs = 0;
 };
 
 // Persistent expert-level workers shared by serving and routed-miss replay.
@@ -44,7 +43,7 @@ class HostExpertWorkerPool {
     HostExpertWorkerPool(const HostExpertWorkerPool&) = delete;
     HostExpertWorkerPool& operator=(const HostExpertWorkerPool&) = delete;
     HostExpertBatchStats run(std::span<const HostExpertTask> tasks, bool group_same_experts = false,
-                            unsigned telemetry_layer = 48, unsigned row_job_budget = 0);
+                            unsigned telemetry_layer = 48);
   private:
     void worker_loop(unsigned worker_id);
     void stop_workers() noexcept;
@@ -61,7 +60,6 @@ class HostExpertWorkerPool {
     std::vector<std::size_t> group_shards_;
     bool grouped_ = false;
     bool row_sharded_ = false;
-    std::size_t row_job_budget_ = 0;
     bool down_phase_ = false;
     bool avx2_;
     bool fp32_intermediate_;

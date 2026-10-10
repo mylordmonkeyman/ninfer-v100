@@ -76,17 +76,6 @@ bool resolve_fp32_intermediate_diagnostic() {
     return env != nullptr && env[0] != '\0' && std::string_view(env) != "0";
 }
 
-unsigned resolve_small_batch_cpu_row_budget(std::int32_t tokens) {
-    if (tokens > 8) return 0;  // Large prefill retains its measured worker schedule.
-    const char* value=std::getenv("NINFER_V100_SMALL_BATCH_CPU_ROW_BUDGET");
-    if (!value || !*value) return 0;
-    char* end=nullptr;
-    const auto budget=std::strtoul(value,&end,10);
-    if (end==value || *end || budget>256)
-        throw std::invalid_argument("NINFER_V100_SMALL_BATCH_CPU_ROW_BUDGET must be in [0, 256]");
-    return static_cast<unsigned>(budget);
-}
-
 bool resolve_shared_fp32_intermediate_diagnostic() {
     const char* env = std::getenv("NINFER_FLASH_NEXT_MOE_SHARED_FP32_INTERMEDIATE");
     return env != nullptr && env[0] != '\0' && std::string_view(env) != "0";
@@ -544,7 +533,6 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
 #if defined(NINFER_VOLTA_BUILD)
     grouped_cpu_experts = tokens > 1 && resolve_cpu_expert_grouping(prefill);
 #endif
-    const unsigned cpu_row_budget = resolve_small_batch_cpu_row_budget(tokens);
     std::future<HostExpertBatchStats> pending_cpu;
     auto cpu_started=measure ? Clock::now() : Clock::time_point{};
     auto cpu_finished=cpu_started;
@@ -685,12 +673,12 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
                 cpu.tasks[i].output=device_route_host_outputs+i*kFlashNextExpertHidden;
             auto* observer=v100_compare::active;
             cpu_started=measure ? Clock::now() : Clock::time_point{};
-            pending_cpu=std::async(std::launch::async,[&,observer,grouped_cpu_experts,cpu_row_budget] {
+            pending_cpu=std::async(std::launch::async,[&,observer,grouped_cpu_experts] {
                 // Until get(), the inference owner only submits CUDA/cache work;
                 // it does not mutate the round. Retain the existing pool ledger.
                 auto* previous=v100_compare::active;v100_compare::active=observer;
                 try {
-                    auto result=host_expert_worker_pool().run(cpu.tasks,grouped_cpu_experts,layer,cpu_row_budget);
+                    auto result=host_expert_worker_pool().run(cpu.tasks,grouped_cpu_experts,layer);
                     cpu_finished=measure ? Clock::now() : Clock::time_point{};
                     v100_compare::active=previous;
                     return result;
@@ -752,7 +740,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         try {
             if(pending_cpu.valid())cpu_batch=pending_cpu.get();
             else {
-                cpu_batch=host_expert_worker_pool().run(cpu.tasks,grouped_cpu_experts,layer,cpu_row_budget);
+                cpu_batch=host_expert_worker_pool().run(cpu.tasks,grouped_cpu_experts,layer);
                 cpu_finished=measure ? Clock::now() : Clock::time_point{};
             }
             if (observe_host && !grouped_cpu_experts) {
@@ -764,9 +752,6 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
             throw;
         }
     }
-    if(observe_host && tokens<=8 && !cpu.tasks.empty())
-        std::fprintf(stderr,"{\"kind\":\"cpu_row_budget\",\"layer\":%u,\"tokens\":%d,\"cpu_routes\":%zu,\"requested_budget\":%u,\"effective_budget\":%u,\"row_jobs\":%u}\n",
-            layer,tokens,cpu.tasks.size(),cpu_row_budget,cpu_batch.row_job_budget,cpu_batch.row_jobs);
     if(cpu.tasks.empty())cpu_finished=measure ? Clock::now() : Clock::time_point{};
     if(observe_host && early_cpu_requested && !cpu.tasks.empty()) {
         const auto overlap_begin=std::max(cpu_started,stream_submit_started);
