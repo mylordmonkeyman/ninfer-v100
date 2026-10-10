@@ -1,4 +1,4 @@
-name: V100 Telemetry First Hardware Qualification
+name: V100 Structural Engine Comparison
 on:
   workflow_dispatch:
   push:
@@ -10,8 +10,22 @@ permissions:
 env:
   CMAKE_BUILD_PARALLEL_LEVEL: 32
 jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Validate structural harness before reserving V100
+        run: |
+          python3 -m compileall -q tools/telemetry
+          python3 -m unittest discover -s tools/telemetry -p 'test_*.py'
+          python3 tools/telemetry/structural_v100.py --help
+          git diff --check
   hardware:
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[v100:telemetry-qualify]')) }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[v100:structural-compare]')) }}
+    needs: checks
     runs-on: [self-hosted, v100, sm70, cuda-12-8, ninfer-phase11]
     concurrency:
       group: v100-sv0-hardware
@@ -29,10 +43,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Remove only the prior run's bad link; do not touch the existing model bytes.
-          old_alias="$GITHUB_WORKSPACE/telemetry-qualification-37707932845-1/qualified-model.ninfer"
-          if [[ -L "$old_alias" ]]; then rm -- "$old_alias"; fi
-          results="$GITHUB_WORKSPACE/telemetry-qualification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          results="$GITHUB_WORKSPACE/structural-comparison-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir "$results"
           echo "QUALIFICATION_RESULTS=$results" >> "$GITHUB_ENV"
           free_mib=$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits | tr -d '[:space:]')
@@ -75,7 +86,7 @@ jobs:
           name: v100-sv2-37270512213-1
           run-id: 37270512213
           github-token: ${{ github.token }}
-          path: telemetry-profile-source
+          path: structural-profile-source
       - name: Build both frozen engines once
         shell: bash
         run: |
@@ -83,52 +94,54 @@ jobs:
           git -C telemetry-strata-source rev-parse HEAD > "$QUALIFICATION_RESULTS/strata-sha.txt"
           test "$(cat "$QUALIFICATION_RESULTS/strata-sha.txt")" = 0430d397d907032fc9ab83c8bb7acff48a935b53
           cmp docs/v100-cross-engine-telemetry-spec.md telemetry-strata-source/docs/v100-cross-engine-telemetry-spec.md
-          cmake -S . -B build-telemetry-qualification -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          cmake -S . -B build-structural-comparison -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70 \
             -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-telemetry-qualification --target ninfer-serve \
-            ninfer_qwen3_8_flash_next_expert_cache_test ninfer_qwen3_8_flash_next_expert_stream_test
-          cmake -S telemetry-strata-source -B build-strata-telemetry-qualification -G Ninja \
+          cmake --build build-structural-comparison --target ninfer-serve
+          cmake -S telemetry-strata-source -B build-strata-structural-comparison -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70
-          cmake --build build-strata-telemetry-qualification --target strata
-          cp build-telemetry-qualification/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
-          cp build-strata-telemetry-qualification/CMakeCache.txt "$QUALIFICATION_RESULTS/strata-CMakeCache.txt"
-      - name: Validate known GPU expert work before loading full models
+          cmake --build build-strata-structural-comparison --target strata
+          cp build-structural-comparison/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
+          cp build-strata-structural-comparison/CMakeCache.txt "$QUALIFICATION_RESULTS/strata-CMakeCache.txt"
+      - name: Record profiler availability without changing permissions
         shell: bash
         run: |
           set -euo pipefail
-          for level in 0 1 2; do
-            for fixture in expert_cache expert_stream; do
-              V100_COMPARE_TELEMETRY_LEVEL="$level" V100_COMPARE_RUN_ID="fixture-${fixture}-l${level}" \
-                "build-telemetry-qualification/tests/ninfer_qwen3_8_flash_next_${fixture}_test" \
-                > "$QUALIFICATION_RESULTS/${fixture}-l${level}.log" 2>&1
-            done
-          done
-      - name: Qualify native outputs and telemetry overhead in one sequential matrix
+          { command -v nsys || true; nsys --version 2>&1 || true; } > "$QUALIFICATION_RESULTS/profiler-availability.txt"
+          # Existing bounded CUDA event ledgers are used in separate diagnostics.
+          # No profiler installation, ptrace changes, or security changes.
+      - name: Compare native engines and isolate structural work
         shell: bash
         run: |
           set -euo pipefail
-          # On failure, print native engine details before the artifact upload step.
-          trap 'rc=$?; echo "::error::Native qualification failed (exit $rc)"; tail -100 "$QUALIFICATION_RESULTS/matrix-summary.log" 2>/dev/null || true; find "$QUALIFICATION_RESULTS/matrix" -maxdepth 2 -name server.log -type f -print -exec tail -n 35 {} \; 2>/dev/null || true; exit "$rc"' ERR
-          python3 tools/telemetry/qualify_v100.py \
-            --ninfer build-telemetry-qualification/apps/ninfer-serve \
-            --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" --profile telemetry-profile-source/sv2-static-profile.json \
+          python3 tools/telemetry/structural_v100.py \
+            --ninfer build-structural-comparison/apps/ninfer-serve \
+            --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
+            --profile structural-profile-source/sv2-static-profile.json \
             --strata-python /opt/ai/strata/.venv/bin/python \
             --strata-server telemetry-strata-source/serve/server.py \
             --strata-config /opt/ai/strata/strata-unsloth-ud-q4_k_xl.json \
-            --strata-binary build-strata-telemetry-qualification/strata \
+            --strata-binary build-strata-structural-comparison/strata \
             --gpu-uuid "$(cat "$QUALIFICATION_RESULTS/gpu-uuid.txt")" \
-            --output "$QUALIFICATION_RESULTS/matrix" --warmups 5 --repeats 3 \
-            > "$QUALIFICATION_RESULTS/matrix-summary.log" 2>&1
+            --output "$QUALIFICATION_RESULTS/matrix" \
+            | tee "$QUALIFICATION_RESULTS/matrix-summary.log"
           cat "$QUALIFICATION_RESULTS/matrix-summary.log" >> "$GITHUB_STEP_SUMMARY"
+      - name: Compress completed or partial native logs
+        if: always()
+        shell: bash
+        run: |
+          folder="$GITHUB_WORKSPACE/structural-comparison-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [[ -d "$folder" ]]; then
+            find "$folder" -type f -name '*.log' -print0 | xargs -0 -r gzip -1
+          fi
       - name: Guard uploaded evidence against large files and symlinks
         id: upload_guard
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          folder="$GITHUB_WORKSPACE/telemetry-qualification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          folder="$GITHUB_WORKSPACE/structural-comparison-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           if [[ ! -d "$folder" ]]; then
             echo "safe=false" >> "$GITHUB_OUTPUT"
             echo "::warning::No evidence directory was created."
@@ -148,7 +161,7 @@ jobs:
         if: ${{ always() && steps.upload_guard.outputs.safe == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: v100-telemetry-qualification-${{ github.run_id }}-${{ github.run_attempt }}
-          path: telemetry-qualification-${{ github.run_id }}-${{ github.run_attempt }}/
+          name: v100-structural-comparison-${{ github.run_id }}-${{ github.run_attempt }}
+          path: structural-comparison-${{ github.run_id }}-${{ github.run_attempt }}/
           retention-days: 30
           if-no-files-found: warn

@@ -267,7 +267,8 @@ def run_case(args, engine, variant, overrides):
     folder = args.output/tag
     folder.mkdir()
     env = os.environ.copy()
-    env.update(V100_COMPARE_TELEMETRY_LEVEL='1', V100_COMPARE_RUN_ID=tag,
+    level = getattr(args, 'telemetry_level', 1)
+    env.update(V100_COMPARE_TELEMETRY_LEVEL=str(level), V100_COMPARE_RUN_ID=tag,
                CUDA_VISIBLE_DEVICES='0', STRATA_REQUEST_LINES='1')
     port = free_port()
     if engine == 'ninfer':
@@ -280,7 +281,7 @@ def run_case(args, engine, variant, overrides):
         for key, value in overrides.items():
             if key.startswith('NINFER_'):
                 env[key] = value
-        flags = NINFER_FLAGS
+        flags = list(getattr(args, 'ninfer_flags', NINFER_FLAGS))
         if 'draft_tokens' in overrides:
             flags = option(flags, '--draft-tokens', overrides['draft_tokens'])
         cmd = ([str(args.ninfer.resolve()), str(args.artifact.absolute()),
@@ -289,7 +290,8 @@ def run_case(args, engine, variant, overrides):
         native_log = folder/'server.log'
     else:
         native_log = folder/'native-engine.log'
-        cfg = strata_config(args.strata_config, args.strata_binary, native_log, 1, tag)
+        cfg = strata_config(args.strata_config, args.strata_binary, native_log, level, tag)
+        cfg['env'].update({k: v for k, v in overrides.items() if k.startswith('STRATA_')})
         flags = option(cfg['args'], '--prompt-cache', '0')
         if 'cache' in overrides:
             flags = option(flags, '--expert-cache', overrides['cache'])
@@ -307,6 +309,8 @@ def run_case(args, engine, variant, overrides):
         cmd = [str(args.strata_python.absolute()), str(args.strata_server.resolve()),
                '--engine', 'strata', '--config', str(config_path.resolve()),
                '--host', '127.0.0.1', '--port', str(port)]
+    if getattr(args, 'launch_prefix', None):
+        cmd = args.launch_prefix + cmd
     if overrides.get('affinity') == 'node0':
         if not shutil.which('taskset'):
             raise RuntimeError('taskset is unavailable')
@@ -337,20 +341,30 @@ def run_case(args, engine, variant, overrides):
             if model is None:
                 raise TimeoutError(f'{tag}: model did not become ready in 600s')
             sampler = subprocess.Popen([sys.executable, str(Path(__file__).with_name('sample_system.py')),
-                '--pid', str(proc.pid), '--engine', engine, '--run-id', tag, '--level', '1',
+                '--pid', str(proc.pid), '--engine', engine, '--run-id', tag, '--level', str(level),
                 '--gpu-uuid', args.gpu_uuid, '--interval-ms', '200',
                 '--output', str(folder/'system.jsonl')])
             # The five long-prompt warmups build expert/cache residency.
-            schedule = [('warmup', 'long')]*args.warmups + [
-                ('measured', 'long')]*args.repeats + [('measured', 'short')]*args.repeats
+            schedule = getattr(args, 'request_schedule', None) or ([('warmup', 'long')]*args.warmups + [
+                ('measured', 'long')]*args.repeats + [('measured', 'short')]*args.repeats)
+            (folder/'startup.json').write_text(json.dumps(dict(ready_seconds=time.monotonic()-start_up,
+                process_pid=proc.pid, telemetry_level=level), indent=2)+'\n')
+            for leaf in ('status', 'numa_maps'):
+                try:
+                    state = Path(f'/proc/{proc.pid}/{leaf}').read_text()
+                except OSError as error:
+                    state = 'unavailable: '+str(error)+'\n'
+                (folder/('proc-'+leaf+'.txt')).write_text(state)
             with (folder/'requests.jsonl').open('w') as out:
                 for index, (phase, which) in enumerate(schedule):
                     payload = dict(model=model, messages=[dict(
-                        role='user', content=PROMPT if which == 'long' else SHORT)],
+                        role='user', content=(getattr(args, 'long_prompt', PROMPT) if which == 'long'
+                                              else getattr(args, 'short_prompt', SHORT)))],
                         max_tokens=args.max_output_tokens, temperature=0, top_p=1, seed=42,
                         enable_thinking=False)
                     if engine == 'strata':
                         payload['chat_template_kwargs'] = {'enable_thinking': False}
+                    begin_offset = native_log.stat().st_size if native_log.exists() else 0
                     begun=time.monotonic_ns()
                     response = query(f'http://127.0.0.1:{port}', '/v1/chat/completions', payload)
                     ended=time.monotonic_ns()
@@ -367,7 +381,9 @@ def run_case(args, engine, variant, overrides):
                     row=dict(schema='v100-strata-ab-request-v1',engine=engine,variant=variant,
                         index=index,phase=phase,prompt=which,
                         wall_seconds=(ended-begun)/1e9,output_sha256=digest,
-                        response=response)
+                        response=response, request_payload=payload,
+                        native_log_start_offset=begin_offset,
+                        native_log_end_offset=native_log.stat().st_size if native_log.exists() else 0)
                     out.write(json.dumps(row,allow_nan=False)+'\n');out.flush()
                     rows.append(row)
                     print(f'{tag} {phase} {which} {index+1}/{len(schedule)} '
@@ -383,6 +399,10 @@ def run_case(args, engine, variant, overrides):
         for row, native in zip(rows, natives):
             row['native_timing'] = native['timings_seconds']
             row['native_speculative'] = native['speculative']
+        # Persist the native phase timings and real MTP accounting, not just
+        # the HTTP response. Never divide total request wall time into decode.
+        with (folder/'requests.jsonl').open('w') as out:
+            for row in rows: out.write(json.dumps(row, allow_nan=False)+'\n')
     (folder/'result.json').write_text(json.dumps(summary_for(rows),indent=2,allow_nan=False)+'\n')
     return dict(engine=engine,variant=variant,overrides=overrides,status='ok',
                 request_count=len(rows),summary=summary_for(rows),
