@@ -367,3 +367,13 @@ scope and marks whether that chunk was eligible for early execution. Ineligible
 small chunks report zero temporal overlap but remain in route conservation. This
 does not change execution or relax the strict cross-arm output/MTP equality gate;
 one protected rerun is required before promotion.
+
+Run 38034582637 repeated the complete A/B and all build/numerical gates, but exposed
+that the first correction still defined a requested scope as `stream_experts`.
+The 13-token initial prefill does not enable expert streaming, so its 4,839 CPU
+routes still had no row. The candidate again preserved exact output, usage and MTP
+accounting while reducing the three warmed medians: HTTP 42.877→40.114 s (6.4%)
+and native prefill 35.233→31.848 s (9.6%); decode medians were 7.543/7.977 s.
+The final accounting fix defines telemetry request scope from prefill plus the
+explicit overlap option, then separately marks execution eligibility from streaming,
+device combine and non-serial scheduling. It changes no work placement.
