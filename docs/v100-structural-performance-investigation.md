@@ -690,7 +690,7 @@ full-model numerical gates support promotion. Do not repeat rejected scheduling
 experiments. No Phase18/SV8, below-4-bit weights, cache eviction, unrelated process
 termination, security changes or installed Strata modifications are authorized.
 
-1. **Non-MoE prefill attribution — in progress.** Use qualified adaptive156 at
+1. **Non-MoE prefill attribution — completed.** Use qualified adaptive156 at
    8192 context, BF16KV, MTP2, 2048 chunks and 88 workers on 32 physical cores.
    One uninstrumented fresh server and one diagnostic fresh server each execute
    cold + four warmups + measured 7111/128/zero-reuse requests. Byte-delimited
@@ -748,3 +748,52 @@ protected run uses `--prefill-breakdown` and produces
 unchanged. All GPU jobs share `v100-sv0-hardware`, cancel-in-progress false, with
 CMake parallel level 32. Evidence aliases remain outside uploaded bundles; uploads
 reject symlinks and bundles >=1 GiB.
+
+
+## Six-step Step 1 completed; Step 6 serving controls started
+
+Run [38086716479](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38086716479)
+passed all gates and paired output/usage/MTP checks; artifact 11682880397 retains
+per-request evidence. Uninstrumented warmed HTTP/native prefill/decode were
+36.4945 / 30.0390 / 5.7993 s. Diagnostic native prefill was 38.7175 s, of which
+38.6655 s was covered by four chunks (all 7111 prompt tokens); the accounting
+difference was 0.0521 s. Instrumentation increased warmed prefill by 8.6785 s
+(28.9%), principally complicating the inclusive MoE/host timeline. Cold reference
+was also variable (49.1702 s prefill vs diagnostic 38.1132 s). These are two
+fresh servers, not a precision timing estimate or pure GPU kernel profile.
+
+| Warmed diagnostic category | Seconds |
+|---|---:|
+| MoE inclusive | 24.4489 |
+| GDN projections | 4.7744 |
+| Hyper/norm boundaries | 3.2098 |
+| QSA projections | 1.6026 |
+| QSA attention/indexer | 1.9482 |
+| Final norm/head | 1.3685 |
+| GDN recurrence/controls | 0.6601 |
+| PLE inclusive | 0.6504 |
+
+Non-MoE totaled 14.2165 s in this diagnostic, with similar cold intervals. This
+identifies GDN projections and hyper boundaries as substantial targets, while
+QSA main attention itself was 1.7629 s. It does not establish a production lower
+bound or attribute all projection time to BF16. Nsight Systems remains unavailable.
+SV7's PLE projection path alone is a small part of current prefill; a new dense
+candidate must be selected from actual dispatch ownership, not isolated old gains.
+Inclusive host spans and request-wide stream timings remain non-additive.
+
+Step 6 starts with `--controlled-comparison`: three alternating fresh servers per
+engine, each cold + four warmups + measured 7111/128/zero-reuse requests. Match
+physical-core placement, 8192 maximum context, requested 2048 prefill chunks,
+16-bit KV storage width and requested two-token MTP windows. Strata uses FP16 KV;
+NInfer BF16 KV. Generated Strata config removes the host-backed KV-resident option,
+sets explicit 6606 expert slots (approximate 20.7 GB from average expert size),
+and preserves installed assets/profile/min-p/resident CPU budget. Actual allocation
+and lending/fallback logs govern; equal cache bytes are not assumed from requested
+counts. No changes to weights or production defaults.
+
+Pinned installed Strata source (`src/program/generate.cpp`) explicitly rejects
+serving when `spec < 2`, so this is an initial serving control, not a no-spec
+comparison. A separate supported native no-spec route remains pending. Weight
+quantization, BF16/FP16 KV values, speculative algorithms and acceptance still
+prevent matched-quality/equal-work claims. Each report retains phase timings,
+usage, output hashes, accepted work and observed memory/cache evidence.

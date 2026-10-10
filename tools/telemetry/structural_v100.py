@@ -280,6 +280,8 @@ def main():
                    help='step 5: qualified adaptive156 versus installed Strata; larger-context feasibility')
     p.add_argument('--prefill-breakdown', action='store_true',
                    help='six-step plan step 1: paired qualified adaptive156 timing and stage attribution')
+    p.add_argument('--controlled-comparison', action='store_true',
+                   help='step 6 initial serving controls: 8K capacity, 16-bit KV, 2048 chunk, MTP2, physical cores')
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=True)
     inventory(a)
@@ -310,9 +312,23 @@ def main():
                                   NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=value))
                      for backend,value in [('fp16-resident','0'),('fp16-resident-overlap','1')]]
     default_arm = ('ninfer', 'v100-default', dict(ARMS[0][2]))
+    if a.controlled_comparison:
+        # Installed serving rejects spec<2. Preserve that engine contract and
+        # record this limitation; a no-spec native-route comparison remains separate.
+        cfg = json.loads(a.strata_config.read_text())
+        flags = cfg['args']
+        if '--kv-resident' in flags:
+            index = flags.index('--kv-resident'); del flags[index:index+2]
+        for key, value in [('--max-context','8192'),('--kv','fp16'),('--prefill','2048'),
+                           ('--spec','2'),('--expert-cache','6606')]:
+            flags = ab.option(flags,key,value)
+        cfg['args'] = flags
+        path = a.output/'controlled-strata-config.json'
+        path.write_text(json.dumps(cfg,indent=2)+'\n')
+        a.strata_config = path
     manifest_arms = ([('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
                      [default_arm] if a.qualified_default_smoke else
-                     [("ninfer", "adaptive156-qualified", residency_arms()[1][2]), ARMS[1]] if a.final_comparison else
+                     [("ninfer", "adaptive156-qualified", residency_arms()[1][2]), ARMS[1]] if (a.final_comparison or a.controlled_comparison) else
                      residency_arms() if a.residency_gemm_ab else
                      [('ninfer', backend, flags) for backend, flags in gemm_arms]
                      if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab) else ARMS)
@@ -325,6 +341,7 @@ def main():
         stream_attribution_only=a.stream_attribution_only, expert_gemm_ab=a.expert_gemm_ab, resident_gemm_ab=a.resident_gemm_ab, cpu_stream_overlap_ab=a.cpu_stream_overlap_ab,
         qualified_default_smoke=a.qualified_default_smoke,
         residency_gemm_ab=a.residency_gemm_ab, final_comparison=a.final_comparison,
+        controlled_comparison=a.controlled_comparison,
         timing_telemetry_level=0, diagnostic_telemetry_level=2,
         cache_budget='actual allocations logged; requested maxima are not equal-memory controls',
         cold_definition='first request after fresh server; host file cache preserved',
@@ -336,14 +353,14 @@ def main():
         if ab.gpu_free_mib() < 28000: raise RuntimeError('GPU occupied; no processes were stopped')
         # Preserve each engine's evidenced placement: NInfer physical-core mask,
         # Strata native inherited CPU set. Record both rather than retune Strata.
-        a.launch_prefix = ninfer_placement if engine == 'ninfer' else []
+        a.launch_prefix = ninfer_placement if (engine == 'ninfer' or a.controlled_comparison) else []
         try:
             result = ab.run_case(a, engine, tag, overrides)
             folder = a.output/(engine+'-'+tag)
             cell = dict(engine=engine, arm=arm, mode=mode, folder=str(folder), result=result)
             if a.residency_gemm_ab:
                 cell['residency'] = residency_observation(folder, a.max_output_tokens)
-            if a.final_comparison or a.prefill_breakdown:
+            if a.final_comparison or a.prefill_breakdown or a.controlled_comparison:
                 samples=[json.loads(line) for line in (folder/'system.jsonl').read_text().splitlines()]
                 peaks=[r.get('gpu',{}).get('metrics',{}).get('memory_used_bytes') for r in samples
                        if r.get('kind')=='system_sample']
@@ -363,6 +380,36 @@ def main():
         finally:
             (a.output/'summary.json').write_text(json.dumps(dict(cells=cells, timing=summarize(cells)), indent=2)+'\n')
         ab.release_gpu()
+    if a.controlled_comparison:
+        arms=[('ninfer','adaptive156-qualified',residency_arms()[1][2]),ARMS[1]]
+        for repeat in range(3):
+            for engine,arm,flags in (arms if repeat!=1 else list(reversed(arms))):
+                run(engine,arm,flags,arm+'-controlled-r'+str(repeat),'timing')
+        cache=[]
+        for c in cells:
+            folder=Path(c['folder'])
+            if c['engine']=='strata':
+                text=gzip.open(folder/'native-engine.log.gz','rt').read()
+                cache.append(dict(engine='strata',arm=c['arm'],
+                    requested_slots=6606, actual_cache_lines=[line for line in text.splitlines()
+                        if ('expert cache' in line.lower() or 'prompt chunk' in line.lower())
+                        and ('slots' in line.lower() or 'chunk' in line.lower())],
+                    sampled_peak_gpu_bytes=c['sampled_peak_gpu_bytes']))
+            else:
+                cache.append(dict(engine='ninfer',arm=c['arm'],residency=c['residency']))
+        report=dict(step=6,status='serving_controls_complete',timing=summarize(cells),cache=cache,
+            controls=dict(context=8192,kv_storage_bits=16,prefill_chunk_requested=2048,
+                          draft_window_requested=2,physical_cpus=cpus,prompt_tokens=7111,
+                          output_limit=128,prefix_reuse=False),
+            limitations=['Installed Strata serving rejects spec<2; no-spec native baseline remains pending.',
+                         'BF16 versus FP16 KV are different representations; only storage width is matched.',
+                         'Expert weights differ; equal quantization/quality is not asserted.',
+                         'Strata 6606 requested slots target about 20.7 GB using mean expert size; actual bytes in logs govern.',
+                         'MTP algorithms/min-p and accepted work differ; decode is not equal-work.',
+                         'Requested chunk size must be checked against actual Strata lending/fallback logs.'])
+        (a.output/'controlled-comparison-report.json').write_text(json.dumps(report,indent=2)+'\n')
+        print('Step 6 serving controls complete; no-spec native comparison remains pending.',flush=True)
+        return
     if a.prefill_breakdown:
         engine, arm, flags = ('ninfer', 'adaptive156-qualified', residency_arms()[1][2])
         run(engine, arm, flags, arm+'-reference', 'timing')
