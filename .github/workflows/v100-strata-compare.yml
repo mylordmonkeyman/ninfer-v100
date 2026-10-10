@@ -1,5 +1,5 @@
 name: V100 Structural Engine Comparison
-# Step 1: qualified GEMM/overlap with static64 versus adaptive156; bounded Step 2 diagnostics.
+# Step 3: adaptive156 CPU dispatch before versus after resident submission.
 on:
   workflow_dispatch:
   push:
@@ -108,11 +108,11 @@ jobs:
           { command -v nsys || true; nsys --version 2>&1 || true; } > "$QUALIFICATION_RESULTS/profiler-availability.txt"
           # Existing bounded CUDA event ledgers are used in separate diagnostics.
           # No profiler installation, ptrace changes, or security changes.
-      - name: Step 1 residency comparison and separate Step 2 diagnostics
+      - name: Step 3 CPU resident overlap comparison and separate diagnostics
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --residency-gemm-ab \
+          python3 tools/telemetry/structural_v100.py --cpu-resident-overlap-ab \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \

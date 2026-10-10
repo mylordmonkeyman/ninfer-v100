@@ -491,3 +491,52 @@ partial-safe evidence. Numerical thresholds are unchanged. No Phase18/SV8,
 unrelated process termination, security changes or model conversion is authorized
 by this campaign. Resume through GitHub after the result, advancing the numbered
 steps without duplicate healthy jobs.
+
+## Five-step continuation: Steps 1–2 completed, Step 3 experiment
+
+Run [38060490788](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38060490788)
+completed successfully on October 10. Three alternating fresh servers per arm,
+each cold + four warmups + measured request, used the same 7111/128 frontend workload.
+Both arms explicitly enabled qualified streamed/resident FP16 GEMM and CPU overlap.
+
+| Warmed median | Static64 | Adaptive156 | Reduction |
+|---|---:|---:|---:|
+| HTTP request | 40.1527 s | 36.3596 s | 9.45% |
+| Native prefill | 32.4406 s | 30.2795 s | 6.66% |
+| Sampled peak GPU memory | 18.46 GiB | 29.83 GiB | — |
+
+Actual fully seeded resident capacity was 3072 versus 7488 experts, using
+8,494,252,032 versus 20,704,739,328 bytes; each arm retained the 2 GiB allocator
+reserve. Both cold and measured outputs repeat within each arm, but differ between
+arms. Adaptive warmed decode fell from 7.6980 to 5.7491 s with different MTP
+acceptance/work, so this does not isolate a decode operator speedup. Adaptive156
+is the next screening reference at 8192 context, not a universal deployment default.
+The existing independent FP32 GEMM oracle and stream/cache join fixtures passed;
+this does not close historical full-model drift qualification.
+
+Step 2 used separate two-request 7K/32-output diagnostics. In the adaptive arm,
+MoE reduction accounted for 18,604.261 of 33,692.276 ms (55.22%) of the repeated
+four-chunk stage timeline. Streamed experts contributed aggregate copy 10,316.933,
+compute-wait 8,725.422 and kernel 7,671.732 ms across both requests; these overlap
+and are not additive wall latency. CPU work totaled 18,174.475 ms, with 10,074.805
+ms overlapping streamed submission. Source inspection establishes a remaining
+schedule gap: all resident consumers are submitted before CPU misses start. These
+measurements identify the expert pipeline as the next target; they do not establish
+how much the newly identified CPU-start gap costs.
+
+Step 3 implements an experimental CPU-before-resident schedule selected by
+`NINFER_V100_PREFILL_CPU_RESIDENT_OVERLAP=1` (unset/0 retains the qualified schedule).
+CPU tasks and output storage are finalized before asynchronous dispatch; resident
+leases and resident-before-streamed GPU ordering remain intact. Exception cleanup
+joins CPU work before releasing buffers or draining cache/stream owners. Arithmetic
+and deterministic route reduction are unchanged. Serial/ineligible scopes retain
+existing behavior. The new diagnostic fields measure resident host submission,
+its CPU overlap, and CPU join wait without adding CUDA synchronization.
+
+`--cpu-resident-overlap-ab` compares resident-first/CPU-first on adaptive156 with
+three alternating fresh servers per arm and the same six-request schedule. It
+requires exact output, usage and native MTP work across corresponding request
+ordinals, allowing normal adaptive cold-to-warm changes. Separate diagnostics
+validate dispatch and CPU route conservation. Defaults remain unchanged until
+request-level evidence supports adoption. Steps 4 (decode) and 5 (contemporary
+Strata/long-context comparison) remain pending Step 3 results.

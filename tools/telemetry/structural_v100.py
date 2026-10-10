@@ -193,6 +193,8 @@ def main():
                    help='one server with unset V100 selectors; require qualified default dispatch and replay')
     p.add_argument('--residency-gemm-ab', action='store_true',
                    help='step 1: static64 versus adaptive156, both with qualified GEMM and CPU overlap')
+    p.add_argument('--cpu-resident-overlap-ab', action='store_true',
+                   help='step 3: adaptive156 CPU misses before versus after resident submission')
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=True)
     inventory(a)
@@ -222,11 +224,15 @@ def main():
                                   NINFER_V100_PREFILL_RESIDENT_GEMM='1',
                                   NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=value))
                      for backend,value in [('fp16-resident','0'),('fp16-resident-overlap','1')]]
+    if a.cpu_resident_overlap_ab:
+        base = residency_arms()[1][2]
+        gemm_arms = [(name, dict(base, NINFER_V100_PREFILL_CPU_RESIDENT_OVERLAP=value))
+                     for name, value in [('resident-first', '0'), ('cpu-first', '1')]]
     default_arm = ('ninfer', 'v100-default', dict(ARMS[0][2]))
     manifest_arms = ([default_arm] if a.qualified_default_smoke else
                      residency_arms() if a.residency_gemm_ab else
                      [('ninfer', backend, flags) for backend, flags in gemm_arms]
-                     if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab) else ARMS)
+                     if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.cpu_resident_overlap_ab) else ARMS)
     (a.output/'manifest.json').write_text(json.dumps(dict(prompt=LONG, short_prompt=ab.SHORT,
         output_limit=32 if (a.stream_attribution_only or a.qualified_default_smoke) else 128,
         physical_cpus=cpus,
@@ -234,11 +240,12 @@ def main():
         fresh_servers_per_arm=1 if (a.stream_attribution_only or a.qualified_default_smoke) else 3,
         stream_attribution_only=a.stream_attribution_only, expert_gemm_ab=a.expert_gemm_ab, resident_gemm_ab=a.resident_gemm_ab, cpu_stream_overlap_ab=a.cpu_stream_overlap_ab,
         qualified_default_smoke=a.qualified_default_smoke,
-        residency_gemm_ab=a.residency_gemm_ab,
+        residency_gemm_ab=a.residency_gemm_ab, cpu_resident_overlap_ab=a.cpu_resident_overlap_ab,
         timing_telemetry_level=0, diagnostic_telemetry_level=2,
         cache_budget='actual allocations logged; requested maxima are not equal-memory controls',
         cold_definition='first request after fresh server; host file cache preserved',
-        cross_quant_comparison='same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.residency_gemm_ab)
+        cross_quant_comparison='same artifact and arithmetic; CPU/GPU submission scheduling only' if a.cpu_resident_overlap_ab else
+            'same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.residency_gemm_ab)
             else 'descriptive; source artifacts and frontend token counts differ',
         ninfer_flags=a.ninfer_flags), indent=2)+'\n')
     cells = []
@@ -349,12 +356,24 @@ def main():
             resident_gemm_routes=sum(row['routes'] for row in resident),
             streamed_routes=sum(row['routes'] for row in streamed)),indent=2),flush=True)
         return
-    if a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab:
+    if a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.cpu_resident_overlap_ab:
         engine, arm, overrides = ARMS[0]
         arms = gemm_arms
         for repeat in range(3):
             for backend, flags in (arms if repeat != 1 else list(reversed(arms))):
                 run(engine, backend, flags, backend+'-r'+str(repeat), 'timing')
+        if a.cpu_resident_overlap_ab:
+            # Adaptive cache warms across requests: compare each request ordinal
+            # across schedules, rather than requiring cold and warm arithmetic parity.
+            signatures = defaultdict(set)
+            for cell in cells:
+                if cell['mode'] != 'timing': continue
+                for ordinal, line in enumerate((Path(cell['folder'])/'requests.jsonl').read_text().splitlines()):
+                    row = json.loads(line)
+                    signatures[ordinal].add(json.dumps([row['output_sha256'], row['response']['usage'],
+                                                        row.get('native_speculative')], sort_keys=True))
+            if len(signatures) != 6 or any(len(values) != 1 for values in signatures.values()):
+                raise ValueError('CPU/resident scheduling changed output, usage or MTP work at matching request ordinal')
         if a.cpu_stream_overlap_ab:
             signatures=set()
             for cell in cells:
@@ -371,6 +390,16 @@ def main():
             diagnostic=dict(flags, NINFER_FLASH_NEXT_STAGE_LEDGER='1',
                             NINFER_V100_EXPERT_STREAM_TIMING='1')
             run(engine,backend,diagnostic,backend+'-diagnostic','diagnostic')
+            if a.cpu_resident_overlap_ab:
+                rows = cells[-1]['work']['early_cpu_stream']
+                expected = cells[-1]['work']['phases']['prefill']['counters'].get('cpu_routes', 0)
+                if not rows or sum(r['cpu_routes'] for r in rows) != expected:
+                    raise ValueError('CPU/resident diagnostics do not conserve CPU routes')
+                eligible = [r for r in rows if r['eligible']]
+                if not eligible or any(r['cpu_before_resident'] != (backend == 'cpu-first') for r in eligible):
+                    raise ValueError('CPU/resident schedule does not match selected backend')
+                if backend == 'resident-first' and any(r['resident_overlap_ms'] > 0 for r in eligible):
+                    raise ValueError('resident-first schedule reported impossible CPU overlap')
             if a.cpu_stream_overlap_ab:
                 rows=cells[-1]['work']['early_cpu_stream']
                 if bool(rows)!=(backend=='fp16-resident-overlap'):
