@@ -449,3 +449,45 @@ preserved, the compact expert payload is unchanged, and no unresolved in-scope
 decision warrants another runner experiment. The remaining gap to Strata is not
 an apples-to-apples kernel claim because quantization, KV, MTP and model arithmetic
 differ; the same-work NInfer improvements are the supported deployment result.
+
+## Authorized five-step continuation
+
+On October 10 the user authorized executing the following performance plan, with
+each step identified and reported on completion. The prior structural-default
+milestone remains complete; this is a new investigation of the remaining gap.
+
+1. **Residency with qualified GEMM/overlap — in progress.** Compare static64 with
+   adaptive LRU156, both explicitly selecting streamed/resident FP16 GEMM and early
+   CPU overlap. Earlier cache-size conclusions used SIMT and need not apply after
+   the compute change. This is a combined capacity/policy comparison, not isolated
+   attribution to either variable. Retain the 7111-token prompt, 128 emitted tokens,
+   zero prefix reuse, MTP2, BF16 KV, 2048-token chunks and 88 workers on physical
+   cores. Three alternating fresh servers per arm each run cold + four warmups +
+   one measured request. Observe actual allocation/seeding and sampled memory;
+   preserve allocator reserves. Record outputs and MTP work instead of asserting
+   numerical equivalence from equal frontend counts. No default changes yet.
+2. **Remaining critical path — pending interpretation.** The same single protected
+   job collects separate two-request 7K/32-output diagnostics for both arms with
+   existing stage, streamed-expert and CPU-overlap ledgers. Use the winning arm's
+   evidence first. Inclusive/overlapping intervals are not additive latency. Add
+   another bounded diagnostic only if a missing observation changes the next design.
+3. **Expert pipeline — pending Step 2.** Implement the strongest measured remedy:
+   batching, staged dequantization/GEMM overlap, justified expanded-weight reuse,
+   or recalibrated CPU/GPU routing. Qualify the affected operator/lifetime contract
+   and measure request-level benefit; do not repeat old ring/chunk sweeps unchanged.
+4. **Decode — pending attribution.** Investigate small routed groups and MTP
+   verification separately; the qualified prefill GEMM crossover is 32 routes.
+   Choose small-group GPU execution or CPU-miss improvements from observed costs.
+   Different >=4-bit representations require independent numerical assessment.
+5. **Strata comparison and longer-context advantage — pending.** Rebenchmark both
+   engines contemporaneously, disclose quantization/KV/MTP/memory differences, and
+   evaluate residency, selected-block attention and speculation at larger contexts.
+   Exceeding historical Strata time alone is not proof of a matched quality win.
+
+Step 1 uses `--residency-gemm-ab` in `tools/telemetry/structural_v100.py` and the
+existing protected structural workflow. It builds NInfer once, preserves the
+original model and installed Strata, and records `residency-report.json` alongside
+partial-safe evidence. Numerical thresholds are unchanged. No Phase18/SV8,
+unrelated process termination, security changes or model conversion is authorized
+by this campaign. Resume through GitHub after the result, advancing the numbered
+steps without duplicate healthy jobs.

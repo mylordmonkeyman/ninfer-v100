@@ -4,8 +4,10 @@ from collections import Counter, defaultdict
 import copy
 import gzip
 import json
+import math
 import os
 from pathlib import Path
+import re
 import statistics
 import struct
 import subprocess
@@ -31,6 +33,44 @@ ARMS = [('ninfer', 'static64', dict(COMMON, NINFER_V100_EXPERT_POLICY='static',
         ('strata', 'native', {}),
         ('ninfer', 'adaptive156', dict(COMMON, NINFER_V100_EXPERT_POLICY='lru',
                                       NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS='156'))]
+
+
+def residency_arms():
+    qualified = dict(NINFER_V100_PREFILL_EXPERT_GEMM='fp16',
+                     NINFER_V100_PREFILL_RESIDENT_GEMM='1',
+                     NINFER_V100_PREFILL_CPU_STREAM_OVERLAP='1')
+    return [(engine, arm, dict(flags, **qualified))
+            for engine, arm, flags in (ARMS[0], ARMS[2])]
+
+
+def residency_observation(folder, output_tokens):
+    rows = [json.loads(line) for line in (folder/'requests.jsonl').read_text().splitlines()]
+    if not rows:
+        raise ValueError('missing residency requests')
+    for row in rows:
+        usage = row['response']['usage']
+        cached = usage.get('prompt_tokens_details', {}).get('cached_tokens', 0)
+        if (usage['prompt_tokens'] != 7111 or usage['completion_tokens'] != output_tokens
+                or cached != 0 or row['response']['choices'][0]['finish_reason'] != 'length'):
+            raise ValueError('residency request did not conserve the fixed frontend workload')
+        timing = row.get('native_timing') or {}
+        if any(not isinstance(timing.get(k), (int, float)) or not math.isfinite(timing[k])
+               or timing[k] <= 0 for k in ('prefill', 'decode')):
+            raise ValueError('missing finite native prefill/decode timings')
+    log = (folder/'server.log').read_text()
+    allocated = {key: int(value) for key, value in re.findall(
+        r'^phase13\.cache\.(slots_per_layer|bytes|transfer_bytes|reserve_bytes)=(\d+)$',
+        log, re.MULTILINE)}
+    if not allocated.get('slots_per_layer') or not allocated.get('bytes'):
+        raise ValueError('missing actual residency allocation')
+    seeded = re.search(r'^v100\.profile\.seeded=(\d+)$', log, re.MULTILINE)
+    if not seeded or int(seeded[1]) != allocated['slots_per_layer']*48:
+        raise ValueError('startup profile did not seed the actual cache capacity')
+    memory = [r.get('gpu', {}).get('metrics', {}).get('memory_used_bytes')
+              for line in (folder/'system.jsonl').read_text().splitlines()
+              for r in [json.loads(line)] if r.get('kind') == 'system_sample']
+    return dict(actual_cache=allocated, seeded_experts=int(seeded[1]),
+                sampled_peak_gpu_bytes=max((v for v in memory if v is not None), default=None))
 
 
 def inventory(a):
@@ -151,6 +191,8 @@ def main():
                    help='one static64 diagnostic server, cold and repeated 7K requests only')
     p.add_argument('--qualified-default-smoke', action='store_true',
                    help='one server with unset V100 selectors; require qualified default dispatch and replay')
+    p.add_argument('--residency-gemm-ab', action='store_true',
+                   help='step 1: static64 versus adaptive156, both with qualified GEMM and CPU overlap')
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=True)
     inventory(a)
@@ -182,6 +224,7 @@ def main():
                      for backend,value in [('fp16-resident','0'),('fp16-resident-overlap','1')]]
     default_arm = ('ninfer', 'v100-default', dict(ARMS[0][2]))
     manifest_arms = ([default_arm] if a.qualified_default_smoke else
+                     residency_arms() if a.residency_gemm_ab else
                      [('ninfer', backend, flags) for backend, flags in gemm_arms]
                      if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab) else ARMS)
     (a.output/'manifest.json').write_text(json.dumps(dict(prompt=LONG, short_prompt=ab.SHORT,
@@ -191,10 +234,11 @@ def main():
         fresh_servers_per_arm=1 if (a.stream_attribution_only or a.qualified_default_smoke) else 3,
         stream_attribution_only=a.stream_attribution_only, expert_gemm_ab=a.expert_gemm_ab, resident_gemm_ab=a.resident_gemm_ab, cpu_stream_overlap_ab=a.cpu_stream_overlap_ab,
         qualified_default_smoke=a.qualified_default_smoke,
+        residency_gemm_ab=a.residency_gemm_ab,
         timing_telemetry_level=0, diagnostic_telemetry_level=2,
         cache_budget='actual allocations logged; requested maxima are not equal-memory controls',
         cold_definition='first request after fresh server; host file cache preserved',
-        cross_quant_comparison='same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab)
+        cross_quant_comparison='same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.residency_gemm_ab)
             else 'descriptive; source artifacts and frontend token counts differ',
         ninfer_flags=a.ninfer_flags), indent=2)+'\n')
     cells = []
@@ -207,6 +251,8 @@ def main():
             result = ab.run_case(a, engine, tag, overrides)
             folder = a.output/(engine+'-'+tag)
             cell = dict(engine=engine, arm=arm, mode=mode, folder=str(folder), result=result)
+            if a.residency_gemm_ab:
+                cell['residency'] = residency_observation(folder, a.max_output_tokens)
             if mode == 'diagnostic':
                 cell['work'] = native_work(folder, engine)
                 if engine == 'ninfer' and not cell['work']['ninfer_prefill_chunks']:
@@ -219,6 +265,42 @@ def main():
         finally:
             (a.output/'summary.json').write_text(json.dumps(dict(cells=cells, timing=summarize(cells)), indent=2)+'\n')
         ab.release_gpu()
+    if a.residency_gemm_ab:
+        arms = residency_arms()
+        for repeat in range(3):
+            for engine, arm, flags in (arms if repeat != 1 else list(reversed(arms))):
+                run(engine, arm, flags, arm+'-gemm-r'+str(repeat), 'timing')
+        timing = summarize(cells)
+        report = dict(step=1, status='timing_complete', timing=timing,
+            comparison='combined cache policy/capacity choice, not isolated policy attribution',
+            output_parity='recorded diagnostically; residency can change CPU/GPU arithmetic and MTP work',
+            observations=[dict(arm=c['arm'], mode=c['mode'], **c['residency']) for c in cells])
+        (a.output/'residency-report.json').write_text(json.dumps(report, indent=2)+'\n')
+        print(json.dumps(report, indent=2), flush=True)
+        # Separate diagnostics cover both possible winners without instrumenting timing.
+        # Step 2 uses these observations first; another job is warranted only for
+        # a material attribution gap, not another residency sweep.
+        a.max_output_tokens=32; a.telemetry_level=2
+        a.request_schedule=[('diagnostic','long'),('diagnostic','long')]
+        for engine, arm, flags in arms:
+            diagnostic=dict(flags, NINFER_FLASH_NEXT_STAGE_LEDGER='1',
+                            NINFER_V100_EXPERT_STREAM_TIMING='1')
+            run(engine, arm, diagnostic, arm+'-gemm-diagnostic', 'diagnostic')
+            work=cells[-1]['work']
+            early=work['early_cpu_stream']
+            expected=work['phases']['prefill']['counters'].get('cpu_routes',0)
+            if not early or sum(row['cpu_routes'] for row in early)!=expected:
+                raise ValueError('residency diagnostic does not conserve prefill CPU routes')
+            if any(row['overlap_ms'] for row in early if not row['eligible']):
+                raise ValueError('ineligible residency scope reported CPU overlap')
+            if not work['expert_resident_gemm'] or not work['expert_stream_timing']:
+                raise ValueError('qualified resident/stream expert dispatch was not observed')
+        report['status']='complete'
+        report['diagnostics']=[dict(arm=c['arm'], residency=c['residency'], work=c['work'])
+                               for c in cells if c['mode']=='diagnostic']
+        (a.output/'residency-report.json').write_text(json.dumps(report, indent=2)+'\n')
+        print('Step 1 residency comparison complete; Step 2 diagnostic evidence retained.', flush=True)
+        return
     if a.stream_attribution_only:
         a.max_output_tokens = 32; a.telemetry_level = 2
         a.request_schedule = [('diagnostic', 'long'), ('diagnostic', 'long')]

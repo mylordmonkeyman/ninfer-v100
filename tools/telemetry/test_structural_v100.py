@@ -9,11 +9,43 @@ import unittest
 from unittest.mock import patch
 
 import ab_v100
-from structural_v100 import inventory, native_work, summarize
+from structural_v100 import inventory, native_work, summarize, residency_arms, residency_observation
 from test_schema import fixture
 
 
 class StructuralTests(unittest.TestCase):
+    def test_residency_comparison_preserves_gemm_selectors_and_validates_observed_work(self):
+        arms = residency_arms()
+        self.assertEqual([arm for _, arm, _ in arms], ['static64', 'adaptive156'])
+        for _, _, flags in arms:
+            self.assertEqual(flags['NINFER_V100_PREFILL_EXPERT_GEMM'], 'fp16')
+            self.assertEqual(flags['NINFER_V100_PREFILL_RESIDENT_GEMM'], '1')
+            self.assertEqual(flags['NINFER_V100_PREFILL_CPU_STREAM_OVERLAP'], '1')
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            row = dict(response=dict(usage=dict(prompt_tokens=7111, completion_tokens=128,
+                prompt_tokens_details=dict(cached_tokens=0)), choices=[dict(finish_reason='length')]),
+                native_timing=dict(prefill=32.6, decode=7.9))
+            requests = folder/'requests.jsonl'
+            requests.write_text(json.dumps(row)+'\n')
+            (folder/'server.log').write_text('phase13.cache.slots_per_layer=64\n'
+                'phase13.cache.bytes=8494252032\nv100.profile.seeded=3072\n')
+            (folder/'system.jsonl').write_text(json.dumps(dict(kind='system_sample',
+                gpu=dict(metrics=dict(memory_used_bytes=19_000_000_000))))+'\n')
+            observed = residency_observation(folder, 128)
+            self.assertEqual(observed['actual_cache']['slots_per_layer'], 64)
+            self.assertEqual(observed['sampled_peak_gpu_bytes'], 19_000_000_000)
+            row['response']['usage']['prompt_tokens_details']['cached_tokens'] = 7111
+            requests.write_text(json.dumps(row)+'\n')
+            with self.assertRaisesRegex(ValueError, 'fixed frontend workload'):
+                residency_observation(folder, 128)
+            row['response']['usage']['prompt_tokens_details']['cached_tokens'] = 0
+            requests.write_text(json.dumps(row)+'\n')
+            (folder/'server.log').write_text('phase13.cache.slots_per_layer=64\n'
+                'phase13.cache.bytes=8494252032\nv100.profile.seeded=3060\n')
+            with self.assertRaisesRegex(ValueError, 'actual cache capacity'):
+                residency_observation(folder, 128)
+
     def test_directory_and_native_format_inventory_without_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); pack = root/'pack'; pack.mkdir()
