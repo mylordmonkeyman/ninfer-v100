@@ -412,3 +412,22 @@ the unchanged NRMSE 0.002 and cosine 0.99999 limits. The three structural paths
 are now qualified together. The next action is to select streamed FP16 GEMM,
 resident GEMM and CPU/stream overlap by default for Volta builds while retaining
 explicit legacy rollback values and validating the default-selected path once.
+
+## Volta default promotion candidate
+
+The qualified combination is now selected by default only when
+`NINFER_VOLTA_BUILD` is active. Unset selectors choose streamed FP16 expert GEMM,
+resident FP16 expert GEMM and early CPU/stream overlap. Explicit rollback remains
+available with `NINFER_V100_PREFILL_EXPERT_GEMM=simt`,
+`NINFER_V100_PREFILL_RESIDENT_GEMM=0` and
+`NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=0`; non-Volta builds retain the legacy
+defaults unless explicitly opted in. Kernel arithmetic, dispatch thresholds,
+numeric gates, compact cache payload and transfer-budget accounting are unchanged.
+
+The protected validation preserves explicit legacy and qualified fixture gates,
+then starts one fresh server with all three selectors removed from the environment.
+Two identical 7K/32-output requests must replay the exact output, usage and native
+MTP accounting, exercise streamed and resident GEMM, conserve every CPU fallback
+route, and report no overlap for ineligible scopes. This is a deployment-selection
+smoke test, not another performance A/B or parameter sweep. Promotion remains
+pending until that default-selected hardware run passes.

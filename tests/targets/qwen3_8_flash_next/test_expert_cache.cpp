@@ -1,4 +1,5 @@
 #include "targets/qwen3_8_flash_next/impl/expert_cache.h"
+#include "targets/qwen3_8_flash_next/impl/expert_gemm.h"
 #include "targets/qwen3_8_flash_next/impl/cpu_expert_reference.h"
 #include "core/device.h"
 #include "ninfer/ops/expert_route_combine.h"
@@ -265,8 +266,7 @@ int main(){try{
         std::cout<<"cache.decode_batch.exact_parity.paths="<<paths<<'\n';
     }
     cache.set_batched_decode(false);
-    const char* resident_mode=std::getenv("NINFER_V100_PREFILL_RESIDENT_GEMM");
-    const bool resident_gemm=resident_mode && std::strcmp(resident_mode,"1")==0;
+    const bool resident_gemm=flash_next_resident_expert_gemm_requested();
     for(unsigned tokens:{1U,3U,5U,8U,63U,64U,65U,128U}) {
         std::vector<float> scalar(tokens*2560),grouped(tokens*2560),expected(tokens*2560);
         const auto gemm_before=cache.stats().gemm_routes;
@@ -348,8 +348,7 @@ int main(){try{
                 }
             }
             std::future<HostExpertBatchStats> pending;
-            const char* early=std::getenv("NINFER_V100_PREFILL_CPU_STREAM_OVERLAP");
-            if(concurrent && early && std::strcmp(early,"1")==0)
+            if(concurrent && flash_next_cpu_stream_overlap_requested())
                 pending=std::async(std::launch::async,[&] {return pool.run(tasks);});
             cache.begin_download(output.size()*sizeof(float), device.stream);
             if (!concurrent) cache.finish_download(output, device.stream);

@@ -1,5 +1,6 @@
 #include "targets/qwen3_8_flash_next/impl/moe.h"
 #include "targets/qwen3_8_flash_next/impl/expert_cache.h"
+#include "targets/qwen3_8_flash_next/impl/expert_gemm.h"
 #include "targets/qwen3_8_flash_next/impl/expert_stream.h"
 #include "targets/qwen3_8_flash_next/impl/stream_order.h"
 #include "targets/qwen3_8_flash_next/impl/stream_fraction.h"
@@ -525,11 +526,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     std::array<std::vector<std::size_t>, 512> streamed_route_indices;
     std::uint64_t streamed_route_count = 0, streamed_experts = 0;
     bool stream_hits_submitted = false;
-    const char* overlap_mode=std::getenv("NINFER_V100_PREFILL_CPU_STREAM_OVERLAP");
-    if(overlap_mode && *overlap_mode && std::strcmp(overlap_mode,"0") && std::strcmp(overlap_mode,"1"))
-        throw std::invalid_argument("prefill CPU/stream overlap must be 0 or 1");
-    const bool early_cpu_requested=prefill && overlap_mode &&
-        std::strcmp(overlap_mode,"1")==0;
+    const bool early_cpu_requested=prefill && flash_next_cpu_stream_overlap_requested();
     const bool early_cpu=early_cpu_requested && stream_experts && device_route_combine &&
         !(cache && cache->serial_schedule());
     bool grouped_cpu_experts = false;

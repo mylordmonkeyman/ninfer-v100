@@ -149,6 +149,8 @@ def main():
                    help='static64 SIMT versus bounded FP16 expert GEMM, same cold/warmed requests')
     p.add_argument('--stream-attribution-only', action='store_true',
                    help='one static64 diagnostic server, cold and repeated 7K requests only')
+    p.add_argument('--qualified-default-smoke', action='store_true',
+                   help='one server with unset V100 selectors; require qualified default dispatch and replay')
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=True)
     inventory(a)
@@ -178,13 +180,17 @@ def main():
                                   NINFER_V100_PREFILL_RESIDENT_GEMM='1',
                                   NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=value))
                      for backend,value in [('fp16-resident','0'),('fp16-resident-overlap','1')]]
-    manifest_arms = ([('ninfer', backend, flags) for backend, flags in gemm_arms]
+    default_arm = ('ninfer', 'v100-default', dict(ARMS[0][2]))
+    manifest_arms = ([default_arm] if a.qualified_default_smoke else
+                     [('ninfer', backend, flags) for backend, flags in gemm_arms]
                      if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab) else ARMS)
     (a.output/'manifest.json').write_text(json.dumps(dict(prompt=LONG, short_prompt=ab.SHORT,
-        output_limit=32 if a.stream_attribution_only else 128, physical_cpus=cpus,
+        output_limit=32 if (a.stream_attribution_only or a.qualified_default_smoke) else 128,
+        physical_cpus=cpus,
         arms=[ARMS[0]] if a.stream_attribution_only else manifest_arms,
-        fresh_servers_per_arm=1 if a.stream_attribution_only else 3,
+        fresh_servers_per_arm=1 if (a.stream_attribution_only or a.qualified_default_smoke) else 3,
         stream_attribution_only=a.stream_attribution_only, expert_gemm_ab=a.expert_gemm_ab, resident_gemm_ab=a.resident_gemm_ab, cpu_stream_overlap_ab=a.cpu_stream_overlap_ab,
+        qualified_default_smoke=a.qualified_default_smoke,
         timing_telemetry_level=0, diagnostic_telemetry_level=2,
         cache_budget='actual allocations logged; requested maxima are not equal-memory controls',
         cold_definition='first request after fresh server; host file cache preserved',
@@ -228,6 +234,38 @@ def main():
         expected_bytes = sum(p['counters'].get('expert_h2d_bytes', 0) for p in work['phases'].values())
         if not rows or routes != expected or weight_bytes != expected_bytes:
             raise ValueError(f'incomplete stream attribution: routes {routes}/{expected}, bytes {weight_bytes}/{expected_bytes}')
+        return
+    if a.qualified_default_smoke:
+        selectors = ('NINFER_V100_PREFILL_EXPERT_GEMM',
+                     'NINFER_V100_PREFILL_RESIDENT_GEMM',
+                     'NINFER_V100_PREFILL_CPU_STREAM_OVERLAP')
+        inherited = [name for name in selectors if name in os.environ]
+        if inherited: raise ValueError(f'default smoke inherited selector overrides: {inherited}')
+        a.max_output_tokens=32; a.telemetry_level=2
+        a.request_schedule=[('cold','long'),('measured','long')]
+        flags=dict(default_arm[2], NINFER_FLASH_NEXT_STAGE_LEDGER='1',
+                   NINFER_V100_EXPERT_STREAM_TIMING='1')
+        run('ninfer','v100-default',flags,'v100-default-diagnostic','diagnostic')
+        cell=cells[-1]; work=cell['work']
+        rows=[json.loads(line) for line in
+              (Path(cell['folder'])/'requests.jsonl').read_text().splitlines()]
+        signatures={json.dumps([row['output_sha256'],row['response']['usage'],
+                                row.get('native_speculative')],sort_keys=True) for row in rows}
+        if len(rows)!=2 or len(signatures)!=1:
+            raise ValueError('default smoke changed output, usage or native MTP work on replay')
+        early=work['early_cpu_stream']; resident=work['expert_resident_gemm']
+        streamed=work['expert_stream_timing']
+        expected=work['phases']['prefill']['counters'].get('cpu_routes',0)
+        if not early or sum(row['cpu_routes'] for row in early)!=expected:
+            raise ValueError('default CPU overlap dispatch does not conserve prefill CPU routes')
+        if any(row['overlap_ms'] for row in early if not row['eligible']):
+            raise ValueError('ineligible default CPU overlap scope reported temporal overlap')
+        if not resident or not streamed:
+            raise ValueError('default V100 resident or streamed expert dispatch was not observed')
+        print(json.dumps(dict(default_smoke='pass', requests=len(rows),
+            cpu_routes=expected, temporal_overlap_ms=sum(row['overlap_ms'] for row in early),
+            resident_gemm_routes=sum(row['routes'] for row in resident),
+            streamed_routes=sum(row['routes'] for row in streamed)),indent=2),flush=True)
         return
     if a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab:
         engine, arm, overrides = ARMS[0]

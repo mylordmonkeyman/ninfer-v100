@@ -312,8 +312,7 @@ int main() { try {
                      <<" nrmse="<<nrmse<<" cosine="<<cosine<<'\n';
         }
     }
-    if(const char* value=std::getenv("NINFER_V100_PREFILL_RESIDENT_GEMM");
-       value && std::string_view(value)=="1") {
+    if(flash_next_resident_expert_gemm_requested()) {
         require(cache.stats().gemm_routes>0,"resident qualification never dispatched GEMM");
         std::cout<<"resident.gemm.routes="<<cache.stats().gemm_routes<<'\n';
     }

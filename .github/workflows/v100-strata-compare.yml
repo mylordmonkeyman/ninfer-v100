@@ -99,28 +99,45 @@ jobs:
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70 \
             -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
           cmake --build build-structural-comparison --target ninfer-serve ninfer_qwen3_8_flash_next_expert_stream_test ninfer_qwen3_8_flash_next_expert_gemm_test ninfer_qwen3_8_flash_next_expert_cache_test
-          NINFER_V100_EXPERT_STREAM_TIMING=1 ctest --test-dir build-structural-comparison \
+          # Preserve the complete legacy SIMT path as an explicit rollback gate.
+          NINFER_V100_PREFILL_EXPERT_GEMM=simt NINFER_V100_PREFILL_RESIDENT_GEMM=0 \
+            NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=0 NINFER_V100_EXPERT_STREAM_TIMING=1 \
+            ctest --test-dir build-structural-comparison \
             -R '^ninfer_qwen3_8_flash_next_expert_stream_test$' --verbose \
             | tee "$QUALIFICATION_RESULTS/stream-timing-fixture.log"
           # Direct exit-code gate: a no-GPU return77 must fail this hardware job.
           build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_gemm_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/expert-gemm-fp32-oracle.log"
-          NINFER_V100_PREFILL_EXPERT_GEMM=fp16 ctest --test-dir build-structural-comparison \
+          NINFER_V100_PREFILL_EXPERT_GEMM=fp16 NINFER_V100_PREFILL_RESIDENT_GEMM=0 \
+            NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=0 ctest --test-dir build-structural-comparison \
             -R '^ninfer_qwen3_8_flash_next_expert_stream_test$' --output-on-failure \
             | tee "$QUALIFICATION_RESULTS/gemm-stream-coexistence-fixture.log"
           NINFER_V100_PREFILL_EXPERT_GEMM=fp16 NINFER_V100_PREFILL_RESIDENT_GEMM=1 \
+            NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=0 \
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_stream_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/gemm-resident-coexistence-fixture.log"
           # Preserve scalar/grouped SIMT exact parity as a separate baseline gate.
-          NINFER_V100_PREFILL_RESIDENT_GEMM=0 \
+          NINFER_V100_PREFILL_EXPERT_GEMM=simt NINFER_V100_PREFILL_RESIDENT_GEMM=0 \
+            NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=0 \
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/simt-resident-cache-fixture.log"
-          NINFER_V100_PREFILL_RESIDENT_GEMM=1 \
+          NINFER_V100_PREFILL_EXPERT_GEMM=fp16 NINFER_V100_PREFILL_RESIDENT_GEMM=1 \
+            NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=0 \
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/gemm-resident-cache-fixture.log"
-          NINFER_V100_PREFILL_RESIDENT_GEMM=1 NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=1 \
+          NINFER_V100_PREFILL_EXPERT_GEMM=fp16 NINFER_V100_PREFILL_RESIDENT_GEMM=1 \
+            NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=1 \
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/early-cpu-cache-fixture.log"
+          # Unset selectors exercise the coherent Volta deployment defaults.
+          env -u NINFER_V100_PREFILL_EXPERT_GEMM -u NINFER_V100_PREFILL_RESIDENT_GEMM \
+            -u NINFER_V100_PREFILL_CPU_STREAM_OVERLAP \
+            build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_stream_test 2>&1 \
+            | tee "$QUALIFICATION_RESULTS/default-stream-coexistence-fixture.log"
+          env -u NINFER_V100_PREFILL_EXPERT_GEMM -u NINFER_V100_PREFILL_RESIDENT_GEMM \
+            -u NINFER_V100_PREFILL_CPU_STREAM_OVERLAP \
+            build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
+            | tee "$QUALIFICATION_RESULTS/default-cache-join-fixture.log"
           cmake -S telemetry-strata-source -B build-strata-structural-comparison -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70
@@ -134,11 +151,13 @@ jobs:
           { command -v nsys || true; nsys --version 2>&1 || true; } > "$QUALIFICATION_RESULTS/profiler-availability.txt"
           # Existing bounded CUDA event ledgers are used in separate diagnostics.
           # No profiler installation, ptrace changes, or security changes.
-      - name: Compare early CPU misses with qualified GEMM baseline
+      - name: Validate qualified V100 deployment defaults
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --cpu-stream-overlap-ab \
+          env -u NINFER_V100_PREFILL_EXPERT_GEMM -u NINFER_V100_PREFILL_RESIDENT_GEMM \
+            -u NINFER_V100_PREFILL_CPU_STREAM_OVERLAP \
+          python3 tools/telemetry/structural_v100.py --qualified-default-smoke \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \

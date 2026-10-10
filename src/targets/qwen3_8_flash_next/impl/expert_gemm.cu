@@ -94,11 +94,35 @@ __global__ void scatter(const FlashNextCachedExpertGroup* groups, unsigned offse
 }
 }
 
+namespace {
+constexpr bool selected_v100_default() {
+#if defined(NINFER_VOLTA_BUILD)
+    return true;
+#else
+    return false;
+#endif
+}
+bool selected_binary_mode(const char* name) {
+    const char* value=std::getenv(name);
+    if(!value || !*value)return selected_v100_default();
+    if(std::string_view(value)=="0")return false;
+    if(std::string_view(value)=="1")return true;
+    throw std::invalid_argument(std::string(name)+" must be 0 or 1");
+}
+}
+
 bool flash_next_expert_gemm_requested() {
     const char* p=std::getenv("NINFER_V100_PREFILL_EXPERT_GEMM");
-    if(!p || !*p || std::string_view(p)=="simt")return false;
+    if(!p || !*p)return selected_v100_default();
+    if(std::string_view(p)=="simt")return false;
     if(std::string_view(p)=="fp16")return true;
     throw std::invalid_argument("NINFER_V100_PREFILL_EXPERT_GEMM must be simt or fp16");
+}
+bool flash_next_resident_expert_gemm_requested() {
+    return selected_binary_mode("NINFER_V100_PREFILL_RESIDENT_GEMM");
+}
+bool flash_next_cpu_stream_overlap_requested() {
+    return selected_binary_mode("NINFER_V100_PREFILL_CPU_STREAM_OVERLAP");
 }
 struct FlashNextExpertGemm::Impl {
     DeviceBuffer gu{1280*2560*2ULL}, down{2560*640*2ULL};

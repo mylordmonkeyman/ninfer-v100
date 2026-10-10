@@ -23,4 +23,9 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 [[nodiscard]] bool flash_next_expert_gemm_requested();
+// These selectors default on only for the Volta build. Their environment
+// variables remain explicit rollback controls (simt/0) and opt-in controls on
+// other architectures (fp16/1).
+[[nodiscard]] bool flash_next_resident_expert_gemm_requested();
+[[nodiscard]] bool flash_next_cpu_stream_overlap_requested();
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

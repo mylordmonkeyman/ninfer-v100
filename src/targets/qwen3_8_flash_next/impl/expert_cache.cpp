@@ -100,12 +100,7 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
     std::size_t free=0,total=0;
     CUDA_CHECK(cudaMemGetInfo(&free,&total));
     const std::size_t paths=std::size_t(max_tokens)*10;
-    bool resident_gemm=false;
-    if (const char* value=std::getenv("NINFER_V100_PREFILL_RESIDENT_GEMM"); value && *value) {
-        if (std::strcmp(value,"0") && std::strcmp(value,"1"))
-            throw std::invalid_argument("resident expert GEMM must be 0 or 1");
-        resident_gemm=std::strcmp(value,"1")==0;
-    }
+    const bool resident_gemm=flash_next_resident_expert_gemm_requested();
     // Include the bounded expansion/workspace in the same operating budget.
     const auto transfer=paths*(640*sizeof(std::uint16_t)+2560*sizeof(float)+sizeof(FlashNextCachedExpertGroup))
         + (resident_gemm ? FlashNextExpertGemm::device_bytes : 0);
