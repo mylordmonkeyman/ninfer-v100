@@ -171,6 +171,59 @@ expert oracle with timing enabled and verifies that timed route/upload counts
 exactly cover native streamed work. Its result decides whether to implement the
 bounded FP16 routed-expert GEMM replacement. Numerical thresholds remain unchanged.
 
+## Stream attribution and selected implementation
+
+[Run 38013686130](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38013686130)
+passed, including the independent expert stream oracle (2.60 s). Artifact
+11655442811 is 4.48 MB compressed. Both requests conserve 25,755 streamed experts,
+2,654,546 routed inputs and the exact corresponding padded compact H2D bytes.
+Machine-readable evidence: `v100-stream-attribution-38013686130.json`.
+
+| Static64 7K diagnostic | Cold | Repeated |
+|---|---:|---:|
+| Streamed expert kernel interval | 26.568 s | 26.665 s |
+| Concurrent H2D interval sum | 7.033 s | 6.929 s |
+| Compute-stream copy-dependency wait | 0.386 s | 0.155 s |
+
+These sums overlap and must not be added. The repeated request's four long-prompt
+chunk MoE intervals total 38.912 s; streamed kernels alone account for about 68.5%
+of that scope. Event placement excludes copy dependencies; it can still include
+small launch submission gaps. Combined with the prior traffic/cache experiments,
+this supports replacing streamed expert compute before changing CPU placement,
+cache capacity, or transfer policy.
+
+The selected opt-in implementation is `NINFER_V100_PREFILL_EXPERT_GEMM=fp16`
+(default `simt`): decode each submitted compact expert once into reusable FP16
+weights, then gather, gate/up GEMM, FP32 SiLU/product, down GEMM and FP32 scatter.
+One scratch allocation is reused in compute-stream order. A 256-route tile bounds
+activation buffers even at maximum planned route capacity. Owned device scratch
+is 19,597,312 bytes (18.69 MiB), plus library/context allocations observed at runtime.
+There is no persistent expansion of all cached experts or model conversion.
+The initial dispatch threshold is 32 routes; the hardware fixture also records
+SIMT/GEMM costs at 8,16,20,32,64,128,256 routes to qualify that crossover.
+
+Unscaled E2M1 × E4M3 finite weight products fit exactly in FP16; the expert divisor
+is applied in FP32 after each GEMM. Inputs and SiLU products use per-token
+power-of-two normalization before FP16 conversion to avoid range overflow on
+large finite inputs. Accumulation is FP32 with cuBLAS reduced-precision reduction
+disallowed. This changes arithmetic and intermediate casts: no numerical
+qualification is claimed from compilation, pairwise comparison, or plausibility.
+
+The new independent gate uses the existing scalar host decoder and sequential
+FP32 represented-weight formula with FP32 intermediate, without candidate FP16
+casts. Real shapes, all finite nonnegative E4M3 scale codes, three divisors,
+large/tiny/zero BF16 inputs, 1–512 routes including partial and multiple tiles,
+and output guard regions are covered. Preserve NRMSE ≤0.002 and cosine ≥0.99999.
+The existing BF16-boundary stream/coexistence oracle is additionally run with the
+candidate enabled; its criteria are unchanged. No default deployment change.
+
+The next protected job first qualifies both gates, then compares static64 SIMT
+and FP16 on the identical 7K/128-output cold + four warmups + warmed workload,
+three fresh servers per arm with reversed middle order, followed by separate
+cold/repeated 7K diagnostics. Strata is not remeasured. Actual memory, token/MTP
+accounting and changed outputs remain evidence requirements. Retain failure
+artifacts and fix the candidate instead of relaxing a numeric gate.
+
 ## Implementation decision
 
 If current profiling confirms routed expert GPU compute as the leading prefill

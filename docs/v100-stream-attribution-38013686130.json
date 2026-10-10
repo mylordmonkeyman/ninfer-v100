@@ -1,0 +1,26 @@
+{
+  "run_id": 38013686130,
+  "artifact_id": 11655442811,
+  "fixture": "independent expert stream oracle passed 2.60s",
+  "requests": [
+    {
+      "experts": 25755,
+      "routes": 2654546,
+      "copy_ms": 7032.777952,
+      "compute_wait_ms": 386.123968,
+      "kernel_interval_ms": 26567.61065
+    },
+    {
+      "experts": 25755,
+      "routes": 2654546,
+      "copy_ms": 6929.236032,
+      "compute_wait_ms": 155.15552,
+      "kernel_interval_ms": 26664.593874000002
+    }
+  ],
+  "limits": [
+    "Concurrent copy and compute event sums are not additive wall time.",
+    "Kernel interval includes possible launch submission gaps.",
+    "192 rows per request verified against native streamed route and weight upload totals."
+  ]
+}

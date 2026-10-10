@@ -785,3 +785,9 @@ target_include_directories(ninfer_qwen3_8_flash_next_perf_telemetry_test PRIVATE
 target_compile_features(ninfer_qwen3_8_flash_next_perf_telemetry_test PRIVATE cxx_std_20)
 add_test(NAME ninfer_qwen3_8_flash_next_perf_telemetry_test
   COMMAND ninfer_qwen3_8_flash_next_perf_telemetry_test)
+
+# Qualify arithmetic-changing FP16 routed experts against the independent exact
+# represented-weight FP32 formula, rather than a SIMT pairwise comparison.
+ninfer_add_test(ninfer_qwen3_8_flash_next_expert_gemm_test
+  SOURCES targets/qwen3_8_flash_next/test_expert_gemm.cpp
+  LIBRARIES ninfer_qwen3_8_flash_next)

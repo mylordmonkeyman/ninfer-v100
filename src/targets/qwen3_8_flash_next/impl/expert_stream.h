@@ -1,5 +1,6 @@
 #pragma once
 #include "targets/qwen3_8_flash_next/impl/expert_cache.h"
+#include "targets/qwen3_8_flash_next/impl/expert_gemm.h"
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 [[nodiscard]] bool flash_next_expert_stream_requested();
@@ -38,6 +39,7 @@ private:
         cudaEvent_t copy_start = nullptr, wait_start = nullptr, kernel_start = nullptr;
         bool timing_pending = false;
     };
+    std::unique_ptr<FlashNextExpertGemm> gemm_;
     std::array<Slot,8> slots_;  // Up to eight bounded in-flight H2D/compute slots.
     cudaStream_t transfer_ = nullptr;
     unsigned maximum_routes_, next_ = 0, ring_slots_ = 4;

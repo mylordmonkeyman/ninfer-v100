@@ -164,7 +164,8 @@ int main() { try {
     const unsigned slots = flash_next_expert_stream_ring_slots();
     require(slots == 4 || slots == 8, "stream ring must have 4 or 8 slots");
     require(flash_next_expert_stream_device_bytes(4) <
-            std::size_t(slots) * 3ULL * 1024ULL * 1024ULL,
+            std::size_t(slots) * 3ULL * 1024ULL * 1024ULL +
+                (flash_next_expert_gemm_requested() ? FlashNextExpertGemm::device_bytes : 0),
             "decode stream staging reserve is unexpectedly large");
     int devices=0; if(cudaGetDeviceCount(&devices)!=cudaSuccess || !devices) return 77;
     DeviceContext device;

@@ -136,6 +136,8 @@ def main():
                  'strata-config', 'strata-binary', 'output'):
         p.add_argument('--'+name, type=Path, required=True)
     p.add_argument('--gpu-uuid', required=True)
+    p.add_argument('--expert-gemm-ab', action='store_true',
+                   help='static64 SIMT versus bounded FP16 expert GEMM, same cold/warmed requests')
     p.add_argument('--stream-attribution-only', action='store_true',
                    help='one static64 diagnostic server, cold and repeated 7K requests only')
     a = p.parse_args()
@@ -155,15 +157,18 @@ def main():
     a.max_output_tokens = 128
     a.warmups = 4; a.repeats = 1; a.telemetry_level = 0
     a.request_schedule = [('cold', 'long')]+[('warmup', 'long')]*4+[('measured', 'long')]
+    manifest_arms = [('ninfer', backend, dict(ARMS[0][2], NINFER_V100_PREFILL_EXPERT_GEMM=backend))
+                     for backend in ('simt', 'fp16')] if a.expert_gemm_ab else ARMS
     (a.output/'manifest.json').write_text(json.dumps(dict(prompt=LONG, short_prompt=ab.SHORT,
         output_limit=32 if a.stream_attribution_only else 128, physical_cpus=cpus,
-        arms=[ARMS[0]] if a.stream_attribution_only else ARMS,
+        arms=[ARMS[0]] if a.stream_attribution_only else manifest_arms,
         fresh_servers_per_arm=1 if a.stream_attribution_only else 3,
-        stream_attribution_only=a.stream_attribution_only,
+        stream_attribution_only=a.stream_attribution_only, expert_gemm_ab=a.expert_gemm_ab,
         timing_telemetry_level=0, diagnostic_telemetry_level=2,
         cache_budget='actual allocations logged; requested maxima are not equal-memory controls',
         cold_definition='first request after fresh server; host file cache preserved',
-        cross_quant_comparison='descriptive; source artifacts and frontend token counts differ',
+        cross_quant_comparison='same represented artifact; arithmetic-changing expert route' if a.expert_gemm_ab
+            else 'descriptive; source artifacts and frontend token counts differ',
         ninfer_flags=a.ninfer_flags), indent=2)+'\n')
     cells = []
     def run(engine, arm, overrides, tag, mode):
@@ -202,6 +207,21 @@ def main():
         expected_bytes = sum(p['counters'].get('expert_h2d_bytes', 0) for p in work['phases'].values())
         if not rows or routes != expected or weight_bytes != expected_bytes:
             raise ValueError(f'incomplete stream attribution: routes {routes}/{expected}, bytes {weight_bytes}/{expected_bytes}')
+        return
+    if a.expert_gemm_ab:
+        engine, arm, overrides = ARMS[0]
+        arms = [('simt', dict(overrides, NINFER_V100_PREFILL_EXPERT_GEMM='simt')),
+                ('fp16', dict(overrides, NINFER_V100_PREFILL_EXPERT_GEMM='fp16'))]
+        for repeat in range(3):
+            for backend, flags in (arms if repeat != 1 else list(reversed(arms))):
+                run(engine, backend, flags, backend+'-r'+str(repeat), 'timing')
+        a.max_output_tokens=32; a.telemetry_level=2
+        a.request_schedule=[('diagnostic','long'),('diagnostic','long')]
+        for backend, flags in arms:
+            diagnostic=dict(flags, NINFER_FLASH_NEXT_STAGE_LEDGER='1',
+                            NINFER_V100_EXPERT_STREAM_TIMING='1')
+            run(engine,backend,diagnostic,backend+'-diagnostic','diagnostic')
+        print(json.dumps(summarize(cells),indent=2),flush=True)
         return
     for repeat in range(3):
         for engine, arm, overrides in (ARMS if repeat != 1 else list(reversed(ARMS))):

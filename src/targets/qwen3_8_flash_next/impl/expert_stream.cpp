@@ -50,7 +50,8 @@ std::size_t flash_next_expert_stream_device_bytes(unsigned maximum_routes) {
     const std::size_t descriptors =
         ((std::size_t(maximum_routes) + 3) / 4) * sizeof(FlashNextCachedExpertGroup);
     return flash_next_expert_stream_ring_slots() *
-        (kExpertSlotBytes + std::size_t(maximum_routes) * 640 * 2 + descriptors);
+        (kExpertSlotBytes + std::size_t(maximum_routes) * 640 * 2 + descriptors)
+        + (flash_next_expert_gemm_requested() ? FlashNextExpertGemm::device_bytes : 0);
 }
 
 FlashNextExpertStream::FlashNextExpertStream(unsigned maximum_routes)
@@ -79,6 +80,10 @@ FlashNextExpertStream::FlashNextExpertStream(unsigned maximum_routes)
             }
             device_bytes_+=kExpertSlotBytes+s.activations->bytes+descriptors;
             pinned_bytes_+=kExpertSlotBytes+descriptors;
+        }
+        if (flash_next_expert_gemm_requested()) {
+            gemm_=std::make_unique<FlashNextExpertGemm>();
+            device_bytes_+=FlashNextExpertGemm::device_bytes;
         }
         if (device_bytes_ != flash_next_expert_stream_device_bytes(maximum_routes_))
             throw std::logic_error("prefill stream device plan mismatch");
@@ -165,7 +170,10 @@ void FlashNextExpertStream::submit(const HostNvfp4ExpertPairView& expert,
     CUDA_CHECK(cudaStreamWaitEvent(compute,s.ready,0));
     if (timing_) CUDA_CHECK(cudaEventRecord(s.kernel_start,compute));
     try {
-        flash_next_cached_expert_group_launch(static_cast<const FlashNextCachedExpertGroup*>(s.groups->p),count,compute);
+        if (gemm_ && routes.size()>=32)
+            gemm_->launch(view,static_cast<const FlashNextCachedExpertGroup*>(s.groups->p),routes.size(),compute);
+        else
+            flash_next_cached_expert_group_launch(static_cast<const FlashNextCachedExpertGroup*>(s.groups->p),count,compute);
         CUDA_CHECK(cudaEventRecord(s.consumed,compute));
         s.pending=true;
         s.timing_pending=timing_;
