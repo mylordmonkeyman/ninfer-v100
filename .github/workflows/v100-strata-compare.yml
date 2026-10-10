@@ -1,5 +1,5 @@
 name: V100 Structural Engine Comparison
-# Bounded NVFP4 expert FP16 GEMM qualification and same-workload A/B.
+# Bounded NVFP4 expert FP16 GEMM qualification, overlap accounting and same-workload A/B.
 on:
   workflow_dispatch:
   push:
