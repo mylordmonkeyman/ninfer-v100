@@ -209,41 +209,71 @@ large finite inputs. Accumulation is FP32 with cuBLAS reduced-precision reductio
 disallowed. This changes arithmetic and intermediate casts: no numerical
 qualification is claimed from compilation, pairwise comparison, or plausibility.
 
-The new independent gate uses the existing scalar host decoder and sequential
+The independent gate uses the existing scalar host decoder and sequential
 FP32 represented-weight formula with FP32 intermediate, without candidate FP16
 casts. Real shapes, all finite nonnegative E4M3 scale codes, three divisors,
 large/tiny/zero BF16 inputs, 1–512 routes including partial and multiple tiles,
-and output guard regions are covered. Preserve NRMSE ≤0.002 and cosine ≥0.99999.
-The existing BF16-boundary stream/coexistence oracle is additionally run with the
-candidate enabled; its criteria are unchanged. No default deployment change.
+and output guard regions are covered. NRMSE ≤0.002 and cosine ≥0.99999 remain
+unchanged; the BF16-boundary stream/coexistence oracle is supplementary.
 
-The next protected job first qualifies both gates, then compares static64 SIMT
-and FP16 on the identical 7K/128-output cold + four warmups + warmed workload,
-three fresh servers per arm with reversed middle order, followed by separate
-cold/repeated 7K diagnostics. Strata is not remeasured. Actual memory, token/MTP
-accounting and changed outputs remain evidence requirements. Retain failure
-artifacts and fix the candidate instead of relaxing a numeric gate.
+## Qualified streamed GEMM result and resident extension
 
-## Implementation decision
+[Run 38016688665, attempt 2](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38016688665)
+passed on V100. Attempt 1 stopped before uploading evidence; its interruption
+cause is unknown. The successful retry produced artifact 11658204890. Compact
+evidence is in `v100-expert-gemm-38016688665.json`.
 
-If current profiling confirms routed expert GPU compute as the leading prefill
-cost, implement a bounded Volta FP16 expert GEMM route at the existing streaming
-boundary: decode the same represented NVFP4 pair once into reusable device buffers,
-gather its routed inputs, fused gate/up GEMM + activation, down GEMM, scatter into
-the existing route-output buffer. Keep compact persistent cache storage and account
-for the FP16 staging/workspace budget; do not duplicate every cached expert in FP16.
-Select a measured route-count crossover rather than use GEMM for tiny decode groups.
+| Static64, same 7111 prompt / 128 emitted tokens | SIMT | Streamed FP16 GEMM |
+|---|---:|---:|
+| Cold HTTP median | 63.250 s | 49.861 s |
+| Warmed HTTP median | 61.767 s | 47.397 s |
+| Warmed prefill median | 53.442 s | 39.955 s |
+| Warmed decode median | 8.159 s | 7.384 s |
+| Observed peak GPU memory | 18843.75 MiB | 18873.75 MiB |
 
-This is an arithmetic-changing operator: qualify against the independent FP32
-formula decoding the exact stored NVFP4 codes/scales/divisor, at real 2560/640
-shapes, including activation casts and unusual finite values. Preserve existing
-criteria; pairwise SIMT agreement is supplementary. Then rerun the identical
-request workload to establish whole-request benefit. If CPU miss execution or
-synchronization instead dominates, prioritize that measured boundary. Do not commit
-to a kernel rewrite merely because the source difference looks promising.
+Each arm used three fresh servers, cold + four warmups + one warmed request,
+with reversed middle order and prefix reuse disabled. All requests conserved
+7111 frontend prompt tokens, 128 emitted tokens and zero cached tokens. Each arm
+replayed one consistent output across its own trials, but outputs differ across
+arms. SIMT accepted 68/116 drafted tokens in 59 rounds; FP16 accepted 70/114 in
+57 rounds. Thus the observed 23.3% whole-request and 25.2% prefill reductions are
+supported; the 9.5% decode reduction is confounded by changed output/MTP work.
+The first SIMT cold prefill was 70.096 s versus 54.7–54.9 s thereafter; host file
+cache was preserved, so cold startup and first-request timing are not symmetric
+page-cache controls. No Strata rerun or cross-quantization claim is involved.
 
-The older non-grouped stage result was about 87% MoE; the later grouped 1220-token
-stream diagnostic still spent 10.355 of 12.486 s in the MoE reduce interval. These
-are older inclusive measurements, not the current 7K GPU-compute fraction. There is
-no justified numerical whole-request speedup prediction yet. A 2× acceleration of
-a measured fraction f yields ideal speedup 1/(1-f/2), before added staging costs.
+The direct independent FP32 formula gate passed every case with worst NRMSE
+0.000225084. Cosine passed ≥0.99999 at full precision; the log rounds its printed
+value to 1. Candidate-enabled stream/coexistence also passed. The expert-cost
+fixture includes expansion, excludes H2D and measured 3 warmups + 5 spans: at
+8 routes SIMT/GEMM was 0.0897/0.1251 ms; at 16, 0.1919/0.1251; at 32,
+0.3412/0.1325; at 128, 1.2993/0.1565. These support the conservative 32-route
+dispatch; tiny groups stay SIMT. This is qualification, not another parameter sweep.
+
+Both arms allocated 8,494,252,032 bytes of compact cache (64 slots per layer).
+The 30 MiB observed peak increment includes the 18.69 MiB explicit scratch and
+library/context extras. Separate two-request 7K/32-output diagnostics show streamed
+kernel interval totals falling 53.170→10.164 s (80.9%), while concurrent copies
+remain 13.698→13.882 s and copy-dependency waits rise 0.466→11.989 s. The new
+compute speed exposes transfer waits; these overlapping sums are not additive.
+Streamed expert counts 51,510/51,644 and routes 5,309,092/5,309,866 differ slightly
+with changed routing. Repeated-request MoE intervals fall 38.800→25.875 s;
+CPU inclusive time and remaining resident SIMT work still matter.
+
+The next additive opt-in extension is `NINFER_V100_PREFILL_RESIDENT_GEMM=1`
+(default 0). Resident prefill groups with ≥32 routes reuse the same qualified
+operator: expand one compact Ready expert, process bounded 256-route tiles and
+scatter directly into existing destinations. A separate 18.69 MiB scratch instance
+is included in cache transfer/operating-budget accounting; there is no persistent
+FP16 cache expansion, extra expert H2D, or decode change. Slot leases are retained
+through the existing completion boundary. Smaller groups keep fused grouped SIMT.
+
+The protected job directly reruns the independent FP32 gate, then candidate-enabled
+cache/stream coexistence and cache integration fixtures, including mixed 31/32/33
+route boundaries. Any skip or numerical failure fails before inference. Only then
+`--resident-gemm-ab` compares qualified stream-only FP16 against stream+resident
+FP16 with the same three-server cold/warmed workload and separate diagnostics.
+Diagnostic resident-dispatch rows must be present only in the resident arm. This
+isolates the extension without repeating Strata or changing the measured streamed
+threshold. Actual memory, emitted/accepted tokens and output changes remain required.
+Both arithmetic-changing paths remain opt-in while this extension is qualified.

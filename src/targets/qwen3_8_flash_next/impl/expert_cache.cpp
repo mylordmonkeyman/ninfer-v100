@@ -1,5 +1,6 @@
 #include "targets/qwen3_8_flash_next/impl/expert_cache.h"
 #include "core/device.h"
+#include "targets/qwen3_8_flash_next/impl/expert_gemm.h"
 #include "targets/qwen3_8_flash_next/impl/perf_telemetry.h"
 #include <algorithm>
 #include <cstdio>
@@ -99,9 +100,18 @@ FlashNextExpertCache::FlashNextExpertCache(const HostNvfp4ExpertTableView& host,
     std::size_t free=0,total=0;
     CUDA_CHECK(cudaMemGetInfo(&free,&total));
     const std::size_t paths=std::size_t(max_tokens)*10;
-    const auto transfer=paths*(640*sizeof(std::uint16_t)+2560*sizeof(float)+sizeof(FlashNextCachedExpertGroup));
+    bool resident_gemm=false;
+    if (const char* value=std::getenv("NINFER_V100_PREFILL_RESIDENT_GEMM"); value && *value) {
+        if (std::strcmp(value,"0") && std::strcmp(value,"1"))
+            throw std::invalid_argument("resident expert GEMM must be 0 or 1");
+        resident_gemm=std::strcmp(value,"1")==0;
+    }
+    // Include the bounded expansion/workspace in the same operating budget.
+    const auto transfer=paths*(640*sizeof(std::uint16_t)+2560*sizeof(float)+sizeof(FlashNextCachedExpertGroup))
+        + (resident_gemm ? FlashNextExpertGemm::device_bytes : 0);
     budget_=flash_next_expert_cache_budget(free,total,transfer,mtp,maximum);
     if (!budget_.slots_per_layer) return;
+    if (resident_gemm) prefill_gemm_=std::make_unique<FlashNextExpertGemm>();
     storage_=std::make_unique<DeviceBuffer>(budget_.cache_bytes);
     activations_=std::make_unique<DeviceBuffer>(paths*640*sizeof(std::uint16_t));
     outputs_=std::make_unique<DeviceBuffer>(paths*2560*sizeof(float));
@@ -303,10 +313,30 @@ void FlashNextExpertCache::submit_consumers(cudaStream_t stream) {
                     reinterpret_cast<std::uintptr_t>(b.expert.gate_up.codes);
             });
             auto* descriptors=static_cast<FlashNextCachedExpertGroup*>(group_descriptors_->data());
+            struct GemmSpan { HostNvfp4ExpertPairView expert; unsigned first_group, routes; };
+            std::vector<GemmSpan> gemm_spans;
             unsigned singles=0;
-            for(unsigned i=0;i<count;) {
+            // GEMM descriptors form a prefix, followed by the fused SIMT fallback.
+            // Pack the prefix first, retaining original task order within each expert.
+            unsigned simt_count=prefill_gemm_ ? 0 : count;
+            for(unsigned i=0;prefill_gemm_ && i<count;) {
                 unsigned end=i+1;
                 while(end<count&&tasks[end].expert.gate_up.codes==tasks[i].expert.gate_up.codes)++end;
+                if(prefill_gemm_ && end-i>=32) {
+                    gemm_spans.push_back({tasks[i].expert,groups,end-i});
+                    while(i<end) {
+                        auto& group=descriptors[groups++];group={};
+                        group.count=std::min(4U,end-i);
+                        for(unsigned t=0;t<group.count;++t)group.tasks[t]=tasks[i++];
+                    }
+                } else {
+                    while(i<end)tasks[simt_count++]=tasks[i++];
+                }
+            }
+            const unsigned gemm_groups=groups;
+            for(unsigned i=0;i<simt_count;) {
+                unsigned end=i+1;
+                while(end<simt_count&&tasks[end].expert.gate_up.codes==tasks[i].expert.gate_up.codes)++end;
                 while(i<end) {
                     const unsigned n=std::min(4U,end-i);
                     if(n==1)tasks[singles++]=tasks[i++];
@@ -320,8 +350,11 @@ void FlashNextExpertCache::submit_consumers(cudaStream_t stream) {
             if(groups) {
                 CUDA_CHECK(cudaMemcpyAsync(batch_tasks_->p,group_descriptors_->data(),
                     group_bytes,cudaMemcpyHostToDevice,stream));
-                flash_next_cached_expert_group_launch(
-                    static_cast<const FlashNextCachedExpertGroup*>(batch_tasks_->p),groups,stream);
+                const auto* device_groups=static_cast<const FlashNextCachedExpertGroup*>(batch_tasks_->p);
+                for(const auto& span:gemm_spans)
+                    prefill_gemm_->launch(span.expert,device_groups+span.first_group,span.routes,stream);
+                if(groups>gemm_groups)
+                    flash_next_cached_expert_group_launch(device_groups+gemm_groups,groups-gemm_groups,stream);
             }
             if(singles) {
                 auto* singleton_tasks=reinterpret_cast<FlashNextCachedExpertTask*>(
@@ -330,10 +363,22 @@ void FlashNextExpertCache::submit_consumers(cudaStream_t stream) {
                     singles*sizeof(FlashNextCachedExpertTask),cudaMemcpyHostToDevice,stream));
                 flash_next_cached_expert_batch_launch(singleton_tasks,singles,stream);
             }
+            if(!gemm_spans.empty()) {
+                std::lock_guard lock(mutex_);
+                stats_.gemm_experts += gemm_spans.size();
+                for(const auto& span:gemm_spans)stats_.gemm_routes += span.routes;
+            }
+            if(v100_perf_telemetry_enabled() && !gemm_spans.empty()) {
+                unsigned routes=0;for(const auto& span:gemm_spans)routes+=span.routes;
+                std::fprintf(stderr,"{\"kind\":\"expert_resident_gemm\",\"experts\":%zu,\"routes\":%u}\n",
+                    gemm_spans.size(),routes);
+            }
             if(timing_enabled_) {
                 std::lock_guard lock(mutex_);
                 stats_.grouped_tasks += count-singles;
-                stats_.hit_kernel_launches += 2*unsigned(groups>0)+2*unsigned(singles>0);
+                stats_.hit_kernel_launches += 2*unsigned(groups>gemm_groups)+2*unsigned(singles>0);
+                // cuBLAS may issue multiple private kernels; count GEMM experts/routes
+                // separately rather than invent a kernel launch total.
             }
         } else {
             CUDA_CHECK(cudaMemcpyAsync(batch_tasks_->p, batch_descriptors_->data(),

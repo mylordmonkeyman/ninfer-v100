@@ -18,6 +18,8 @@
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
+class FlashNextExpertGemm;
+
 struct FlashNextExpertCacheBudget {
     std::size_t total_bytes = 0, free_before_bytes = 0, transfer_bytes = 0;
     std::size_t reserve_bytes = 0, used_limit_bytes = 0, cache_bytes = 0;
@@ -43,6 +45,7 @@ struct FlashNextExpertCacheStats {
     double hit_submission_us = 0;
     std::uint64_t grouped_tasks = 0, grouped_groups = 0;
     std::uint64_t hit_kernel_launches = 0;
+    std::uint64_t gemm_experts = 0, gemm_routes = 0;
 };
 
 struct FlashNextCachedExpertTask {
@@ -128,6 +131,7 @@ private:
     HostNvfp4ExpertTableView host_;
     FlashNextExpertCacheBudget budget_;
     std::unique_ptr<DeviceBuffer> storage_, activations_, outputs_, batch_tasks_;
+    std::unique_ptr<FlashNextExpertGemm> prefill_gemm_;
     std::unique_ptr<PinnedHostBuffer> fill_buffer_, result_buffer_, batch_descriptors_, group_descriptors_;
     cudaStream_t fill_stream_ = nullptr;
     cudaEvent_t hit_start_ = nullptr, hit_stop_ = nullptr, result_copy_start_ = nullptr;

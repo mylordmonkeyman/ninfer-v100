@@ -220,7 +220,7 @@ int main(){try{
     DeviceBuffer d_input(input.size()*2);d_input.copy_from_host(input.data(),input.size()*2);
     CpuNvfp4ExpertReferenceScratch scratch;
     test_device_route_integration(host, layer, std::span(input.data(), 2560), device.stream);
-    for(unsigned tokens:{1U,2U,3U,4U,6U,8U,128U}){
+    for(unsigned tokens:{1U,2U,3U,4U,6U,8U,31U,32U,33U,63U,64U,65U,128U}){
         cache.begin_layer(true);
         std::vector<float> out(tokens*2560),expected(tokens*2560);
         for(unsigned t=0;t<tokens;++t){

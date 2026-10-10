@@ -312,6 +312,11 @@ int main() { try {
                      <<" nrmse="<<nrmse<<" cosine="<<cosine<<'\n';
         }
     }
+    if(const char* value=std::getenv("NINFER_V100_PREFILL_RESIDENT_GEMM");
+       value && std::string_view(value)=="1") {
+        require(cache.stats().gemm_routes>0,"resident qualification never dispatched GEMM");
+        std::cout<<"resident.gemm.routes="<<cache.stats().gemm_routes<<'\n';
+    }
     // Packing/group rejection after submitted Ready work must permit reuse.
     cache.begin_layer(true);
     require(cache.execute_to(0,0,d_input.p,static_cast<float*>(output.p),0,device.stream),

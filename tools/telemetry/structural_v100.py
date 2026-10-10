@@ -85,17 +85,20 @@ def native_work(folder, engine):
             if layer.get('cache_windows'):
                 end = layer['cache_windows'][-1]['end']
                 dst['cache_last_by_layer'][str(layer['layer'])] = {k:v for k,v in end.items() if k != 'resident_ids'}
-    ledger, dispatch, stream_timing = [], [], []
+    ledger, dispatch, stream_timing, resident_gemm = [], [], [], []
     for line in log.read_text().splitlines():
         if '"prefill_stage_ledger"' in line:
             ledger.append(json.loads(line))
         elif '"expert_stream_timing"' in line:
             stream_timing.append(json.loads(line))
+        elif '"expert_resident_gemm"' in line:
+            resident_gemm.append(json.loads(line))
         elif engine == 'strata' and any(s in line.lower() for s in
             ('prefill timing:', 'mmq', 'fp16', 'cache', 'resident', 'slots')):
             dispatch.append(line)
     return dict(phases=dict(phases), ninfer_prefill_chunks=ledger,
         strata_dispatch_and_phase_lines=dispatch, expert_stream_timing=stream_timing,
+        expert_resident_gemm=resident_gemm,
         limits=['Host spans are inclusive, not additive critical-path components.',
                 'CUDA stage intervals include stream waits and host gaps.',
                 'CPU weight-read counters are modeled reads, not hardware DRAM counters.',
@@ -136,6 +139,8 @@ def main():
                  'strata-config', 'strata-binary', 'output'):
         p.add_argument('--'+name, type=Path, required=True)
     p.add_argument('--gpu-uuid', required=True)
+    p.add_argument('--resident-gemm-ab', action='store_true',
+                   help='qualified streamed GEMM versus streamed plus resident GEMM')
     p.add_argument('--expert-gemm-ab', action='store_true',
                    help='static64 SIMT versus bounded FP16 expert GEMM, same cold/warmed requests')
     p.add_argument('--stream-attribution-only', action='store_true',
@@ -157,17 +162,24 @@ def main():
     a.max_output_tokens = 128
     a.warmups = 4; a.repeats = 1; a.telemetry_level = 0
     a.request_schedule = [('cold', 'long')]+[('warmup', 'long')]*4+[('measured', 'long')]
-    manifest_arms = [('ninfer', backend, dict(ARMS[0][2], NINFER_V100_PREFILL_EXPERT_GEMM=backend))
-                     for backend in ('simt', 'fp16')] if a.expert_gemm_ab else ARMS
+    gemm_arms = [('simt', dict(ARMS[0][2], NINFER_V100_PREFILL_EXPERT_GEMM='simt')),
+                 ('fp16', dict(ARMS[0][2], NINFER_V100_PREFILL_EXPERT_GEMM='fp16'))]
+    if a.resident_gemm_ab:
+        gemm_arms = [('fp16', dict(ARMS[0][2], NINFER_V100_PREFILL_EXPERT_GEMM='fp16',
+                                  NINFER_V100_PREFILL_RESIDENT_GEMM='0')),
+                     ('fp16-resident', dict(ARMS[0][2], NINFER_V100_PREFILL_EXPERT_GEMM='fp16',
+                                           NINFER_V100_PREFILL_RESIDENT_GEMM='1'))]
+    manifest_arms = ([('ninfer', backend, flags) for backend, flags in gemm_arms]
+                     if (a.expert_gemm_ab or a.resident_gemm_ab) else ARMS)
     (a.output/'manifest.json').write_text(json.dumps(dict(prompt=LONG, short_prompt=ab.SHORT,
         output_limit=32 if a.stream_attribution_only else 128, physical_cpus=cpus,
         arms=[ARMS[0]] if a.stream_attribution_only else manifest_arms,
         fresh_servers_per_arm=1 if a.stream_attribution_only else 3,
-        stream_attribution_only=a.stream_attribution_only, expert_gemm_ab=a.expert_gemm_ab,
+        stream_attribution_only=a.stream_attribution_only, expert_gemm_ab=a.expert_gemm_ab, resident_gemm_ab=a.resident_gemm_ab,
         timing_telemetry_level=0, diagnostic_telemetry_level=2,
         cache_budget='actual allocations logged; requested maxima are not equal-memory controls',
         cold_definition='first request after fresh server; host file cache preserved',
-        cross_quant_comparison='same represented artifact; arithmetic-changing expert route' if a.expert_gemm_ab
+        cross_quant_comparison='same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab)
             else 'descriptive; source artifacts and frontend token counts differ',
         ninfer_flags=a.ninfer_flags), indent=2)+'\n')
     cells = []
@@ -208,10 +220,9 @@ def main():
         if not rows or routes != expected or weight_bytes != expected_bytes:
             raise ValueError(f'incomplete stream attribution: routes {routes}/{expected}, bytes {weight_bytes}/{expected_bytes}')
         return
-    if a.expert_gemm_ab:
+    if a.expert_gemm_ab or a.resident_gemm_ab:
         engine, arm, overrides = ARMS[0]
-        arms = [('simt', dict(overrides, NINFER_V100_PREFILL_EXPERT_GEMM='simt')),
-                ('fp16', dict(overrides, NINFER_V100_PREFILL_EXPERT_GEMM='fp16'))]
+        arms = gemm_arms
         for repeat in range(3):
             for backend, flags in (arms if repeat != 1 else list(reversed(arms))):
                 run(engine, backend, flags, backend+'-r'+str(repeat), 'timing')
@@ -221,6 +232,10 @@ def main():
             diagnostic=dict(flags, NINFER_FLASH_NEXT_STAGE_LEDGER='1',
                             NINFER_V100_EXPERT_STREAM_TIMING='1')
             run(engine,backend,diagnostic,backend+'-diagnostic','diagnostic')
+            if a.resident_gemm_ab:
+                rows=cells[-1]['work']['expert_resident_gemm']
+                if bool(rows) != (backend=='fp16-resident'):
+                    raise ValueError('resident GEMM dispatch does not match selected backend')
         print(json.dumps(summarize(cells),indent=2),flush=True)
         return
     for repeat in range(3):
