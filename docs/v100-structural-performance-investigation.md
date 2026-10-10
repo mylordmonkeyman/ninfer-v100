@@ -679,3 +679,72 @@ has exhausted its tested benefit. Long-context work should address KV residency
 cost before assuming a 262K performance advantage; full-length measurement and
 selected-block attribution require a separate bounded investigation. These are
 next design directions, not measured wins or additional campaigns launched here.
+
+
+## Authorized six-step follow-up
+
+On October 10 the user authorized the following follow-up after the completed
+five-step investigation. Preserve the qualified deployment and original assets;
+new arithmetic paths remain opt-in until their affected independent operator and
+full-model numerical gates support promotion. Do not repeat rejected scheduling
+experiments. No Phase18/SV8, below-4-bit weights, cache eviction, unrelated process
+termination, security changes or installed Strata modifications are authorized.
+
+1. **Non-MoE prefill attribution — in progress.** Use qualified adaptive156 at
+   8192 context, BF16KV, MTP2, 2048 chunks and 88 workers on 32 physical cores.
+   One uninstrumented fresh server and one diagnostic fresh server each execute
+   cold + four warmups + measured 7111/128/zero-reuse requests. Byte-delimited
+   per-request native-log windows isolate prefill chunks from verification and
+   later requests. Require complete prompt coverage, stage reconciliation and
+   exact corresponding output/usage/MTP; record actual residency, native phase
+   timings and telemetry overhead. Existing CUDA event/SV0 ledgers separate QSA
+   projections/indexer/attention, GDN projections/recurrence/controls, PLE,
+   hyper/norm boundaries, embedding/staging, final norm/head and MoE. Stage
+   intervals include host gaps and dependencies; they are not pure GPU kernel
+   times or exclusively BF16. Native-minus-ledger is an accounting difference,
+   not a measured launch-gap category. Request-wide expert-stream intervals and
+   inclusive host scopes remain non-additive. Nsight Systems was unavailable in
+   the prior runner; record availability again, without installation or security
+   changes. A missing distinction is grounds for a bounded targeted observation
+   only if it changes the next design choice.
+2. **Conditional SV7 revisit — pending attribution.** Dense projection TensorOp
+   and QSA attention are separate candidates. Re-screen only a measured material
+   contribution in the new baseline; independent operator gates precede timing,
+   full-model oracle qualification precedes default promotion. Earlier isolated
+   kernel gains and the old negative HTTP screen are not new end-to-end evidence.
+3. **MoE work/bytes — pending.** Compare achieved FP16 GEMM throughput with a
+   same-shape device-resident reference; distinguish actual GPU idle dependency
+   gaps from merely recorded compute-stream waits. Investigate grouped expert
+   launches and fewer dequant/staging passes, with scratch/residency tradeoffs and
+   affected oracle/lifetime checks. Select one evidence-backed candidate rather
+   than another ordering sweep.
+4. **Context-aware cache planning — pending.** Retain static64 default and
+   adaptive residency opt-in. Existing allocator already clips to the available
+   budget; compare policies at the same context/KV capacity, including feasible
+   adaptive101 at 262K. If unused KV reservation dominates, consider lazy device
+   allocation with coherent cache budgeting; paged addressing alone does not
+   imply lazy physical allocation. No host-tiering/SV8 implementation.
+5. **Full-length FP8 KV — pending.** Existing Flash-Next/Volta code includes FP8
+   KV storage and attention consumers despite no native FP8 arithmetic. Qualify
+   the affected storage/attention contract and measure a manageable prompt first;
+   advance to actual 128K and 262K prompts only after correctness/capacity gates.
+   Record peak memory, resident slots, throughput and output/work, preserving
+   allocator reserves. Prior 29.8 GiB peak already includes active GEMM scratch.
+6. **Controlled Strata comparison — pending, baseline moved earlier.** After
+   attribution, establish controlled prefill with speculation disabled where
+   the installed serving route supports it; otherwise record the concrete
+   limitation and use an applicable native route without editing installed
+   assets. Match prompts, capacity, KV, cache budgets and placement as supported,
+   then compare decode/speculation separately. Exact quantization equivalence
+   requires represented-weight equivalence, not equal nominal bits. Reuse
+   existing valid measurements rather than rebuild or repeat unchanged arms.
+
+The execution order is attribution, controlled baseline, the largest justified
+kernel/work reduction, KV/residency comparison and full-length checks. Numbered
+steps retain the user's six proposals; conditional steps may be rejected by
+measured evidence rather than forcing an unhelpful implementation. The initial
+protected run uses `--prefill-breakdown` and produces
+`prefill-breakdown-report.json`; original models/packs and installed Strata remain
+unchanged. All GPU jobs share `v100-sv0-hardware`, cancel-in-progress false, with
+CMake parallel level 32. Evidence aliases remain outside uploaded bundles; uploads
+reject symlinks and bundles >=1 GiB.

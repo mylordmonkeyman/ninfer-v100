@@ -9,11 +9,41 @@ import unittest
 from unittest.mock import patch
 
 import ab_v100
-from structural_v100 import inventory, native_work, summarize, residency_arms, residency_observation
+from structural_v100 import inventory, native_work, summarize, residency_arms, residency_observation, prefill_breakdown
 from test_schema import fixture
 
 
 class StructuralTests(unittest.TestCase):
+    def test_prefill_breakdown_separates_request_windows_and_verify(self):
+        import gzip
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            data = b'initialization noise\n'
+            requests = []
+            for index, duration in enumerate((1000, 2000)):
+                begin = len(data)
+                def chunk(phase, ms):
+                    return dict(kind='prefill_stage_ledger', tokens=10,
+                        context=dict(phase=phase), total_chunk_ms=ms, residual_ms=1,
+                        stages=[dict(stage='PLE injection', interval_ms=ms-1)])
+                data += (json.dumps(chunk('prefill', duration))+'\n').encode()
+                data += (json.dumps(chunk('verify', 999999))+'\n').encode()
+                requests.append(dict(index=index, phase='measured',
+                    native_log_start_offset=begin, native_log_end_offset=len(data),
+                    response=dict(usage=dict(prompt_tokens=10)), native_timing=dict(prefill=3),
+                    wall_seconds=4, output_sha256='fixture', native_speculative={}))
+            with gzip.open(folder/'server.log.gz','wb') as out:
+                out.write(data)
+            (folder/'requests.jsonl').write_text('\n'.join(map(json.dumps, requests)))
+            rows = prefill_breakdown(folder)
+            self.assertEqual([r['ledger_seconds'] for r in rows], [1, 2])
+            self.assertEqual([r['native_minus_ledger_seconds'] for r in rows], [2, 1])
+            self.assertAlmostEqual(rows[1]['categories_seconds']['ple_inclusive'], 1.999)
+            requests[1]['response']['usage']['prompt_tokens'] = 11
+            (folder/'requests.jsonl').write_text('\n'.join(map(json.dumps, requests)))
+            with self.assertRaisesRegex(ValueError, 'complete request prompt'):
+                prefill_breakdown(folder)
+
     def test_residency_comparison_preserves_gemm_selectors_and_validates_observed_work(self):
         arms = residency_arms()
         self.assertEqual([arm for _, arm, _ in arms], ['static64', 'adaptive156'])

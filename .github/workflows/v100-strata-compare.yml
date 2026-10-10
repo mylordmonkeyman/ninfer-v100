@@ -1,5 +1,5 @@
 name: V100 Structural Engine Comparison
-# Step 5: contemporary installed Strata comparison and larger-context checks.
+# Six-step follow-up, Step 1: paired qualified prefill cost breakdown.
 on:
   workflow_dispatch:
   push:
@@ -31,7 +31,7 @@ jobs:
     concurrency:
       group: v100-sv0-hardware
       cancel-in-progress: false
-    timeout-minutes: 180
+    timeout-minutes: 90
     env:
       CUDA_VISIBLE_DEVICES: '0'
       NINFER_WEIGHTS: /models/qwen3-8b-flash-next
@@ -110,11 +110,11 @@ jobs:
           { command -v nsys || true; nsys --version 2>&1 || true; } > "$QUALIFICATION_RESULTS/profiler-availability.txt"
           # Existing bounded CUDA event ledgers are used in separate diagnostics.
           # No profiler installation, ptrace changes, or security changes.
-      - name: Step 5 contemporary comparison and larger-context checks
+      - name: Six-step plan Step 1 prefill breakdown
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --final-comparison \
+          python3 tools/telemetry/structural_v100.py --prefill-breakdown \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \

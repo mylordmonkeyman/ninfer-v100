@@ -168,6 +168,88 @@ def summarize(cells):
                      unique_outputs=len({r['output_hash'] for r in rows})) for key, rows in groups.items()}
 
 
+def prefill_breakdown(folder):
+    """Attribute each HTTP request using its byte-delimited native log window.
+
+    Consecutive compute-stream event intervals partition the observed timeline;
+    they include host submission gaps and stream dependencies, not just kernels.
+    Inclusive SV0 host spans and separate stream timings must not be added to it.
+    """
+    log = folder/'server.log'
+    data = log.read_bytes() if log.exists() else gzip.open(str(log)+'.gz', 'rb').read()
+    requests = [json.loads(line) for line in (folder/'requests.jsonl').read_text().splitlines()]
+    reports = []
+    for row in requests:
+        begin, end = row['native_log_start_offset'], row['native_log_end_offset']
+        if not 0 <= begin < end <= len(data):
+            raise ValueError('invalid request native log byte window')
+        records = []
+        for line in data[begin:end].decode().splitlines():
+            if line.startswith('{'):
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        chunks = [r for r in records if r.get('kind') == 'prefill_stage_ledger'
+                  and r.get('context', {}).get('phase') == 'prefill']
+        usage = row['response']['usage']
+        if not chunks or sum(c['tokens'] for c in chunks) != usage['prompt_tokens']:
+            raise ValueError('prefill ledger does not cover this complete request prompt')
+        stages = Counter()
+        for chunk in chunks:
+            for stage in chunk['stages']:
+                stages[stage['stage']] += stage['interval_ms']
+        total_ms = sum(c['total_chunk_ms'] for c in chunks)
+        residual_ms = sum(c['residual_ms'] for c in chunks)
+        if abs(sum(stages.values()) + residual_ms - total_ms) > max(1, total_ms*.0001):
+            raise ValueError('stage ledger intervals do not reconcile')
+        native_ms = row['native_timing']['prefill']*1000
+        groups = Counter()
+        for name, ms in stages.items():
+            if name.startswith('MoE:'):
+                group = 'moe_inclusive'
+            elif name.startswith('Attention: QSA'):
+                group = 'qsa_projection' if 'projection' in name else 'qsa_attention_indexer'
+            elif name.startswith('Attention: GDN'):
+                group = 'gdn_projection' if 'projection' in name else 'gdn_recurrence_controls'
+            elif name == 'PLE injection':
+                group = 'ple_inclusive'
+            elif name.startswith('Hyper '):
+                group = 'hyper_norm_boundaries'
+            elif name.startswith('Preamble:'):
+                group = 'embedding_staging'
+            else:
+                group = 'final_norm_head'
+            groups[group] += ms
+        # Stream timing rows have no phase context. Keep request-wide aggregates
+        # explicitly separate from the prefill partition instead of guessing ownership.
+        stream_rows = [r for r in records if r.get('kind') == 'expert_stream_timing']
+        host = Counter()
+        for rec in records:
+            if rec.get('kind') == 'round' and rec.get('phase') == 'prefill':
+                for layer in rec.get('layers', []):
+                    host.update(layer.get('host_us', {}))
+        reports.append(dict(index=row['index'], phase=row['phase'], usage=usage,
+            wall_seconds=row['wall_seconds'], native_timing=row['native_timing'],
+            output_hash=row['output_sha256'], speculative=row.get('native_speculative'),
+            prefill_chunks=len(chunks), ledger_seconds=total_ms/1000,
+            native_minus_ledger_seconds=(native_ms-total_ms)/1000,
+            residual_seconds=residual_ms/1000,
+            categories_seconds={k:v/1000 for k,v in groups.items()},
+            category_pct_of_ledger={k:100*v/total_ms for k,v in groups.items()},
+            stages_seconds={k:v/1000 for k,v in stages.items()},
+            inclusive_prefill_host_seconds={k:v/1e6 for k,v in host.items()},
+            request_wide_nonadditive_stream_ms={k:sum(r.get(k,0) for r in stream_rows)
+                for k in ('copy_ms','compute_wait_ms','kernel_interval_ms')},
+            limits=['Stage event intervals include waits and launch gaps; not pure GPU kernel time.',
+                    'Projection stages are not exclusively BF16; dtype attribution requires dispatch evidence.',
+                    'PLE includes gather publication, projections, convolution and injection.',
+                    'Native-minus-ledger is reconciliation, not a measured launch-gap category.',
+                    'Stream timing rows lack phase context; aggregates are request-wide.',
+                    'Inclusive host and separate-stream intervals overlap; do not sum into latency.']))
+    return reports
+
+
 def compress_logs(folder):
     for path in folder.glob('*.log'):
         with path.open('rb') as src, gzip.open(str(path)+'.gz', 'wb', compresslevel=1) as dst:
@@ -196,6 +278,8 @@ def main():
                    help='step 1: static64 versus adaptive156, both with qualified GEMM and CPU overlap')
     p.add_argument('--final-comparison', action='store_true',
                    help='step 5: qualified adaptive156 versus installed Strata; larger-context feasibility')
+    p.add_argument('--prefill-breakdown', action='store_true',
+                   help='six-step plan step 1: paired qualified adaptive156 timing and stage attribution')
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=True)
     inventory(a)
@@ -226,7 +310,8 @@ def main():
                                   NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=value))
                      for backend,value in [('fp16-resident','0'),('fp16-resident-overlap','1')]]
     default_arm = ('ninfer', 'v100-default', dict(ARMS[0][2]))
-    manifest_arms = ([default_arm] if a.qualified_default_smoke else
+    manifest_arms = ([('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
+                     [default_arm] if a.qualified_default_smoke else
                      [("ninfer", "adaptive156-qualified", residency_arms()[1][2]), ARMS[1]] if a.final_comparison else
                      residency_arms() if a.residency_gemm_ab else
                      [('ninfer', backend, flags) for backend, flags in gemm_arms]
@@ -235,14 +320,15 @@ def main():
         output_limit=32 if (a.stream_attribution_only or a.qualified_default_smoke) else a.max_output_tokens,
         physical_cpus=cpus,
         arms=[ARMS[0]] if a.stream_attribution_only else manifest_arms,
-        fresh_servers_per_arm=1 if (a.stream_attribution_only or a.qualified_default_smoke) else 3,
+        fresh_servers_per_arm=2 if a.prefill_breakdown else 1 if (a.stream_attribution_only or a.qualified_default_smoke) else 3,
+        prefill_breakdown=a.prefill_breakdown,
         stream_attribution_only=a.stream_attribution_only, expert_gemm_ab=a.expert_gemm_ab, resident_gemm_ab=a.resident_gemm_ab, cpu_stream_overlap_ab=a.cpu_stream_overlap_ab,
         qualified_default_smoke=a.qualified_default_smoke,
         residency_gemm_ab=a.residency_gemm_ab, final_comparison=a.final_comparison,
         timing_telemetry_level=0, diagnostic_telemetry_level=2,
         cache_budget='actual allocations logged; requested maxima are not equal-memory controls',
         cold_definition='first request after fresh server; host file cache preserved',
-        cross_quant_comparison='same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.residency_gemm_ab)
+        cross_quant_comparison='same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.residency_gemm_ab or a.prefill_breakdown)
             else 'descriptive; source artifacts and frontend token counts differ',
         ninfer_flags=a.ninfer_flags), indent=2)+'\n')
     cells = []
@@ -257,7 +343,7 @@ def main():
             cell = dict(engine=engine, arm=arm, mode=mode, folder=str(folder), result=result)
             if a.residency_gemm_ab:
                 cell['residency'] = residency_observation(folder, a.max_output_tokens)
-            if a.final_comparison:
+            if a.final_comparison or a.prefill_breakdown:
                 samples=[json.loads(line) for line in (folder/'system.jsonl').read_text().splitlines()]
                 peaks=[r.get('gpu',{}).get('metrics',{}).get('memory_used_bytes') for r in samples
                        if r.get('kind')=='system_sample']
@@ -277,6 +363,39 @@ def main():
         finally:
             (a.output/'summary.json').write_text(json.dumps(dict(cells=cells, timing=summarize(cells)), indent=2)+'\n')
         ab.release_gpu()
+    if a.prefill_breakdown:
+        engine, arm, flags = ('ninfer', 'adaptive156-qualified', residency_arms()[1][2])
+        run(engine, arm, flags, arm+'-reference', 'timing')
+        a.telemetry_level = 2
+        diagnostic = dict(flags, NINFER_FLASH_NEXT_STAGE_LEDGER='1',
+                          NINFER_V100_EXPERT_STREAM_TIMING='1')
+        run(engine, arm, diagnostic, arm+'-breakdown', 'diagnostic')
+        reference, observed = [Path(c['folder']) for c in cells]
+        base = [json.loads(line) for line in (reference/'requests.jsonl').read_text().splitlines()]
+        breakdown = prefill_breakdown(observed)
+        if len(base) != 6 or len(breakdown) != len(base):
+            raise ValueError('incomplete reference/diagnostic schedule')
+        for before, after in zip(base, breakdown):
+            if (before['index'] != after['index'] or before['phase'] != after['phase']
+                    or before['output_sha256'] != after['output_hash']
+                    or before['response']['usage'] != after['usage']
+                    or before.get('native_speculative') != after['speculative']):
+                raise ValueError('instrumentation changed corresponding output/usage/MTP work')
+        report = dict(step=1, plan='six-step performance investigation', status='complete',
+            reference_timing=summarize(cells), diagnostic_requests=breakdown,
+            exact_corresponding_output_usage_mtp=True,
+            residency=[dict(mode=c['mode'], observation=c['residency']) for c in cells],
+            telemetry_overhead=[dict(index=b['index'], phase=b['phase'],
+                http_seconds=d['wall_seconds']-b['wall_seconds'],
+                prefill_seconds=d['native_timing']['prefill']-b['native_timing']['prefill'])
+                for b,d in zip(base,breakdown)],
+            profiler='existing SV0 and CUDA event ledgers; nsys availability recorded separately')
+        (a.output/'prefill-breakdown-report.json').write_text(json.dumps(report,indent=2)+'\n')
+        for row in breakdown:
+            if row['phase'] in ('cold','measured'):
+                print(json.dumps(row,indent=2),flush=True)
+        print('Six-step plan Step 1 complete: paired prefill attribution retained.',flush=True)
+        return
     if a.final_comparison:
         arms=[('ninfer','adaptive156-qualified',residency_arms()[1][2]),ARMS[1]]
         for repeat in range(3):
