@@ -413,7 +413,7 @@ are now qualified together. The next action is to select streamed FP16 GEMM,
 resident GEMM and CPU/stream overlap by default for Volta builds while retaining
 explicit legacy rollback values and validating the default-selected path once.
 
-## Volta default promotion candidate
+## Qualified Volta defaults
 
 The qualified combination is now selected by default only when
 `NINFER_VOLTA_BUILD` is active. Unset selectors choose streamed FP16 expert GEMM,
@@ -426,8 +426,26 @@ numeric gates, compact cache payload and transfer-budget accounting are unchange
 
 The protected validation preserves explicit legacy and qualified fixture gates,
 then starts one fresh server with all three selectors removed from the environment.
-Two identical 7K/32-output requests must replay the exact output, usage and native
-MTP accounting, exercise streamed and resident GEMM, conserve every CPU fallback
-route, and report no overlap for ineligible scopes. This is a deployment-selection
-smoke test, not another performance A/B or parameter sweep. Promotion remains
-pending until that default-selected hardware run passes.
+[Run 38041684008](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38041684008)
+passed this deployment-selection smoke. Compact evidence is in
+`v100-qualified-defaults-38041684008.json`.
+
+Neither the manifest nor recorded launch environment contains a selector override.
+Cold and repeated 7111-prompt/32-output requests replay the exact output, usage and
+native MTP work (16/27 accepted/drafted in 15 rounds). The default path dispatches
+5,311,550 streamed routes and 1,050,616 resident-GEMM routes. Its 432 early-CPU
+rows conserve all 370,509 native prefill CPU routes; the 48 ineligible rows cover
+4,839 routes and report zero overlap, while eligible work overlaps submission by
+11.812 s. Peak GPU use is 18905.75 MiB.
+
+The independent FP32, explicit legacy rollback, streamed/resident coexistence,
+cache integration and CPU/cache join fixtures all pass. Default-path cache and
+coexistence maxima are NRMSE 0.00169476 and 0.00173574 under the unchanged 0.002
+and cosine 0.99999 gates. This smoke is not a new performance comparison.
+
+The authorized structural investigation is complete: all three evidence-backed
+improvements are integrated as coherent Volta defaults, explicit rollback is
+preserved, the compact expert payload is unchanged, and no unresolved in-scope
+decision warrants another runner experiment. The remaining gap to Strata is not
+an apples-to-apples kernel claim because quantization, KV, MTP and model arithmetic
+differ; the same-work NInfer improvements are the supported deployment result.

@@ -1,0 +1,78 @@
+{
+  "schema": "ninfer.v100.qualified_defaults_evidence.v1",
+  "run": {
+    "id": 38041684008,
+    "url": "https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38041684008",
+    "artifact_id": 11665593650,
+    "artifact_sha256": "7aa5eef8c0a10d68986112a6744d6e672cfd314fae3036dc462b05ddac47c49d",
+    "commit": "d81a5aa46399e68cee25320bf2a34cd65ba0a746",
+    "conclusion": "success"
+  },
+  "selection": {
+    "build": "NINFER_VOLTA_BUILD",
+    "unset_selectors": [
+      "NINFER_V100_PREFILL_EXPERT_GEMM",
+      "NINFER_V100_PREFILL_RESIDENT_GEMM",
+      "NINFER_V100_PREFILL_CPU_STREAM_OVERLAP"
+    ],
+    "manifest_selector_overrides": 0,
+    "launch_selector_overrides": 0,
+    "selected_paths": [
+      "streamed_fp16_expert_gemm",
+      "resident_fp16_expert_gemm",
+      "cpu_stream_overlap"
+    ],
+    "legacy_rollback": {
+      "NINFER_V100_PREFILL_EXPERT_GEMM": "simt",
+      "NINFER_V100_PREFILL_RESIDENT_GEMM": "0",
+      "NINFER_V100_PREFILL_CPU_STREAM_OVERLAP": "0"
+    }
+  },
+  "smoke": {
+    "frontend_prompt_tokens": 7111,
+    "completion_tokens": 32,
+    "cached_tokens": 0,
+    "requests": 2,
+    "wall_seconds": [39.365283745, 37.91537255],
+    "prefill_seconds": [37.172499329, 35.789022812],
+    "decode_seconds": [2.124727369, 2.116417467],
+    "output_sha256": "190125f0a369ef16560684288dec1013642084ba5b3a7db1785281ccbc27e56c",
+    "distinct_replay_signatures": 1,
+    "mtp": {
+      "accepted_per_position": [9, 7],
+      "accepted": 16,
+      "drafted": 27,
+      "rounds": 15,
+      "window": 2,
+      "fallback": 0
+    }
+  },
+  "dispatch_two_request_totals": {
+    "streamed_experts": 51468,
+    "streamed_routes": 5311550,
+    "resident_gemm_experts": 7334,
+    "resident_gemm_routes": 1050616,
+    "early_cpu_rows": 432,
+    "early_cpu_routes": 370509,
+    "native_prefill_cpu_routes": 370509,
+    "eligible_rows": 384,
+    "eligible_routes": 365670,
+    "ineligible_rows": 48,
+    "ineligible_routes": 4839,
+    "ineligible_overlap_ms": 0.0,
+    "temporal_overlap_ms": 11812.380239
+  },
+  "qualification": {
+    "explicit_legacy_rollback_fixture": "pass",
+    "independent_fp32_formula_worst_nrmse": 0.000225084,
+    "default_cache_integration_worst_nrmse": 0.00169476,
+    "default_coexistence_worst_nrmse": 0.00173574,
+    "nrmse_limit": 0.002,
+    "cosine_limit": 0.99999,
+    "all_direct_and_integration_gates": "pass"
+  },
+  "memory": {
+    "peak_gpu_mib": 18905.75
+  },
+  "interpretation": "The coherent qualified configuration is selected by an unset-selector Volta deployment, while explicit legacy rollback remains operational. This is a functional deployment smoke, not a new performance comparison."
+}
