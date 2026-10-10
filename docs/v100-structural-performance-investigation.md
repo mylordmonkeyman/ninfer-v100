@@ -3,6 +3,37 @@
 Checkpoint: October 9, 2026. NInfer baseline `293e6bc0fe85bcf3f85c39958aab651adbe52895`;
 Strata comparison source `0430d397d907032fc9ab83c8bb7acff48a935b53`.
 
+## First execution: framing and launch correction
+
+Run 38007509479 built both engines successfully, but the harness combined
+`--no-prefix-reuse` with explicit context-cache capacity options. Native CLI
+validation rejected the first NInfer launch before model loading or inference.
+Artifact 11651544700 preserves the 66 KB compressed partial evidence. No request
+performance result exists from that run. The corrected launch keeps prefix reuse
+disabled and omits the incompatible capacity options. Thus those capacity settings
+from the earlier prefix-reuse experiment are not part of this comparison's memory
+budget; actual allocations are authoritative. Startup failures now print the native
+error directly into Actions logs.
+
+The artifact's actual native expert table and `.ninfer` directory establish:
+
+| Engine / layers | Stored expert formats | Bytes per complete expert | All 512-expert banks |
+|---|---|---:|---:|
+| NInfer, 48 layers | NVFP4 fused gate/up + down | 2,764,808 | 67,947,921,408 B |
+| Strata, 43 layers | Q4_K gate/up, Q5_1 down | 3,072,000 | Included below |
+| Strata, 4 layers | Q4_K gate/up, Q8_0 down | 3,584,000 | Included below |
+| Strata, 1 layer | Q5_K gate/up, Q8_0 down | 3,993,600 | Included below |
+| Strata, all 48 layers | Mixed integer GGUF | Varies by layer | 77,017,907,200 B |
+
+Strata's experts occupy about 13.35% more compact bytes, not fewer. This rules out
+smaller compact expert payload as the explanation for its historical advantage;
+it does not rule out format-specific compute efficiency, better device reuse,
+different cache allocation, or other representation differences. The installed
+Strata configuration is MTP spec4, INT8 KV, 262144 maximum context / 32768 resident
+KV, auto expert cache, auto prefill, resident-budget71GiB. Those differ from NInfer's
+MTP2/BF16/8192 controls and remain explicit descriptive-comparison confounds.
+`nsys` is unavailable in the runner; existing bounded event ledgers are retained.
+
 ## Evidence retained from the completed chunk test
 
 [Hardware 38003028002](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38003028002)

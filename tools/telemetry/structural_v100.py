@@ -145,8 +145,7 @@ def main():
     ninfer_placement = ['taskset', '--cpu-list', ','.join(map(str, cpus))]
     a.ninfer_flags = ['--max-context', '8192', '--kv-capacity', '8192', '--max-concurrency', '1',
         '--prefill-chunk', '2048', '--kv-dtype', 'bf16', '--no-prefix-reuse', '--no-thinking',
-        '--no-cuda-graph', '--no-qsa-prefill-mma', '--device-state-slots', '2', '--host-state-slots', '2',
-        '--host-kv-mib', '256', '--max-private-continuations', '2', '--max-shared-prefixes', '2',
+        '--no-cuda-graph', '--no-qsa-prefill-mma',
         '--spec', 'mtp', '--draft-tokens', '2', '--lm-head-draft']
     a.long_prompt = LONG
     a.max_output_tokens = 128

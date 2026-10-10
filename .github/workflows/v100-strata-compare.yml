@@ -1,4 +1,5 @@
 name: V100 Structural Engine Comparison
+# Prefix reuse is disabled; the harness omits incompatible context-cache capacity flags.
 on:
   workflow_dispatch:
   push:

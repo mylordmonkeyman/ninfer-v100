@@ -331,7 +331,9 @@ def run_case(args, engine, variant, overrides):
             model = None
             while time.monotonic()-start_up < 600:
                 if proc.poll() is not None:
-                    raise RuntimeError(f'{tag}: exited before HTTP ready, inspect server.log')
+                    log.flush()
+                    detail = (folder/'server.log').read_text()[-8192:]
+                    raise RuntimeError(f'{tag}: exited before HTTP ready:\n{detail}')
                 try:
                     models = query(f'http://127.0.0.1:{port}', '/v1/models')
                     model = models['data'][0]['id']
