@@ -52,8 +52,9 @@ void HostExpertWorkerPool::execute_jobs(std::size_t count) {
 }
 
 HostExpertBatchStats HostExpertWorkerPool::run(std::span<const HostExpertTask> tasks,
-                                               bool group_same_experts, unsigned telemetry_layer) {
+                                               bool group_same_experts, unsigned telemetry_layer, unsigned row_job_budget) {
     HostExpertBatchStats stats;
+    if (row_job_budget > 256) throw std::invalid_argument("CPU row-job budget must be in [0, 256]");
     if (tasks.empty()) { return stats; }
     if (group_same_experts &&
         (!avx2_ || fp32_intermediate_ ||
@@ -76,6 +77,8 @@ HostExpertBatchStats HostExpertWorkerPool::run(std::span<const HostExpertTask> t
         throw std::invalid_argument("host expert batch exceeds worker semaphore capacity");
     }
     std::unique_lock<std::mutex> submit_lock(submit_mutex_);
+    row_job_budget_ = row_job_budget ? std::min<std::size_t>(row_job_budget, workers_.size()) : workers_.size();
+    stats.row_job_budget = row_job_budget_;
     telemetry_level_ = v100_compare::active && telemetry_layer < 48 ? v100_compare::level() : 0;
     if (telemetry_level_) {
         for (unsigned i = 0; i < worker_observations_.size(); ++i) {
@@ -94,7 +97,7 @@ HostExpertBatchStats HostExpertWorkerPool::run(std::span<const HostExpertTask> t
     if (grouped_) {
         run_grouped(tasks, stats);
     } else {
-        row_sharded_ = avx2_ && tasks.size() < workers_.size() &&
+        row_sharded_ = avx2_ && tasks.size() < row_job_budget_ &&
             std::none_of(tasks.begin(), tasks.end(), [](const auto& task) {
                 return task.input_fp32 != nullptr;
             });
@@ -107,7 +110,7 @@ HostExpertBatchStats HostExpertWorkerPool::run(std::span<const HostExpertTask> t
                 // Fill available cores without adding a mostly idle second wave.
                 // Bound sharding for a lone expert to keep rendezvous work modest.
                 const std::size_t shards = std::min<std::size_t>(
-                    8, workers_.size() / tasks.size() + (i < workers_.size() % tasks.size()));
+                    8, row_job_budget_ / tasks.size() + (i < row_job_budget_ % tasks.size()));
                 for (std::size_t shard = 0; shard < shards; ++shard) {
                     row_jobs_.push_back({i, shard, shards});
                 }
@@ -129,6 +132,7 @@ HostExpertBatchStats HostExpertWorkerPool::run(std::span<const HostExpertTask> t
         std::lock_guard<std::mutex> error_lock(error_mutex_);
         error = error_;
     }
+    stats.row_jobs = row_sharded_ ? row_jobs_.size() : 0;
     tasks_ = nullptr;
     work_count_ = 0;
     if (error) { std::rethrow_exception(error); }
@@ -165,7 +169,7 @@ void HostExpertWorkerPool::run_grouped(std::span<const HostExpertTask> tasks,
     for (const auto& group : groups_) {
         stats.weight_read_bytes += compact_expert_bytes(group.expert);
     }
-    row_sharded_ = groups_.size() < workers_.size();
+    row_sharded_ = groups_.size() < row_job_budget_;
     if (!row_sharded_) {
         execute_jobs(groups_.size());
         return;
@@ -175,7 +179,7 @@ void HostExpertWorkerPool::run_grouped(std::span<const HostExpertTask> tasks,
     // singleton workers idle, especially in MTP verification batches. Split
     // the available worker budget by routed rows rather than expert count.
     group_shards_.assign(groups_.size(), 1);
-    for (std::size_t jobs = groups_.size(); jobs < workers_.size(); ++jobs) {
+    for (std::size_t jobs = groups_.size(); jobs < row_job_budget_; ++jobs) {
         std::size_t selected = groups_.size();
         for (std::size_t i = 0; i < groups_.size(); ++i) {
             if (group_shards_[i] == 8) { continue; }

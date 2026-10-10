@@ -125,7 +125,7 @@ def native_work(folder, engine):
             if layer.get('cache_windows'):
                 end = layer['cache_windows'][-1]['end']
                 dst['cache_last_by_layer'][str(layer['layer'])] = {k:v for k,v in end.items() if k != 'resident_ids'}
-    ledger, dispatch, stream_timing, resident_gemm, early_cpu = [], [], [], [], []
+    ledger, dispatch, stream_timing, resident_gemm, early_cpu, row_budget = [], [], [], [], [], []
     for line in log.read_text().splitlines():
         if '"prefill_stage_ledger"' in line:
             ledger.append(json.loads(line))
@@ -133,6 +133,8 @@ def native_work(folder, engine):
             stream_timing.append(json.loads(line))
         elif '"expert_resident_gemm"' in line:
             resident_gemm.append(json.loads(line))
+        elif '"cpu_row_budget"' in line:
+            row_budget.append(json.loads(line))
         elif '"early_cpu_stream"' in line:
             early_cpu.append(json.loads(line))
         elif engine == 'strata' and any(s in line.lower() for s in
@@ -140,7 +142,7 @@ def native_work(folder, engine):
             dispatch.append(line)
     return dict(phases=dict(phases), ninfer_prefill_chunks=ledger,
         strata_dispatch_and_phase_lines=dispatch, expert_stream_timing=stream_timing,
-        expert_resident_gemm=resident_gemm, early_cpu_stream=early_cpu,
+        expert_resident_gemm=resident_gemm, early_cpu_stream=early_cpu, cpu_row_budget=row_budget,
         limits=['Host spans are inclusive, not additive critical-path components.',
                 'CUDA stage intervals include stream waits and host gaps.',
                 'CPU weight-read counters are modeled reads, not hardware DRAM counters.',
@@ -193,8 +195,8 @@ def main():
                    help='one server with unset V100 selectors; require qualified default dispatch and replay')
     p.add_argument('--residency-gemm-ab', action='store_true',
                    help='step 1: static64 versus adaptive156, both with qualified GEMM and CPU overlap')
-    p.add_argument('--staged-dequant-ab', action='store_true',
-                   help='step 3: adaptive156 dequantization on compute versus dedicated preparation stream')
+    p.add_argument('--small-batch-cpu-ab', action='store_true',
+                   help='step 4: bound small-batch CPU row sharding while preserving large prefill')
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=True)
     inventory(a)
@@ -210,6 +212,8 @@ def main():
         '--spec', 'mtp', '--draft-tokens', '2', '--lm-head-draft']
     a.long_prompt = LONG
     a.max_output_tokens = 128
+    if a.small_batch_cpu_ab:
+        a.max_output_tokens = 512
     a.warmups = 4; a.repeats = 1; a.telemetry_level = 0
     a.request_schedule = [('cold', 'long')]+[('warmup', 'long')]*4+[('measured', 'long')]
     gemm_arms = [('simt', dict(ARMS[0][2], NINFER_V100_PREFILL_EXPERT_GEMM='simt')),
@@ -224,27 +228,27 @@ def main():
                                   NINFER_V100_PREFILL_RESIDENT_GEMM='1',
                                   NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=value))
                      for backend,value in [('fp16-resident','0'),('fp16-resident-overlap','1')]]
-    if a.staged_dequant_ab:
+    if a.small_batch_cpu_ab:
         base = residency_arms()[1][2]
-        gemm_arms = [(name, dict(base, NINFER_V100_EXPERT_STREAM_STAGED_DEQUANT=value))
-                     for name, value in [('compute-dequant', '0'), ('staged-dequant', '1')]]
+        gemm_arms = [(name, dict(base, NINFER_V100_SMALL_BATCH_CPU_ROW_BUDGET=value))
+                     for name, value in [('full-row-budget', '0'), ('physical-row-budget', '32')]]
     default_arm = ('ninfer', 'v100-default', dict(ARMS[0][2]))
     manifest_arms = ([default_arm] if a.qualified_default_smoke else
                      residency_arms() if a.residency_gemm_ab else
                      [('ninfer', backend, flags) for backend, flags in gemm_arms]
-                     if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.staged_dequant_ab) else ARMS)
+                     if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.small_batch_cpu_ab) else ARMS)
     (a.output/'manifest.json').write_text(json.dumps(dict(prompt=LONG, short_prompt=ab.SHORT,
-        output_limit=32 if (a.stream_attribution_only or a.qualified_default_smoke) else 128,
+        output_limit=32 if (a.stream_attribution_only or a.qualified_default_smoke) else a.max_output_tokens,
         physical_cpus=cpus,
         arms=[ARMS[0]] if a.stream_attribution_only else manifest_arms,
         fresh_servers_per_arm=1 if (a.stream_attribution_only or a.qualified_default_smoke) else 3,
         stream_attribution_only=a.stream_attribution_only, expert_gemm_ab=a.expert_gemm_ab, resident_gemm_ab=a.resident_gemm_ab, cpu_stream_overlap_ab=a.cpu_stream_overlap_ab,
         qualified_default_smoke=a.qualified_default_smoke,
-        residency_gemm_ab=a.residency_gemm_ab, staged_dequant_ab=a.staged_dequant_ab,
+        residency_gemm_ab=a.residency_gemm_ab, small_batch_cpu_ab=a.small_batch_cpu_ab,
         timing_telemetry_level=0, diagnostic_telemetry_level=2,
         cache_budget='actual allocations logged; requested maxima are not equal-memory controls',
         cold_definition='first request after fresh server; host file cache preserved',
-        cross_quant_comparison='same artifact and arithmetic; expert expansion stream scheduling only' if a.staged_dequant_ab else
+        cross_quant_comparison='same artifact and arithmetic; small-batch CPU row partition only' if a.small_batch_cpu_ab else
             'same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.residency_gemm_ab)
             else 'descriptive; source artifacts and frontend token counts differ',
         ninfer_flags=a.ninfer_flags), indent=2)+'\n')
@@ -258,7 +262,7 @@ def main():
             result = ab.run_case(a, engine, tag, overrides)
             folder = a.output/(engine+'-'+tag)
             cell = dict(engine=engine, arm=arm, mode=mode, folder=str(folder), result=result)
-            if a.residency_gemm_ab or a.staged_dequant_ab:
+            if a.residency_gemm_ab or a.small_batch_cpu_ab:
                 cell['residency'] = residency_observation(folder, a.max_output_tokens)
             if mode == 'diagnostic':
                 cell['work'] = native_work(folder, engine)
@@ -356,13 +360,13 @@ def main():
             resident_gemm_routes=sum(row['routes'] for row in resident),
             streamed_routes=sum(row['routes'] for row in streamed)),indent=2),flush=True)
         return
-    if a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.staged_dequant_ab:
+    if a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.small_batch_cpu_ab:
         engine, arm, overrides = ARMS[0]
         arms = gemm_arms
         for repeat in range(3):
             for backend, flags in (arms if repeat != 1 else list(reversed(arms))):
                 run(engine, backend, flags, backend+'-r'+str(repeat), 'timing')
-        if a.staged_dequant_ab:
+        if a.small_batch_cpu_ab:
             # Adaptive cache warms across requests: compare each request ordinal
             # across schedules, rather than requiring cold and warm arithmetic parity.
             signatures = defaultdict(set)
@@ -373,7 +377,7 @@ def main():
                     signatures[ordinal].add(json.dumps([row['output_sha256'], row['response']['usage'],
                                                         row.get('native_speculative')], sort_keys=True))
             if len(signatures) != 6 or any(len(values) != 1 for values in signatures.values()):
-                raise ValueError('Staged dequantization changed output, usage or MTP work at matching request ordinal')
+                raise ValueError('CPU row-budget changed output, usage or MTP work at matching request ordinal')
         if a.cpu_stream_overlap_ab:
             signatures=set()
             for cell in cells:
@@ -390,15 +394,15 @@ def main():
             diagnostic=dict(flags, NINFER_FLASH_NEXT_STAGE_LEDGER='1',
                             NINFER_V100_EXPERT_STREAM_TIMING='1')
             run(engine,backend,diagnostic,backend+'-diagnostic','diagnostic')
-            if a.staged_dequant_ab:
-                rows = cells[-1]['work']['expert_stream_timing']
-                expected = cells[-1]['work']['phases']['prefill']['counters'].get('nonresident_gpu_routes', 0)
-                if not rows or sum(r['routes'] for r in rows) != expected:
-                    raise ValueError('Staged dequantization diagnostics do not conserve streamed routes')
-                if any(r['staged_dequant'] != (backend == 'staged-dequant') for r in rows):
-                    raise ValueError('Dequantization dispatch does not match selected backend')
-                if backend == 'staged-dequant' and sum(r['dequant_ms'] for r in rows) <= 0:
-                    raise ValueError('Staged expansion interval was not observed')
+            if a.small_batch_cpu_ab:
+                work=cells[-1]['work']; rows=work['cpu_row_budget']
+                expected=work['phases']['verify']['counters'].get('cpu_routes',0)
+                selected=32 if backend=='physical-row-budget' else 0
+                if not rows or sum(r['cpu_routes'] for r in rows)!=expected:
+                    raise ValueError('Small-batch CPU diagnostics do not conserve verification routes')
+                if any(r['requested_budget']!=selected or r['effective_budget']!=(selected or 88)
+                       or r['row_jobs']>r['effective_budget'] for r in rows):
+                    raise ValueError('Small-batch CPU row budget was not respected')
             if a.cpu_stream_overlap_ab:
                 rows=cells[-1]['work']['early_cpu_stream']
                 if bool(rows)!=(backend=='fp16-resident-overlap'):

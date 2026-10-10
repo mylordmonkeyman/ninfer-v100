@@ -125,18 +125,14 @@ bool flash_next_cpu_stream_overlap_requested() {
     return selected_binary_mode("NINFER_V100_PREFILL_CPU_STREAM_OVERLAP");
 }
 struct FlashNextExpertGemm::Impl {
-    DeviceBuffer gu, down;
+    DeviceBuffer gu{1280*2560*2ULL}, down{2560*640*2ULL};
     DeviceBuffer x{tile_routes*2560*2ULL}, gate_up{tile_routes*1280*4ULL};
     DeviceBuffer h{tile_routes*640*2ULL}, y{tile_routes*2560*4ULL};
     DeviceBuffer input_scales{tile_routes*4ULL}, h_scales{tile_routes*4ULL};
     DeviceBuffer workspace{4ULL*1024*1024};
     cublasHandle_t handle=nullptr;
     cudaStream_t compute=nullptr; bool bound=false;
-    explicit Impl(bool own_weights) {
-        if (own_weights) {
-            gu=DeviceBuffer(1280*2560*2ULL);
-            down=DeviceBuffer(2560*640*2ULL);
-        }
+    Impl() {
         blas_check(cublasCreate(&handle));
         try {
             blas_check(cublasSetMathMode(handle,static_cast<cublasMath_t>(
@@ -145,55 +141,35 @@ struct FlashNextExpertGemm::Impl {
     }
     ~Impl(){if(handle)cublasDestroy(handle);}
 };
-FlashNextExpertGemm::FlashNextExpertGemm(bool own_weights):impl_(std::make_unique<Impl>(own_weights)){}
+FlashNextExpertGemm::FlashNextExpertGemm():impl_(std::make_unique<Impl>()){}
 FlashNextExpertGemm::~FlashNextExpertGemm()=default;
-void FlashNextExpertGemm::expand_weights(const HostNvfp4ExpertPairView& expert,
-    void* gu, void* down, cudaStream_t stream) {
-    if (!gu || !down || expert.gate_up.rows!=1280 || expert.gate_up.columns!=2560 ||
-        expert.down.rows!=2560 || expert.down.columns!=640)
-        throw std::invalid_argument("invalid Flash-Next expert expansion geometry");
-    expand<<<(1280*2560+255)/256,256,0,stream>>>(expert.gate_up,static_cast<__half*>(gu));
-    CUDA_CHECK(cudaGetLastError());
-    expand<<<(2560*640+255)/256,256,0,stream>>>(expert.down,static_cast<__half*>(down));
-    CUDA_CHECK(cudaGetLastError());
-}
 void FlashNextExpertGemm::launch(const HostNvfp4ExpertPairView& expert,
     const FlashNextCachedExpertGroup* groups,unsigned routes,cudaStream_t stream) {
     auto& m=*impl_;
-    if (!routes || !groups)
-        throw std::invalid_argument("invalid Flash-Next expert GEMM geometry");
-    if (!m.gu.p || !m.down.p)
-        throw std::logic_error("expert GEMM instance requires caller-prepared weights");
-    if (m.bound && m.compute!=stream)
-        throw std::invalid_argument("expert GEMM scratch requires one compute stream");
-    expand_weights(expert,m.gu.p,m.down.p,stream);
-    launch_prepared(expert,{m.gu.p,m.down.p},groups,routes,stream);
-}
-void FlashNextExpertGemm::launch_prepared(const HostNvfp4ExpertPairView& expert,
-    FlashNextExpandedExpertView weights, const FlashNextCachedExpertGroup* groups,
-    unsigned routes,cudaStream_t stream) {
-    auto& m=*impl_;
-    if(!routes || !groups || !weights.gate_up || !weights.down ||
-       expert.gate_up.rows!=1280 || expert.gate_up.columns!=2560 ||
+    if(!routes || !groups || expert.gate_up.rows!=1280 || expert.gate_up.columns!=2560 ||
        expert.down.rows!=2560 || expert.down.columns!=640)
         throw std::invalid_argument("invalid Flash-Next expert GEMM geometry");
     if(m.bound && m.compute!=stream)throw std::invalid_argument("expert GEMM scratch requires one compute stream");
     m.bound=true;m.compute=stream;
     blas_check(cublasSetStream(m.handle,stream));
     blas_check(cublasSetWorkspace(m.handle,m.workspace.p,m.workspace.bytes));
+    expand<<<(1280*2560+255)/256,256,0,stream>>>(expert.gate_up,static_cast<__half*>(m.gu.p));
+    CUDA_CHECK(cudaGetLastError());
+    expand<<<(2560*640+255)/256,256,0,stream>>>(expert.down,static_cast<__half*>(m.down.p));
+    CUDA_CHECK(cudaGetLastError());
     const float one=1,zero=0;
     for(unsigned offset=0;offset<routes;offset+=tile_routes) {
         const unsigned count=std::min(tile_routes,routes-offset), padded=(count+7)&~7U;
         gather<<<padded,256,0,stream>>>(groups,offset,count,static_cast<__half*>(m.x.p),static_cast<float*>(m.input_scales.p));
         CUDA_CHECK(cudaGetLastError());
         blas_check(cublasGemmEx(m.handle,CUBLAS_OP_T,CUBLAS_OP_N,1280,padded,2560,
-            &one,weights.gate_up,CUDA_R_16F,2560,m.x.p,CUDA_R_16F,2560,&zero,m.gate_up.p,CUDA_R_32F,1280,
+            &one,m.gu.p,CUDA_R_16F,2560,m.x.p,CUDA_R_16F,2560,&zero,m.gate_up.p,CUDA_R_32F,1280,
             CUBLAS_COMPUTE_32F,CUBLAS_GEMM_DEFAULT_TENSOR_OP));
         activate<<<padded,256,0,stream>>>(static_cast<const float*>(m.gate_up.p),static_cast<const float*>(m.input_scales.p),
             expert.gate_up.weight_scale_divisor,static_cast<__half*>(m.h.p),static_cast<float*>(m.h_scales.p));
         CUDA_CHECK(cudaGetLastError());
         blas_check(cublasGemmEx(m.handle,CUBLAS_OP_T,CUBLAS_OP_N,2560,padded,640,
-            &one,weights.down,CUDA_R_16F,640,m.h.p,CUDA_R_16F,640,&zero,m.y.p,CUDA_R_32F,2560,
+            &one,m.down.p,CUDA_R_16F,640,m.h.p,CUDA_R_16F,640,&zero,m.y.p,CUDA_R_32F,2560,
             CUBLAS_COMPUTE_32F,CUBLAS_GEMM_DEFAULT_TENSOR_OP));
         scatter<<<count,256,0,stream>>>(groups,offset,count,static_cast<const float*>(m.y.p),
             static_cast<const float*>(m.h_scales.p),expert.down.weight_scale_divisor);

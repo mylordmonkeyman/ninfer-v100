@@ -471,11 +471,11 @@ milestone remains complete; this is a new investigation of the remaining gap.
    existing stage, streamed-expert and CPU-overlap ledgers. Use the winning arm's
    evidence first. Inclusive/overlapping intervals are not additive latency. Add
    another bounded diagnostic only if a missing observation changes the next design.
-3. **Expert pipeline — in progress.** Implement the strongest measured remedy:
+3. **Expert pipeline — completed; two negative experiments.** Implement the strongest measured remedy:
    batching, staged dequantization/GEMM overlap, justified expanded-weight reuse,
    or recalibrated CPU/GPU routing. Qualify the affected operator/lifetime contract
    and measure request-level benefit; do not repeat old ring/chunk sweeps unchanged.
-4. **Decode — pending attribution.** Investigate small routed groups and MTP
+4. **Decode — in progress.** Investigate small routed groups and MTP
    verification separately; the qualified prefill GEMM crossover is 32 routes.
    Choose small-group GPU execution or CPU-miss improvements from observed costs.
    Different >=4-bit representations require independent numerical assessment.
@@ -540,38 +540,49 @@ inclusive sums explain why simply starting CPU work sooner is insufficient;
 they do not add to request latency. Verification remained CPU-heavy (about
 1.81 s CPU in a 2.99 s inclusive MoE scope), retained for Step 4.
 
-Step 3 now tests staged streamed-weight expansion with
-`NINFER_V100_EXPERT_STREAM_STAGED_DEQUANT=1` (unset/0 retains compute-stream expansion).
-A dedicated preparation stream waits for each slot's compact H2D upload, then
-runs the same two FP16 expansion kernels while earlier GEMMs may execute. DMA
-remains on its own stream and can upload subsequent slots concurrently. Compute
-waits for expansion-ready; consumed protects compact weights, divisor pointers,
-descriptors and expanded weights from reuse. Completion and exception cleanup
-drain all three streams before freeing buffers. Resident execution, route order,
-represented scales, arithmetic, persistent cache and the >=32-route GEMM crossover
-are unchanged. Smaller groups retain SIMT.
+Step 3's second attempt, staged dequantization, was rejected by run
+[38066265273](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38066265273).
+The independent FP32 prepared-weight oracle, exact prepared/baseline parity,
+multiple-wrap stream lifetime/coexistence fixtures and exact corresponding-request
+output/usage/MTP checks passed. Warmed HTTP was 36.1270 s compute-dequant versus
+36.4944 s staged-dequant (+1.02%); prefill was 30.2523 versus 30.3965 s. Cold HTTP
+was 39.3714 versus 39.8020 s. Across two diagnostics, compute kernel intervals
+fell 7690.888 -> 5588.926 ms, but compute waits rose 8919.324 -> 10026.323 ms,
+with staged preparation 2821.063 ms. These intervals overlap and are not additive.
+Moving expansion off compute did not improve request throughput. The experimental
+stream, expanded-slot memory, prepared launch API and corresponding campaign were
+removed, retaining the qualified bounded shared expansion. **Step 3 completed
+with no additional deployment change:** both schedule experiments were negative.
 
-Each ring slot owns 9.375 MiB expanded weights; shared compute scratch no longer
-owns an unused expansion. Extra planned allocation is 28.125 MiB for four slots
-(65.625 MiB for eight), included in the existing stream memory plan and allocator
-reserve accounting. This is bounded temporary storage, not permanent expanded
-expert caching. No ring size, old slot-reuse flag, expert order or chunk sweep is
-repeated. Dequantization/preparation interval, transfer, compute wait and kernel
-interval are reported separately; preparation includes queue wait and cross-stream
-intervals remain overlapping, not additive wall time.
+## Step 4: small-batch CPU row scheduling
 
-`--staged-dequant-ab` compares compute-dequant/staged-dequant on adaptive156 using
-three alternating fresh servers per arm, cold + four warmups + measured requests,
-then separate two-request diagnostics. Exact output, usage and native MTP work
-must match corresponding request ordinals; normal adaptive cold-to-warm changes
-are allowed. Actual cache capacity/seeding and sampled GPU peak are retained.
-Diagnostics require conserved streamed routes and observed staged dispatch.
+Verification diagnostics had 12,294 CPU routes over 31 rounds, with 1.8024 s CPU
+work inside 3.0191 s inclusive MoE time. Small-batch CPU groups commonly trigger
+two-phase row sharding using the whole configured 88-worker budget on the fixed
+32-physical-core mask. Large prefill's 88-worker choice has separate measured
+support; it does not establish the best small verification schedule.
 
-The hardware gate checks prepared-weight GEMM directly against the independent
-FP32 oracle across extreme represented inputs/scales and route tails, with exact
-baseline/prepared parity. The stream fixture covers mixed SIMT/GEMM groups over
-multiple slot wraps, different expert/divisor replacement, guards, pending
-prepared-work destruction, and persistent-hit/streamed-miss coexistence. Both
-baseline and staged fixtures must pass before timing starts. The default stays
-off until request-level evidence supports adoption. Steps 4 (decode) and 5
-(contemporary Strata/long-context comparison) remain pending Step 3 results.
+The experimental `NINFER_V100_SMALL_BATCH_CPU_ROW_BUDGET=32` caps row-shard job
+creation for batches of up to eight tokens. Unset/0 retains the full pool budget;
+values 1..256 are capped to configured workers. Large prefill is unchanged. This
+is a row-job budget, not a new thread pool, CPU placement or cap on whole-expert
+jobs. Groups at or above the budget use whole-group jobs, while fewer groups use
+the existing work-balanced row partition with the smaller budget. Each output row
+keeps its original AVX2 arithmetic; group membership, route order, represented
+weights, cache residency, MTP state and reduction order are unchanged.
+
+The existing grouped CPU fixture now varies the row budget and crosses whole-group
+versus split-row boundaries, requires exact original output bits after clearing
+output storage, unchanged route/group/weight-read accounting, and pool recovery.
+Separate diagnostics log effective row budget and row-job count with CPU routes.
+This schedule-only change uses exact parity; it changes no mathematical operator.
+
+`--small-batch-cpu-ab` compares full-row-budget/physical-row-budget on adaptive156
+with three alternating fresh servers each, cold + four warmups + measured request,
+using the same 7111-token prompt and **512 output tokens** to expose decode costs.
+Context8192, BF16KV, MTP2, 2048 chunks, 88 persistent workers, physical-core mask,
+qualified GEMM and CPU/stream overlap remain fixed. Corresponding request ordinals
+must have identical output, usage and native MTP work. Separate two-request 7K/32
+diagnostics require conserved verification CPU routes and observed job budgets.
+The selector remains off until hardware evidence supports adoption. Step 5's
+contemporary Strata and larger-context comparison follows Step 4 results.

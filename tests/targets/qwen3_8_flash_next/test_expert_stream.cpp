@@ -165,9 +165,7 @@ int main() { try {
     require(slots == 4 || slots == 8, "stream ring must have 4 or 8 slots");
     require(flash_next_expert_stream_device_bytes(4) <
             std::size_t(slots) * 3ULL * 1024ULL * 1024ULL +
-                (flash_next_expert_gemm_requested() ? FlashNextExpertGemm::device_bytes : 0) +
-                (flash_next_expert_gemm_requested() && flash_next_expert_stream_staged_dequant()
-                 ? slots*FlashNextExpertGemm::expanded_weight_bytes : 0),
+                (flash_next_expert_gemm_requested() ? FlashNextExpertGemm::device_bytes : 0),
             "decode stream staging reserve is unexpectedly large");
     int devices=0; if(cudaGetDeviceCount(&devices)!=cudaSuccess || !devices) return 77;
     DeviceContext device;
@@ -192,9 +190,7 @@ int main() { try {
     }
     DeviceBuffer d_input(input.size()*2); d_input.copy_from_host(input.data(),input.size()*2);
     run_cost_calibration(device,layer.expert(0),input,d_input);
-    // Mixed SIMT/GEMM groups wrap every slot repeatedly, including replacing
-    // prepared weights with a different expert and crossing the 32-route boundary.
-    const std::array<unsigned,16> counts{1,2,3,4,5,8,16,17,128,256,2048,32,33,64,65,32};
+    const std::array<unsigned,11> counts{1,2,3,4,5,8,16,17,128,256,2048};
     std::size_t total=0;for(auto n:counts)total+=n;
     std::vector<float> actual(total*2560+16);
     DeviceBuffer output(actual.size()*4);output.fill(0xA5);
@@ -235,18 +231,15 @@ int main() { try {
     // Reuse after the explicit completion boundary and destructor completion are both valid.
     FlashNextStreamRoute last{d_input.p,static_cast<float*>(output.p)};
     ring.submit(layer.expert(2),std::span(&last,1),device.stream);ring.finish();
-    std::array<FlashNextStreamRoute,32> pending_routes;
-    for (unsigned t=0;t<pending_routes.size();++t)
-        pending_routes[t]={d_input.p,static_cast<float*>(output.p)+t*2560};
-    { FlashNextExpertStream temporary(pending_routes.size());
-      temporary.submit(layer.expert(1),pending_routes,device.stream); }
-    std::vector<float> tail(pending_routes.size()*2560);
+    { FlashNextExpertStream temporary(1);
+      temporary.submit(layer.expert(1),std::span(&last,1),device.stream); }
+    std::vector<float> tail(2560);
     CUDA_CHECK(cudaMemcpy(tail.data(),output.p,tail.size()*4,cudaMemcpyDeviceToHost));
     double tail_error=0,tail_norm=0;
-    for(unsigned j=0;j<tail.size();++j) {
-        const double d=double(tail[j])-reference[1][j%2560];
+    for(unsigned j=0;j<2560;++j) {
+        const double d=double(tail[j])-reference[1][j];
         require(std::isfinite(tail[j]),"destructor lost pending output");
-        tail_error+=d*d;tail_norm+=double(reference[1][j%2560])*reference[1][j%2560];
+        tail_error+=d*d;tail_norm+=double(reference[1][j])*reference[1][j];
     }
     require(std::sqrt(tail_error/std::max(tail_norm,1e-30))<=.002,"destructor completion oracle mismatch");
     // Ready persistent outputs and ephemeral misses share the actual SV2 route

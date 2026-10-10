@@ -1,5 +1,5 @@
 name: V100 Structural Engine Comparison
-# Step 3: adaptive156 compute-stream versus dedicated-stream weight expansion.
+# Step 4: small-batch CPU row-job budget; large prefill worker schedule fixed.
 on:
   workflow_dispatch:
   push:
@@ -88,7 +88,7 @@ jobs:
           cmake -S . -B build-structural-comparison -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70 \
             -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-structural-comparison --target ninfer-serve ninfer_qwen3_8_flash_next_expert_stream_test ninfer_qwen3_8_flash_next_expert_gemm_test ninfer_qwen3_8_flash_next_expert_cache_test
+          cmake --build build-structural-comparison --target ninfer-serve ninfer_qwen3_8_flash_next_expert_stream_test ninfer_qwen3_8_flash_next_expert_gemm_test ninfer_qwen3_8_flash_next_expert_cache_test ninfer_qwen3_8_flash_next_cpu_expert_group_test
           # Direct invocation makes no-GPU return77 a failure, not a skipped gate.
           build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_gemm_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/expert-gemm-fp32-oracle.log"
@@ -100,11 +100,8 @@ jobs:
             NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=1 \
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/qualified-cache-join-fixture.log"
-          # Qualify cross-stream expansion, multi-wrap slot lifetime, and joins.
-          NINFER_V100_PREFILL_EXPERT_GEMM=fp16 NINFER_V100_PREFILL_RESIDENT_GEMM=1 \
-            NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=1 NINFER_V100_EXPERT_STREAM_STAGED_DEQUANT=1 \
-            build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_stream_test 2>&1 \
-            | tee "$QUALIFICATION_RESULTS/staged-dequant-stream-oracle.log"
+          build-structural-comparison/tests/ninfer_qwen3_8_flash_next_cpu_expert_group_test 2>&1 \
+            | tee "$QUALIFICATION_RESULTS/small-batch-cpu-exact-partition.log"
           cp build-structural-comparison/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
       - name: Record profiler availability without changing permissions
         shell: bash
@@ -113,11 +110,11 @@ jobs:
           { command -v nsys || true; nsys --version 2>&1 || true; } > "$QUALIFICATION_RESULTS/profiler-availability.txt"
           # Existing bounded CUDA event ledgers are used in separate diagnostics.
           # No profiler installation, ptrace changes, or security changes.
-      - name: Step 3 staged dequantization comparison and separate diagnostics
+      - name: Step 4 small-batch CPU comparison and separate diagnostics
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --staged-dequant-ab \
+          python3 tools/telemetry/structural_v100.py --small-batch-cpu-ab \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \
