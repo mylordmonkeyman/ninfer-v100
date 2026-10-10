@@ -35,11 +35,16 @@ private:
         std::unique_ptr<PinnedHostBuffer> host_weights, host_groups;
         cudaEvent_t ready = nullptr, consumed = nullptr;
         bool pending = false;
+        cudaEvent_t copy_start = nullptr, wait_start = nullptr, kernel_start = nullptr;
+        bool timing_pending = false;
     };
     std::array<Slot,8> slots_;  // Up to eight bounded in-flight H2D/compute slots.
     cudaStream_t transfer_ = nullptr;
     unsigned maximum_routes_, next_ = 0, ring_slots_ = 4;
-    bool pipeline_reuse_ = false;
+    bool pipeline_reuse_ = false, timing_ = false;
+    double copy_ms_ = 0, wait_ms_ = 0, kernel_ms_ = 0;
+    std::uint64_t timed_experts_ = 0, timed_routes_ = 0;
+    void collect_timing(Slot& slot);
     std::size_t device_bytes_ = 0, pinned_bytes_ = 0;
     std::uint64_t submitted_ = 0;
     void cleanup() noexcept;

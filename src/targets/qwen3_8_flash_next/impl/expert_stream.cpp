@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
 #include <stdexcept>
 #include <string_view>
 
@@ -57,6 +58,8 @@ FlashNextExpertStream::FlashNextExpertStream(unsigned maximum_routes)
       pipeline_reuse_(flash_next_expert_stream_pipeline_reuse()) {
     if (!maximum_routes || maximum_routes > 8192U*10U)
         throw std::invalid_argument("invalid prefill stream route capacity");
+    const char* timing = std::getenv("NINFER_V100_EXPERT_STREAM_TIMING");
+    timing_ = timing && std::string_view(timing) == "1";
     const std::size_t descriptors = ((std::size_t(maximum_routes)+3)/4)*sizeof(FlashNextCachedExpertGroup);
     try {
         CUDA_CHECK(cudaStreamCreateWithFlags(&transfer_,cudaStreamNonBlocking));
@@ -67,8 +70,13 @@ FlashNextExpertStream::FlashNextExpertStream(unsigned maximum_routes)
             s.groups=std::make_unique<DeviceBuffer>(descriptors);
             s.host_weights=std::make_unique<PinnedHostBuffer>(kExpertSlotBytes);
             s.host_groups=std::make_unique<PinnedHostBuffer>(descriptors);
-            CUDA_CHECK(cudaEventCreateWithFlags(&s.ready,cudaEventDisableTiming));
-            CUDA_CHECK(cudaEventCreateWithFlags(&s.consumed,cudaEventDisableTiming));
+            CUDA_CHECK(cudaEventCreateWithFlags(&s.ready,timing_ ? cudaEventDefault : cudaEventDisableTiming));
+            CUDA_CHECK(cudaEventCreateWithFlags(&s.consumed,timing_ ? cudaEventDefault : cudaEventDisableTiming));
+            if (timing_) {
+                CUDA_CHECK(cudaEventCreate(&s.copy_start));
+                CUDA_CHECK(cudaEventCreate(&s.wait_start));
+                CUDA_CHECK(cudaEventCreate(&s.kernel_start));
+            }
             device_bytes_+=kExpertSlotBytes+s.activations->bytes+descriptors;
             pinned_bytes_+=kExpertSlotBytes+descriptors;
         }
@@ -85,6 +93,10 @@ void FlashNextExpertStream::cleanup() noexcept {
         if (s.pending) cudaEventSynchronize(s.consumed);
         if (s.ready) cudaEventDestroy(s.ready);
         if (s.consumed) cudaEventDestroy(s.consumed);
+        if (s.copy_start) cudaEventDestroy(s.copy_start);
+        if (s.wait_start) cudaEventDestroy(s.wait_start);
+        if (s.kernel_start) cudaEventDestroy(s.kernel_start);
+        s.copy_start=nullptr; s.wait_start=nullptr; s.kernel_start=nullptr;
         s.ready=nullptr; s.consumed=nullptr; s.pending=false;
     }
     if (transfer_) cudaStreamDestroy(transfer_);
@@ -114,6 +126,12 @@ void FlashNextExpertStream::submit(const HostNvfp4ExpertPairView& expert,
         } else {
             CUDA_CHECK(cudaEventSynchronize(s.consumed));
         }
+        // Diagnostic collection uses the same completed slot before its events
+        // are overwritten. Only diagnostic pipelined reuse adds a host wait.
+        if (timing_) {
+            CUDA_CHECK(cudaEventSynchronize(s.consumed));
+            collect_timing(s);
+        }
         s.pending = false;
     }
     auto* host=static_cast<std::byte*>(s.host_weights->data());
@@ -139,14 +157,19 @@ void FlashNextExpertStream::submit(const HostNvfp4ExpertPairView& expert,
                 static_cast<std::uint16_t*>(s.activations->p)+index*640,routes[index].output_fp32};
         }
     }
+    if (timing_) CUDA_CHECK(cudaEventRecord(s.copy_start,transfer_));
     CUDA_CHECK(cudaMemcpyAsync(s.weights->p,host,kExpertSlotBytes,cudaMemcpyHostToDevice,transfer_));
     CUDA_CHECK(cudaMemcpyAsync(s.groups->p,groups,count*sizeof(*groups),cudaMemcpyHostToDevice,transfer_));
     CUDA_CHECK(cudaEventRecord(s.ready,transfer_));
+    if (timing_) CUDA_CHECK(cudaEventRecord(s.wait_start,compute));
     CUDA_CHECK(cudaStreamWaitEvent(compute,s.ready,0));
+    if (timing_) CUDA_CHECK(cudaEventRecord(s.kernel_start,compute));
     try {
         flash_next_cached_expert_group_launch(static_cast<const FlashNextCachedExpertGroup*>(s.groups->p),count,compute);
         CUDA_CHECK(cudaEventRecord(s.consumed,compute));
         s.pending=true;
+        s.timing_pending=timing_;
+        if (timing_) timed_routes_ += routes.size();
     } catch (...) {
         // A launch may already have submitted work before reporting an error.
         cudaStreamSynchronize(compute);
@@ -154,10 +177,27 @@ void FlashNextExpertStream::submit(const HostNvfp4ExpertPairView& expert,
     }
     ++submitted_; next_=(next_+1)%ring_slots_;
 }
+void FlashNextExpertStream::collect_timing(Slot& s) {
+    if (!s.timing_pending) return;
+    float copy = 0, wait = 0, kernel = 0;
+    CUDA_CHECK(cudaEventElapsedTime(&copy,s.copy_start,s.ready));
+    CUDA_CHECK(cudaEventElapsedTime(&wait,s.wait_start,s.kernel_start));
+    CUDA_CHECK(cudaEventElapsedTime(&kernel,s.kernel_start,s.consumed));
+    copy_ms_ += copy; wait_ms_ += wait; kernel_ms_ += kernel;
+    ++timed_experts_; s.timing_pending=false;
+}
 void FlashNextExpertStream::finish() {
     for(auto& s:slots_) if(s.pending) {
-        CUDA_CHECK(cudaEventSynchronize(s.consumed)); s.pending=false;
+        CUDA_CHECK(cudaEventSynchronize(s.consumed));
+        collect_timing(s); s.pending=false;
     }
     CUDA_CHECK(cudaStreamSynchronize(transfer_));
+    if (timing_ && timed_experts_) {
+        // Separate streams overlap: these sums must never be added as a wall time.
+        std::fprintf(stderr,"{\"kind\":\"expert_stream_timing\",\"experts\":%llu,\"routes\":%llu,\"copy_ms\":%.6f,\"compute_wait_ms\":%.6f,\"kernel_interval_ms\":%.6f}\n",
+            static_cast<unsigned long long>(timed_experts_),
+            static_cast<unsigned long long>(timed_routes_),copy_ms_,wait_ms_,kernel_ms_);
+        copy_ms_=wait_ms_=kernel_ms_=0; timed_experts_=timed_routes_=0;
+    }
 }
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

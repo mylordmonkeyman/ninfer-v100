@@ -85,15 +85,17 @@ def native_work(folder, engine):
             if layer.get('cache_windows'):
                 end = layer['cache_windows'][-1]['end']
                 dst['cache_last_by_layer'][str(layer['layer'])] = {k:v for k,v in end.items() if k != 'resident_ids'}
-    ledger, dispatch = [], []
+    ledger, dispatch, stream_timing = [], [], []
     for line in log.read_text().splitlines():
         if '"prefill_stage_ledger"' in line:
             ledger.append(json.loads(line))
+        elif '"expert_stream_timing"' in line:
+            stream_timing.append(json.loads(line))
         elif engine == 'strata' and any(s in line.lower() for s in
             ('prefill timing:', 'mmq', 'fp16', 'cache', 'resident', 'slots')):
             dispatch.append(line)
     return dict(phases=dict(phases), ninfer_prefill_chunks=ledger,
-        strata_dispatch_and_phase_lines=dispatch,
+        strata_dispatch_and_phase_lines=dispatch, expert_stream_timing=stream_timing,
         limits=['Host spans are inclusive, not additive critical-path components.',
                 'CUDA stage intervals include stream waits and host gaps.',
                 'CPU weight-read counters are modeled reads, not hardware DRAM counters.',
@@ -134,6 +136,8 @@ def main():
                  'strata-config', 'strata-binary', 'output'):
         p.add_argument('--'+name, type=Path, required=True)
     p.add_argument('--gpu-uuid', required=True)
+    p.add_argument('--stream-attribution-only', action='store_true',
+                   help='one static64 diagnostic server, cold and repeated 7K requests only')
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=True)
     inventory(a)
@@ -152,7 +156,10 @@ def main():
     a.warmups = 4; a.repeats = 1; a.telemetry_level = 0
     a.request_schedule = [('cold', 'long')]+[('warmup', 'long')]*4+[('measured', 'long')]
     (a.output/'manifest.json').write_text(json.dumps(dict(prompt=LONG, short_prompt=ab.SHORT,
-        output_limit=128, physical_cpus=cpus, arms=ARMS, fresh_servers_per_arm=3,
+        output_limit=32 if a.stream_attribution_only else 128, physical_cpus=cpus,
+        arms=[ARMS[0]] if a.stream_attribution_only else ARMS,
+        fresh_servers_per_arm=1 if a.stream_attribution_only else 3,
+        stream_attribution_only=a.stream_attribution_only,
         timing_telemetry_level=0, diagnostic_telemetry_level=2,
         cache_budget='actual allocations logged; requested maxima are not equal-memory controls',
         cold_definition='first request after fresh server; host file cache preserved',
@@ -180,6 +187,22 @@ def main():
         finally:
             (a.output/'summary.json').write_text(json.dumps(dict(cells=cells, timing=summarize(cells)), indent=2)+'\n')
         ab.release_gpu()
+    if a.stream_attribution_only:
+        a.max_output_tokens = 32; a.telemetry_level = 2
+        a.request_schedule = [('diagnostic', 'long'), ('diagnostic', 'long')]
+        engine, arm, overrides = ARMS[0]
+        diagnostic = dict(overrides, NINFER_FLASH_NEXT_STAGE_LEDGER='1',
+                          NINFER_V100_EXPERT_STREAM_TIMING='1')
+        run(engine, arm, diagnostic, arm+'-stream-attribution', 'diagnostic')
+        work = cells[-1]['work']; rows = work['expert_stream_timing']
+        routes = sum(r['routes'] for r in rows)
+        expected = sum(p['counters'].get('nonresident_gpu_routes', 0) for p in work['phases'].values())
+        slot_bytes = (2_764_808+255)//256*256
+        weight_bytes = sum(r['experts'] for r in rows)*slot_bytes
+        expected_bytes = sum(p['counters'].get('expert_h2d_bytes', 0) for p in work['phases'].values())
+        if not rows or routes != expected or weight_bytes != expected_bytes:
+            raise ValueError(f'incomplete stream attribution: routes {routes}/{expected}, bytes {weight_bytes}/{expected_bytes}')
+        return
     for repeat in range(3):
         for engine, arm, overrides in (ARMS if repeat != 1 else list(reversed(ARMS))):
             run(engine, arm, overrides, arm+'-r'+str(repeat), 'timing')

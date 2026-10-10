@@ -109,6 +109,68 @@ Logs compressed per cell, partial evidence preserved, aliases outside artifacts,
 uploads refuse symlinks and >=1GiB. No page-cache eviction, model conversion, process
 stops outside owned server groups, runner security changes or Phase18/SV8.
 
+## Completed structural comparison
+
+[Run 38008780320](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38008780320)
+and software run 38008780221 passed at `a8711f9`. Artifact 11655316722
+(18.4 MB compressed) contains all ten timing servers and three separate diagnostics.
+The compact machine-readable result is `v100-structural-comparison-38008780320.json`.
+Every timed response reports 7,111 prompt tokens, zero reused prompt tokens and 128
+completion tokens. These are observed frontend counts, not proof of equal accepted
+internal work, quantization, outputs or arithmetic.
+
+| Arm | Cold HTTP median | Warmed HTTP median | Warmed native prefill | Warmed native decode | Peak sampled GPU |
+|---|---:|---:|---:|---:|---:|
+| NInfer static64 | 70.218 s | 62.022 s | 53.491 s | 7.549 s | 18,844 MiB |
+| NInfer adaptive156, including fresh end reference | 72.217 s | 60.373 s | 53.270 s | 6.186 s | 30,488 MiB |
+| Strata native | 16.431 s | 11.551 s | 8.583 s | 2.301 s | 32,470 MiB |
+
+NInfer medians are stable after the first request; Strata retains drift and changes
+outputs between servers and some requests. Static/adaptive NInfer each replay their
+own output exactly; their cross-arm outputs differ. The three main adaptive warmed
+HTTP measurements are 60.541, 60.257, 59.617 s; the independent end reference is
+60.489 s with 53.277 s prefill. This supports the prefill execution gap without
+claiming global convergence or matched cross-engine correctness. Warmed NInfer
+static/adaptive MTP accept 68/67 drafted tokens from 116/118 drafted, respectively;
+Strata accepts 68/73/67 from 119/112/110 drafted. Equal output limits do not make
+verifier/draft schedules equal.
+
+Actual diagnostic cache capacities: static64 allocates 8,494,252,032 compact bytes
+(3,072 experts), adaptive156 allocates 20,704,739,328 bytes (7,488 experts).
+At the final verify snapshot adaptive has 7,442 ready and 46 uploading experts.
+Strata logs an actual 8,082-slot cache, 23.59 GiB, despite an earlier auto estimate
+of 6,342 slots; its prompt path borrows 1,144 slots (3.33 GiB). It also allocates
+48.14 GiB of page-locked, mapped host cache complement. Its telemetry cache-window
+fields are absent: their zero aggregate is **missing observation**, not zero cache.
+Native allocation messages are authoritative. Child RSS coverage is incomplete.
+
+Separate diagnostics aggregate 7K, short and warmup/setup work; NInfer prefill has
+344,976 layer-tokens versus Strata 341,280, so do not compare raw totals as equal
+work. Static/adaptive NInfer prefill expert H2D is 71.214/54.618 GB, modeled CPU
+weight reads 193.617/147.879 GB; inclusive CPU expert intervals 10.152/9.835 s.
+Verify residency is 27.0%/70.2%, versus Strata 66.0% with another 4.2% nonresident
+GPU routes. Diagnostic verify work differs (40,800/40,800/68,160 routes).
+The increased cache saves traffic and improves decode, but barely changes prefill.
+
+The four long-prompt NInfer chunk ledgers put 78.4%/78.0% of their timelines in
+`MoE: reduce`; this includes stream waits and host gaps. It is not yet a kernel-only
+measurement. Strata's **actual** prefill log reports 1,472 ms dequantization,
+2,145 ms gate/up GEMM and 1,071 ms down GEMM, establishing that its dequantize +
+FP16 GEMM fallback executes on these actual layer types. No MMQ attribution is
+needed for this run. Its 8,864 ms GPU timeline includes 277 ms waiting for copies
+and 244 ms combine. Host spans and concurrent stream intervals are not additive.
+
+The next job is one static64 diagnostic server with two 7K/32-output requests,
+not another comparison or parameter sweep. Opt-in `NINFER_V100_EXPERT_STREAM_TIMING=1`
+reuses a bounded five-event set per ring slot, recording H2D, compute-stream wait
+and the two-kernel interval after the copy dependency. Collection occurs after
+slot consumption; normal serving allocates no extra events. The kernel interval
+can include launch submission gaps and overlap with transfer; it is not an
+isolated instruction profiler. This job tests the existing real-shape independent
+expert oracle with timing enabled and verifies that timed route/upload counts
+exactly cover native streamed work. Its result decides whether to implement the
+bounded FP16 routed-expert GEMM replacement. Numerical thresholds remain unchanged.
+
 ## Implementation decision
 
 If current profiling confirms routed expert GPU compute as the leading prefill
