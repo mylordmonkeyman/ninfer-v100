@@ -277,3 +277,20 @@ Diagnostic resident-dispatch rows must be present only in the resident arm. This
 isolates the extension without repeating Strata or changing the measured streamed
 threshold. Actual memory, emitted/accepted tokens and output changes remain required.
 Both arithmetic-changing paths remain opt-in while this extension is qualified.
+
+Resident extension run 38023836226 compiled and passed the direct FP32 operator
+and resident/stream coexistence gates (32,730 resident GEMM routes). Its cache
+fixture passed all numeric checks reached, including mixed dispatch boundaries,
+then stopped on a legacy grouped-versus-scalar bitwise equality assertion at
+128 tokens. This is an arithmetic-profile assertion, not an independent-formula
+failure. Artifact 11659926204 preserves the partial logs; no inference timings
+exist for this run.
+
+The corrected fixture retains exact grouped/scalar parity for SIMT and small
+fallback groups. Eligible resident GEMM routes are checked individually against
+the existing independent represented-weight FP32 formula, without candidate
+casts, at the same NRMSE ≤0.002 / cosine ≥0.99999. Mixed 32/31, 32/32 and 33/32
+expert counts verify both dispatch conservation and each route's applicable
+formula. The protected job runs the entire cache fixture with resident GEMM off
+first, then on; neither the SIMT assertion nor the numerical thresholds are
+removed. Rerun the isolated resident A/B only after all these gates pass.

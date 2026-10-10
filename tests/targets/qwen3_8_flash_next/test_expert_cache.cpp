@@ -7,6 +7,7 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <iostream>
 #include <random>
 #include <stdexcept>
@@ -15,7 +16,7 @@ using namespace ninfer;
 using namespace ninfer::targets::qwen3_8_flash_next::detail;
 void require(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
 std::uint16_t bf16(float x){auto b=std::bit_cast<std::uint32_t>(x);b+=0x7fff+((b>>16)&1);return b>>16;}
-void compare(const std::vector<float>& actual,const std::vector<float>& expected){
+void compare(std::span<const float> actual,std::span<const float> expected){
     double error=0,norm=0,dot=0,aa=0;
     for(unsigned i=0;i<actual.size();++i){require(std::isfinite(actual[i]),"nonfinite cached output");
         error+=std::pow(double(actual[i])-expected[i],2);norm+=double(expected[i])*expected[i];
@@ -263,21 +264,45 @@ int main(){try{
         std::cout<<"cache.decode_batch.exact_parity.paths="<<paths<<'\n';
     }
     cache.set_batched_decode(false);
-    for(unsigned tokens:{1U,3U,5U,8U,128U}) {
+    const char* resident_mode=std::getenv("NINFER_V100_PREFILL_RESIDENT_GEMM");
+    const bool resident_gemm=resident_mode && std::strcmp(resident_mode,"1")==0;
+    for(unsigned tokens:{1U,3U,5U,8U,63U,64U,65U,128U}) {
         std::vector<float> scalar(tokens*2560),grouped(tokens*2560),expected(tokens*2560);
+        const auto gemm_before=cache.stats().gemm_routes;
         for(bool group:{false,true}) {
             cache.set_batched_prefill(false);cache.set_grouped_prefill(group);cache.begin_layer(true);
             for(unsigned t=0;t<tokens;++t) {
                 require(cache.execute(0,t%2,static_cast<std::uint16_t*>(d_input.p)+t*2560,
                     t,device.stream),"group Ready hit missing");
-                if(group)flash_next_cpu_nvfp4_expert_pair_reference(layer.expert(t%2),
-                    std::span(input.data()+t*2560,2560),std::span(expected.data()+t*2560,2560),scratch);
+                if(group) {
+                    const unsigned expert_routes=(tokens+1-t%2)/2;
+                    // GEMM changes private staging precision. Its oracle evaluates the
+                    // represented-weight FP32 formula without candidate FP16 casts.
+                    // Groups remaining on SIMT retain their BF16 activation boundary.
+                    const auto reference=resident_gemm && expert_routes>=32
+                        ? flash_next_cpu_nvfp4_expert_pair_reference_fp32_intermediate
+                        : flash_next_cpu_nvfp4_expert_pair_reference;
+                    reference(layer.expert(t%2),std::span(input.data()+t*2560,2560),
+                        std::span(expected.data()+t*2560,2560),scratch);
+                }
             }
             cache.download(group?grouped:scalar,device.stream);
         }
-        require(scalar==grouped,"grouped expert outputs changed scalar arithmetic");
-        compare(grouped,expected);
-        std::cout<<"cache.group.exact_parity.tokens="<<tokens<<'\n';
+        const auto gemm_routes=cache.stats().gemm_routes-gemm_before;
+        if(!gemm_routes) {
+            require(scalar==grouped,"grouped SIMT expert outputs changed scalar arithmetic");
+            compare(grouped,expected);
+            std::cout<<"cache.group.exact_parity.tokens="<<tokens<<'\n';
+        } else {
+            const unsigned expected_routes=(tokens+1)/2>=32 ? (tokens+1)/2 : 0;
+            const unsigned second_routes=tokens/2>=32 ? tokens/2 : 0;
+            require(gemm_routes==expected_routes+second_routes,"resident GEMM dispatch count mismatch");
+            for(unsigned t=0;t<tokens;++t)
+                compare(std::span(grouped.data()+t*2560,2560),
+                        std::span(expected.data()+t*2560,2560));
+            std::cout<<"cache.group.fp32_oracle.tokens="<<tokens
+                     <<" gemm_routes="<<gemm_routes<<'\n';
+        }
     }
     cache.set_grouped_prefill(false);
     {

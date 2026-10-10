@@ -111,6 +111,10 @@ jobs:
           NINFER_V100_PREFILL_EXPERT_GEMM=fp16 NINFER_V100_PREFILL_RESIDENT_GEMM=1 \
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_stream_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/gemm-resident-coexistence-fixture.log"
+          # Preserve scalar/grouped SIMT exact parity as a separate baseline gate.
+          NINFER_V100_PREFILL_RESIDENT_GEMM=0 \
+            build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
+            | tee "$QUALIFICATION_RESULTS/simt-resident-cache-fixture.log"
           NINFER_V100_PREFILL_RESIDENT_GEMM=1 \
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/gemm-resident-cache-fixture.log"
