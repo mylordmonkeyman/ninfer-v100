@@ -43,6 +43,21 @@ int main() {try {
     std::vector<FlashNextCachedExpertGroup> descriptors(128);
     DeviceBuffer groups(descriptors.size()*sizeof(descriptors[0]));
     DeviceBuffer simt_activations(512*640*2ULL);
+    std::unique_ptr<FlashNextExpertGemm> baseline;
+    const bool pair_expand=flash_next_expert_pair_expand_requested();
+    if(pair_expand) {
+#if defined(_WIN32)
+        _putenv_s("NINFER_V100_EXPERT_PAIR_EXPAND","0");
+#else
+        setenv("NINFER_V100_EXPERT_PAIR_EXPAND","0",1);
+#endif
+        baseline=std::make_unique<FlashNextExpertGemm>();
+#if defined(_WIN32)
+        _putenv_s("NINFER_V100_EXPERT_PAIR_EXPAND","1");
+#else
+        setenv("NINFER_V100_EXPERT_PAIR_EXPAND","1",1);
+#endif
+    }
     FlashNextExpertGemm gemm;
     CpuNvfp4ExpertReferenceScratch scratch;
     for(float divisor:{3.1415927F,64.F,.001F}) {
@@ -74,6 +89,14 @@ int main() {try {
             CUDA_CHECK(cudaStreamSynchronize(device.stream));
             std::vector<float> actual(count*2560+16);
             output.copy_to_host(actual.data(),actual.size()*4);
+            if(baseline) {
+                output.fill(0xA5);
+                baseline->launch(gpu,static_cast<const FlashNextCachedExpertGroup*>(groups.p),count,device.stream);
+                CUDA_CHECK(cudaStreamSynchronize(device.stream));
+                std::vector<float> control(actual.size());output.copy_to_host(control.data(),control.size()*4);
+                require(std::memcmp(actual.data(),control.data(),actual.size()*4)==0,
+                    "paired expansion changed expert output or guard bits");
+            }
             double worst=0,min_cosine=1;
             for(unsigned t=0;t<count;++t) {
                 double err=0,norm=0,dot=0,aa=0;
@@ -124,6 +147,7 @@ int main() {try {
         }
     }
     CUDA_CHECK(cudaEventDestroy(begin));CUDA_CHECK(cudaEventDestroy(end));
-    std::cout<<"Independent represented-NVFP4 FP32 expert GEMM qualification passed\n";
+    std::cout<<"Independent represented-NVFP4 FP32 expert GEMM qualification passed; pair_expand="
+             <<pair_expand<<" exact_baseline_parity="<<bool(baseline)<<'\n';
     return 0;
 } catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

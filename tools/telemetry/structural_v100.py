@@ -99,6 +99,32 @@ def reuse_dense_baseline(source, output):
                 source_run=38098932339,reused=True)
 
 
+def reuse_pair_expand_baseline(source, output, flags, physical_cpus, ninfer_flags):
+    """Reuse the completed uninstrumented control from the phase measurement."""
+    import shutil
+    manifest=json.loads((source/'manifest.json').read_text())
+    if ((source.parent/'ninfer-sha.txt').read_text().strip()!=
+        '2fb6d3ee70514de5398e631f2f09c37e28c9d1b8' or
+        not manifest.get('moe_work_breakdown') or manifest.get('prompt')!=LONG or
+        manifest.get('output_limit')!=128 or manifest.get('timing_telemetry_level')!=0 or
+        manifest.get('physical_cpus')!=physical_cpus or manifest.get('ninfer_flags')!=ninfer_flags):
+        raise ValueError('pair expansion reference configuration does not match')
+    cells=json.loads((source/'checkpoint.json').read_text())
+    if not cells or (cells[0]['engine'],cells[0]['arm'],cells[0]['mode'])!=('ninfer','dense-full-chunk','timing'):
+        raise ValueError('pair expansion reference is missing the complete uninstrumented control')
+    folder=source/'ninfer-dense-full-chunk-reference'
+    rows=[json.loads(l) for l in (folder/'requests.jsonl').read_text().splitlines()]
+    if [r['phase'] for r in rows]!=['cold']+['warmup']*4+['measured']:
+        raise ValueError('pair expansion reference schedule incomplete')
+    old=json.loads((folder/'launch.json').read_text())['overrides']
+    expected={k:v for k,v in flags.items() if k!='NINFER_V100_EXPERT_PAIR_EXPAND'}
+    if old!=expected:raise ValueError('pair expansion reference selectors differ')
+    observation=residency_observation(folder,128)
+    target=output/'ninfer-expand-scalar-r0';shutil.copytree(folder,target)
+    return dict(cells[0],arm='expand-scalar',folder=str(target),residency=observation,
+                source_run=38102677923,reused=True)
+
+
 def inventory(a):
     # Read only the v2 JSON directory. The canonical geometry validator imports
     # torch; this inventory does not decode weights or need a tensor framework.
@@ -388,6 +414,9 @@ def main():
     p.add_argument('--dense-baseline-reference', type=Path)
     p.add_argument('--moe-work-breakdown', action='store_true',
                    help='Step 3: phase-owned stream waits/group geometry with dense GEMM opt-in')
+    p.add_argument('--expert-pair-expand-ab', action='store_true',
+                   help='Step 3: scalar/two-launch versus packed-pair/fused expert expansion')
+    p.add_argument('--expert-pair-expand-reference', type=Path)
     p.add_argument('--comparison-reference', type=Path)
     a = p.parse_args()
     if a.controlled_strata_followup:
@@ -445,7 +474,9 @@ def main():
         a.strata_config = path
     dense_arms=[('ninfer',name,dict(residency_arms()[1][2],NINFER_V100_FP8_PREFILL_GEMM=value))
               for name,value in [('dense-qpn','0'),('dense-full-chunk','1')]]
-    manifest_arms = ([dense_arms[1]] if a.moe_work_breakdown else dense_arms if a.dense_prefill_gemm_ab else [('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
+    pair_arms=[('ninfer',name,dict(dense_arms[1][2],NINFER_V100_EXPERT_PAIR_EXPAND=value))
+               for name,value in [('expand-scalar','0'),('expand-pair','1')]]
+    manifest_arms = (pair_arms if a.expert_pair_expand_ab else [dense_arms[1]] if a.moe_work_breakdown else dense_arms if a.dense_prefill_gemm_ab else [('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
                      [default_arm] if a.qualified_default_smoke else
                      [("ninfer", "adaptive156-qualified", residency_arms()[1][2]), ARMS[1]] if (a.final_comparison or a.controlled_comparison) else
                      residency_arms() if a.residency_gemm_ab else
@@ -457,6 +488,7 @@ def main():
         arms=[ARMS[0]] if a.stream_attribution_only else manifest_arms,
         fresh_servers_per_arm=2 if (a.prefill_breakdown or a.moe_work_breakdown) else 1 if (a.stream_attribution_only or a.qualified_default_smoke) else 3,
         moe_work_breakdown=a.moe_work_breakdown,
+        expert_pair_expand_ab=a.expert_pair_expand_ab,
         prefill_breakdown=a.prefill_breakdown, dense_prefill_gemm_ab=a.dense_prefill_gemm_ab,
         stream_attribution_only=a.stream_attribution_only, expert_gemm_ab=a.expert_gemm_ab, resident_gemm_ab=a.resident_gemm_ab, cpu_stream_overlap_ab=a.cpu_stream_overlap_ab,
         qualified_default_smoke=a.qualified_default_smoke,
@@ -466,7 +498,7 @@ def main():
         timing_telemetry_level=0, diagnostic_telemetry_level=2,
         cache_budget='actual allocations logged; requested maxima are not equal-memory controls',
         cold_definition='first request after fresh server; host file cache preserved',
-        cross_quant_comparison='same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.residency_gemm_ab or a.prefill_breakdown or a.dense_prefill_gemm_ab or a.moe_work_breakdown)
+        cross_quant_comparison='same represented artifact; exact-output expansion work reduction' if a.expert_pair_expand_ab else 'same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.residency_gemm_ab or a.prefill_breakdown or a.dense_prefill_gemm_ab or a.moe_work_breakdown)
             else 'descriptive; source artifacts and frontend token counts differ',
         ninfer_flags=a.ninfer_flags), indent=2)+'\n')
     cells = []
@@ -481,7 +513,7 @@ def main():
             cell = dict(engine=engine, arm=arm, mode=mode, folder=str(folder), result=result)
             if a.residency_gemm_ab:
                 cell['residency'] = residency_observation(folder, a.max_output_tokens)
-            if a.final_comparison or a.prefill_breakdown or a.controlled_comparison or a.dense_prefill_gemm_ab or a.moe_work_breakdown:
+            if a.final_comparison or a.prefill_breakdown or a.controlled_comparison or a.dense_prefill_gemm_ab or a.moe_work_breakdown or a.expert_pair_expand_ab:
                 samples=[json.loads(line) for line in (folder/'system.jsonl').read_text().splitlines()]
                 peaks=[r.get('gpu',{}).get('metrics',{}).get('memory_used_bytes') for r in samples
                        if r.get('kind')=='system_sample']
@@ -501,6 +533,37 @@ def main():
         finally:
             (a.output/'summary.json').write_text(json.dumps(dict(cells=cells, timing=summarize(cells)), indent=2)+'\n')
         ab.release_gpu()
+    if a.expert_pair_expand_ab:
+        if a.expert_pair_expand_reference:
+            cells.append(reuse_pair_expand_baseline(a.expert_pair_expand_reference,a.output,
+                pair_arms[0][2],cpus,a.ninfer_flags))
+        for repeat in range(3):
+            for engine,arm,flags in (pair_arms if repeat!=1 else list(reversed(pair_arms))):
+                if repeat==0 and arm=='expand-scalar' and a.expert_pair_expand_reference:continue
+                run(engine,arm,flags,arm+'-r'+str(repeat),'timing')
+                folder=Path(cells[-1]['folder'])
+                text=gzip.open(folder/'server.log.gz','rt').read()
+                if ('v100.expert_pair_expand=1' in text)!=(arm=='expand-pair'):
+                    raise ValueError('expert expansion dispatch does not match selected arm')
+        signatures=defaultdict(set)
+        for cell in cells:
+            rows=[json.loads(l) for l in (Path(cell['folder'])/'requests.jsonl').read_text().splitlines()]
+            if [r['phase'] for r in rows]!=['cold']+['warmup']*4+['measured']:
+                raise ValueError('expert expansion A/B schedule incomplete')
+            for row in rows:
+                signatures[row['index']].add(json.dumps([row['output_sha256'],row['response']['usage'],
+                    row.get('native_speculative')],sort_keys=True))
+        if len(signatures)!=6 or any(len(s)!=1 for s in signatures.values()):
+            raise ValueError('expert expansion changed corresponding output/usage/native MTP work')
+        report=dict(step=3,status='pair_expansion_comparison_complete',timing=summarize(cells),
+            exact_corresponding_output_usage_mtp=True,
+            observations=[dict(arm=c['arm'],source_run=c.get('source_run'),reused=c.get('reused',False),
+                               **c['residency']) for c in cells],
+            limits=['First unchanged scalar control reused from run38102677923 when provided.',
+                    'No production default promotion; request gain must justify retaining candidate.'])
+        (a.output/'expert-pair-expand-report.json').write_text(json.dumps(report,indent=2)+'\n')
+        print(json.dumps(report,indent=2),flush=True)
+        return
     if a.dense_prefill_gemm_ab:
         if a.dense_baseline_reference:
             cells.append(reuse_dense_baseline(a.dense_baseline_reference,a.output))

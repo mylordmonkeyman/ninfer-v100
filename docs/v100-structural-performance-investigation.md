@@ -1124,3 +1124,55 @@ unperturbed critical path or a value to add to overlapping CPU/copy intervals.
 Stage/event/SV0 diagnostics perturb timing; paired per-ordinal overhead is recorded.
 The phase-specific evidence is intended to select one grouped/fused work reduction,
 not launch another ordering sweep. Step 3 remains open after this measurement.
+
+
+### Step 3 phase-owned evidence complete; fused expansion candidate selected
+
+Run [38102677923](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38102677923)
+passed numerical/lifetime/cache gates, the mixed-scope ring ownership fixture,
+complete request/owner route and weight-byte conservation, and exact corresponding
+output/usage/native MTP work between reference and instrumentation. Both servers
+actually allocated155 experts/layer, seeded7440, and peaked29.9177 GiB.
+
+The warmed uninstrumented request took32.4921 s HTTP/25.6397 s native prefill.
+Instrumentation took41.9032/35.1561 s: +9.5164 s prefill overhead. In that diagnostic
+prefill, streamed compact weights totaled55,677,167,616 bytes over20,136 expert
+pairs. Copy intervals summed5.6343 s; compute-stream transfer dependency waits
+summed4.6878 s; streamed expert execution intervals summed4.0095 s. These overlap
+other scopes and are not a production latency decomposition or whole-GPU idle.
+No streamed verification work was observed for this policy; phase ownership and
+coverage still reconciled with all native execution owners.
+
+Of those streamed pairs,16,166 used GEMM, covering2,054,365 routes. Their modeled
+FP16 expansion writes totaled158,918,246,400 bytes. GEMM group buckets were5925
+at32–63 routes,5463 at64–127,3080 at128–255,1321 at256–511 and377 at512+;3970
+smaller groups used SIMT. Most GEMM groups therefore remain narrow. Materializing
+many active experts as expanded FP16 simultaneously would add substantial scratch
+to an already near30 GiB footprint and can waste padded work in a uniform grouped
+GEMM. A single grouped launch for every active expert is not selected without a
+bounded memory/layout case.
+
+Select one bounded **work reduction**: fuse the two gate/up and down expansion
+launches into one kernel, decode both E2M1 values from each packed byte together,
+load their common E4M3 scale once, and store the same two FP16 weights together.
+This halves expansion threads and duplicate code/scale/address decode work and
+removes one expansion launch per GEMM expert pair. It does **not** reduce expanded
+weight bytes, H2D bytes, GEMM work or CPU misses. Existing compact storage, FP32
+divisors, shared scratch, ring ownership, tile256/pad8 and32-route crossover remain.
+No additional device memory is planned.
+
+The experimental `NINFER_V100_EXPERT_PAIR_EXPAND=1` is default0 on all builds and
+applies to both streamed and resident expert GEMMs. The independent represented
+NVFP4 FP32 oracle, extreme inputs/scales/divisors, guards and zero gates precede
+timing; candidate fixtures additionally require bit-exact baseline expert outputs.
+Stream multi-wrap/destructor/coexistence and cache join gates run on the candidate.
+Request screening compares three fresh-server cells per arm, cold/four-warmup/
+measured7111/128/zero reuse, with dense projection opt-in1 in both. Reuse only the
+completed uninstrumented control from this phase-owned run after validating source
+revision, selectors, frontend/native work, full schedule, placement/context flags,
+actual cache and seeding. The other two controls and all three candidate servers
+are new; the report identifies reuse and is not wholly contemporaneous. Require
+exact corresponding output/usage/native MTP work across arms and request ordinals;
+observe dispatch, cache capacity and GPU peak. Retain only if the request-level
+result justifies it, otherwise remove the experimental route and advance. Step 3
+is still open pending this one implementation test; Steps 4 and 5 remain pending.

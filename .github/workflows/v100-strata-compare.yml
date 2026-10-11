@@ -1,5 +1,5 @@
 name: V100 Structural Engine Comparison
-# Step 3: submission-owned stream dependencies/group geometry, dense opt-in.
+# Step 3: fused packed-pair expert expansion; qualified request A/B.
 on:
   workflow_dispatch:
   push:
@@ -83,7 +83,7 @@ jobs:
           run-id: 37270512213
           github-token: ${{ github.token }}
           path: structural-profile-source
-      - name: Step 3 build and qualify stream ownership and unchanged arithmetic
+      - name: Step 3 build and qualify fused expert expansion
         shell: bash
         run: |
           set -euo pipefail
@@ -93,10 +93,14 @@ jobs:
           cmake --build build-structural-comparison --target ninfer-serve ninfer_fp8_f32_prefill_sm70_test ninfer_qwen3_8_flash_next_expert_gemm_test ninfer_qwen3_8_flash_next_expert_stream_test ninfer_qwen3_8_flash_next_expert_cache_test
           build-structural-comparison/tests/ninfer_fp8_f32_prefill_sm70_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/dense-public-dispatch-oracle.log"
-          build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_gemm_test 2>&1 \
-            | tee "$QUALIFICATION_RESULTS/expert-gemm-fp32-oracle.log"
+          NINFER_V100_EXPERT_PAIR_EXPAND=0 \
+            build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_gemm_test 2>&1 \
+            | tee "$QUALIFICATION_RESULTS/expert-scalar-oracle-and-cost.log"
+          NINFER_V100_EXPERT_PAIR_EXPAND=1 \
+            build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_gemm_test 2>&1 \
+            | tee "$QUALIFICATION_RESULTS/expert-pair-oracle-parity-and-cost.log"
           NINFER_V100_PREFILL_EXPERT_GEMM=fp16 NINFER_V100_PREFILL_RESIDENT_GEMM=1 \
-            NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=1 \
+            NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=1 NINFER_V100_EXPERT_PAIR_EXPAND=1 \
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_stream_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/stream-lifetime-and-ownership.log"
           python3 - <<'PY_CHECK'
@@ -112,15 +116,23 @@ jobs:
           print('Submission ownership survives multi-wrap collection and finish in verification')
           PY_CHECK
           NINFER_V100_PREFILL_EXPERT_GEMM=fp16 NINFER_V100_PREFILL_RESIDENT_GEMM=1 \
-            NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=1 \
+            NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=1 NINFER_V100_EXPERT_PAIR_EXPAND=1 \
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/cache-join-oracle.log"
           cp build-structural-comparison/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
-      - name: Step 3 phase-owned stream work and dependency measurement
+      - name: Retrieve completed scalar expansion control
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: v100-structural-comparison-38102677923-1
+          run-id: 38102677923
+          github-token: ${{ github.token }}
+          path: expert-expansion-reference
+      - name: Step 3 fused expert expansion request A/B
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --moe-work-breakdown \
+          python3 tools/telemetry/structural_v100.py --expert-pair-expand-ab \
+            --expert-pair-expand-reference expert-expansion-reference/matrix \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \

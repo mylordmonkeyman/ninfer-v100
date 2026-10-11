@@ -5,6 +5,7 @@
 #include <cuda_fp16.h>
 #include <algorithm>
 #include <cstdlib>
+#include <cstdio>
 #include <stdexcept>
 #include <string_view>
 #include <string>
@@ -30,6 +31,26 @@ __global__ void expand(Nvfp4ExpertMatrixView matrix, __half* weights) {
     // and needless division rounding at every weight.
     const float raw=((col&1)?code.y:code.x)*ops::detail::decode_nvfp4_e4m3(scales[offset]);
     weights[i]=__float2half_rn(raw);
+}
+__global__ void expand_pair(HostNvfp4ExpertPairView expert, __half2* gu, __half2* down) {
+    unsigned pair=blockIdx.x*blockDim.x+threadIdx.x;
+    constexpr unsigned gu_pairs=1280*2560/2,down_pairs=2560*640/2;
+    if(pair>=gu_pairs+down_pairs)return;
+    const bool is_gu=pair<gu_pairs;
+    const auto matrix=is_gu?expert.gate_up:expert.down;
+    __half2* output=is_gu?gu:down;
+    if(!is_gu)pair-=gu_pairs;
+    const unsigned columns=matrix.columns,row=pair/(columns/2),col=(pair%(columns/2))*2;
+    const unsigned group=col/16;
+    const unsigned offset=((row/128)*(columns/64)+group/4)*512
+        +(row%32)*16+((row%128)/32)*4+group%4;
+    // Both codes share one scale. Decode once per packed byte and write the
+    // same two FP16 values as the scalar expansion, without changing divisors.
+    const auto code=ops::detail::decode_nvfp4_e2m1x2(
+        reinterpret_cast<const unsigned char*>(matrix.codes)[pair]);
+    const float scale=ops::detail::decode_nvfp4_e4m3(
+        reinterpret_cast<const unsigned char*>(matrix.scales)[offset]);
+    output[pair]=__floats2half2_rn(code.x*scale,code.y*scale);
 }
 __device__ float block_max(float x) {
     __shared__ float warps[8];
@@ -118,6 +139,12 @@ bool flash_next_expert_gemm_requested() {
     if(std::string_view(p)=="fp16")return true;
     throw std::invalid_argument("NINFER_V100_PREFILL_EXPERT_GEMM must be simt or fp16");
 }
+bool flash_next_expert_pair_expand_requested() {
+    const char* value=std::getenv("NINFER_V100_EXPERT_PAIR_EXPAND");
+    if(!value || !*value || std::string_view(value)=="0")return false;
+    if(std::string_view(value)=="1")return true;
+    throw std::invalid_argument("NINFER_V100_EXPERT_PAIR_EXPAND must be 0 or 1");
+}
 bool flash_next_resident_expert_gemm_requested() {
     return selected_binary_mode("NINFER_V100_PREFILL_RESIDENT_GEMM");
 }
@@ -125,6 +152,7 @@ bool flash_next_cpu_stream_overlap_requested() {
     return selected_binary_mode("NINFER_V100_PREFILL_CPU_STREAM_OVERLAP");
 }
 struct FlashNextExpertGemm::Impl {
+    bool pair_expand=flash_next_expert_pair_expand_requested();
     DeviceBuffer gu{1280*2560*2ULL}, down{2560*640*2ULL};
     DeviceBuffer x{tile_routes*2560*2ULL}, gate_up{tile_routes*1280*4ULL};
     DeviceBuffer h{tile_routes*640*2ULL}, y{tile_routes*2560*4ULL};
@@ -138,6 +166,7 @@ struct FlashNextExpertGemm::Impl {
             blas_check(cublasSetMathMode(handle,static_cast<cublasMath_t>(
                 CUBLAS_TENSOR_OP_MATH | CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION)));
         } catch(...) {cublasDestroy(handle);handle=nullptr;throw;}
+        if(pair_expand)std::fprintf(stderr,"v100.expert_pair_expand=1\n");
     }
     ~Impl(){if(handle)cublasDestroy(handle);}
 };
@@ -153,10 +182,16 @@ void FlashNextExpertGemm::launch(const HostNvfp4ExpertPairView& expert,
     m.bound=true;m.compute=stream;
     blas_check(cublasSetStream(m.handle,stream));
     blas_check(cublasSetWorkspace(m.handle,m.workspace.p,m.workspace.bytes));
-    expand<<<(1280*2560+255)/256,256,0,stream>>>(expert.gate_up,static_cast<__half*>(m.gu.p));
-    CUDA_CHECK(cudaGetLastError());
-    expand<<<(2560*640+255)/256,256,0,stream>>>(expert.down,static_cast<__half*>(m.down.p));
-    CUDA_CHECK(cudaGetLastError());
+    if(m.pair_expand) {
+        expand_pair<<<((1280*2560+2560*640)/2+255)/256,256,0,stream>>>(expert,
+            static_cast<__half2*>(m.gu.p),static_cast<__half2*>(m.down.p));
+        CUDA_CHECK(cudaGetLastError());
+    } else {
+        expand<<<(1280*2560+255)/256,256,0,stream>>>(expert.gate_up,static_cast<__half*>(m.gu.p));
+        CUDA_CHECK(cudaGetLastError());
+        expand<<<(2560*640+255)/256,256,0,stream>>>(expert.down,static_cast<__half*>(m.down.p));
+        CUDA_CHECK(cudaGetLastError());
+    }
     const float one=1,zero=0;
     for(unsigned offset=0;offset<routes;offset+=tile_routes) {
         const unsigned count=std::min(tile_routes,routes-offset), padded=(count+7)&~7U;
