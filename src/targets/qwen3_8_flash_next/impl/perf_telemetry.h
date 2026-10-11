@@ -29,6 +29,13 @@ inline bool v100_perf_telemetry_enabled() {
 }
 
 using PerfClock = std::chrono::steady_clock;
+inline bool v100_moe_arch_timing_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NINFER_V100_MOE_ARCH_TIMING");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    return enabled;
+}
 inline double perf_elapsed_us(PerfClock::time_point started) {
     return std::chrono::duration<double, std::micro>(PerfClock::now()-started).count();
 }

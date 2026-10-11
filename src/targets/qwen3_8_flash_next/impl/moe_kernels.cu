@@ -2662,7 +2662,9 @@ void flash_next_moe_host_routed_merge_launch(const MoeWeights& weights,
             output_fp32 ? static_cast<float*>(output_fp32->data) : nullptr);
     }
     CUDA_CHECK(cudaGetLastError());
-    stage_ledger_record(stream, FlashNextStageId::MoE_Reduce);
+    // In the host-backed route this kernel performs shared_down plus the final
+    // merge. Routed top-k reduction is recorded separately by its caller.
+    stage_ledger_record(stream, FlashNextStageId::MoE_SharedDown);
 }
 
 void flash_next_moe_bf16_kernels_launch(const Tensor& input, const MoeBf16Weights& weights,

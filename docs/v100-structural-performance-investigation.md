@@ -1657,3 +1657,62 @@ off. It must repeat bit-exact output across identical launches, pass the indepen
 represented-NVFP4 FP32 and expanded-cuBLAS numerical gates, and materially beat the
 qualified paired-expansion operator before any serving campaign is allowed. This is
 not an unchanged retry: the synchronization and accumulation topology are different.
+
+### Source-directed audit of the remaining Strata gap
+
+The user requested a deeper architectural comparison before further isolated
+optimization races. The latest qualified practical result remains27.6765seconds
+NInfer versus10.5659seconds installed native Strata (2.62x HTTP). No win is claimed.
+Run [38140773240](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38140773240)
+qualified deterministic compact split-plane reduction, including repeatability,
+independent mathematical oracles, guards and existing lifetime/cache gates. Its
+aggregate isolated operator time was17.43% lower than paired expansion, with
+route512 about2.84% slower. This is operator admission only: no serving evidence.
+Keep `NINFER_V100_EXPERT_PACKED_REDUCE` default off and defer its serving race while
+resolving whole-request attribution.
+
+The pinned Strata source and the actual NInfer host-backed serving path expose
+these differences. They are potential explanations, not measured causal shares:
+
+| Area | NInfer serving path | Pinned Strata source / observed installed behavior | Measurement needed |
+|---|---|---|---|
+| Router and shared expert | `impl/moe.cpp` calls `flash_next_route` then `flash_next_moe_host_shared_launch`; `moe_kernels.cu` uses SIMT FP32 FMA for shared gate/up and shared down/merge. The inherited BF16 shared-MMA backend explicitly rejects Volta in `moe_shared_kernels.cu`. | `src/prefill/prefill.cpp` uses batched `bf16_proj` for router and `native_proj` for shared gate/up/down. | Separate router, shared gate/up and shared down/merge from routed work. The shared expert alone models3.355TFLOP across48 layers at7111 tokens. |
+| Route classification | Every token/path calls `expert_cache.cpp::execute_impl`, taking a mutex and scanning the layer's resident slots; misses populate per-expert vectors. CPU fallback also downloads the whole input. | Host grouping uses histogram/prefix/scatter; admitted fused paths can group on device. | Host grouping and rendezvous separately, with actual resident/stream/CPU route counts. |
+| Routed expert math | Paired expansion writes full FP16 matrices then calls cuBLAS separately per expert; small groups use SIMT. The last diagnostic modeled88.552GB expansion writes. | `mmq_plan` checks compiled support and actual per-device tiles, including fallback; admitted MMQ groups16 experts with quantized activations and compact native weight blocks. Other layers expand to FP16. | Installed build inclusion, native configuration and phase timings; source support alone does not prove installed dispatch or a tensor-core path on sm70. |
+| Expert submission | Four streamed slots, blocking reuse, six compact-plane DMA operations per expert. Source pin now removes the extra host copy. | Native prefill supports a cross-layer issuer and a larger borrowed cache ring; installed logs show8192 auto chunks. | Host submission duration versus compute timeline, and copy waits on Strata. Do not infer whole-GPU idle from a dependency wait. |
+| VRAM and residency | Best qualified profile has4896 seeded compact experts,262144 fully allocated FP8 KV capacity and graphs off. | Latest installed logs show8082 native resident experts,1144 cache slots borrowed for prefill,301 native projection matrices2975MiB plus1416MiB loaded weights; only32768 of262144 KV cells resident,3.09GiB host KV, and captured verification windows. | Record memory, effective prefill residency, native cache hits and decode work. Storage formats and heterogeneous layer placement prevent slot-count quality equivalence. Existing host KV/graphs explain configuration differences; this audit introduces neither SV8 nor a new graph policy. |
+| QSA / hyper connections / decode | Half of the12 prompt QSA dispatches use the admitted score-MMA route; hyper/norm and MTP costs remain. | Installed engine has separate QSA, hyper-connection and verification paths. | Compare QSA/indexer, hyper/read, verification/draft/host costs using native timers; retain actual token and speculative work. |
+
+The earlier detailed diagnostic added7.5166seconds to prefill and attributed
+shared-expert compute, route rendezvous, grouping, routed submission and joins
+largely to one inclusive MoE interval. It cannot determine which of these dominates
+the uninstrumented request. The new `--architecture-breakdown` mode collects one
+clean and one diagnostic fresh server per engine, each cold +4 warmups + measured,
+with7111 frontend prompt tokens,128 output tokens and no reuse. NInfer uses the
+qualified pinned-source/102-slot/8192-chunk/262K-FP8/dense+pair+late-QSA opt-in
+profile; deterministic packed reduction is explicitly excluded.
+
+`NINFER_V100_MOE_ARCH_TIMING=1` adds phase/transaction-owned host-clock spans for
+rendezvous, route grouping, resident submission, stream submission, CPU join and
+cache join, plus route conservation. `NINFER_FLASH_NEXT_STAGE_LEDGER_JSON=1` permits
+structured CUDA stage intervals without enabling level2 telemetry or BF16
+projection timers. The stage ledger now partitions host-backed MoE into router,
+shared gate/up, rendezvous, grouping, routed submission, join, routed reduction,
+and shared down/merge. It collects at the existing chunk-end ledger boundary;
+there is no added per-layer expert-stream drain. Host spans still overlap CUDA
+intervals, which include submission gaps and stream dependencies.
+
+Installed Strata is unchanged: `STRATA_PREFILL_TIMING=1` and
+`STRATA_DECODE_TIMING=1` expose existing native phase and verification/draft/host
+costs. Native timer token counts, millisecond rounding and potentially cumulative
+host-staging totals are recorded explicitly. Compiled MMQ symbols establish build
+inclusion only. NInfer must retain exact corresponding output/usage/MTP work;
+Strata differences are recorded rather than assumed away. Both engines' telemetry
+overhead, request byte windows, memory/residency and partial results are preserved
+in `architecture-breakdown-report.json`. This is attribution, not a speedup claim.
+
+Local verification:60 telemetry tests, including byte-window ownership, all48
+prefill layers, verification exclusion, route conservation and installed timer
+parsing; Python compilation/help, workflow YAML/bash syntax and diff checks pass.
+CUDA build and live attribution are pending the target runner. No arithmetic,
+model asset or production-default change is introduced by the audit.

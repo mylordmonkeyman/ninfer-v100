@@ -9,11 +9,60 @@ import unittest
 from unittest.mock import patch
 
 import ab_v100
-from structural_v100 import inventory, native_work, summarize, residency_arms, residency_observation, prefill_breakdown, moe_stream_breakdown
+from structural_v100 import inventory, native_work, summarize, residency_arms, residency_observation, prefill_breakdown, moe_stream_breakdown, architecture_requests
 from test_schema import fixture
 
 
 class StructuralTests(unittest.TestCase):
+    def test_architecture_report_separates_request_phase_and_native_strata_timers(self):
+        import gzip
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            context = dict(executor=2, transaction=1, phase='prefill')
+            ledger = dict(kind='prefill_stage_ledger', context=context, tokens=10,
+                total_chunk_ms=1000, residual_ms=0,
+                stages=[dict(stage='MoE: shared gate-up', interval_ms=250),
+                        dict(stage='MoE: routed submission timeline', interval_ms=750)])
+            rows = [ledger]
+            for phase, transaction, tokens, wait in [('prefill',1,10,3), ('verify',2,2,999)]:
+                for layer in range(48):
+                    rows.append(dict(kind='moe_arch_timing', layer=layer, tokens=tokens,
+                        context=dict(context, phase=phase, transaction=transaction),
+                        routes=tokens*10, resident_routes=tokens*2, stream_routes=tokens*7,
+                        cpu_routes=tokens, stream_experts=3, heavy_stream_drain=False,
+                        host_us=dict(cpu_join=wait)))
+            data=('startup noise\n'+'\n'.join(map(json.dumps,rows))+'\n').encode()
+            request=dict(index=0, phase='measured', response=dict(usage=dict(prompt_tokens=10)),
+                native_log_start_offset=len('startup noise\n'), native_log_end_offset=len(data),
+                wall_seconds=2, native_timing=dict(prefill=1), output_sha256='fixture')
+            (folder/'requests.jsonl').write_text(json.dumps(request)+'\n')
+            with gzip.open(folder/'server.log.gz','wb') as out: out.write(data)
+            report=architecture_requests(folder,'ninfer')[0]
+            self.assertEqual(report['architecture_phases']['prefill']['host_us']['cpu_join'],144)
+            self.assertEqual(report['architecture_phases']['verify']['host_us']['cpu_join'],48*999)
+            self.assertEqual(report['stages_seconds']['MoE: shared gate-up'],.25)
+            rows[1]['stream_routes']+=1
+            bad=('startup noise\n'+'\n'.join(map(json.dumps,rows))+'\n').encode()
+            request['native_log_end_offset']=len(bad)
+            (folder/'requests.jsonl').write_text(json.dumps(request)+'\n')
+            with gzip.open(folder/'server.log.gz','wb') as out: out.write(bad)
+            with self.assertRaisesRegex(ValueError,'route conservation'):
+                architecture_requests(folder,'ninfer')
+            text=('unowned strata prefill timing: 999 tokens, GPU timeline 999 ms\n'
+                  'strata prefill timing: 9 tokens, GPU timeline 200 ms, wall 230 ms, host staging 2 ms:'
+                  ' router+shared 50 (25.0%) host grouping 10 (5.0%) gemm gate/up 140 (70.0%)\n'
+                  'strata prefill timing: host: chunk setup 3 ms\n'
+                  'strata decode timing: 4 windows, avg T 3.2\n')
+            start=text.index('strata prefill timing: 9')
+            request.update(native_log_start_offset=start,native_log_end_offset=len(text.encode()))
+            (folder/'requests.jsonl').write_text(json.dumps(request)+'\n')
+            (folder/'native-engine.log').write_text(text)
+            strata=architecture_requests(folder,'strata')[0]
+            self.assertEqual(strata['timer_tokens'],9)
+            self.assertEqual(strata['phases_ms']['router+shared'],50)
+            self.assertEqual(strata['phases_ms']['gemm gate/up'],140)
+            self.assertEqual(len(strata['decode_lines']),1)
+
     def test_stream_report_owns_request_phase_and_conserves_routes_bytes(self):
         import gzip
         with tempfile.TemporaryDirectory() as tmp:

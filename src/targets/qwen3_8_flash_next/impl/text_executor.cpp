@@ -145,11 +145,11 @@ FlashNextTextExecutor::FlashNextTextExecutor(const TextModelView& model,
                       ? (allocation.plan().config.speculative_draft_tokens + 1U)
                       : 1U))))),
       round_completion_(device) {
-    if (v100_perf_telemetry_enabled() || v100_compare::level()) {
+    if (v100_perf_telemetry_enabled() || v100_compare::level() || v100_moe_arch_timing_enabled()) {
         perf_executor_id_ = next_perf_executor_id();
         if (v100_perf_telemetry_enabled())
             bf16_timing_ = std::make_unique<ops::detail::Bf16TimingCollector>();
-        if (v100_perf_telemetry_enabled()) {
+        if (v100_perf_telemetry_enabled() || v100_moe_arch_timing_enabled()) {
         const auto& p = allocation.plan();
         std::ostringstream out;
         out << "{\"sv\":0,\"schema\":1,\"kind\":\"runtime_memory\",\"executor\":" << perf_executor_id_
@@ -540,7 +540,7 @@ PendingRound FlashNextTextExecutor::finish_prepared_round(
     try {
         std::optional<PerfContextScope> perf_scope;
         std::optional<ops::detail::ScopedBf16Timing> bf16_scope;
-        if (bf16_timing_ || v100_compare::level()) {
+        if (bf16_timing_ || v100_compare::level() || v100_moe_arch_timing_enabled()) {
             PerfContext context{.executor=perf_executor_id_, .transaction=prepared.transaction_id, .phase="decode"};
             context.span_count = batch_size;
             for (unsigned i = 0; i < batch_size; ++i) {
@@ -669,7 +669,7 @@ PendingRound FlashNextTextExecutor::execute_prefill_chunk(
     try {
         std::optional<PerfContextScope> perf_scope;
         std::optional<ops::detail::ScopedBf16Timing> bf16_scope;
-        if (bf16_timing_ || v100_compare::level()) {
+        if (bf16_timing_ || v100_compare::level() || v100_moe_arch_timing_enabled()) {
             PerfContext context{.executor=perf_executor_id_, .transaction=prepared.transaction_id, .phase="prefill"};
             context.span_count = 1;
             context.spans[0] = {0, num_tokens, handle.lane_index(), handle.epoch(), first_token_index};
@@ -854,7 +854,7 @@ PendingRound FlashNextTextExecutor::execute_speculative_verify_round(
     try {
         std::optional<PerfContextScope> perf_scope;
         std::optional<ops::detail::ScopedBf16Timing> bf16_scope;
-        if (bf16_timing_ || v100_compare::level()) {
+        if (bf16_timing_ || v100_compare::level() || v100_moe_arch_timing_enabled()) {
             PerfContext context{.executor=perf_executor_id_, .transaction=prepared.transaction_id, .phase="verify"};
             context.span_count = 1;
             context.spans[0] = {0, num_tokens, handle.lane_index(), handle.epoch(), first_token_index};

@@ -94,6 +94,12 @@ std::string_view FlashNextStageLedger::stage_name(FlashNextStageId stage) noexce
         return "MoE: routed down";
     case FlashNextStageId::MoE_Reduce:
         return "MoE: reduce";
+    case FlashNextStageId::MoE_HostRendezvous:
+        return "MoE: host rendezvous";
+    case FlashNextStageId::MoE_RoutedSubmit:
+        return "MoE: routed submission timeline";
+    case FlashNextStageId::MoE_HostJoin:
+        return "MoE: host join timeline";
     case FlashNextStageId::Hyper_InjectMlp:
         return "Hyper inject (mlp side)";
     case FlashNextStageId::Final_NormHead:
@@ -157,7 +163,11 @@ void FlashNextStageLedger::finish_chunk(cudaStream_t stream) {
         last_stats_.residual_pct  = (last_stats_.residual_ms / last_stats_.total_chunk_ms) * 100.0f;
     }
 
-    if (v100_perf_telemetry_enabled()) {
+    // JSON-only stage attribution does not enable the heavyweight expert timing
+    // path, which drains the expert stream at each layer. Events are collected
+    // at this existing chunk boundary; they still include host gaps and waits.
+    const char* json_env = std::getenv("NINFER_FLASH_NEXT_STAGE_LEDGER_JSON");
+    if (v100_perf_telemetry_enabled() || (json_env && std::strcmp(json_env, "1") == 0)) {
         std::ostringstream out;
         out.imbue(std::locale::classic());
         out.precision(17);
@@ -235,6 +245,9 @@ void FlashNextStageLedger::finish_chunk(cudaStream_t stream) {
     moe_ms += last_stats_.stage_ms[static_cast<std::size_t>(FlashNextStageId::MoE_SharedDown)];
     moe_ms += last_stats_.stage_ms[static_cast<std::size_t>(FlashNextStageId::MoE_RoutedDown)];
     moe_ms += last_stats_.stage_ms[static_cast<std::size_t>(FlashNextStageId::MoE_Reduce)];
+    moe_ms += last_stats_.stage_ms[static_cast<std::size_t>(FlashNextStageId::MoE_HostRendezvous)];
+    moe_ms += last_stats_.stage_ms[static_cast<std::size_t>(FlashNextStageId::MoE_RoutedSubmit)];
+    moe_ms += last_stats_.stage_ms[static_cast<std::size_t>(FlashNextStageId::MoE_HostJoin)];
 
     float hyper_ms = 0.0f;
     hyper_ms += last_stats_.stage_ms[static_cast<std::size_t>(FlashNextStageId::Hyper_PrepareAttn)];

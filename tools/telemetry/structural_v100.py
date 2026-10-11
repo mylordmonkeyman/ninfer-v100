@@ -306,6 +306,80 @@ def prefill_breakdown(folder):
     return reports
 
 
+
+def architecture_requests(folder, engine):
+    """Byte-owned low-overhead NInfer host spans or installed Strata timers.
+
+    These are observations of the instrumented timeline, not kernel counters.
+    Host spans and CUDA intervals overlap and are deliberately kept separate.
+    """
+    path = folder/('server.log' if engine == 'ninfer' else 'native-engine.log')
+    data = path.read_bytes() if path.exists() else gzip.open(str(path)+'.gz', 'rb').read()
+    requests = [json.loads(line) for line in (folder/'requests.jsonl').read_text().splitlines()]
+    reports = prefill_breakdown(folder) if engine == 'ninfer' else []
+    for ordinal, request in enumerate(requests):
+        begin, end = request['native_log_start_offset'], request['native_log_end_offset']
+        if not 0 <= begin < end <= len(data):
+            raise ValueError('invalid architecture request byte window')
+        text = data[begin:end].decode()
+        if engine == 'ninfer':
+            rows = [json.loads(line) for line in text.splitlines()
+                    if line.startswith('{') and '"moe_arch_timing"' in line]
+            phases = defaultdict(lambda: dict(layers=0, tokens_by_layer=Counter(),
+                host_us=Counter(), routes=Counter()))
+            owners = set()
+            for row in rows:
+                context = row.get('context') or {}
+                owner = (context.get('executor'), context.get('transaction'), row['layer'])
+                if owner in owners or row.get('heavy_stream_drain'):
+                    raise ValueError('duplicate architecture owner or heavyweight stream drain')
+                owners.add(owner)
+                if row['routes'] != sum(row[k] for k in ('resident_routes','stream_routes','cpu_routes')):
+                    raise ValueError('architecture route conservation failed')
+                if any(not math.isfinite(v) or v < 0 for v in row['host_us'].values()):
+                    raise ValueError('invalid architecture host duration')
+                dst = phases[context['phase']]
+                dst['layers'] += 1
+                dst['tokens_by_layer'][str(row['layer'])] += row['tokens']
+                dst['host_us'].update(row['host_us'])
+                dst['routes'].update({k:row[k] for k in
+                    ('routes','resident_routes','stream_routes','cpu_routes','stream_experts')})
+            prefill = phases.get('prefill')
+            if (not prefill or len(prefill['tokens_by_layer']) != 48
+                    or set(prefill['tokens_by_layer'].values()) != {request['response']['usage']['prompt_tokens']}):
+                raise ValueError('architecture prefill does not cover all 48 layers and prompt tokens')
+            reports[ordinal]['architecture_phases'] = dict(phases)
+        else:
+            lines = [line for line in text.splitlines() if 'strata prefill timing:' in line]
+            headers = [re.search(r'prefill timing: (\d+) tokens, GPU timeline ([0-9.]+) ms, '
+                        r'wall ([0-9.]+) ms, host staging ([0-9.]+) ms:', line) for line in lines]
+            headers = [m for m in headers if m]
+            if not headers: raise ValueError('missing installed Strata prefill timer')
+            phases_ms = Counter()
+            for line in lines:
+                for name, milliseconds in re.findall(r' ([a-z+ /]+) ([0-9.]+) \([0-9.]+%\)', line):
+                    phases_ms[name.strip()] += float(milliseconds)
+            decode_lines=[line for line in text.splitlines() if
+                'strata decode timing:' in line or 'strata decode GPU stages' in line]
+            if not decode_lines: raise ValueError('missing installed Strata decode timer')
+            reports.append(dict(index=request['index'], phase=request['phase'],
+                usage=request['response']['usage'], wall_seconds=request['wall_seconds'],
+                response_timing=request['response'].get('timings'), output_hash=request['output_sha256'],
+                timer_tokens=sum(int(m[1]) for m in headers),
+                gpu_timeline_ms=sum(float(m[2]) for m in headers),
+                timer_wall_ms=sum(float(m[3]) for m in headers),
+                host_staging_reported_ms=[float(m[4]) for m in headers],
+                phases_ms=dict(phases_ms), timer_lines=lines,
+                decode_lines=decode_lines,
+                native_work_lines=[line for line in text.splitlines() if
+                    'strata serve:' in line and any(s in line for s in
+                        ('prompt ', 'cache hit rate', 'expert tiers:', 'KV streaming:', 'resident RAM:'))],
+                limits=['Strata timer intervals include stream waits and host gaps.',
+                        'Phase totals are rounded to milliseconds by the installed engine.',
+                        'Host staging can be cumulative; do not sum across requests.',
+                        'Timer tokens are native prefill work, separately recorded from frontend usage.']))
+    return reports
+
 def moe_stream_breakdown(folder):
     """Request/phase-owned stream dependencies; never infer whole-device idle."""
     path=folder/'server.log'
@@ -445,6 +519,8 @@ def main():
                    help='Bounded 8192-profile SIMT versus admitted late-half score-MMA and native Strata')
     p.add_argument('--pinned-expert-source-race', action='store_true',
                    help='Best-profile staged-copy versus page-locked direct expert-source DMA and native Strata')
+    p.add_argument('--architecture-breakdown', action='store_true',
+                   help='Source-directed shared/routed MoE attribution plus installed Strata prefill/decode timers')
     p.add_argument('--comparison-reference', type=Path)
     a = p.parse_args()
     if a.large_profile_breakdown:
@@ -465,15 +541,15 @@ def main():
         '--prefill-chunk', '2048', '--kv-dtype', 'bf16', '--no-prefix-reuse', '--no-thinking',
         '--no-cuda-graph', '--no-qsa-prefill-mma',
         '--spec', 'mtp', '--draft-tokens', '2', '--lm-head-draft']
-    if a.context_residency_ab or a.fp8_long_context or a.large_prefill_race or a.large_profile_breakdown or a.qsa_late_half_race or a.pinned_expert_source_race:
+    if a.context_residency_ab or a.fp8_long_context or a.large_prefill_race or a.large_profile_breakdown or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown:
         a.ninfer_flags = ab.option(a.ninfer_flags, '--max-context', '262144')
         a.ninfer_flags = ab.option(a.ninfer_flags, '--kv-capacity', '262144')
-    if a.fp8_long_context or a.large_prefill_race or a.large_profile_breakdown or a.qsa_late_half_race or a.pinned_expert_source_race:
+    if a.fp8_long_context or a.large_prefill_race or a.large_profile_breakdown or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown:
         a.ninfer_flags = ab.option(a.ninfer_flags, '--kv-dtype', 'fp8')
         a.request_timeout = 5400
-    if a.large_profile_breakdown or a.qsa_late_half_race or a.pinned_expert_source_race:
+    if a.large_profile_breakdown or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown:
         a.ninfer_flags=ab.option(a.ninfer_flags,'--prefill-chunk','8192')
-    if a.pinned_expert_source_race:
+    if a.pinned_expert_source_race or a.architecture_breakdown:
         a.ninfer_flags=[f for f in a.ninfer_flags if f!='--no-qsa-prefill-mma']+['--qsa-prefill-mma']
     a.long_prompt = LONG
     a.max_output_tokens = 64 if a.fp8_long_context else 128
@@ -538,18 +614,21 @@ def main():
                      residency_arms() if a.residency_gemm_ab else
                      [('ninfer', backend, flags) for backend, flags in gemm_arms]
                      if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab) else ARMS)
+    if a.architecture_breakdown:
+        manifest_arms=[pinned_arms[1], ARMS[1]]
     (a.output/'manifest.json').write_text(json.dumps(dict(prompt=None if a.fp8_long_context else LONG, short_prompt=ab.SHORT,
         prompt_definition='Serving-calibrated repeated prose; actual per-cell payloads in requests.jsonl' if a.fp8_long_context else 'fixed 360 numbered records',
         output_limit=32 if (a.stream_attribution_only or a.qualified_default_smoke) else a.max_output_tokens,
         physical_cpus=cpus,
         arms=[ARMS[0]] if a.stream_attribution_only else manifest_arms,
-        fresh_servers_per_arm=4 if a.fp8_long_context else 2 if (a.prefill_breakdown or a.moe_work_breakdown) else 1 if (a.stream_attribution_only or a.qualified_default_smoke) else 3,
+        fresh_servers_per_arm=2 if a.architecture_breakdown else 4 if a.fp8_long_context else 2 if (a.prefill_breakdown or a.moe_work_breakdown) else 1 if (a.stream_attribution_only or a.qualified_default_smoke) else 3,
         moe_work_breakdown=a.moe_work_breakdown,
         expert_pair_expand_ab=a.expert_pair_expand_ab, context_residency_ab=a.context_residency_ab,
         fp8_long_context=a.fp8_long_context, large_prefill_race=a.large_prefill_race,
         large_profile_breakdown=a.large_profile_breakdown,
         qsa_late_half_race=a.qsa_late_half_race,
         pinned_expert_source_race=a.pinned_expert_source_race,
+        architecture_breakdown=a.architecture_breakdown,
         request_timeout=getattr(a,'request_timeout',900),
         prefill_breakdown=a.prefill_breakdown, dense_prefill_gemm_ab=a.dense_prefill_gemm_ab,
         stream_attribution_only=a.stream_attribution_only, expert_gemm_ab=a.expert_gemm_ab, resident_gemm_ab=a.resident_gemm_ab, cpu_stream_overlap_ab=a.cpu_stream_overlap_ab,
@@ -557,7 +636,7 @@ def main():
         residency_gemm_ab=a.residency_gemm_ab, final_comparison=a.final_comparison,
         controlled_comparison=a.controlled_comparison,
         controlled_strata_followup=a.controlled_strata_followup,
-        timing_telemetry_level=0, diagnostic_telemetry_level=2,
+        timing_telemetry_level=0, diagnostic_telemetry_level=0 if a.architecture_breakdown else 2,
         cache_budget='actual allocations logged; requested maxima are not equal-memory controls',
         cold_definition='first request after fresh server; host file cache preserved',
         cross_quant_comparison='same represented artifact; exact-output expansion work reduction' if a.expert_pair_expand_ab else 'same represented artifact; cache residency can change CPU/GPU arithmetic' if a.context_residency_ab else 'same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.residency_gemm_ab or a.prefill_breakdown or a.dense_prefill_gemm_ab or a.moe_work_breakdown)
@@ -576,7 +655,7 @@ def main():
             if a.residency_gemm_ab or a.context_residency_ab or a.fp8_long_context:
                 cell['residency'] = residency_observation(folder, a.max_output_tokens,
                     None if a.fp8_long_context else 7111)
-            if a.final_comparison or a.prefill_breakdown or a.controlled_comparison or a.dense_prefill_gemm_ab or a.moe_work_breakdown or a.expert_pair_expand_ab or a.large_prefill_race or a.qsa_late_half_race or a.pinned_expert_source_race:
+            if a.final_comparison or a.prefill_breakdown or a.controlled_comparison or a.dense_prefill_gemm_ab or a.moe_work_breakdown or a.expert_pair_expand_ab or a.large_prefill_race or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown:
                 samples=[json.loads(line) for line in (folder/'system.jsonl').read_text().splitlines()]
                 peaks=[r.get('gpu',{}).get('metrics',{}).get('memory_used_bytes') for r in samples
                        if r.get('kind')=='system_sample']
@@ -584,12 +663,19 @@ def main():
                 if engine=='ninfer':
                     cell['residency']=residency_observation(folder,a.max_output_tokens,
                                                          7111 if mode=='timing' else None)
-                    if a.pinned_expert_source_race:
+                    if a.pinned_expert_source_race or a.architecture_breakdown:
                         log=(folder/'server.log').read_text(errors='replace')
                         match=re.search(r'v100\.expert_source_pinned=1 ranges=(\d+) registered_bytes=(\d+)',log)
                         cell['expert_source_registration']=(dict(ranges=int(match.group(1)),
                             registered_bytes=int(match.group(2))) if match else None)
-            if mode == 'diagnostic':
+            if mode == 'diagnostic' and a.architecture_breakdown:
+                cell['architecture_requests'] = architecture_requests(folder, engine)
+                native_log=folder/('server.log' if engine=='ninfer' else 'native-engine.log')
+                cell['architecture_startup']=[line for line in native_log.read_text().splitlines()
+                    if any(s in line for s in ('"runtime_memory"', 'strata generate:',
+                        'FileExpertSource:', 'prompt chunk auto:', 'prompt path borrows',
+                        'prompt kernels:', 'prompt experts on', 'strata hc:', 'v100.expert_source_pinned='))]
+            elif mode == 'diagnostic':
                 cell['work'] = native_work(folder, engine)
                 if engine == 'ninfer' and not cell['work']['ninfer_prefill_chunks']:
                     raise ValueError('missing NInfer prefill stage evidence')
@@ -601,6 +687,64 @@ def main():
         finally:
             (a.output/'summary.json').write_text(json.dumps(dict(cells=cells, timing=summarize(cells)), indent=2)+'\n')
         ab.release_gpu()
+    if a.architecture_breakdown:
+        paired = [(pinned_arms[1], dict(NINFER_V100_MOE_ARCH_TIMING='1',
+                      NINFER_FLASH_NEXT_STAGE_LEDGER='1', NINFER_FLASH_NEXT_STAGE_LEDGER_JSON='1')),
+                  (ARMS[1], dict(STRATA_PREFILL_TIMING='1', STRATA_DECODE_TIMING='1'))]
+        report = dict(status='in_progress', telemetry_level=0, comparisons=[],
+            objective='Explain the practical serving gap using source-directed whole-request attribution',
+            limits=['One clean and one diagnostic fresh server per engine; attribution, not a new win claim.',
+                    'Different weights, KV representation, residency and speculative algorithms remain.',
+                    'CUDA intervals include waits/host gaps; host spans must not be added to them.',
+                    'No per-layer expert stream drain or worker telemetry; overhead is still measured.',
+                    'Packed-reduce candidate is operator-admitted but is not part of this audit.'])
+        output = a.output/'architecture-breakdown-report.json'
+        output.write_text(json.dumps(report, indent=2)+'\n')
+        for (engine, arm, flags), diagnostics in paired:
+            if engine=='ninfer': flags=dict(flags,NINFER_V100_EXPERT_PACKED_REDUCE='0')
+            run(engine, arm, flags, 'architecture-reference', 'timing')
+            run(engine, arm, dict(flags, **diagnostics), 'architecture-diagnostic', 'diagnostic')
+            before, after = cells[-2:]
+            requests = [[json.loads(l) for l in (Path(c['folder'])/'requests.jsonl').read_text().splitlines()]
+                        for c in (before, after)]
+            if any(len(rows) != 6 for rows in requests):
+                raise ValueError('incomplete architecture schedule')
+            comparisons = []
+            for b, d in zip(*requests):
+                for row in (b,d):
+                    usage=row['response']['usage']
+                    if (usage['prompt_tokens']!=7111 or usage['completion_tokens']!=128
+                            or usage.get('prompt_tokens_details',{}).get('cached_tokens',0)!=0
+                            or row['response']['choices'][0]['finish_reason']!='length'):
+                        raise ValueError('architecture serving workload changed')
+                def speculative(row):
+                    if engine=='ninfer': return row.get('native_speculative')
+                    timings=row['response'].get('timings') or {}
+                    return {k:timings[k] for k in ('draft_n','draft_n_accepted') if k in timings}
+                baseline_spec, diagnostic_spec=speculative(b),speculative(d)
+                exact = (b['output_sha256'] == d['output_sha256'] and
+                         b['response']['usage'] == d['response']['usage'] and
+                         baseline_spec == diagnostic_spec)
+                comparisons.append(dict(index=b['index'], phase=b['phase'], exact_output_usage_mtp=exact,
+                    http_overhead_seconds=d['wall_seconds']-b['wall_seconds'],
+                    baseline_speculative_work=baseline_spec, diagnostic_speculative_work=diagnostic_spec,
+                    baseline_native_timing=b.get('native_timing') or b['response'].get('timings'),
+                    diagnostic_native_timing=d.get('native_timing') or d['response'].get('timings'),
+                    baseline_output_hash=b['output_sha256'], diagnostic_output_hash=d['output_sha256']))
+            comparison = dict(engine=engine, requests=comparisons,
+                diagnostic=after['architecture_requests'],
+                startup=after['architecture_startup'],
+                residency=[c.get('residency') for c in (before, after)],
+                sampled_peak_gpu_bytes=[c.get('sampled_peak_gpu_bytes') for c in (before, after)])
+            report['comparisons'].append(comparison)
+            output.write_text(json.dumps(report, indent=2)+'\n')
+            if engine == 'ninfer' and not all(r['exact_output_usage_mtp'] for r in comparisons):
+                raise ValueError('lightweight instrumentation changed NInfer corresponding output/usage/MTP')
+        report['status'] = 'complete'
+        report['reference_timing'] = summarize(cells)
+        output.write_text(json.dumps(report, indent=2)+'\n')
+        print('Architecture attribution complete; no arithmetic candidate/default change.', flush=True)
+        return
     if a.qsa_late_half_race:
         # The late-half scope was admitted by the existing 4,096-position paired
         # numerical screen. Confirm that this exact serving profile actually

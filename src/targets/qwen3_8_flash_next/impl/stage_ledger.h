@@ -35,6 +35,9 @@ enum class FlashNextStageId : std::uint16_t {
     MoE_SharedDown,
     MoE_RoutedDown,
     MoE_Reduce,
+    MoE_HostRendezvous,
+    MoE_RoutedSubmit,
+    MoE_HostJoin,
     Hyper_InjectMlp,
     Final_NormHead,
     Count

@@ -459,6 +459,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         input, resident_weights, scratch, stream,
         use_shared_expert_input_fp32 ? shared_expert_input_fp32 : nullptr,
         use_shared_fp32_intermediate);
+    stage_ledger_record(stream, FlashNextStageId::MoE_SharedGateUp);
 
     if (stream_experts && !device_route_combine) {
         throw std::invalid_argument(
@@ -485,10 +486,11 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
 
     const bool telemetry = v100_perf_telemetry_enabled();
     const bool aggregate = v100_compare::active != nullptr;
+    const bool arch_timing = v100_moe_arch_timing_enabled();
     std::optional<v100_compare::CacheSnapshot> cache_begin;
     if (aggregate && cache) cache_begin = cache->telemetry_snapshot(layer, v100_compare::level() >= 2);
     std::bitset<512> resident_ids, missed_ids;
-    const bool observe_host = telemetry || aggregate;
+    const bool observe_host = telemetry || aggregate || arch_timing;
     const auto rendezvous_started = observe_host ? PerfClock::now() : PerfClock::time_point{};
     const std::uint16_t* host_input = cpu.input.data();
     if (route_handoff) {
@@ -519,6 +521,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
 
     if (cache) cache->begin_layer(prefill);
     const double rendezvous_us = observe_host ? perf_elapsed_us(rendezvous_started) : 0;
+    stage_ledger_record(stream, FlashNextStageId::MoE_HostRendezvous);
     const bool measure = observe_host || (cache != nullptr && cache->timing_enabled());
     using Clock = std::chrono::steady_clock;
     const auto branch_started = measure ? Clock::now() : Clock::time_point{};
@@ -537,6 +540,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     auto cpu_started=measure ? Clock::now() : Clock::time_point{};
     auto cpu_finished=cpu_started;
     auto stream_submit_started=cpu_started, stream_submit_finished=cpu_started;
+    const auto grouping_started = arch_timing ? Clock::now() : Clock::time_point{};
+    double grouping_us = 0, resident_submit_us = 0, cache_join_us = 0;
 
     // Independent routed expert pairs are computed concurrently. Each task writes
     // a private FP32 vector. Routing alpha is then accumulated below on this thread
@@ -603,6 +608,8 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
             });
         }
     }
+    grouping_us = arch_timing ? perf_elapsed_us(grouping_started) : 0;
+    stage_ledger_record(stream, FlashNextStageId::MoE_Grouping);
     if (stream_experts) {
         // Fractional decode streaming mirrors Strata's hybrid principle: rank the
         // current layer's distinct misses by routed work, stream only the hottest
@@ -630,7 +637,9 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
 
         // Submit grouped resident consumers before streaming selected nonresidents.
         // Their leases remain held until the common compute stream has completed.
+        const auto resident_started = arch_timing ? Clock::now() : Clock::time_point{};
         if (cache) cache->begin_device_results(stream);
+        resident_submit_us = arch_timing ? perf_elapsed_us(resident_started) : 0;
         stream_hits_submitted = true;
         std::array<std::size_t, 512> stream_route_counts{};
         for (std::size_t expert_id = 0; expert_id < streamed_routes.size(); ++expert_id)
@@ -712,6 +721,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
         }
         throw;
     }
+    stage_ledger_record(stream, FlashNextStageId::MoE_RoutedSubmit);
     if (device_route_combine && !cpu.tasks.empty() && !pending_cpu.valid()) {
         device_route_host_outputs = cpu.ensure_pinned_pair_outputs(
             cpu.tasks.size()*kFlashNextExpertHidden);
@@ -726,9 +736,11 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     double gpu_us = 0, wait_us = 0, result_copy_us = 0;
     const auto finish_hits = [&] {
         if (cache == nullptr) return;
+        const auto join_started = arch_timing ? Clock::now() : Clock::time_point{};
         gpu_us = device_route_combine ? cache->finish_device_results(stream,&wait_us) :
             cache->finish_download(cpu.pair_outputs,stream,&wait_us,
                 telemetry?&result_copy_us:nullptr);
+        if (arch_timing) cache_join_us += perf_elapsed_us(join_started);
     };
     // Serial is a diagnostic control. Production starts misses while hit kernels and
     // the pinned result transfer are already in flight, then joins only at the merge.
@@ -736,6 +748,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     if (serial) finish_hits();
     if(!pending_cpu.valid())cpu_started=measure ? Clock::now() : Clock::time_point{};
     HostExpertBatchStats cpu_batch;
+    const auto cpu_join_started = arch_timing ? Clock::now() : Clock::time_point{};
     if (!cpu.tasks.empty()) {
         try {
             if(pending_cpu.valid())cpu_batch=pending_cpu.get();
@@ -752,8 +765,9 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
             throw;
         }
     }
+    const double cpu_join_us = arch_timing ? perf_elapsed_us(cpu_join_started) : 0;
     if(cpu.tasks.empty())cpu_finished=measure ? Clock::now() : Clock::time_point{};
-    if(observe_host && early_cpu_requested && !cpu.tasks.empty()) {
+    if((telemetry || aggregate) && early_cpu_requested && !cpu.tasks.empty()) {
         const auto overlap_begin=std::max(cpu_started,stream_submit_started);
         const auto overlap_end=std::min(cpu_finished,stream_submit_finished);
         const auto ms=[](auto end,auto begin) {return std::chrono::duration<double,std::milli>(end-begin).count();};
@@ -768,6 +782,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     // Telemetry is already an opt-in synchronization path. Drain ephemeral streamed
     // misses here so its branch timing includes transfer and GPU expert execution.
     if (stream_experts && telemetry) expert_stream->finish();
+    stage_ledger_record(stream, FlashNextStageId::MoE_HostJoin);
     const double branch_wall_us = measure ? perf_elapsed_us(branch_started) : 0;
     if (measure && cache) cache->record_schedule(
         std::chrono::duration<double, std::micro>(cpu_finished-cpu_started).count(),
@@ -855,9 +870,31 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
             static_cast<float*>(scratch.activations.data),tokens,
             kActivationPitchBytes/sizeof(float),stream);
     }
+    stage_ledger_record(stream, FlashNextStageId::MoE_Reduce);
     flash_next_moe_host_routed_merge_launch(
         resident_weights, scratch, output, tokens, stream,
         use_shared_fp32_intermediate, output_fp32);
+    if (arch_timing) {
+        std::ostringstream out;
+        out.imbue(std::locale::classic());
+        out.precision(17);
+        out << "{\"kind\":\"moe_arch_timing\",\"layer\":" << layer
+            << ",\"tokens\":" << tokens << ",\"routes\":" << routed_paths
+            << ",\"resident_routes\":" << routed_paths-streamed_route_count-cpu.tasks.size()
+            << ",\"stream_routes\":" << streamed_route_count
+            << ",\"cpu_routes\":" << cpu.tasks.size()
+            << ",\"stream_experts\":" << streamed_experts
+            << ",\"host_us\":{\"rendezvous\":" << rendezvous_us
+            << ",\"grouping\":" << grouping_us
+            << ",\"resident_submit\":" << resident_submit_us
+            << ",\"stream_submit\":" << std::chrono::duration<double, std::micro>(stream_submit_finished-stream_submit_started).count()
+            << ",\"cpu_join\":" << cpu_join_us
+            << ",\"cache_join\":" << cache_join_us
+            << "},\"heavy_stream_drain\":" << (telemetry ? "true" : "false");
+        append_perf_context(out);
+        out << '}';
+        emit_perf_json(out.str());
+    }
     if (output_fp32 != nullptr) {
         s_host_expert_fp32_output_calls.fetch_add(1, std::memory_order_relaxed);
     }
