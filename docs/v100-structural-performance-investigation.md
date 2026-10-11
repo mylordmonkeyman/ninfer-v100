@@ -889,3 +889,24 @@ output/workspace guards and scope reuse must all pass before event-timed operato
 screening (three warmups/seven alternating repetitions including all expansion/cast/scaling
 work). Operator gains alone will not establish request gains or authorize a default
 change; full-model qualification remains required before arithmetic promotion.
+
+
+### Step 2 first qualification stopped on a BF16 output-criterion error
+
+Run [38096951500](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38096951500)
+compiled successfully. Baseline and candidate passed the complete 16384x2560
+fixtures (T128/257/2048 and extreme129), with identical reported oracle errors.
+The 2560x6144 baseline at T257 passed aggregate NRMSE0.00167733/cosine0.999999,
+but the additional per-token unrounded-oracle gate stopped at 0.00203029.
+No timings were collected and the candidate was not evaluated on that final cell.
+
+A host calculation using the same independent oracle and represented inputs
+confirmed **ideal nearest-BF16 output alone** has worst-token NRMSE0.00203029
+on this fixture. That extra per-token requirement was impossible even for ideal
+BF16 rounding. Correct it to compare each token against the independently rounded
+public BF16 oracle output; retain the original aggregate unrounded FP32 oracle
+gate (NRMSE<=0.002/cosine>=0.99999), all inputs/shapes/extremes and lifetime guards.
+Report the ideal rounding floor as well as per-token BF16-reference error. No
+production arithmetic or aggregate thresholds change. Re-run only this bounded
+operator qualification/screen; a serving comparison remains conditional on its
+result.

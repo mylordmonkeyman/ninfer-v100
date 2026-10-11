@@ -68,24 +68,30 @@ void run(DeviceContext& device,int n,int k,int t,bool extreme,bool measure){
         yd.fill(0xa5);launch(expanded);device.synchronize();
         std::vector<std::uint16_t> actual(std::size_t(n)*t+128);yd.copy_to_host(actual.data(),actual.size()*2);
         double err=0,norm=0,dot=0,anorm=0;
-        std::vector<std::array<double,4>> per_token(t);
+        std::vector<std::array<double,6>> per_token(t);
         for(int u=0;u<t;++u)for(int r=0;r<n;++r){
             const double expected=dots[(u%T)*R+r%R]*scales[r];const double a=bf(actual[std::size_t(u)*n+r]);
             require(std::isfinite(a),"nonfinite output");err+=(a-expected)*(a-expected);norm+=expected*expected;
             dot+=a*expected;anorm+=a*a;
-            auto& stats=per_token[u];stats[0]+=(a-expected)*(a-expected);
-            stats[1]+=expected*expected;stats[2]+=a*expected;stats[3]+=a*a;
+            // BF16 is the public output. Keep the aggregate unrounded-oracle
+            // gate; extra per-token gating compares its independently rounded
+            // public result, not unavoidable BF16 representation error.
+            const double rounded=bf(encode_bf(static_cast<float>(expected)));
+            auto& stats=per_token[u];stats[0]+=(a-rounded)*(a-rounded);
+            stats[1]+=rounded*rounded;stats[2]+=a*rounded;stats[3]+=a*a;
+            stats[4]+=(rounded-expected)*(rounded-expected);stats[5]+=expected*expected;
             if(scales[r]==0.F)require(a==0.F,"zero row scale failed");
         }
         const double nrmse=std::sqrt(err/norm),cosine=dot/std::sqrt(norm*anorm);
-        double worst_nrmse=0,worst_cosine=1;
+        double worst_nrmse=0,worst_cosine=1,rounding_floor=0;
         for(const auto& stats:per_token){
             worst_nrmse=std::max(worst_nrmse,std::sqrt(stats[0]/stats[1]));
             worst_cosine=std::min(worst_cosine,stats[2]/std::sqrt(stats[1]*stats[3]));
+            rounding_floor=std::max(rounding_floor,std::sqrt(stats[4]/stats[5]));
         }
         std::cout<<"fp8_f32.gate n="<<n<<" k="<<k<<" t="<<t<<" extreme="<<extreme<<" expanded="<<expanded
-                 <<" nrmse="<<nrmse<<" cosine="<<cosine<<" worst_token_nrmse="<<worst_nrmse
-                 <<" worst_token_cosine="<<worst_cosine<<" scratch_bytes="<<capacity<<std::endl;
+                 <<" nrmse="<<nrmse<<" cosine="<<cosine<<" worst_token_bf16_reference_nrmse="<<worst_nrmse
+                 <<" worst_token_bf16_reference_cosine="<<worst_cosine<<" bf16_rounding_floor_worst_token="<<rounding_floor<<" scratch_bytes="<<capacity<<std::endl;
         require(nrmse<=.002 && cosine>=.99999 && worst_nrmse<=.002 && worst_cosine>=.99999,"independent FP32 oracle failed");
         for(std::size_t i=std::size_t(n)*t;i<actual.size();++i)require(actual[i]==0xa5a5,"output guard damaged");
         std::array<std::uint8_t,256> check{};CUDA_CHECK(cudaMemcpy(check.data(),guard.data,256,cudaMemcpyDeviceToHost));

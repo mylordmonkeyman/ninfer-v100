@@ -1,5 +1,5 @@
 name: V100 Structural Engine Comparison
-# Six-step follow-up, Step 2 GDN large-prefill operator qualification and screening.
+# Step 2: retain aggregate oracle gate; fix extra per-token BF16 output criterion.
 on:
   workflow_dispatch:
   push:
