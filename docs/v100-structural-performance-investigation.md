@@ -1623,3 +1623,37 @@ registered paths at a GEMM route width, and requires bit-exact output plus succe
 registration/unregistration accounting. The full serving rerun retains exact output,
 usage and MTP parity at matching ordinals now that residency is matched. This bounded
 rerun resolves the only confound rather than repeating an unchanged campaign.
+
+### Matched source pin qualifies; deterministic packed reduction is next
+
+Corrected run [38137140616](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38137140616)
+passed every numerical, lifetime, cache and transport gate. The direct-source fixture
+registered one contiguous layer bank and was bit-exact against staged transport. In
+serving, both arms retained exactly102 experts/layer (4,896 seeded experts and
+13,537,714,176 cache bytes), and all corresponding cold and measured requests had
+identical output hashes, token usage and native MTP work (62 rounds,123 drafts and65
+accepts).
+
+Across three rotated fresh servers per arm, warmed HTTP improved from31.0407 to
+27.6765seconds (-10.84%) and native prefill from22.4344 to20.5434seconds (-8.43%).
+Decode was flat at6.8695 versus6.8849seconds. The HTTP ranges were29.5484–31.3243
+and27.6021–28.4472seconds. The candidate registered48 ranges totaling
+67,948,101,632 bytes; sampled peak GPU memory was29.8533GiB for staged transport and
+29.9763GiB for direct transport, a126MiB registration-bookkeeping difference. Keep
+`NINFER_V100_EXPERT_SOURCE_PINNED=1` as a qualified, default-off profile option.
+
+Installed native Strata measured10.5659seconds warmed HTTP,8.2908seconds prompt and
+2.6205seconds predicted-token work in the same campaign. Qualified NInfer remains
+2.62x slower end to end and2.48x slower in prefill. The representations and native
+speculative work remain different, so this is practical rather than matched-quality
+performance.
+
+The rejected packed-MMA result showed that direct compact tensor-core arithmetic can
+beat expanded cuBLAS as an isolated operator, but its split-K atomics caused both
+serving variability and a request regression. The next bounded operator candidate
+keeps the same compact arithmetic while replacing atomics with one FP32 plane per
+split and a fixed-order reduction. `NINFER_V100_EXPERT_PACKED_REDUCE=1` is default
+off. It must repeat bit-exact output across identical launches, pass the independent
+represented-NVFP4 FP32 and expanded-cuBLAS numerical gates, and materially beat the
+qualified paired-expansion operator before any serving campaign is allowed. This is
+not an unchanged retry: the synchronization and accumulation topology are different.

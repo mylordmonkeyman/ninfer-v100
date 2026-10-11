@@ -18,8 +18,9 @@
 // buffered shared staging, split-K via volta_mma_splits.h's shared CTA-budget logic), the
 // pipeline shape (issue loads, run MMA on the *previous* tile, only then decode-and-store the
 // new one -- fusing load+decode+store into one step left global latency exposed with nothing to
-// hide it behind, per that file's own note), and the fp32-partial/atomicAdd/narrow structure for
-// splits>1. What's new is entirely in prefetch()/commit(): NVFP4's decoder (from
+// hide it behind, per that file's own note). The generic path retains its atomic split-K
+// accumulation; the expert companion can instead write disjoint split planes for a deterministic
+// fixed-order reduction. What's new in the matrix loop is entirely in prefetch()/commit(): NVFP4's decoder (from
 // nvfp4_volta_qpn_gemm.cuh, not re-derived) and its swizzled scale plane.
 //
 // The one structural wrinkle: mma.sync.m8n8k4's B-fragment (the weight's own 32-row axis for the
@@ -73,10 +74,15 @@ __device__ __forceinline__ void nvfp4_mma_unshuffle(const half2 (&out)[4], half2
     a[3] = (o[2] >> 16) | (o[3] & 0xFFFF0000u);           // (k6, k7)
 }
 
-template <bool kDirect>
+__device__ __forceinline__ __half nvfp4_mma_activation_to_half(__half value) { return value; }
+__device__ __forceinline__ __half nvfp4_mma_activation_to_half(__nv_bfloat16 value) {
+    return __float2half(__bfloat162float(value));
+}
+
+template <class Activation, bool kDirect, bool kSplitPlanes = false>
 __global__ __launch_bounds__(Nvfp4VoltaMmaSchedule::kThreads, 8) void nvfp4_volta_mma_gemm_kernel(
     const std::uint8_t* __restrict__ codes, const std::uint8_t* __restrict__ scales,
-    const __nv_bfloat16* __restrict__ x, float* __restrict__ partial,
+    const Activation* __restrict__ x, float* __restrict__ partial,
     __nv_bfloat16* __restrict__ out, int out_ld, int n, int k, int t,
     float inverse_weight_divisor, int splits) {
     using S = Nvfp4VoltaMmaSchedule;
@@ -147,10 +153,10 @@ __global__ __launch_bounds__(Nvfp4VoltaMmaSchedule::kThreads, 8) void nvfp4_volt
     auto commit = [&](const Carry& r, int buf) {
         if (r.xactive) {
             const int idx   = static_cast<int>(threadIdx.x);
-            const auto* src = reinterpret_cast<const __nv_bfloat16*>(&r.xraw);
+            const auto* src = reinterpret_cast<const Activation*>(&r.xraw);
             __half tmp[8];
 #pragma unroll
-            for (int j = 0; j < 8; ++j) { tmp[j] = __float2half(__bfloat162float(src[j])); }
+            for (int j = 0; j < 8; ++j) { tmp[j] = nvfp4_mma_activation_to_half(src[j]); }
             *reinterpret_cast<uint4*>(&x_sh[buf][idx / kVecs][(idx % kVecs) * 8]) =
                 *reinterpret_cast<const uint4*>(tmp);
         }
@@ -202,11 +208,24 @@ __global__ __launch_bounds__(Nvfp4VoltaMmaSchedule::kThreads, 8) void nvfp4_volt
             if constexpr (kDirect) {
                 out[static_cast<std::int64_t>(t0 + row_t) * out_ld + col_n] =
                     __float2bfloat16(d[l]);
+            } else if constexpr (kSplitPlanes) {
+                partial[(static_cast<std::int64_t>(blockIdx.y) * t + t0 + row_t) * n + col_n] = d[l];
             } else {
                 atomicAdd(&partial[static_cast<std::int64_t>(t0 + row_t) * n + col_n], d[l]);
             }
         }
     }
+}
+
+__global__ void nvfp4_volta_mma_reduce_f32_kernel(const float* __restrict__ partial,
+                                                   float* __restrict__ out,
+                                                   int n, int t, int splits) {
+    const std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const std::int64_t count = static_cast<std::int64_t>(n) * t;
+    if (i >= count) return;
+    float sum = 0.0F;
+    for (int split = 0; split < splits; ++split) sum += partial[split * count + i];
+    out[i] = sum;
 }
 
 __global__ void nvfp4_volta_mma_narrow_strided_kernel(const float* __restrict__ partial,
