@@ -28,7 +28,9 @@ class StructuralTests(unittest.TestCase):
                     round_context=dict(context,input_columns=10 if phase=='prefill' else 3)
                     record=dict(kind='round',status='ok',phase=phase,context=round_context,
                         layers=[dict(counters=dict(nonresident_gpu_routes=routes,
-                                                   expert_h2d_bytes=experts*slot_bytes))])
+                                                   expert_h2d_bytes=experts*slot_bytes,cpu_routes=routes+1),
+                                     host_us=dict(cpu_expert=wait*1000,host_wait=wait*10),
+                                     workers=[dict(full_jobs=experts,full_us=wait*20)])])
                     stream=dict(kind='expert_stream_timing',context=context,routes=routes,
                         experts=experts,gemm_experts=gemm,gemm_routes=routes if gemm else 0,
                         route_buckets=buckets,copy_ms=3,compute_wait_ms=wait,kernel_interval_ms=8)
@@ -44,6 +46,11 @@ class StructuralTests(unittest.TestCase):
             self.assertEqual(rows[0]['stream_phases']['verify']['compute_wait_ms'],999)
             self.assertEqual(rows[1]['stream_phases']['prefill']['weight_h2d_bytes'],2*slot_bytes)
             self.assertAlmostEqual(rows[0]['prefill_wait_pct_of_instrumented_native'],.3)
+            self.assertEqual(rows[0]['native_phases']['prefill']['counters']['cpu_routes'],65)
+            self.assertEqual(rows[0]['native_phases']['verify']['counters']['cpu_routes'],8)
+            self.assertEqual(rows[0]['native_phases']['prefill']['host_spans_us']['cpu_expert'],12000)
+            self.assertEqual(rows[1]['native_phases']['prefill']['worker_jobs']['full_jobs'],2)
+            self.assertEqual(rows[1]['native_phases']['verify']['worker_us']['full_us'],19980)
             data=data.replace(b'"transaction": 1, "phase": "prefill"',
                               b'"transaction": 9, "phase": "prefill"',1)
             # Change only a round owner; a stream row must not silently inherit

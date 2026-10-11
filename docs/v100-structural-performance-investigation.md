@@ -1426,13 +1426,13 @@ NInfer retained FP8 KV/262K capacity/dense and fused opt-ins/MTP2/physical32;
 installed Strata retained its native int8 KV, speculative settings and placement.
 Representations, persistent state codecs and arithmetic remain different.
 
-### Next bounded candidate: exact-block CPU integer dots
+### Screened candidate: exact-block CPU integer dots
 
 Pinned Strata code uses integer AVX2 dot products while NInfer's CPU miss path
-expands packed codes into FP32/FMA vectors. `NINFER_V100_CPU_EXACT_S16=1` is a new
-default-off screening candidate for singleton and grouped/row-sharded experts.
-For each K16 input block, choose a power-of-two scale and use signed16-bit codes
-only if every reconstructed value equals the represented BF16-derived FP32 input.
+expands packed codes into FP32/FMA vectors. The removed `NINFER_V100_CPU_EXACT_S16=1`
+candidate covered singleton and grouped/row-sharded experts. For each K16 input
+block it chose a power-of-two scale and used signed16-bit codes only if every
+reconstructed value equaled the represented BF16-derived FP32 input.
 Wider exponent spans, nonfinite or tiny scales fall back to floating-point block
 products. This adds no activation quantization error and changes no stored weights,
 weight divisors, routing order, worker budget or BF16 SiLU/up boundary. Integer
@@ -1443,17 +1443,43 @@ The local probe passed independent scalar full-formula gates at actual2560/640
 dimensions (NRMSE<=.002/cosine>=.99999), mixed signed codes and scale extremes,
 zeros/small values/wide exponent fallback, widths1–4, and grouped/pool row parity.
 Local timing is mixed and does not establish a target-host or serving gain.
-The next workflow first compares both routes on the actual host, alternating three
+The workflow first compared both routes on the actual host, alternating three
 probe processes per route, rotating32 synthetic canonical expert pairs (~84MiB)
-outside target LLC. Require at least5% aggregate median operator improvement and
-no width regressing over5% before admitting a serving campaign. An admission
-failure is a negative operator screen, not a workflow error; remove the candidate
-and advance rather than spend a full repeated serving campaign on it.
-
-If admitted, full CPU group/unit and retained GPU numerical/lifetime/cache gates
-precede three alternating fresh servers per route at the tested8192 FP8/262K
-profile, cold/four warmups/measured7111/128/noReuse. Record HTTP/native phases,
-output/native MTP, actual residency and sampled GPU peaks in
-`cpu-exact-s16-report.json`. Do not force cross-route exact request output, promote
-the arithmetic default, or declare a native-Strata win from an operator result.
+outside target LLC. Admission required at least5% aggregate median operator
+improvement and no width regressing over5% before a serving campaign.
 The original model, source packs and installed Strata remain untouched.
+
+### Exact-block CPU candidate rejected; current profile attribution next
+
+Run [38120078643](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38120078643)
+at6928cc1e passed every independent CPU numerical and grouped/sharded qualification,
+but failed the performance admission screen on the actual host. Across three
+alternating processes per route and32 rotating canonical expert pairs, operator
+median microseconds were:
+
+| Routed width | Existing FMA | Exact S16 candidate | Candidate change |
+|---|---:|---:|---:|
+| 1 | 1026.20 | 1078.72 | +5.12% |
+| 2 | 1368.81 | 1671.25 | +22.10% |
+| 3 | 1624.35 | 2154.84 | +32.66% |
+| 4 | 1876.63 | 2682.78 | +42.96% |
+
+The aggregate ratio was1.2869. This is a negative CPU operator screen, not a serving
+measurement; the workflow correctly skipped the GPU build and full serving A/B.
+The experimental selector/path, probe and A/B harness were removed; existing CPU
+arithmetic/schedule is retained. The preserved artifact11693974510 contains qualification
+and admission evidence. Do not retry the same candidate or infer that Strata's
+activation-quantizing integer path is a free equivalent of this exact-block path.
+
+Before choosing the next substantive GPU/CPU implementation, attribute the tested
+8192/FP8/262K/dense+fused profile. Existing2048 measurements have different group
+widths, cache capacity and arithmetic and cannot reliably choose the next bottleneck.
+`--large-profile-breakdown` runs one fresh uninstrumented reference and one fresh
+diagnostic server, each cold/four warmups/measured7111/128/noReuse. Require exact
+corresponding output/usage/nativeMTP and record instrumentation overhead by ordinal.
+Retain affected GPU qualifications before timing. Existing byte-window ownership
+separates prefill and verification; include per-phase CPU routes, inclusive host
+wait/CPU spans and summed worker jobs/durations alongside streamed expert group
+geometry/bytes/copy/dependency intervals. Worker durations and host scopes overlap;
+do not sum them or reinterpret dependency wait as whole-GPU idle. This changed
+profile measurement should choose work reduction, not another ordering sweep.
