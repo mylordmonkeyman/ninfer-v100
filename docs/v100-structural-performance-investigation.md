@@ -1061,3 +1061,37 @@ subtraction, turning intended negative inputs into large positive values that
 overflowed FP16 conversion. Correct the generator to signed token arithmetic;
 its intended input range is [-0.875,0.875]. No production arithmetic, numerical
 threshold or benchmark geometry changes. Re-run only the bounded operator job.
+
+
+### Step 3 resident reference complete; work/bytes optimization remains open
+
+Corrected run [38102172529](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38102172529)
+succeeded on Tesla V100-PCIE-32GB (80 SMs). Production expert independent-oracle,
+extreme/divisor, guard and zero gates passed; every synthetic resident GEMM output
+matched the independent FP32 dot exactly on this dyadic fixture. All timing below
+excludes H2D transfers and CPU staging.
+
+| Routes | Full expert pair mean | Resident GEMM pair median | Resident useful TFLOPs |
+|---|---:|---:|---:|
+| 32 | 0.143565 ms | 0.048128 ms | 6.54 |
+| 33 (40 padded) | 0.150118 ms | 0.052224 ms | 6.21 |
+| 64 | 0.156058 ms | 0.062464 ms | 10.07 |
+| 128 | 0.171616 ms | 0.069632 ms | 18.07 |
+| 256 | 0.229568 ms | 0.120832 ms | 20.83 |
+| 512 (two tiles) | 0.380512 ms | 0.233472 ms | 21.56 |
+
+The same-shape resident reference is a practical comparison for these narrow
+GEMMs, not a measured saturated device peak. At256 routes, gate/up achieved
+18.00 TFLOPs (0.093184 ms), down28.25 TFLOPs (0.029696 ms). Separate phase medians
+are not additive with the pair median. The full expert path adds weight expansion,
+gather, activation/scaling and scatter, with different represented inputs; its
+roughly threefold cost over the reference at32 routes and twofold at256 motivate
+reducing launches/expansion/staging work. They do not isolate an exclusive
+phase cost or prove compute saturation, H2D starvation or an end-to-end gain.
+The production pair remains substantially faster than SIMT at these sizes.
+
+Next, establish phase-owned compute-stream dependency-wait evidence and evaluate
+one grouped/fused work reduction if justified by actual active-expert geometry and
+scratch constraints. Keep hardware evidence bounded and avoid another ordering
+sweep. Step 3 remains open; Steps 4 and 5 are pending. No arithmetic default was
+promoted and no claim of beating Strata follows from this reference.
