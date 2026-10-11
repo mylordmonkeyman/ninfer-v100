@@ -6,8 +6,6 @@
 
 #include <cuda_bf16.h>
 
-#include <stdexcept>
-
 namespace ninfer::ops::detail {
 
 #ifdef NINFER_VOLTA_BUILD
@@ -55,7 +53,7 @@ void launch_nvfp4_volta_mma(const Tensor& x, const Weight& w, Tensor& out, Works
     auto* out_data      = static_cast<__nv_bfloat16*>(out.data);
 
     if (splits == 1) {
-        nvfp4_volta_mma_gemm_kernel<__nv_bfloat16, true><<<grid, S::kThreads, 0, stream>>>(
+        nvfp4_volta_mma_gemm_kernel<true><<<grid, S::kThreads, 0, stream>>>(
             codes, scales, static_cast<const __nv_bfloat16*>(x.data), nullptr, out_data, out_ld, n,
             k, t, inverse_weight_divisor, splits);
         CUDA_CHECK(cudaGetLastError());
@@ -72,7 +70,7 @@ void launch_nvfp4_volta_mma(const Tensor& x, const Weight& w, Tensor& out, Works
     auto* partial        = static_cast<float*>(buf.data);
     CUDA_CHECK(cudaMemsetAsync(partial, 0, workspace_bytes, stream));
 
-    nvfp4_volta_mma_gemm_kernel<__nv_bfloat16, false><<<grid, S::kThreads, 0, stream>>>(
+    nvfp4_volta_mma_gemm_kernel<false><<<grid, S::kThreads, 0, stream>>>(
         codes, scales, static_cast<const __nv_bfloat16*>(x.data), partial, out_data, out_ld, n, k,
         t, inverse_weight_divisor, splits);
     CUDA_CHECK(cudaGetLastError());
@@ -82,29 +80,6 @@ void launch_nvfp4_volta_mma(const Tensor& x, const Weight& w, Tensor& out, Works
     nvfp4_volta_mma_narrow_strided_kernel<<<
         static_cast<unsigned>((count + kNarrowThreads - 1) / kNarrowThreads), kNarrowThreads, 0,
         stream>>>(partial, out_data, n, t, out_ld);
-    CUDA_CHECK(cudaGetLastError());
-}
-
-void launch_nvfp4_volta_mma_fp16_f32(const void* codes, const void* scales, const void* x,
-                                      float* out, std::int32_t n, std::int32_t k,
-                                      std::int32_t t, cudaStream_t stream,
-                                      int splits_override) {
-    if (!nvfp4_volta_mma_supported(n, k, t)) {
-        throw std::invalid_argument("unsupported FP16-to-FP32 Volta NVFP4 MMA geometry");
-    }
-    const int splits = splits_override > 0 ? splits_override : nvfp4_volta_mma_splits(n, k, t);
-    const dim3 grid(static_cast<unsigned>((n + S::kRowsPerCta - 1) / S::kRowsPerCta),
-                    static_cast<unsigned>(splits),
-                    static_cast<unsigned>((t + S::kTTile - 1) / S::kTTile));
-    const std::size_t output_bytes = static_cast<std::size_t>(n) *
-                                     static_cast<std::size_t>(t) * sizeof(float);
-    CUDA_CHECK(cudaMemsetAsync(out, 0, output_bytes, stream));
-    // Expert GEMM keeps each matrix divisor in the existing FP32 activation/scatter epilogue.
-    // Therefore the fused decoder materializes the same raw E2M1*E4M3 values as expand(), with
-    // inverse_weight_divisor=1, and accumulates them directly into caller-owned FP32 storage.
-    nvfp4_volta_mma_gemm_kernel<__half, false><<<grid, S::kThreads, 0, stream>>>(
-        static_cast<const std::uint8_t*>(codes), static_cast<const std::uint8_t*>(scales),
-        static_cast<const __half*>(x), out, nullptr, n, n, k, t, 1.0F, splits);
     CUDA_CHECK(cudaGetLastError());
 }
 

@@ -1554,3 +1554,44 @@ expanded-cuBLAS numerical comparison, guard/lifetime/ownership/cache gates, at l
 count more than5% slower. Only an admitted candidate proceeds to three rotated fresh
 servers each for expanded cuBLAS, packed MMA and installed Strata on the best8192/FP8/
 late-half-QSA profile. No arithmetic default is promoted by this screen.
+
+### Packed expert MMA rejected despite its operator gain
+
+Run [38129638960](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38129638960)
+at `2bfabf36` passed all codec, QSA, dense, independent expert numerical,
+guard, lifetime, ownership and cache gates. The direct packed operator was 19.59%
+faster in aggregate than paired expansion plus cuBLAS over route counts32–512.
+The per-count ratios were0.570,0.583,0.610,0.782,0.883 and0.989 respectively.
+
+That operator result did not become a request gain. Across three rotated fresh
+servers per arm, warmed HTTP changed from29.1395 to29.2781seconds (+0.48%) and
+native prefill from21.9073 to22.4750seconds (+2.59%). Split-K atomic accumulation
+also produced different outputs and MTP work across fresh candidate servers, while
+the expanded-cuBLAS control remained stable. Installed native Strata measured
+10.3014seconds warmed HTTP in the same campaign, leaving the valid NInfer control
+2.83x slower. The packed selector, kernel route, test extension and admission
+harness were removed. Do not promote or repeat this candidate unchanged.
+
+The next candidate addresses bytes and CPU work without changing arithmetic. NInfer
+currently copies every streamed expert's six compact planes from its file mapping
+into one of four pinned bounce buffers before H2D. The current-profile diagnostic
+therefore performed another27.957GB of explicit host copies in addition to H2D.
+Installed Strata's Linux path instead page-locks its resident expert arena and DMAs
+from the source.
+
+`NINFER_V100_EXPERT_SOURCE_PINNED=1` is a default-off transport experiment. It
+page-aligns and merges the96 mapped gate/up and down bank ranges, registers them
+with CUDA for the stream lifetime, omits the per-slot weight bounce buffers, and
+issues direct asynchronous copies of the unchanged codes, scales and divisors into
+the existing canonical device slots. GPU weights, expansion, GEMM, routing and
+post-ops are unchanged. Registration byte/range evidence is logged, and cleanup
+unregisters every successfully registered range before the mapped model can leave
+scope.
+
+The bounded campaign retains all existing numerical/lifetime/cache gates, then
+rotates three fresh servers each for staged source copy, pinned-source DMA and
+installed native Strata on the current8192/FP8/late-half-QSA profile. Every matching
+NInfer request must have exactly identical output hash, usage and native MTP work;
+otherwise the candidate is rejected before any performance interpretation. Source
+registration failure is also a clean candidate failure, not permission to alter
+system security or memory-lock policy.

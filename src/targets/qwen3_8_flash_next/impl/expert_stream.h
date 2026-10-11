@@ -11,6 +11,7 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 [[nodiscard]] std::size_t flash_next_expert_stream_device_bytes(unsigned maximum_routes);
 [[nodiscard]] unsigned flash_next_expert_stream_ring_slots();
 [[nodiscard]] bool flash_next_expert_stream_pipeline_reuse();
+[[nodiscard]] bool flash_next_expert_source_pin_requested();
 
 struct FlashNextStreamRoute {
     const void* input_bf16;
@@ -21,7 +22,9 @@ struct FlashNextStreamRoute {
 // cache admission/eviction. Caller retains input/output until finish() returns.
 class FlashNextExpertStream {
 public:
-    explicit FlashNextExpertStream(unsigned maximum_routes_per_expert);
+    explicit FlashNextExpertStream(
+        unsigned maximum_routes_per_expert,
+        const HostNvfp4ExpertTableView* host_experts = nullptr);
     ~FlashNextExpertStream();
     FlashNextExpertStream(const FlashNextExpertStream&) = delete;
     FlashNextExpertStream& operator=(const FlashNextExpertStream&) = delete;
@@ -30,6 +33,10 @@ public:
     void finish();
     [[nodiscard]] std::size_t device_bytes() const { return device_bytes_; }
     [[nodiscard]] std::size_t pinned_bytes() const { return pinned_bytes_; }
+    [[nodiscard]] std::size_t source_registered_bytes() const {
+        return source_registered_bytes_;
+    }
+    [[nodiscard]] bool source_pinned() const { return source_pinned_; }
     [[nodiscard]] std::uint64_t submitted_experts() const { return submitted_; }
     [[nodiscard]] std::uint64_t expert_h2d_bytes() const { return submitted_ * kExpertSlotBytes; }
 private:
@@ -50,13 +57,15 @@ private:
         TimingRecord timing;
     };
     std::unique_ptr<FlashNextExpertGemm> gemm_;
+    struct RegisteredRange { void* base = nullptr; std::size_t bytes = 0; };
+    std::vector<RegisteredRange> source_ranges_;
     std::array<Slot,8> slots_;  // Up to eight bounded in-flight H2D/compute slots.
     cudaStream_t transfer_ = nullptr;
     unsigned maximum_routes_, next_ = 0, ring_slots_ = 4;
-    bool pipeline_reuse_ = false, timing_ = false;
+    bool pipeline_reuse_ = false, timing_ = false, source_pinned_ = false;
     std::vector<TimingRecord> timings_;
     void collect_timing(Slot& slot);
-    std::size_t device_bytes_ = 0, pinned_bytes_ = 0;
+    std::size_t device_bytes_ = 0, pinned_bytes_ = 0, source_registered_bytes_ = 0;
     std::uint64_t submitted_ = 0;
     void cleanup() noexcept;
 };

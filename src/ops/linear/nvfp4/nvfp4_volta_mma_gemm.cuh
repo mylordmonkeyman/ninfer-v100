@@ -73,15 +73,10 @@ __device__ __forceinline__ void nvfp4_mma_unshuffle(const half2 (&out)[4], half2
     a[3] = (o[2] >> 16) | (o[3] & 0xFFFF0000u);           // (k6, k7)
 }
 
-__device__ __forceinline__ __half nvfp4_mma_activation_to_half(__half value) { return value; }
-__device__ __forceinline__ __half nvfp4_mma_activation_to_half(__nv_bfloat16 value) {
-    return __float2half(__bfloat162float(value));
-}
-
-template <class Activation, bool kDirect>
+template <bool kDirect>
 __global__ __launch_bounds__(Nvfp4VoltaMmaSchedule::kThreads, 8) void nvfp4_volta_mma_gemm_kernel(
     const std::uint8_t* __restrict__ codes, const std::uint8_t* __restrict__ scales,
-    const Activation* __restrict__ x, float* __restrict__ partial,
+    const __nv_bfloat16* __restrict__ x, float* __restrict__ partial,
     __nv_bfloat16* __restrict__ out, int out_ld, int n, int k, int t,
     float inverse_weight_divisor, int splits) {
     using S = Nvfp4VoltaMmaSchedule;
@@ -152,10 +147,10 @@ __global__ __launch_bounds__(Nvfp4VoltaMmaSchedule::kThreads, 8) void nvfp4_volt
     auto commit = [&](const Carry& r, int buf) {
         if (r.xactive) {
             const int idx   = static_cast<int>(threadIdx.x);
-            const auto* src = reinterpret_cast<const Activation*>(&r.xraw);
+            const auto* src = reinterpret_cast<const __nv_bfloat16*>(&r.xraw);
             __half tmp[8];
 #pragma unroll
-            for (int j = 0; j < 8; ++j) { tmp[j] = nvfp4_mma_activation_to_half(src[j]); }
+            for (int j = 0; j < 8; ++j) { tmp[j] = __float2half(__bfloat162float(src[j])); }
             *reinterpret_cast<uint4*>(&x_sh[buf][idx / kVecs][(idx % kVecs) * 8]) =
                 *reinterpret_cast<const uint4*>(tmp);
         }

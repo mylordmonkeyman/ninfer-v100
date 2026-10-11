@@ -1,6 +1,6 @@
 name: V100 Structural Engine Comparison
-# Renewed objective: remove expert FP16 expansion writes with direct compact-NVFP4 Volta MMA.
-# A target-host operator admission gate prevents a full serving campaign for a slower candidate.
+# Renewed objective: remove the pageable-source to pinned-ring host copy from every streamed expert.
+# Compare exact-work direct DMA from page-locked mapped expert banks against the retained staging path.
 on:
   workflow_dispatch:
   push:
@@ -106,12 +106,8 @@ jobs:
           NINFER_V100_EXPERT_PAIR_EXPAND=1 \
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_gemm_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/expert-pair-oracle-parity-and-cost.log"
-          NINFER_V100_EXPERT_PAIR_EXPAND=1 NINFER_V100_EXPERT_PACKED_MMA=1 \
-            build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_gemm_test 2>&1 \
-            | tee "$QUALIFICATION_RESULTS/expert-packed-mma-oracle-and-cost.log"
           NINFER_V100_PREFILL_EXPERT_GEMM=fp16 NINFER_V100_PREFILL_RESIDENT_GEMM=1 \
             NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=1 NINFER_V100_EXPERT_PAIR_EXPAND=1 \
-            NINFER_V100_EXPERT_PACKED_MMA=1 \
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_stream_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/stream-lifetime-and-ownership.log"
           python3 - <<'PY_CHECK'
@@ -128,41 +124,14 @@ jobs:
           PY_CHECK
           NINFER_V100_PREFILL_EXPERT_GEMM=fp16 NINFER_V100_PREFILL_RESIDENT_GEMM=1 \
             NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=1 NINFER_V100_EXPERT_PAIR_EXPAND=1 \
-            NINFER_V100_EXPERT_PACKED_MMA=1 \
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/cache-join-oracle.log"
           cp build-structural-comparison/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
-      - name: Admit direct packed expert MMA on target hardware
-        id: packed_admission
+      - name: Race page-locked expert source DMA against staged copy and installed Strata
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY_ADMISSION'
-          import json, os, pathlib, re
-          root=pathlib.Path(os.environ['QUALIFICATION_RESULTS'])
-          pattern=re.compile(r'expert\.cost routes=(\d+) backend=fp16 mean_ms=([0-9.]+)')
-          def read(name):
-              return {int(r):float(ms) for r,ms in pattern.findall((root/name).read_text()) if int(r)>=32}
-          baseline=read('expert-pair-oracle-parity-and-cost.log')
-          candidate=read('expert-packed-mma-oracle-and-cost.log')
-          if baseline.keys()!=candidate.keys() or not baseline:
-              raise SystemExit(f'incomplete operator timing: baseline={baseline} candidate={candidate}')
-          ratios={r:candidate[r]/baseline[r] for r in sorted(baseline)}
-          aggregate=sum(candidate.values())/sum(baseline.values())
-          admitted=aggregate<=0.90 and max(ratios.values())<=1.05
-          report={'baseline_ms':baseline,'candidate_ms':candidate,'ratios':ratios,
-                  'aggregate_ratio':aggregate,'admitted':admitted,
-                  'criterion':'sum(candidate)/sum(baseline)<=0.90 and no route count >1.05x'}
-          (root/'expert-packed-mma-admission.json').write_text(json.dumps(report,indent=2)+'\n')
-          print(json.dumps(report,indent=2))
-          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write(f'admitted={str(admitted).lower()}\n')
-          PY_ADMISSION
-      - name: Race admitted packed expert MMA against expanded cuBLAS and installed Strata
-        if: ${{ steps.packed_admission.outputs.admitted == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --packed-expert-race \
+          python3 tools/telemetry/structural_v100.py --pinned-expert-source-race \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \

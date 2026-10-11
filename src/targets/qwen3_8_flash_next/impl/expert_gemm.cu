@@ -1,7 +1,6 @@
 #include "targets/qwen3_8_flash_next/impl/expert_gemm.h"
 #include "core/device.h"
 #include "ops/linear/nvfp4/nvfp4_codec.cuh"
-#include "ops/linear/nvfp4/nvfp4_launch.h"
 #include <cublas_v2.h>
 #include <cuda_fp16.h>
 #include <algorithm>
@@ -146,17 +145,6 @@ bool flash_next_expert_pair_expand_requested() {
     if(std::string_view(value)=="1")return true;
     throw std::invalid_argument("NINFER_V100_EXPERT_PAIR_EXPAND must be 0 or 1");
 }
-bool flash_next_expert_packed_mma_requested() {
-    const char* value=std::getenv("NINFER_V100_EXPERT_PACKED_MMA");
-    if(!value || !*value || std::string_view(value)=="0")return false;
-    if(std::string_view(value)!="1")
-        throw std::invalid_argument("NINFER_V100_EXPERT_PACKED_MMA must be 0 or 1");
-#if defined(NINFER_VOLTA_BUILD)
-    return true;
-#else
-    throw std::invalid_argument("NINFER_V100_EXPERT_PACKED_MMA requires the Volta build");
-#endif
-}
 bool flash_next_resident_expert_gemm_requested() {
     return selected_binary_mode("NINFER_V100_PREFILL_RESIDENT_GEMM");
 }
@@ -165,7 +153,6 @@ bool flash_next_cpu_stream_overlap_requested() {
 }
 struct FlashNextExpertGemm::Impl {
     bool pair_expand=flash_next_expert_pair_expand_requested();
-    bool packed_mma=flash_next_expert_packed_mma_requested();
     DeviceBuffer gu{1280*2560*2ULL}, down{2560*640*2ULL};
     DeviceBuffer x{tile_routes*2560*2ULL}, gate_up{tile_routes*1280*4ULL};
     DeviceBuffer h{tile_routes*640*2ULL}, y{tile_routes*2560*4ULL};
@@ -180,7 +167,6 @@ struct FlashNextExpertGemm::Impl {
                 CUBLAS_TENSOR_OP_MATH | CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION)));
         } catch(...) {cublasDestroy(handle);handle=nullptr;throw;}
         if(pair_expand)std::fprintf(stderr,"v100.expert_pair_expand=1\n");
-        if(packed_mma)std::fprintf(stderr,"v100.expert_packed_mma=1\n");
     }
     ~Impl(){if(handle)cublasDestroy(handle);}
 };
@@ -196,11 +182,11 @@ void FlashNextExpertGemm::launch(const HostNvfp4ExpertPairView& expert,
     m.bound=true;m.compute=stream;
     blas_check(cublasSetStream(m.handle,stream));
     blas_check(cublasSetWorkspace(m.handle,m.workspace.p,m.workspace.bytes));
-    if(!m.packed_mma && m.pair_expand) {
+    if(m.pair_expand) {
         expand_pair<<<((1280*2560+2560*640)/2+255)/256,256,0,stream>>>(expert,
             static_cast<__half2*>(m.gu.p),static_cast<__half2*>(m.down.p));
         CUDA_CHECK(cudaGetLastError());
-    } else if(!m.packed_mma) {
+    } else {
         expand<<<(1280*2560+255)/256,256,0,stream>>>(expert.gate_up,static_cast<__half*>(m.gu.p));
         CUDA_CHECK(cudaGetLastError());
         expand<<<(2560*640+255)/256,256,0,stream>>>(expert.down,static_cast<__half*>(m.down.p));
@@ -211,30 +197,15 @@ void FlashNextExpertGemm::launch(const HostNvfp4ExpertPairView& expert,
         const unsigned count=std::min(tile_routes,routes-offset), padded=(count+7)&~7U;
         gather<<<padded,256,0,stream>>>(groups,offset,count,static_cast<__half*>(m.x.p),static_cast<float*>(m.input_scales.p));
         CUDA_CHECK(cudaGetLastError());
-        if(m.packed_mma) {
-#if defined(NINFER_VOLTA_BUILD)
-            ops::detail::launch_nvfp4_volta_mma_fp16_f32(expert.gate_up.codes,
-                expert.gate_up.scales,m.x.p,static_cast<float*>(m.gate_up.p),1280,2560,
-                padded,stream);
-#endif
-        } else {
-            blas_check(cublasGemmEx(m.handle,CUBLAS_OP_T,CUBLAS_OP_N,1280,padded,2560,
-                &one,m.gu.p,CUDA_R_16F,2560,m.x.p,CUDA_R_16F,2560,&zero,m.gate_up.p,CUDA_R_32F,1280,
-                CUBLAS_COMPUTE_32F,CUBLAS_GEMM_DEFAULT_TENSOR_OP));
-        }
+        blas_check(cublasGemmEx(m.handle,CUBLAS_OP_T,CUBLAS_OP_N,1280,padded,2560,
+            &one,m.gu.p,CUDA_R_16F,2560,m.x.p,CUDA_R_16F,2560,&zero,m.gate_up.p,CUDA_R_32F,1280,
+            CUBLAS_COMPUTE_32F,CUBLAS_GEMM_DEFAULT_TENSOR_OP));
         activate<<<padded,256,0,stream>>>(static_cast<const float*>(m.gate_up.p),static_cast<const float*>(m.input_scales.p),
             expert.gate_up.weight_scale_divisor,static_cast<__half*>(m.h.p),static_cast<float*>(m.h_scales.p));
         CUDA_CHECK(cudaGetLastError());
-        if(m.packed_mma) {
-#if defined(NINFER_VOLTA_BUILD)
-            ops::detail::launch_nvfp4_volta_mma_fp16_f32(expert.down.codes,
-                expert.down.scales,m.h.p,static_cast<float*>(m.y.p),2560,640,padded,stream);
-#endif
-        } else {
-            blas_check(cublasGemmEx(m.handle,CUBLAS_OP_T,CUBLAS_OP_N,2560,padded,640,
-                &one,m.down.p,CUDA_R_16F,640,m.h.p,CUDA_R_16F,640,&zero,m.y.p,CUDA_R_32F,2560,
-                CUBLAS_COMPUTE_32F,CUBLAS_GEMM_DEFAULT_TENSOR_OP));
-        }
+        blas_check(cublasGemmEx(m.handle,CUBLAS_OP_T,CUBLAS_OP_N,2560,padded,640,
+            &one,m.down.p,CUDA_R_16F,640,m.h.p,CUDA_R_16F,640,&zero,m.y.p,CUDA_R_32F,2560,
+            CUBLAS_COMPUTE_32F,CUBLAS_GEMM_DEFAULT_TENSOR_OP));
         scatter<<<count,256,0,stream>>>(groups,offset,count,static_cast<const float*>(m.y.p),
             static_cast<const float*>(m.h_scales.p),expert.down.weight_scale_divisor);
         CUDA_CHECK(cudaGetLastError());

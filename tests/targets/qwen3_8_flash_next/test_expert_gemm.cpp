@@ -45,22 +45,17 @@ int main() {try {
     DeviceBuffer simt_activations(512*640*2ULL);
     std::unique_ptr<FlashNextExpertGemm> baseline;
     const bool pair_expand=flash_next_expert_pair_expand_requested();
-    const bool packed_mma=flash_next_expert_packed_mma_requested();
-    if(pair_expand || packed_mma) {
+    if(pair_expand) {
 #if defined(_WIN32)
         _putenv_s("NINFER_V100_EXPERT_PAIR_EXPAND","0");
-        _putenv_s("NINFER_V100_EXPERT_PACKED_MMA","0");
 #else
         setenv("NINFER_V100_EXPERT_PAIR_EXPAND","0",1);
-        setenv("NINFER_V100_EXPERT_PACKED_MMA","0",1);
 #endif
         baseline=std::make_unique<FlashNextExpertGemm>();
 #if defined(_WIN32)
-        _putenv_s("NINFER_V100_EXPERT_PAIR_EXPAND",pair_expand?"1":"0");
-        _putenv_s("NINFER_V100_EXPERT_PACKED_MMA",packed_mma?"1":"0");
+        _putenv_s("NINFER_V100_EXPERT_PAIR_EXPAND","1");
 #else
-        setenv("NINFER_V100_EXPERT_PAIR_EXPAND",pair_expand?"1":"0",1);
-        setenv("NINFER_V100_EXPERT_PACKED_MMA",packed_mma?"1":"0",1);
+        setenv("NINFER_V100_EXPERT_PAIR_EXPAND","1",1);
 #endif
     }
     FlashNextExpertGemm gemm;
@@ -99,24 +94,8 @@ int main() {try {
                 baseline->launch(gpu,static_cast<const FlashNextCachedExpertGroup*>(groups.p),count,device.stream);
                 CUDA_CHECK(cudaStreamSynchronize(device.stream));
                 std::vector<float> control(actual.size());output.copy_to_host(control.data(),control.size()*4);
-                if(!packed_mma) {
-                    require(std::memcmp(actual.data(),control.data(),actual.size()*4)==0,
-                        "paired expansion changed expert output or guard bits");
-                } else {
-                    double err=0,norm=0,dot=0,aa=0;
-                    for(unsigned i=0;i<count*2560;++i) {
-                        const double a=actual[i],b=control[i];
-                        require(std::isfinite(a)&&std::isfinite(b),
-                            "packed MMA produced nonfinite baseline comparison");
-                        err+=(a-b)*(a-b);norm+=b*b;dot+=a*b;aa+=a*a;
-                    }
-                    const double nrmse=std::sqrt(err/std::max(norm,1e-300));
-                    const double cosine=dot/std::sqrt(aa*norm);
-                    require(nrmse<=.002 && cosine>=.99999,
-                        "packed MMA failed expanded cuBLAS numerical gate");
-                    std::cout<<"gemm.baseline routes="<<count<<" nrmse="<<nrmse
-                             <<" cosine="<<cosine<<'\n';
-                }
+                require(std::memcmp(actual.data(),control.data(),actual.size()*4)==0,
+                    "paired expansion changed expert output or guard bits");
             }
             double worst=0,min_cosine=1;
             for(unsigned t=0;t<count;++t) {
@@ -169,7 +148,6 @@ int main() {try {
     }
     CUDA_CHECK(cudaEventDestroy(begin));CUDA_CHECK(cudaEventDestroy(end));
     std::cout<<"Independent represented-NVFP4 FP32 expert GEMM qualification passed; pair_expand="
-             <<pair_expand<<" packed_mma="<<packed_mma
-             <<" exact_baseline_parity="<<(bool(baseline)&&!packed_mma)<<'\n';
+             <<pair_expand<<" exact_baseline_parity="<<bool(baseline)<<'\n';
     return 0;
 } catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
