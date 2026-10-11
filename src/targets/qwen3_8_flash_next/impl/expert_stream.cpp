@@ -104,7 +104,7 @@ std::size_t flash_next_expert_stream_device_bytes(unsigned maximum_routes) {
 }
 
 FlashNextExpertStream::FlashNextExpertStream(
-    unsigned maximum_routes, const HostNvfp4ExpertTableView* host_experts)
+    unsigned maximum_routes, std::span<const HostNvfp4ExpertLayerView> host_expert_layers)
     : maximum_routes_(maximum_routes), ring_slots_(flash_next_expert_stream_ring_slots()),
       pipeline_reuse_(flash_next_expert_stream_pipeline_reuse()) {
     if (!maximum_routes || maximum_routes > 8192U*10U)
@@ -114,13 +114,13 @@ FlashNextExpertStream::FlashNextExpertStream(
     const std::size_t descriptors = ((std::size_t(maximum_routes)+3)/4)*sizeof(FlashNextCachedExpertGroup);
     try {
         if (flash_next_expert_source_pin_requested()) {
-            if (!host_experts)
+            if (host_expert_layers.empty())
                 throw std::invalid_argument(
-                    "pinned expert source requires the complete host expert table");
+                    "pinned expert source requires host expert layers");
             const std::size_t page_bytes = host_page_bytes();
             std::vector<std::pair<std::uintptr_t, std::uintptr_t>> ranges;
-            ranges.reserve(host_experts->layers.size() * 2);
-            for (const auto& layer : host_experts->layers) {
+            ranges.reserve(host_expert_layers.size() * 2);
+            for (const auto& layer : host_expert_layers) {
                 ranges.push_back(expert_bank_range(layer.gate_up, page_bytes));
                 ranges.push_back(expert_bank_range(layer.down, page_bytes));
             }

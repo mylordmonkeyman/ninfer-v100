@@ -24,7 +24,7 @@ class FlashNextExpertStream {
 public:
     explicit FlashNextExpertStream(
         unsigned maximum_routes_per_expert,
-        const HostNvfp4ExpertTableView* host_experts = nullptr);
+        std::span<const HostNvfp4ExpertLayerView> host_expert_layers = {});
     ~FlashNextExpertStream();
     FlashNextExpertStream(const FlashNextExpertStream&) = delete;
     FlashNextExpertStream& operator=(const FlashNextExpertStream&) = delete;

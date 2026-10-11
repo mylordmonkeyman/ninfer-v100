@@ -1595,3 +1595,31 @@ NInfer request must have exactly identical output hash, usage and native MTP wor
 otherwise the candidate is rejected before any performance interpretation. Source
 registration failure is also a clean candidate failure, not permission to alter
 system security or memory-lock policy.
+
+### Initial source-pin race: material gain, residency confound isolated
+
+Run [38133726602](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38133726602)
+completed all operator/lifetime/cache qualification and all27 serving cells before
+the final parity assertion stopped the workflow. CUDA successfully registered48
+merged ranges totaling67,948,101,632 bytes on every candidate server. Median warmed
+HTTP improved from30.3073 to28.3620seconds (-6.42%) and native prefill from22.6901
+to20.6081seconds (-9.18%). Decode medians were6.9013 and6.9459seconds. The measured
+HTTP ranges were29.9890–30.6393 and28.0234–28.9720seconds; they do not overlap.
+Installed native Strata measured11.7196seconds in this run, so this is a material
+NInfer improvement but not the requested overall win.
+
+The initial A/B exposed a specific allocation confound: staged-copy servers retained
+103 experts/layer, while registering the source left102 slots/layer. Both paths had
+the same29.9763GiB sampled GPU peak and2GiB reserve, but the one-slot difference
+changed the CPU/GPU expert partition. Each arm was internally repeatable; measured
+output hashes matched across arms, while native MTP work differed by one accepted
+token and one round. Earlier warmups also had repeatable output/MTP differences.
+That is not a valid byte-corruption conclusion because the allocator deliberately
+selected different arithmetic partitions.
+
+The corrected comparison caps both arms at102 slots/layer. A new target-GPU fixture
+also constructs identical contiguous compact banks, executes the staged and directly
+registered paths at a GEMM route width, and requires bit-exact output plus successful
+registration/unregistration accounting. The full serving rerun retains exact output,
+usage and MTP parity at matching ordinals now that residency is matched. This bounded
+rerun resolves the only confound rather than repeating an unchanged campaign.

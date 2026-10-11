@@ -8,6 +8,7 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -190,6 +191,67 @@ int main() { try {
         flash_next_cpu_nvfp4_expert_pair_reference(layer.expert(i),input,reference[i],scratch);
     }
     DeviceBuffer d_input(input.size()*2); d_input.copy_from_host(input.data(),input.size()*2);
+    // Direct source DMA must preserve the exact canonical bytes and downstream
+    // arithmetic of the staged-copy path. Use contiguous bank payloads so the
+    // fixture also exercises read-only source registration and cleanup.
+    std::vector<std::byte> pinned_gate(gc.size()+gs.size()+sizeof(divisors));
+    std::vector<std::byte> pinned_down(dc.size()+ds.size()+sizeof(divisors));
+    std::memcpy(pinned_gate.data(),gc.data(),gc.size());
+    std::memcpy(pinned_gate.data()+gc.size(),gs.data(),gs.size());
+    std::memcpy(pinned_gate.data()+gc.size()+gs.size(),divisors,sizeof(divisors));
+    std::memcpy(pinned_down.data(),dc.data(),dc.size());
+    std::memcpy(pinned_down.data()+dc.size(),ds.data(),ds.size());
+    std::memcpy(pinned_down.data()+dc.size()+ds.size(),divisors,sizeof(divisors));
+    HostNvfp4ExpertLayerView pinned_layer{
+        {pinned_gate.data(),pinned_gate.data()+gc.size(),
+         reinterpret_cast<const float*>(pinned_gate.data()+gc.size()+gs.size()),
+         3,1280,2560,1'638'400,204'800},
+        {pinned_down.data(),pinned_down.data()+dc.size(),
+         reinterpret_cast<const float*>(pinned_down.data()+dc.size()+ds.size()),
+         3,2560,640,819'200,102'400}};
+    constexpr unsigned transport_routes=33;
+    DeviceBuffer staged_output(std::size_t(transport_routes)*2560*sizeof(float));
+    DeviceBuffer direct_output(std::size_t(transport_routes)*2560*sizeof(float));
+    std::vector<FlashNextStreamRoute> staged_routes(transport_routes), direct_routes(transport_routes);
+    for(unsigned i=0;i<transport_routes;++i) {
+        staged_routes[i]={d_input.p,static_cast<float*>(staged_output.p)+std::size_t(i)*2560};
+        direct_routes[i]={d_input.p,static_cast<float*>(direct_output.p)+std::size_t(i)*2560};
+    }
+#if defined(_WIN32)
+    _putenv_s("NINFER_V100_EXPERT_SOURCE_PINNED","0");
+#else
+    setenv("NINFER_V100_EXPERT_SOURCE_PINNED","0",1);
+#endif
+    FlashNextExpertStream staged_transport(transport_routes);
+#if defined(_WIN32)
+    _putenv_s("NINFER_V100_EXPERT_SOURCE_PINNED","1");
+#else
+    setenv("NINFER_V100_EXPERT_SOURCE_PINNED","1",1);
+#endif
+    {
+        FlashNextExpertStream direct_transport(transport_routes,
+            std::span<const HostNvfp4ExpertLayerView>(&pinned_layer,1));
+        require(direct_transport.source_pinned() &&
+                direct_transport.source_registered_bytes()>=pinned_gate.size()+pinned_down.size(),
+                "direct expert source registration accounting changed");
+        staged_transport.submit(pinned_layer.expert(2),staged_routes,device.stream);
+        direct_transport.submit(pinned_layer.expert(2),direct_routes,device.stream);
+        staged_transport.finish();direct_transport.finish();
+    }
+    std::vector<float> staged_values(std::size_t(transport_routes)*2560),
+        direct_values(std::size_t(transport_routes)*2560);
+    staged_output.copy_to_host(staged_values.data(),staged_values.size()*sizeof(float));
+    direct_output.copy_to_host(direct_values.data(),direct_values.size()*sizeof(float));
+    require(std::memcmp(staged_values.data(),direct_values.data(),
+                        staged_values.size()*sizeof(float))==0,
+            "direct expert source DMA changed staged-copy output bits");
+#if defined(_WIN32)
+    _putenv_s("NINFER_V100_EXPERT_SOURCE_PINNED","0");
+#else
+    setenv("NINFER_V100_EXPERT_SOURCE_PINNED","0",1);
+#endif
+    std::cout<<"stream.source_pin.exact_parity=1 registered_bytes="
+             <<pinned_gate.size()+pinned_down.size()<<'\n';
     run_cost_calibration(device,layer.expert(0),input,d_input);
     const std::array<unsigned,11> counts{1,2,3,4,5,8,16,17,128,256,2048};
     std::size_t total=0;for(auto n:counts)total+=n;

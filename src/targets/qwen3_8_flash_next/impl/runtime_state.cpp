@@ -124,7 +124,7 @@ void FlashNextRuntimeAllocation::configure_expert_cache(const TextModelView& mod
                         ? plan_.config.speculative_draft_tokens + 1U : 1U));
         }
         expert_stream_ =
-            std::make_unique<FlashNextExpertStream>(maximum_routes, &*model.host_experts);
+            std::make_unique<FlashNextExpertStream>(maximum_routes, model.host_experts->layers);
         if (expert_stream_->device_bytes() != plan_.expert_stream_device_bytes) {
             throw std::logic_error("Flash-Next expert stream allocation exceeded its plan");
         }

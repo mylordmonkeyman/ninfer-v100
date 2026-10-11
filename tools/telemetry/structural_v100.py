@@ -526,7 +526,9 @@ def main():
                                                 NINFER_V100_QSA_SCORE_MMA_MIN_QSA='6')),
               ARMS[1]]
     pinned_base=dict(context_arms[1][2],NINFER_V100_QSA_SCORE_MMA='1',
-                     NINFER_V100_QSA_SCORE_MMA_MIN_QSA='6',NINFER_V100_EXPERT_SOURCE_PINNED='0')
+                     NINFER_V100_QSA_SCORE_MMA_MIN_QSA='6',
+                     NINFER_FLASH_NEXT_EXPERT_CACHE_MAX_SLOTS='102',
+                     NINFER_V100_EXPERT_SOURCE_PINNED='0')
     pinned_arms=[('ninfer','staged-source-copy',pinned_base),
                  ('ninfer','pinned-source-dma',dict(pinned_base,NINFER_V100_EXPERT_SOURCE_PINNED='1')),
                  ARMS[1]]
@@ -678,6 +680,7 @@ def main():
                                residency=c.get('residency'),
                                expert_source_registration=c.get('expert_source_registration')) for c in cells],
             limits=['The page-locked expert source route is experimental and remains default-off.',
+                    'Both NInfer arms are capped at 102 resident experts per layer to match the registered-source allocation.',
                     'Corresponding NInfer requests require exact output, usage and native MTP work parity.',
                     'Native Strata uses different weights, KV codec and speculative algorithm; this is practical, not matched-quality performance.'])
         (a.output/'pinned-expert-source-race-report.json').write_text(json.dumps(report,indent=2)+'\n')

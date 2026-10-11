@@ -1,6 +1,7 @@
 name: V100 Structural Engine Comparison
 # Renewed objective: remove the pageable-source to pinned-ring host copy from every streamed expert.
-# Compare exact-work direct DMA from page-locked mapped expert banks against the retained staging path.
+# Compare direct DMA from page-locked banks against staging at matched 102-slot residency;
+# a target-GPU fixture first requires bit-exact transport/operator output.
 on:
   workflow_dispatch:
   push:
