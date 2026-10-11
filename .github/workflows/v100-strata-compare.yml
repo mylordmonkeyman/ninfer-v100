@@ -1,5 +1,6 @@
 name: V100 Structural Engine Comparison
 # Renewed objective: test the admitted late-half QSA score-MMA path on the faster 8192 profile.
+# Dispatch admission scopes the 12 layer events to the 7,111-token prompt; smaller serving work stays SIMT.
 on:
   workflow_dispatch:
   push:
