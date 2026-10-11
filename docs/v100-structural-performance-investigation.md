@@ -1,6 +1,9 @@
 # V100 structural performance investigation
 
-Checkpoint: October 9, 2026. NInfer baseline `293e6bc0fe85bcf3f85c39958aab651adbe52895`;
+Current status: six-step performance screening completed October 11, 2026.
+See the final checkpoint below for retained opt-ins, long-context feasibility and limits.
+
+Initial checkpoint: October 9, 2026. NInfer baseline `293e6bc0fe85bcf3f85c39958aab651adbe52895`;
 Strata comparison source `0430d397d907032fc9ab83c8bb7acff48a935b53`.
 
 ## First execution: framing and launch correction
@@ -1291,3 +1294,62 @@ tolerances (including1e-3 for these small cases). The exact conversion oracle an
 independent attention oracle are unchanged. No production arithmetic or default
 changes. Resume qualification and long requests; no completed serving cells exist
 to reuse or rerun from this stopped job.
+
+### Step 5 complete: actual 128K and near-262K prompts fit with FP8 KV
+
+Run [38111959506](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38111959506)
+passed every qualification gate and all six requests. Exact software conversion
+covered all65,280 finite BF16 inputs; independent FP64 QSA attention, full QSA
+append/decode/prefill, dense/expert numerical, stream lifetime/ownership and cache
+join gates passed. The corrected supplementary BF16 cross-schedule fixture retained
+its numerical criteria: T=2 value-cache relative-L2 was1.499333e-6 and output
+2.963199e-5, both below the existing1e-3 limits. No production arithmetic changed.
+
+Serving calibrated14 tokens per repeated prose record plus31 frontend/template
+tokens. Actual large-request counts exactly matched calibration. Each used a fresh
+server,262144 allocated context/KV capacity, software FP8 KV, requested adaptive156,
+dense/fused opt-ins, MTP2,2048 chunks,88 workers on32 physical cores, no prefix reuse
+and no QSA MMA/CUDA graphs. Both generated64 tokens with zero cached prompt tokens.
+
+| Actual prompt tokens | Cold HTTP | Native prefill | Native decode | Sampled GPU peak |
+|---|---:|---:|---:|---:|
+| 131,085 | 617.8754 s | 612.7882 s | 4.8700 s | 30.0037 GiB |
+| 262,027 | 1,359.5693 s | 1,354.5581 s | 4.6027 s | 30.0037 GiB |
+
+All four servers actually allocated128 experts/layer (16,988,504,064 bytes), seeded
+6144 experts and preserved the2 GiB reserve. At the largest request, prompt plus
+output totaled262091, leaving53 tokens below262144. Native MTP work was35 rounds/
+68 drafted/28 accepted at128K and33/65/30 at near262K. Calibration prompts5071
+and5085 also completed cold and repeated requests. FP8 thus permits more actual
+resident slots than the separate BF16262K screen's101; that is not a matched
+FP8-versus-BF16 latency or quality experiment.
+
+This establishes real long-prompt memory/execution feasibility on the32GB V100,
+not merely allocation feasibility. Inputs were synthetic repeated prose, each
+large size had one cold request, and there was no matched Strata long-prompt arm.
+It does not qualify long-document quality, establish general throughput, close
+historical full-model drift or justify arithmetic default promotion.
+
+### Six-step final checkpoint
+
+| Step | Result / decision |
+|---|---|
+| 1. Non-MoE attribution | Complete; dense GDN projections motivated implementation. Instrumented ledgers are not exclusive unperturbed kernel times. |
+| 2. Conditional dense/SV7 revisit | Dense opt-in improved warmed HTTP12.55% and prefill15.48%; outputs/MTP changed. Retain opt-in, not a default promotion. Further attention-only tuning was not justified by attribution. |
+| 3. MoE work/bytes | Fused expansion improved HTTP1.47%/prefill1.60% in a small overlapping-range screen, with exact corresponding work/output parity and no extra VRAM. Retain opt-in; whole-GPU H2D idle remains unmeasured. |
+| 4. Context-aware cache | Existing reserve-aware clipping produced101 adaptive slots at262K BF16 capacity; HTTP4.84%/prefill3.26% better than static64. Keep static64 default/adaptive opt-in; defer lazy device-KV redesign. |
+| 5. Full FP8 long prompts | Qualified operators and completed actual131085/262027-token prompts plus64 outputs; peak30.0037 GiB,128 slots/layer. Feasibility, not matched quality or throughput. |
+| 6. Controlled Strata comparison | Bounded controls completed; installed Strata rejects no-spec operation, and representations/native work differ. No matched-quality win or claim that Strata was beaten. |
+
+Retained experimental flags are `NINFER_V100_FP8_PREFILL_GEMM=1` and
+`NINFER_V100_EXPERT_PAIR_EXPAND=1`, both default0; unset or0 disables each.
+FP8 KV is selected explicitly with `--kv-dtype fp8`. Cache policy remains explicit
+static64 or adaptive LRU with actual capacity determined by context/scratch and
+the allocator reserve. The original model, source packs, forwardport branch and
+installed Strata were preserved. No Phase18/SV8, lower-bit weights, unrelated
+process kills or cache eviction were introduced.
+
+All authorized six-step screens are complete. Stop this test campaign and its
+automatic continuation instead of starting unrequested wider tuning. Arithmetic
+default promotion still requires full-model qualification; historical drift and
+matched-representation/quality comparison remain unresolved limitations.
