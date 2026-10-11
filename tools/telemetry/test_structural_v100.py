@@ -9,11 +9,49 @@ import unittest
 from unittest.mock import patch
 
 import ab_v100
-from structural_v100 import inventory, native_work, summarize, residency_arms, residency_observation, prefill_breakdown
+from structural_v100 import inventory, native_work, summarize, residency_arms, residency_observation, prefill_breakdown, moe_stream_breakdown
 from test_schema import fixture
 
 
 class StructuralTests(unittest.TestCase):
+    def test_stream_report_owns_request_phase_and_conserves_routes_bytes(self):
+        import gzip
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp);data=b'initialization noise\n';requests=[]
+            slot_bytes=(2_764_808+255)//256*256
+            for index in range(2):
+                begin=len(data)
+                for phase,transaction,routes,experts,gemm,buckets,wait in (
+                    ('prefill',index*2+1,64,2,2,[0,2,0,0,0,0],12),
+                    ('verify',index*2+2,7,1,0,[1,0,0,0,0,0],999)):
+                    context=dict(executor=1,transaction=transaction,phase=phase)
+                    round_context=dict(context,input_columns=10 if phase=='prefill' else 3)
+                    record=dict(kind='round',status='ok',phase=phase,context=round_context,
+                        layers=[dict(counters=dict(nonresident_gpu_routes=routes,
+                                                   expert_h2d_bytes=experts*slot_bytes))])
+                    stream=dict(kind='expert_stream_timing',context=context,routes=routes,
+                        experts=experts,gemm_experts=gemm,gemm_routes=routes if gemm else 0,
+                        route_buckets=buckets,copy_ms=3,compute_wait_ms=wait,kernel_interval_ms=8)
+                    data+=('\n'.join(map(json.dumps,[record,stream]))+'\n').encode()
+                requests.append(dict(index=index,phase='measured',native_log_start_offset=begin,
+                    native_log_end_offset=len(data),response=dict(usage=dict(prompt_tokens=10)),
+                    output_sha256='fixture',wall_seconds=5,native_timing=dict(prefill=4)))
+            with gzip.open(folder/'server.log.gz','wb') as out:out.write(data)
+            (folder/'requests.jsonl').write_text('\n'.join(map(json.dumps,requests)))
+            rows=moe_stream_breakdown(folder)
+            self.assertEqual(len(rows),2)
+            self.assertEqual(rows[0]['stream_phases']['prefill']['compute_wait_ms'],12)
+            self.assertEqual(rows[0]['stream_phases']['verify']['compute_wait_ms'],999)
+            self.assertEqual(rows[1]['stream_phases']['prefill']['weight_h2d_bytes'],2*slot_bytes)
+            self.assertAlmostEqual(rows[0]['prefill_wait_pct_of_instrumented_native'],.3)
+            data=data.replace(b'"transaction": 1, "phase": "prefill"',
+                              b'"transaction": 9, "phase": "prefill"',1)
+            # Change only a round owner; a stream row must not silently inherit
+            # the later verification owner or be accepted merely by phase name.
+            with gzip.open(folder/'server.log.gz','wb') as out:out.write(data)
+            with self.assertRaisesRegex(ValueError,'matching execution owner'):
+                moe_stream_breakdown(folder)
+
     def test_prefill_breakdown_separates_request_windows_and_verify(self):
         import gzip
         with tempfile.TemporaryDirectory() as tmp:

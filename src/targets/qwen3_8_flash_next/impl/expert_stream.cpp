@@ -1,8 +1,10 @@
 #include "targets/qwen3_8_flash_next/impl/expert_stream.h"
 #include "core/device.h"
+#include "targets/qwen3_8_flash_next/impl/perf_telemetry.h"
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <cstdio>
 #include <stdexcept>
 #include <string_view>
@@ -162,7 +164,24 @@ void FlashNextExpertStream::submit(const HostNvfp4ExpertPairView& expert,
                 static_cast<std::uint16_t*>(s.activations->p)+index*640,routes[index].output_fp32};
         }
     }
-    if (timing_) CUDA_CHECK(cudaEventRecord(s.copy_start,transfer_));
+    if (timing_) {
+        // Capture the owner at submission, before the caller can leave its
+        // context. Slot collection and finish may occur in a later phase.
+        s.timing = {};
+        if (active_perf_context) {
+            s.timing.phase = active_perf_context->phase;
+            s.timing.executor = active_perf_context->executor;
+            s.timing.transaction = active_perf_context->transaction;
+        }
+        s.timing.experts = 1; s.timing.routes = routes.size();
+        const bool uses_gemm = gemm_ && routes.size() >= 32;
+        s.timing.gemm_experts = uses_gemm ? 1 : 0;
+        s.timing.gemm_routes = uses_gemm ? routes.size() : 0;
+        const unsigned bucket = routes.size()<32 ? 0 : routes.size()<64 ? 1 :
+            routes.size()<128 ? 2 : routes.size()<256 ? 3 : routes.size()<512 ? 4 : 5;
+        s.timing.route_buckets[bucket] = 1;
+        CUDA_CHECK(cudaEventRecord(s.copy_start,transfer_));
+    }
     CUDA_CHECK(cudaMemcpyAsync(s.weights->p,host,kExpertSlotBytes,cudaMemcpyHostToDevice,transfer_));
     CUDA_CHECK(cudaMemcpyAsync(s.groups->p,groups,count*sizeof(*groups),cudaMemcpyHostToDevice,transfer_));
     CUDA_CHECK(cudaEventRecord(s.ready,transfer_));
@@ -177,7 +196,6 @@ void FlashNextExpertStream::submit(const HostNvfp4ExpertPairView& expert,
         CUDA_CHECK(cudaEventRecord(s.consumed,compute));
         s.pending=true;
         s.timing_pending=timing_;
-        if (timing_) timed_routes_ += routes.size();
     } catch (...) {
         // A launch may already have submitted work before reporting an error.
         cudaStreamSynchronize(compute);
@@ -191,8 +209,18 @@ void FlashNextExpertStream::collect_timing(Slot& s) {
     CUDA_CHECK(cudaEventElapsedTime(&copy,s.copy_start,s.ready));
     CUDA_CHECK(cudaEventElapsedTime(&wait,s.wait_start,s.kernel_start));
     CUDA_CHECK(cudaEventElapsedTime(&kernel,s.kernel_start,s.consumed));
-    copy_ms_ += copy; wait_ms_ += wait; kernel_ms_ += kernel;
-    ++timed_experts_; s.timing_pending=false;
+    auto entry=std::find_if(timings_.begin(),timings_.end(),[&](const TimingRecord& t) {
+        return t.executor==s.timing.executor && t.transaction==s.timing.transaction && t.phase==s.timing.phase;
+    });
+    if(entry==timings_.end()) {
+        timings_.push_back(s.timing);entry=std::prev(timings_.end());
+    } else {
+        entry->experts+=s.timing.experts;entry->routes+=s.timing.routes;
+        entry->gemm_experts+=s.timing.gemm_experts;entry->gemm_routes+=s.timing.gemm_routes;
+        for(unsigned i=0;i<6;++i)entry->route_buckets[i]+=s.timing.route_buckets[i];
+    }
+    entry->copy_ms+=copy;entry->wait_ms+=wait;entry->kernel_ms+=kernel;
+    s.timing_pending=false;
 }
 void FlashNextExpertStream::finish() {
     for(auto& s:slots_) if(s.pending) {
@@ -200,12 +228,19 @@ void FlashNextExpertStream::finish() {
         collect_timing(s); s.pending=false;
     }
     CUDA_CHECK(cudaStreamSynchronize(transfer_));
-    if (timing_ && timed_experts_) {
+    for (const auto& t : timings_) {
         // Separate streams overlap: these sums must never be added as a wall time.
-        std::fprintf(stderr,"{\"kind\":\"expert_stream_timing\",\"experts\":%llu,\"routes\":%llu,\"copy_ms\":%.6f,\"compute_wait_ms\":%.6f,\"kernel_interval_ms\":%.6f}\n",
-            static_cast<unsigned long long>(timed_experts_),
-            static_cast<unsigned long long>(timed_routes_),copy_ms_,wait_ms_,kernel_ms_);
-        copy_ms_=wait_ms_=kernel_ms_=0; timed_experts_=timed_routes_=0;
+        std::ostringstream out;out.imbue(std::locale::classic());out.precision(17);
+        out << "{\"kind\":\"expert_stream_timing\",\"experts\":" << t.experts
+            << ",\"routes\":" << t.routes << ",\"copy_ms\":" << t.copy_ms
+            << ",\"compute_wait_ms\":" << t.wait_ms << ",\"kernel_interval_ms\":" << t.kernel_ms
+            << ",\"gemm_experts\":" << t.gemm_experts << ",\"gemm_routes\":" << t.gemm_routes
+            << ",\"route_buckets\":[";
+        for(unsigned i=0;i<6;++i){if(i)out<<',';out<<t.route_buckets[i];}
+        out << "],\"context\":{\"executor\":" << t.executor << ",\"transaction\":" << t.transaction
+            << ",\"phase\":\"" << t.phase << "\"}}";
+        emit_perf_json(out.str());
     }
+    timings_.clear();
 }
 } // namespace ninfer::targets::qwen3_8_flash_next::detail

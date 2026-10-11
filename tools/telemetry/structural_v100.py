@@ -248,8 +248,8 @@ def prefill_breakdown(folder):
             else:
                 group = 'final_norm_head'
             groups[group] += ms
-        # Stream timing rows have no phase context. Keep request-wide aggregates
-        # explicitly separate from the prefill partition instead of guessing ownership.
+        # Keep this summary request-wide and separate from the stage partition.
+        # New submission-owned rows are validated by moe_stream_breakdown.
         stream_rows = [r for r in records if r.get('kind') == 'expert_stream_timing']
         host = Counter()
         for rec in records:
@@ -272,8 +272,80 @@ def prefill_breakdown(folder):
                     'Projection stages are not exclusively BF16; dtype attribution requires dispatch evidence.',
                     'PLE includes gather publication, projections, convolution and injection.',
                     'Native-minus-ledger is reconciliation, not a measured launch-gap category.',
-                    'Stream timing rows lack phase context; aggregates are request-wide.',
+                    'This stream summary is request-wide; phase-owned rows are validated separately when requested.',
                     'Inclusive host and separate-stream intervals overlap; do not sum into latency.']))
+    return reports
+
+
+def moe_stream_breakdown(folder):
+    """Request/phase-owned stream dependencies; never infer whole-device idle."""
+    path=folder/'server.log'
+    data=path.read_bytes() if path.exists() else gzip.open(str(path)+'.gz','rb').read()
+    requests=[json.loads(l) for l in (folder/'requests.jsonl').read_text().splitlines()]
+    reports=[]
+    for request in requests:
+        begin,end=request['native_log_start_offset'],request['native_log_end_offset']
+        if not 0<=begin<end<=len(data):raise ValueError('invalid stream request byte window')
+        records=[]
+        for line in data[begin:end].decode().splitlines():
+            if line.startswith('{'):
+                try:records.append(json.loads(line))
+                except json.JSONDecodeError:continue
+        expected=defaultdict(Counter)
+        prompt_columns=0
+        for row in records:
+            if row.get('kind')!='round':continue
+            if row['status']!='ok':raise ValueError('failed execution in stream request')
+            context=row['context']
+            key=(context['executor'],context['transaction'],row['phase'])
+            if row['phase']=='prefill':prompt_columns+=context['input_columns']
+            for layer in row['layers']:
+                expected[key].update(layer.get('counters',{}))
+        if prompt_columns!=request['response']['usage']['prompt_tokens']:
+            raise ValueError('stream report does not cover complete prompt')
+        observed=defaultdict(Counter)
+        phases=defaultdict(lambda:dict(experts=0,routes=0,gemm_experts=0,gemm_routes=0,
+            copy_ms=0,compute_wait_ms=0,kernel_interval_ms=0,route_buckets=[0]*6))
+        stream_rows=[r for r in records if r.get('kind')=='expert_stream_timing']
+        if not stream_rows:raise ValueError('missing phase-owned stream timing')
+        for row in stream_rows:
+            context=row.get('context') or {}
+            key=(context.get('executor'),context.get('transaction'),context.get('phase'))
+            if key not in expected:raise ValueError('stream timing has no matching execution owner')
+            if (sum(row['route_buckets'])!=row['experts'] or
+                sum(row['route_buckets'][1:])!=row['gemm_experts'] or
+                not 0<=row['gemm_routes']<=row['routes']):
+                raise ValueError('stream group geometry does not conserve experts/routes')
+            observed[key].update(routes=row['routes'],experts=row['experts'])
+            dst=phases[key[2]]
+            for name in ('experts','routes','gemm_experts','gemm_routes','copy_ms',
+                         'compute_wait_ms','kernel_interval_ms'):
+                value=row[name]
+                if not isinstance(value,(int,float)) or not math.isfinite(value) or value<0:
+                    raise ValueError('invalid stream measurement')
+                dst[name]+=value
+            for i,value in enumerate(row['route_buckets']):dst['route_buckets'][i]+=value
+        slot_bytes=(2_764_808+255)//256*256
+        for key,counters in expected.items():
+            if (observed[key]['routes']!=counters.get('nonresident_gpu_routes',0) or
+                observed[key]['experts']*slot_bytes!=counters.get('expert_h2d_bytes',0)):
+                raise ValueError('phase-owned stream routes/weight bytes do not conserve native work')
+        for phase,dst in phases.items():
+            dst['weight_h2d_bytes']=dst['experts']*slot_bytes
+            dst['modeled_fp16_expansion_write_bytes']=dst['gemm_experts']*(1280*2560+2560*640)*2
+            dst['useful_gemm_flops']=dst['gemm_routes']*2*(1280*2560+2560*640)
+        reports.append(dict(index=request['index'],phase=request['phase'],
+            usage=request['response']['usage'],output_hash=request['output_sha256'],
+            speculative=request.get('native_speculative'),wall_seconds=request['wall_seconds'],
+            native_timing=request['native_timing'],stream_phases=dict(phases),
+            prefill_wait_pct_of_instrumented_native=100*phases['prefill']['compute_wait_ms']/
+                (request['native_timing']['prefill']*1000),
+            route_bucket_bounds=['1-31','32-63','64-127','128-255','256-511','512+'],
+            limits=['Compute-stream dependency wait is not whole-GPU idle or an uninstrumented critical path.',
+                    'Copy and compute intervals overlap; do not add them into wall time.',
+                    'Kernel interval includes expansion, GEMM/SIMT, joins and submission gaps.',
+                    'Expansion write bytes and useful FLOPs are modeled work, not hardware counters.',
+                    'Ring event collection and stage/SV0 telemetry perturb timing.']))
     return reports
 
 
@@ -314,6 +386,8 @@ def main():
     p.add_argument('--dense-prefill-gemm-ab', action='store_true',
                    help='Step 2: qualified QPN versus full-chunk FP16 dense projection GEMM')
     p.add_argument('--dense-baseline-reference', type=Path)
+    p.add_argument('--moe-work-breakdown', action='store_true',
+                   help='Step 3: phase-owned stream waits/group geometry with dense GEMM opt-in')
     p.add_argument('--comparison-reference', type=Path)
     a = p.parse_args()
     if a.controlled_strata_followup:
@@ -371,7 +445,7 @@ def main():
         a.strata_config = path
     dense_arms=[('ninfer',name,dict(residency_arms()[1][2],NINFER_V100_FP8_PREFILL_GEMM=value))
               for name,value in [('dense-qpn','0'),('dense-full-chunk','1')]]
-    manifest_arms = (dense_arms if a.dense_prefill_gemm_ab else [('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
+    manifest_arms = ([dense_arms[1]] if a.moe_work_breakdown else dense_arms if a.dense_prefill_gemm_ab else [('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
                      [default_arm] if a.qualified_default_smoke else
                      [("ninfer", "adaptive156-qualified", residency_arms()[1][2]), ARMS[1]] if (a.final_comparison or a.controlled_comparison) else
                      residency_arms() if a.residency_gemm_ab else
@@ -381,7 +455,8 @@ def main():
         output_limit=32 if (a.stream_attribution_only or a.qualified_default_smoke) else a.max_output_tokens,
         physical_cpus=cpus,
         arms=[ARMS[0]] if a.stream_attribution_only else manifest_arms,
-        fresh_servers_per_arm=2 if a.prefill_breakdown else 1 if (a.stream_attribution_only or a.qualified_default_smoke) else 3,
+        fresh_servers_per_arm=2 if (a.prefill_breakdown or a.moe_work_breakdown) else 1 if (a.stream_attribution_only or a.qualified_default_smoke) else 3,
+        moe_work_breakdown=a.moe_work_breakdown,
         prefill_breakdown=a.prefill_breakdown, dense_prefill_gemm_ab=a.dense_prefill_gemm_ab,
         stream_attribution_only=a.stream_attribution_only, expert_gemm_ab=a.expert_gemm_ab, resident_gemm_ab=a.resident_gemm_ab, cpu_stream_overlap_ab=a.cpu_stream_overlap_ab,
         qualified_default_smoke=a.qualified_default_smoke,
@@ -391,7 +466,7 @@ def main():
         timing_telemetry_level=0, diagnostic_telemetry_level=2,
         cache_budget='actual allocations logged; requested maxima are not equal-memory controls',
         cold_definition='first request after fresh server; host file cache preserved',
-        cross_quant_comparison='same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.residency_gemm_ab or a.prefill_breakdown or a.dense_prefill_gemm_ab)
+        cross_quant_comparison='same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.residency_gemm_ab or a.prefill_breakdown or a.dense_prefill_gemm_ab or a.moe_work_breakdown)
             else 'descriptive; source artifacts and frontend token counts differ',
         ninfer_flags=a.ninfer_flags), indent=2)+'\n')
     cells = []
@@ -406,7 +481,7 @@ def main():
             cell = dict(engine=engine, arm=arm, mode=mode, folder=str(folder), result=result)
             if a.residency_gemm_ab:
                 cell['residency'] = residency_observation(folder, a.max_output_tokens)
-            if a.final_comparison or a.prefill_breakdown or a.controlled_comparison or a.dense_prefill_gemm_ab:
+            if a.final_comparison or a.prefill_breakdown or a.controlled_comparison or a.dense_prefill_gemm_ab or a.moe_work_breakdown:
                 samples=[json.loads(line) for line in (folder/'system.jsonl').read_text().splitlines()]
                 peaks=[r.get('gpu',{}).get('metrics',{}).get('memory_used_bytes') for r in samples
                        if r.get('kind')=='system_sample']
@@ -508,8 +583,9 @@ def main():
         (a.output/'controlled-comparison-report.json').write_text(json.dumps(report,indent=2)+'\n')
         print('Step 6 serving control evidence retained; installed pack no-spec limitation recorded.',flush=True)
         return
-    if a.prefill_breakdown:
-        engine, arm, flags = ('ninfer', 'adaptive156-qualified', residency_arms()[1][2])
+    if a.prefill_breakdown or a.moe_work_breakdown:
+        engine, arm, flags = (dense_arms[1] if a.moe_work_breakdown else
+                              ('ninfer', 'adaptive156-qualified', residency_arms()[1][2]))
         run(engine, arm, flags, arm+'-reference', 'timing')
         a.telemetry_level = 2
         diagnostic = dict(flags, NINFER_FLASH_NEXT_STAGE_LEDGER='1',
@@ -518,6 +594,7 @@ def main():
         reference, observed = [Path(c['folder']) for c in cells]
         base = [json.loads(line) for line in (reference/'requests.jsonl').read_text().splitlines()]
         breakdown = prefill_breakdown(observed)
+        stream_breakdown = moe_stream_breakdown(observed) if a.moe_work_breakdown else None
         if len(base) != 6 or len(breakdown) != len(base):
             raise ValueError('incomplete reference/diagnostic schedule')
         for before, after in zip(base, breakdown):
@@ -526,7 +603,8 @@ def main():
                     or before['response']['usage'] != after['usage']
                     or before.get('native_speculative') != after['speculative']):
                 raise ValueError('instrumentation changed corresponding output/usage/MTP work')
-        report = dict(step=1, plan='six-step performance investigation', status='complete',
+        report = dict(step=3 if a.moe_work_breakdown else 1, plan='six-step performance investigation',
+            status='stream_measurement_complete' if a.moe_work_breakdown else 'complete',
             reference_timing=summarize(cells), diagnostic_requests=breakdown,
             exact_corresponding_output_usage_mtp=True,
             residency=[dict(mode=c['mode'], observation=c['residency']) for c in cells],
@@ -535,11 +613,15 @@ def main():
                 prefill_seconds=d['native_timing']['prefill']-b['native_timing']['prefill'])
                 for b,d in zip(base,breakdown)],
             profiler='existing SV0 and CUDA event ledgers; nsys availability recorded separately')
-        (a.output/'prefill-breakdown-report.json').write_text(json.dumps(report,indent=2)+'\n')
+        if stream_breakdown is not None:
+            report['stream_requests']=stream_breakdown
+        name='moe-work-breakdown-report.json' if a.moe_work_breakdown else 'prefill-breakdown-report.json'
+        (a.output/name).write_text(json.dumps(report,indent=2)+'\n')
         for row in breakdown:
             if row['phase'] in ('cold','measured'):
                 print(json.dumps(row,indent=2),flush=True)
-        print('Six-step plan Step 1 complete: paired prefill attribution retained.',flush=True)
+        print('Step 3 stream measurement complete; work reduction remains open.' if a.moe_work_breakdown
+              else 'Six-step plan Step 1 complete: paired prefill attribution retained.',flush=True)
         return
     if a.final_comparison:
         arms=[('ninfer','adaptive156-qualified',residency_arms()[1][2]),ARMS[1]]

@@ -1095,3 +1095,32 @@ one grouped/fused work reduction if justified by actual active-expert geometry a
 scratch constraints. Keep hardware evidence bounded and avoid another ordering
 sweep. Step 3 remains open; Steps 4 and 5 are pending. No arithmetic default was
 promoted and no claim of beating Strata follows from this reference.
+
+
+### Step 3 phase-owned stream work/dependency measurement started
+
+The next bounded job uses one uninstrumented and one diagnostic fresh server,
+each cold + four warmups + measured 7111 prompt/128 output/zero reuse requests.
+Both explicitly select the successful dense projection opt-in, qualified expert
+paths, requested adaptive156, BF16KV, MTP2, 8K context, 2048 chunks and 88 workers
+on 32 physical cores. Observe actual clipped capacity/seeding and GPU peak; require
+exact corresponding output/usage/native MTP work between reference and telemetry.
+
+Stream timing now captures phase/executor/transaction at submission, retaining
+ownership across ring reuse and later finish. A multi-wrap fixture submits five
+32-route prefill groups and one seven-route verification group, then finishes
+inside verification; its emitted counters must keep those owners separate.
+Existing event placement, ring reuse, synchronization and arithmetic are unchanged.
+Only enabled telemetry collects the additional host metadata. Independent dense
+and expert gates plus stream lifetime/cache join gates precede serving measurement.
+
+The byte-window report reconciles each request's prefill token coverage and each
+execution owner's streamed routes/compact-weight bytes against native SV0 counters.
+It reports copy, compute dependency wait and whole expert-kernel intervals separately
+for prefill/verification, plus actual streamed group-size buckets and modeled GEMM
+expansion writes/useful FLOPs. The stream wait interval spans the compute-stream
+wait for the transfer-ready event. It is **not whole-GPU idle**, an exclusive
+unperturbed critical path or a value to add to overlapping CPU/copy intervals.
+Stage/event/SV0 diagnostics perturb timing; paired per-ordinal overhead is recorded.
+The phase-specific evidence is intended to select one grouped/fused work reduction,
+not launch another ordering sweep. Step 3 remains open after this measurement.

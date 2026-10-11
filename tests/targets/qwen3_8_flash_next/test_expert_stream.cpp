@@ -2,6 +2,7 @@
 #include "targets/qwen3_8_flash_next/impl/cpu_expert_reference.h"
 #include "targets/qwen3_8_flash_next/impl/cpu_expert_pool.h"
 #include "core/device.h"
+#include "targets/qwen3_8_flash_next/impl/perf_telemetry.h"
 #include "ninfer/ops/expert_route_combine.h"
 #include <algorithm>
 #include <bit>
@@ -331,6 +332,29 @@ int main() { try {
     require(cache.execute_to(0,0,d_input.p,static_cast<float*>(output.p),0,device.stream),
             "postexception resident reuse failed");
     cache.begin_device_results(device.stream);cache.finish_device_results(device.stream);
+    // Phase ownership survives multi-wrap collection and a finish in a different
+    // scope. The workflow checks the emitted records for these known owners.
+#if defined(_WIN32)
+    _putenv_s("NINFER_V100_EXPERT_STREAM_TIMING","1");
+#else
+    setenv("NINFER_V100_EXPERT_STREAM_TIMING","1",1);
+#endif
+    FlashNextExpertStream owned_ring(32);
+    std::vector<FlashNextStreamRoute> owned_routes(32);
+    for(unsigned i=0;i<32;++i)owned_routes[i]={d_input.p,static_cast<float*>(output.p)+i*2560};
+    PerfContext owned_prefill;owned_prefill.executor=991;
+    owned_prefill.transaction=991991;owned_prefill.phase="prefill";
+    {
+        PerfContextScope scope(owned_prefill);
+        for(unsigned i=0;i<5;++i)owned_ring.submit(layer.expert(0),owned_routes,device.stream);
+    }
+    PerfContext owned_verify;owned_verify.executor=991;
+    owned_verify.transaction=991992;owned_verify.phase="verify";
+    {
+        PerfContextScope scope(owned_verify);
+        owned_ring.submit(layer.expert(1),std::span(owned_routes.data(),7),device.stream);
+        owned_ring.finish();
+    }
     std::cout<<"SV3 bounded staging and persistent-hit coexistence passed\n";
     return 0;
 } catch(const std::exception& e) { std::cerr<<e.what()<<'\n';return 1; } }
