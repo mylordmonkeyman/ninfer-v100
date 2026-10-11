@@ -930,11 +930,12 @@ weight expansion, activation conversion, GEMM and row scaling:
 | 2560x6144 / 2048 | 8.53504 ms | 0.931840 ms |
 
 This establishes an operator case, not an end-to-end result. The implementation
-now has **opt-in** `NINFER_V100_GDN_PREFILL_GEMM=1` (default0), restricted to these
-two F32-scale GDN shapes at T>=128. QSA/vocabulary projections, smaller batches,
+now has **opt-in** `NINFER_V100_FP8_PREFILL_GEMM=1` (default0), restricted to these
+two F32-scale projection shapes at T>=128. This includes GDN input and GDN/QSA
+output; QSA input/vocabulary projections, smaller batches,
 and non-Volta routes retain their existing path. The public Linear workspace
 capacity includes the candidate's maximum scratch over the requested interval;
-GDN and runtime planners already consume that capacity. No hidden allocation or
+GDN and runtime planners consume that capacity after the composition correction below. No hidden allocation or
 persistent expanded weights are introduced. The public dispatcher qualification
 also covers T127 below the crossover and planned arena scope/guard reuse.
 
@@ -947,6 +948,41 @@ residency and cannot be assumed free. Report HTTP/native prefill/decode and
 outputs/usage/accepted work separately. Arithmetic changes can alter routes/output
 and MTP acceptance, so cross-arm exact output/work parity is not a gate or a
 quality claim. Two separate diagnostic requests per arm validate real GDN dispatch
-and both shapes' 36-layer/7111-token conservation without instrumenting timing.
+and input36/output48-layer/7111-token conservation without instrumenting timing.
 The opt-in remains experimental; full-model qualification is required before a
 production arithmetic default change.
+
+
+### Step 2 serving integration correction and partial-run reuse
+
+Run [38098932339](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38098932339)
+passed public dispatch/operator and unchanged expert numerical/lifetime gates.
+The first QPN control completed all six requests (warmed HTTP36.6983 s); the first
+candidate request terminated with an arena `std::bad_alloc`, so no candidate
+request timing or end-to-end benefit is established.
+
+The full text-prefill planner independently composed GDN tensors plus recurrence
+scratch, omitting the newly required input-projection Linear scratch. Updating
+Linear and the standalone GDN planner was insufficient. Correct the full-prefill
+composition to consume GDN's authoritative complete workspace capacity, including
+projection and recurrence maxima under the existing shared arena scopes. This
+also places the extra bytes in the runtime/expert-cache budget before allocation.
+The failure occurred with 2.17 GiB device memory free after startup; it was not
+evidence that adaptive156 necessarily exhausts total VRAM.
+
+Source inspection also corrected the earlier **GDN-only** scope claim: QSA uses
+the same 2560x6144 output projection. The qualified two-shape Op selector therefore
+also accelerates QSA output. Rename the experimental selector to
+`NINFER_V100_FP8_PREFILL_GEMM` (default0); no old selector alias remains. Keep
+16384x2560 GDN input and 2560x6144 GDN/QSA output qualified, with QSA input and
+vocabulary unchanged. Diagnostics now require 36 input and 48 output projections
+per complete prompt, excluding narrow verification batches.
+
+Resume the bounded request comparison after this correction, reusing only the
+completed first QPN server from artifact11686872868. Validate its complete
+cold/four-warmup/measured schedule, fixed counts, zero reuse, native timings,
+explicit baseline selector, actual allocation and profile seeding before copying
+its evidence. Measure the remaining two QPN and three candidate fresh servers,
+then two diagnostic requests per arm. The report identifies the reused source
+run; it is not claimed to be wholly contemporaneous. No additional tuning sweep,
+weight conversion, cache eviction or default promotion is involved.

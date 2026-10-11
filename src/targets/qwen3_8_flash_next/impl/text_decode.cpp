@@ -181,10 +181,9 @@ std::size_t flash_next_text_prefill_workspace_capacity_bytes(std::int32_t maximu
     }
     {
         auto scope = layout.scope();
-        (void)allocate_flash_next_gdn_workspace(layout, tokens);
-        const std::size_t gdn_op_ws =
-            ops::gated_delta_net_workspace_capacity_bytes(16, 48, true, tokens, tokens);
-        layout.alloc_bytes(gdn_op_ws, 256);
+        // GDN owns projection and recurrence scratch composition. A tensor-only
+        // estimate omitted full-chunk FP8 expansion/GEMM temporary storage.
+        (void)layout.alloc_bytes(flash_next_gdn_workspace_capacity_bytes(1, tokens), 256);
     }
     {
         auto scope                   = layout.scope();

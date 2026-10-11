@@ -1,5 +1,5 @@
 name: V100 Structural Engine Comparison
-# Step 2: qualify public GDN opt-in dispatch/planner, then measure request A/B.
+# Step 2: fix full-prefill scratch composition; resume dense projection A/B.
 on:
   workflow_dispatch:
   push:
@@ -109,11 +109,19 @@ jobs:
             | tee "$QUALIFICATION_RESULTS/qualified-cache-join-fixture.log"
           cp build-structural-comparison/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
           cat "$QUALIFICATION_RESULTS/fp8-f32-prefill-oracle-and-screen.log" >> "$GITHUB_STEP_SUMMARY"
-      - name: Step 2 GDN request-level A/B
+      - name: Retrieve completed QPN control without repeating its requests
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: v100-structural-comparison-38098932339-1
+          run-id: 38098932339
+          github-token: ${{ github.token }}
+          path: dense-comparison-reference
+      - name: Step 2 dense projection request-level A/B
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --gdn-prefill-gemm-ab \
+          python3 tools/telemetry/structural_v100.py --dense-prefill-gemm-ab \
+            --dense-baseline-reference dense-comparison-reference/matrix \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \
