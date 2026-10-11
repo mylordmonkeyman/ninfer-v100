@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -18,6 +19,31 @@
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+void require_pool_timing(const ninfer::targets::qwen3_8_flash_next::detail::HostExpertBatchStats& stats,
+                         unsigned workers) {
+    const auto* requested = std::getenv("NINFER_V100_CPU_POOL_TIMING");
+    if (!requested || std::strcmp(requested, "1") != 0) return;
+    if (!stats.pool_timing_observed || stats.configured_workers != workers ||
+        !std::isfinite(stats.batch_wall_us) || stats.batch_wall_us <= 0)
+        throw std::runtime_error("CPU pool timing batch ownership");
+    double wall = stats.orchestration_us;
+    for (const auto& phase : stats.phases) {
+        for (double value : {phase.wall_us, phase.release_us, phase.first_job_us,
+                             phase.worker_compute_us, phase.completion_lock_wait_us})
+            if (!std::isfinite(value) || value < 0)
+                throw std::runtime_error("CPU pool nonfinite duration");
+        if (phase.jobs && (phase.worker_compute_us <= 0 || phase.release_us > phase.wall_us ||
+                           phase.first_job_us > phase.wall_us))
+            throw std::runtime_error("CPU pool phase interval ownership");
+        wall += phase.wall_us;
+    }
+    if (std::abs(wall - stats.batch_wall_us) > .01 ||
+        (stats.row_sharded && (stats.phases[0].jobs || !stats.phases[1].jobs ||
+                              stats.phases[1].jobs != stats.phases[2].jobs)) ||
+        (!stats.row_sharded && (!stats.phases[0].jobs || stats.phases[1].jobs || stats.phases[2].jobs)))
+        throw std::runtime_error("CPU pool reused phase completion accounting");
+}
 
 std::vector<std::byte> make_bank(std::int32_t rows, std::int32_t columns) {
     const std::array<std::uint64_t, 3> shape = {
@@ -214,6 +240,7 @@ int main() {
                 });
             }
             const auto stats = pool.run(tasks, true, 0);
+            require_pool_timing(stats, workers);
             for (unsigned i = 0; i < count; ++i) {
                 if (std::memcmp(actual[i].data(), expected[i].data(), sizeof(actual[i])) != 0) {
                     throw std::runtime_error("grouped worker pool changed an output slot");
@@ -260,6 +287,7 @@ int main() {
         }
         for (unsigned repeat = 0; repeat < 3; ++repeat) {
             const auto stats = sparse_pool.run(tasks, true, 0);
+            require_pool_timing(stats, 32);
             if (stats.groups != 1 || stats.grouped_pairs != 4 ||
                 stats.weight_read_bytes != (count - 3) * 2'764'808ULL) {
                 throw std::runtime_error("sparse grouped worker accounting mismatch");

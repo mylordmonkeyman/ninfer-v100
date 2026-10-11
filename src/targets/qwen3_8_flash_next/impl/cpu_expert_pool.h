@@ -32,6 +32,17 @@ struct HostExpertTaskGroup {
 
 struct HostExpertBatchStats {
     std::uint64_t groups = 0, grouped_pairs = 0, weight_read_bytes = 0;
+    struct Phase {
+        std::uint64_t jobs = 0;
+        double wall_us = 0, release_us = 0, first_job_us = 0;
+        double worker_compute_us = 0, completion_lock_wait_us = 0;
+    };
+    // Opt-in host-clock observations; summed worker durations overlap and are
+    // never an additive request wall-time ledger. Indices: full, gate/up, down.
+    bool pool_timing_observed = false, row_sharded = false;
+    unsigned configured_workers = 0;
+    double submit_wait_us = 0, batch_wall_us = 0, orchestration_us = 0;
+    std::array<Phase, 3> phases{};
 };
 
 // Persistent expert-level workers shared by serving and routed-miss replay.
@@ -67,6 +78,13 @@ class HostExpertWorkerPool {
     std::uint64_t pool_id_ = v100_compare::pool_sequence.fetch_add(1);
     std::vector<v100_compare::WorkerObservation> worker_observations_;
     int telemetry_level_ = 0;
+    bool pool_timing_ = false;
+    struct WorkerTiming {
+        std::array<HostExpertBatchStats::Phase, 3> phases{};
+    };
+    std::vector<WorkerTiming> pool_worker_timing_;
+    std::array<HostExpertBatchStats::Phase, 3> pool_phase_timing_{};
+    std::atomic<std::int64_t> first_job_ns_{0};
     std::counting_semaphore<1'048'576> work_{0};
     std::atomic<bool> stop_{false};
     std::atomic<std::size_t> next_{0};

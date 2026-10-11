@@ -1993,3 +1993,69 @@ unclosed, and no default promotion or speedup claim precedes hardware evidence.
 Local62 telemetry tests, Python compilation/help, workflow YAML/bash syntax and
 diff checks pass. CUDA build, affected numerical qualification and serving timing
 await the target V100 runner.
+
+### Dedicated quad attention qualifies and reduces the remaining gap
+
+[Run38179605429](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38179605429)
+passed all retained gates, the exact finite-FP8 staging checks and independent
+attention oracles. The actual7,111-token mixed dense/sparse operator ratio was
+0.443835 versus the earlier full layout. Real-input admission covered exactly12
+prompt quad dispatches, all24 heads at beginning/middle/end and no verification
+dispatches; every complete FP64 sampled oracle passed. Maximum sampled candidate
+relative L2 was6.44e-5 against the unchanged1e-3 threshold.
+
+Three rotated fresh servers per arm, each cold+4warmups+measured7111/128/0reuse:
+
+| Engine / attention route | HTTP median seconds | Native prefill median seconds | Native decode median seconds |
+|---|---:|---:|---:|
+| NInfer old full layout |23.2052|15.9342|6.8071|
+| NInfer dedicated quad layout |20.5566|12.9367|6.7870|
+| Installed native Strata |10.6927|8.0358|2.2576|
+
+HTTP improved11.41% and prefill18.81%, with nonoverlapping HTTP ranges22.6894–
+23.4315 versus19.5600–20.8823. Strata ranged10.1177–10.7423. NInfer still trails
+1.92x HTTP and1.61x prefill. Both NInfer arms retained102slots/layer,4,896seeds,
+13,537,714,176cache bytes, the2GiB reserve and30.0037GiB peak. Measured outputs and
+MTP work were stable within each arm; across arms outputs changed and draft work
+moved59rounds/116drafts/68accepts to59/118/68. No isolated decode gain follows.
+Retain `NINFER_V100_QSA_QUAD_MMA=1` opt-in/default off. The cross-engine result
+remains a practical serving comparison with different representations/arithmetic.
+
+### Focused CPU pool attribution on the admitted quad profile
+
+Decode remains about6.8seconds versus Strata2.26seconds. The latest architecture
+run measured3.0582seconds verification CPU join and1.1503seconds prefill CPU join
+before the quad arithmetic change. The source audit also found a concrete pool
+difference: NInfer publishes counting-semaphore permits per row job and takes a
+completion mutex per job; Strata uses epoch publication/atomic claims and
+completion, bounded worker spin/park and host participation. Both split gate/up
+and down with a necessary phase barrier. These are leads, not causal conclusions
+or a reason to repeat the rejected worker-count/order experiments.
+
+`NINFER_V100_CPU_POOL_TIMING=1` adds default-off host observations without changing
+CPU arithmetic, tasks, worker count or scheduling. Each nonempty batch reports
+submit-mutex wait, total batch wall and orchestration outside worker phases.
+Full-expert, gate/up and down phases separately report caller wall, semaphore
+release interval, time to the first claimed worker, job count, summed worker
+compute duration and summed completion-mutex acquisition wait. Worker writes
+precede the existing release completion; the caller acquires completion before
+collecting/resetting observations. Stats return to the inference owner, which
+emits them inside its request/transaction/layer/phase-owned MoE record.
+
+Release and first-job intervals are inside phase wall, while worker sums overlap
+each other and GPU work. Orchestration includes grouping/input preparation and
+bookkeeping, not a pure conversion-kernel cost. None should be added to request
+time or interpreted as whole-GPU idle. Per-request parsing checks caller ledger
+reconciliation, matched gate/up/down job completion, phase-owned route coverage
+and verification exclusion from prefill.
+
+`--cpu-pool-breakdown` runs one clean and one diagnostic fresh NInfer server on
+the admitted quad/full-QSA/hyper/shared/pinned/dense/pair/8192/262K-FP8 profile,
+each cold+4warmups+measured7111/128/0reuse. Corresponding output/usage/native MTP
+must match exactly. Instrumentation overhead, cache/memory and all phases are
+preserved in `cpu-pool-breakdown-report.json`; the just-completed native Strata
+comparison is reused as context instead of rerunning it. Existing CPU grouped
+pool fixtures additionally check timed batch/phase ownership, repeated reuse,
+mixed identities and exact output parity before serving diagnostics. Local62
+telemetry tests, Python compilation/help, YAML/bash syntax and diff checks pass;
+new C++ timing qualification and serving evidence await the target runner.

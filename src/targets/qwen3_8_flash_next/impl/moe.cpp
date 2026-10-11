@@ -894,7 +894,29 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
             << ",\"stream_submit\":" << std::chrono::duration<double, std::micro>(stream_submit_finished-stream_submit_started).count()
             << ",\"cpu_join\":" << cpu_join_us
             << ",\"cache_join\":" << cache_join_us
-            << "},\"heavy_stream_drain\":" << (telemetry ? "true" : "false");
+            << "},\"heavy_stream_drain\":" << (telemetry ? "true" : "false")
+            << ",\"cpu_pool\":{\"observed\":" << (cpu_batch.pool_timing_observed ? "true" : "false");
+        if (cpu_batch.pool_timing_observed) {
+            out << ",\"configured_workers\":" << cpu_batch.configured_workers
+                << ",\"row_sharded\":" << (cpu_batch.row_sharded ? "true" : "false")
+                << ",\"submit_wait_us\":" << cpu_batch.submit_wait_us
+                << ",\"batch_wall_us\":" << cpu_batch.batch_wall_us
+                << ",\"orchestration_us\":" << cpu_batch.orchestration_us
+                << ",\"phases\":{";
+            constexpr const char* names[] = {"full", "gate_up", "down"};
+            for (unsigned index = 0; index < 3; ++index) {
+                const auto& phase = cpu_batch.phases[index];
+                if (index) out << ',';
+                out << '\"' << names[index] << "\":{\"jobs\":" << phase.jobs
+                    << ",\"wall_us\":" << phase.wall_us
+                    << ",\"release_us\":" << phase.release_us
+                    << ",\"first_job_us\":" << phase.first_job_us
+                    << ",\"worker_compute_us\":" << phase.worker_compute_us
+                    << ",\"completion_lock_wait_us\":" << phase.completion_lock_wait_us << '}';
+            }
+            out << '}';
+        }
+        out << '}';
         append_perf_context(out);
         out << '}';
         emit_perf_json(out.str());

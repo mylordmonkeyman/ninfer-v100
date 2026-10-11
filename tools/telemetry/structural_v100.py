@@ -329,6 +329,8 @@ def architecture_requests(folder, engine):
                     if line.startswith('{') and '"moe_arch_timing"' in line]
             phases = defaultdict(lambda: dict(layers=0, tokens_by_layer=Counter(),
                 host_us=Counter(), routes=Counter()))
+            pools = defaultdict(lambda: dict(batches=0, cpu_routes=0, row_sharded_batches=0,
+                configured_workers=Counter(), caller_us=Counter(), phases=defaultdict(Counter)))
             owners = set()
             for row in rows:
                 context = row.get('context') or {}
@@ -346,11 +348,45 @@ def architecture_requests(folder, engine):
                 dst['host_us'].update(row['host_us'])
                 dst['routes'].update({k:row[k] for k in
                     ('routes','resident_routes','stream_routes','cpu_routes','stream_experts')})
+                pool = row.get('cpu_pool') or {}
+                if pool.get('observed'):
+                    if not row['cpu_routes'] or not 1 <= pool['configured_workers'] <= 256:
+                        raise ValueError('CPU pool observation without routes/workers')
+                    caller = {key:pool[key] for key in
+                        ('submit_wait_us','batch_wall_us','orchestration_us')}
+                    phase_rows = pool['phases']
+                    if set(phase_rows) != {'full','gate_up','down'}:
+                        raise ValueError('CPU pool phase coverage changed')
+                    if any(not isinstance(v,(int,float)) or not math.isfinite(v) or v < 0
+                           for v in caller.values()):
+                        raise ValueError('invalid CPU pool caller duration')
+                    if abs(caller['batch_wall_us'] - caller['orchestration_us'] -
+                           sum(p['wall_us'] for p in phase_rows.values())) > .01:
+                        raise ValueError('CPU pool caller ledger did not reconcile')
+                    for name,pool_phase in phase_rows.items():
+                        if (not isinstance(pool_phase['jobs'],int) or pool_phase['jobs'] < 0 or
+                            any(not isinstance(v,(int,float)) or not math.isfinite(v) or v < 0
+                                for v in pool_phase.values())):
+                            raise ValueError('invalid CPU pool worker observation')
+                    jobs = {name:p['jobs'] for name,p in phase_rows.items()}
+                    if ((pool['row_sharded'] and (jobs['full'] or not jobs['gate_up'] or
+                                                jobs['gate_up'] != jobs['down'])) or
+                        (not pool['row_sharded'] and (not jobs['full'] or jobs['gate_up'] or jobs['down']))):
+                        raise ValueError('CPU pool completion/phase ownership mismatch')
+                    target = pools[context['phase']]
+                    target['batches'] += 1
+                    target['cpu_routes'] += row['cpu_routes']
+                    target['row_sharded_batches'] += bool(pool['row_sharded'])
+                    target['configured_workers'][str(pool['configured_workers'])] += 1
+                    target['caller_us'].update(caller)
+                    for name,pool_phase in phase_rows.items():
+                        target['phases'][name].update(pool_phase)
             prefill = phases.get('prefill')
             if (not prefill or len(prefill['tokens_by_layer']) != 48
                     or set(prefill['tokens_by_layer'].values()) != {request['response']['usage']['prompt_tokens']}):
                 raise ValueError('architecture prefill does not cover all 48 layers and prompt tokens')
             reports[ordinal]['architecture_phases'] = dict(phases)
+            reports[ordinal]['cpu_pool_phases'] = dict(pools)
         else:
             lines = [line for line in text.splitlines() if 'strata prefill timing:' in line]
             headers = [re.search(r'prefill timing: (\d+) tokens, GPU timeline ([0-9.]+) ms, '
@@ -548,8 +584,12 @@ def main():
                    help='Best-profile staged-copy versus page-locked direct expert-source DMA and native Strata')
     p.add_argument('--architecture-breakdown', action='store_true',
                    help='Source-directed shared/routed MoE attribution plus installed Strata prefill/decode timers')
+    p.add_argument('--cpu-pool-breakdown', action='store_true',
+                   help='Paired current-best NInfer reference/diagnostic CPU preparation, phase and completion costs')
     p.add_argument('--comparison-reference', type=Path)
     a = p.parse_args()
+    if a.cpu_pool_breakdown:
+        a.architecture_breakdown=True
     if a.large_profile_breakdown:
         a.moe_work_breakdown=True
     if a.controlled_strata_followup:
@@ -650,7 +690,7 @@ def main():
                      [('ninfer', backend, flags) for backend, flags in gemm_arms]
                      if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab) else ARMS)
     if a.architecture_breakdown:
-        manifest_arms=[shared_arms[1], ARMS[1]]
+        manifest_arms=[quad_arms[1]] if a.cpu_pool_breakdown else [shared_arms[1], ARMS[1]]
     (a.output/'manifest.json').write_text(json.dumps(dict(prompt=None if a.fp8_long_context else LONG, short_prompt=ab.SHORT,
         prompt_definition='Serving-calibrated repeated prose; actual per-cell payloads in requests.jsonl' if a.fp8_long_context else 'fixed 360 numbered records',
         output_limit=32 if (a.stream_attribution_only or a.qualified_default_smoke) else a.max_output_tokens,
@@ -666,6 +706,7 @@ def main():
         shared_cublas_race=a.shared_cublas_race,
         pinned_expert_source_race=a.pinned_expert_source_race,
         architecture_breakdown=a.architecture_breakdown,
+        cpu_pool_breakdown=a.cpu_pool_breakdown,
         request_timeout=getattr(a,'request_timeout',900),
         prefill_breakdown=a.prefill_breakdown, dense_prefill_gemm_ab=a.dense_prefill_gemm_ab,
         stream_attribution_only=a.stream_attribution_only, expert_gemm_ab=a.expert_gemm_ab, resident_gemm_ab=a.resident_gemm_ab, cpu_stream_overlap_ab=a.cpu_stream_overlap_ab,
@@ -728,6 +769,10 @@ def main():
         paired = [(shared_arms[1], dict(NINFER_V100_MOE_ARCH_TIMING='1',
                       NINFER_FLASH_NEXT_STAGE_LEDGER='1', NINFER_FLASH_NEXT_STAGE_LEDGER_JSON='1')),
                   (ARMS[1], dict(STRATA_PREFILL_TIMING='1', STRATA_DECODE_TIMING='1'))]
+        if a.cpu_pool_breakdown:
+            paired=[(quad_arms[1],dict(NINFER_V100_MOE_ARCH_TIMING='1',
+                NINFER_FLASH_NEXT_STAGE_LEDGER='1',NINFER_FLASH_NEXT_STAGE_LEDGER_JSON='1',
+                NINFER_V100_CPU_POOL_TIMING='1'))]
         report = dict(status='in_progress', telemetry_level=0, comparisons=[],
             objective='Explain the practical serving gap using source-directed whole-request attribution',
             limits=['One clean and one diagnostic fresh server per engine; attribution, not a new win claim.',
@@ -736,10 +781,20 @@ def main():
                     'No per-layer expert stream drain or worker telemetry; overhead is still measured.',
                     'The current admitted full-QSA, hyper-cuBLAS and shared-cuBLAS routes are included.',
                     'Packed-reduce candidate is operator-admitted but is not part of this audit.'])
-        output = a.output/'architecture-breakdown-report.json'
+        output = a.output/('cpu-pool-breakdown-report.json' if a.cpu_pool_breakdown else 'architecture-breakdown-report.json')
+        if a.cpu_pool_breakdown:
+            report['objective']='Resolve CPU join cost on the admitted quad-QSA profile'
+            report['limits']=[
+                'One clean/diagnostic NInfer pair; exact corresponding output/usage/MTP required.',
+                'Phase caller wall includes wakeup, computation and completion; release/first-job intervals are inside it.',
+                'Worker compute and completion-lock durations overlap across workers and GPU work; never add to request wall.',
+                'Orchestration includes grouping, preparation and caller bookkeeping outside worker phases.',
+                'No arithmetic, worker count, scheduling or production-default change; overhead measured.',
+                'Contemporary Strata serving comparison already completed in run38179605429; not repeated here.']
         output.write_text(json.dumps(report, indent=2)+'\n')
         for (engine, arm, flags), diagnostics in paired:
             if engine=='ninfer': flags=dict(flags,NINFER_V100_EXPERT_PACKED_REDUCE='0')
+            if a.cpu_pool_breakdown: flags=dict(flags,NINFER_V100_CPU_POOL_TIMING='0')
             run(engine, arm, flags, 'architecture-reference', 'timing')
             run(engine, arm, dict(flags, **diagnostics), 'architecture-diagnostic', 'diagnostic')
             before, after = cells[-2:]
@@ -774,6 +829,15 @@ def main():
                 startup=after['architecture_startup'],
                 residency=[c.get('residency') for c in (before, after)],
                 sampled_peak_gpu_bytes=[c.get('sampled_peak_gpu_bytes') for c in (before, after)])
+            if a.cpu_pool_breakdown:
+                for request in after['architecture_requests']:
+                    pools=request['cpu_pool_phases']
+                    if not pools or 'verify' not in pools:
+                        raise ValueError('missing verification CPU pool observations')
+                    for phase,parts in request['architecture_phases'].items():
+                        cpu_routes=parts['routes']['cpu_routes']
+                        if cpu_routes != pools.get(phase,{}).get('cpu_routes',0):
+                            raise ValueError('CPU pool rows did not conserve phase-owned routes')
             report['comparisons'].append(comparison)
             output.write_text(json.dumps(report, indent=2)+'\n')
             if engine == 'ninfer' and not all(r['exact_output_usage_mtp'] for r in comparisons):

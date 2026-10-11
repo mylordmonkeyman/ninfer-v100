@@ -1,6 +1,6 @@
 name: V100 Structural Engine Comparison
-# Dedicated Volta quad-pair attention: independent affected oracles and target
-# operator admission, then real-layer admission before repeated serving timing.
+# Focused CPU pool attribution on the admitted dedicated Volta QSA profile.
+# Exact output/work and instrumentation-overhead checks precede conclusions.
 on:
   workflow_dispatch:
   push:
@@ -95,7 +95,7 @@ jobs:
           cmake -S . -B build-structural-comparison -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70 \
             -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-structural-comparison --target ninfer-serve ninfer_volta_nvfp4_codec_test ninfer_volta_qsa_scores_test ninfer_qwen3_8_flash_next_qsa_attention_test ninfer_fp8_f32_prefill_sm70_test ninfer_qwen3_8_flash_next_expert_gemm_test ninfer_qwen3_8_flash_next_expert_stream_test ninfer_qwen3_8_flash_next_expert_cache_test ninfer_qwen3_8_flash_next_hyper_connection_test ninfer_qwen3_8_flash_next_moe_shared_volta_test
+          cmake --build build-structural-comparison --target ninfer-serve ninfer_volta_nvfp4_codec_test ninfer_volta_qsa_scores_test ninfer_qwen3_8_flash_next_qsa_attention_test ninfer_fp8_f32_prefill_sm70_test ninfer_qwen3_8_flash_next_expert_gemm_test ninfer_qwen3_8_flash_next_expert_stream_test ninfer_qwen3_8_flash_next_expert_cache_test ninfer_qwen3_8_flash_next_hyper_connection_test ninfer_qwen3_8_flash_next_moe_shared_volta_test ninfer_qwen3_8_flash_next_cpu_expert_group_test
           build-structural-comparison/tests/ninfer_volta_nvfp4_codec_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/software-fp8-codec-oracle.log"
           NINFER_V100_QSA_QUAD_ADMISSION=1 build-structural-comparison/tests/ninfer_volta_qsa_scores_test 2>&1 \
@@ -135,12 +135,15 @@ jobs:
             | tee "$QUALIFICATION_RESULTS/hyper-cublas-independent-oracle-and-admission.log"
           build-structural-comparison/tests/ninfer_qwen3_8_flash_next_moe_shared_volta_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/shared-cublas-independent-oracle-and-admission.log"
+          NINFER_V100_CPU_POOL_TIMING=1 \
+            build-structural-comparison/tests/ninfer_qwen3_8_flash_next_cpu_expert_group_test 2>&1 \
+            | tee "$QUALIFICATION_RESULTS/cpu-pool-timing-parity-and-reuse.log"
           cp build-structural-comparison/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
-      - name: Qualify real-layer quad attention and compare with native Strata
+      - name: Attribute CPU pool phases on the admitted quad profile
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --qsa-quad-mma-race \
+          python3 tools/telemetry/structural_v100.py --cpu-pool-breakdown \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \

@@ -56,7 +56,16 @@ class StructuralTests(unittest.TestCase):
                         context=dict(context, phase=phase, transaction=transaction),
                         routes=tokens*10, resident_routes=tokens*2, stream_routes=tokens*7,
                         cpu_routes=tokens, stream_experts=3, heavy_stream_drain=False,
-                        host_us=dict(cpu_join=wait)))
+                        host_us=dict(cpu_join=wait),
+                        cpu_pool=dict(observed=True,configured_workers=4,row_sharded=True,
+                            submit_wait_us=2,batch_wall_us=1000,orchestration_us=100,
+                            phases={name:dict(jobs=0 if name=='full' else 2,
+                                wall_us=0 if name=='full' else 400 if name=='gate_up' else 500,
+                                release_us=0 if name=='full' else 20,
+                                first_job_us=0 if name=='full' else 50,
+                                worker_compute_us=0 if name=='full' else 1200,
+                                completion_lock_wait_us=0 if name=='full' else 5)
+                                for name in ('full','gate_up','down')})))
             data=('startup noise\n'+'\n'.join(map(json.dumps,rows))+'\n').encode()
             request=dict(index=0, phase='measured', response=dict(usage=dict(prompt_tokens=10)),
                 native_log_start_offset=len('startup noise\n'), native_log_end_offset=len(data),
@@ -67,6 +76,17 @@ class StructuralTests(unittest.TestCase):
             self.assertEqual(report['architecture_phases']['prefill']['host_us']['cpu_join'],144)
             self.assertEqual(report['architecture_phases']['verify']['host_us']['cpu_join'],48*999)
             self.assertEqual(report['stages_seconds']['MoE: shared gate-up'],.25)
+            self.assertEqual(report['cpu_pool_phases']['prefill']['cpu_routes'],480)
+            self.assertEqual(report['cpu_pool_phases']['verify']['cpu_routes'],96)
+            self.assertEqual(report['cpu_pool_phases']['verify']['phases']['gate_up']['jobs'],96)
+            rows[1]['cpu_pool']['phases']['down']['jobs']=3
+            bad=('startup noise\n'+'\n'.join(map(json.dumps,rows))+'\n').encode()
+            request['native_log_end_offset']=len(bad)
+            (folder/'requests.jsonl').write_text(json.dumps(request)+'\n')
+            with gzip.open(folder/'server.log.gz','wb') as out: out.write(bad)
+            with self.assertRaisesRegex(ValueError,'phase ownership'):
+                architecture_requests(folder,'ninfer')
+            rows[1]['cpu_pool']['phases']['down']['jobs']=2
             rows[1]['stream_routes']+=1
             bad=('startup noise\n'+'\n'.join(map(json.dumps,rows))+'\n').encode()
             request['native_log_end_offset']=len(bad)

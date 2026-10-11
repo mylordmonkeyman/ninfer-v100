@@ -1,9 +1,26 @@
 #include "targets/qwen3_8_flash_next/impl/cpu_expert_pool.h"
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <stdexcept>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 namespace {
+using PoolClock = std::chrono::steady_clock;
+double pool_elapsed_us(PoolClock::time_point begin) {
+    return std::chrono::duration<double, std::micro>(PoolClock::now() - begin).count();
+}
+bool pool_timing_requested() {
+    static const bool enabled = [] {
+        const auto* value = std::getenv("NINFER_V100_CPU_POOL_TIMING");
+        if (!value || !*value || std::strcmp(value, "0") == 0) return false;
+        if (std::strcmp(value, "1") == 0) return true;
+        throw std::invalid_argument("NINFER_V100_CPU_POOL_TIMING must be 0 or 1");
+    }();
+    return enabled;
+}
 std::uint64_t compact_expert_bytes(const HostNvfp4ExpertPairView& expert) {
     const auto matrix_bytes = [](const Nvfp4ExpertMatrixView& matrix) {
         const auto elements = static_cast<std::uint64_t>(matrix.rows) * matrix.columns;
@@ -23,6 +40,7 @@ HostExpertWorkerPool::HostExpertWorkerPool(unsigned workers, bool avx2, bool fp3
     }
     workers_.reserve(workers);
     worker_observations_.resize(workers);
+    pool_worker_timing_.resize(workers);
     try {
         for (unsigned worker = 0; worker < workers; ++worker) {
             workers_.emplace_back([this, worker] { worker_loop(worker); });
@@ -41,14 +59,26 @@ void HostExpertWorkerPool::stop_workers() noexcept {
     }
 }
 void HostExpertWorkerPool::execute_jobs(std::size_t count) {
+    const auto started = pool_timing_ ? PoolClock::now() : PoolClock::time_point{};
+    if (pool_timing_) first_job_ns_.store(std::numeric_limits<std::int64_t>::max(), std::memory_order_relaxed);
     work_count_ = count;
     next_.store(0, std::memory_order_relaxed);
     remaining_.store(count, std::memory_order_release);
     work_.release(static_cast<std::ptrdiff_t>(count));
+    const double release_us = pool_timing_ ? pool_elapsed_us(started) : 0;
     std::unique_lock<std::mutex> done_lock(done_mutex_);
     done_cv_.wait(done_lock, [this] {
         return remaining_.load(std::memory_order_acquire) == 0;
     });
+    if (pool_timing_) {
+        auto& phase = pool_phase_timing_[row_sharded_ ? (down_phase_ ? 2 : 1) : 0];
+        phase.wall_us += pool_elapsed_us(started);
+        phase.release_us += release_us;
+        const auto first = first_job_ns_.load(std::memory_order_relaxed);
+        const auto begin_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(started.time_since_epoch()).count();
+        if (count && first != std::numeric_limits<std::int64_t>::max())
+            phase.first_job_us += static_cast<double>(first - begin_ns) / 1000;
+    }
 }
 
 HostExpertBatchStats HostExpertWorkerPool::run(std::span<const HostExpertTask> tasks,
@@ -75,7 +105,16 @@ HostExpertBatchStats HostExpertWorkerPool::run(std::span<const HostExpertTask> t
     if (tasks.size() > 1'048'576ULL) {
         throw std::invalid_argument("host expert batch exceeds worker semaphore capacity");
     }
+    const bool timing = pool_timing_requested();
+    const auto submit_started = timing ? PoolClock::now() : PoolClock::time_point{};
     std::unique_lock<std::mutex> submit_lock(submit_mutex_);
+    pool_timing_ = timing;
+    const auto batch_started = timing ? PoolClock::now() : PoolClock::time_point{};
+    if (timing) {
+        stats.submit_wait_us = std::chrono::duration<double, std::micro>(batch_started - submit_started).count();
+        pool_phase_timing_ = {};
+        for (auto& worker : pool_worker_timing_) worker = {};
+    }
     telemetry_level_ = v100_compare::active && telemetry_layer < 48 ? v100_compare::level() : 0;
     if (telemetry_level_) {
         for (unsigned i = 0; i < worker_observations_.size(); ++i) {
@@ -134,6 +173,23 @@ HostExpertBatchStats HostExpertWorkerPool::run(std::span<const HostExpertTask> t
     if (error) { std::rethrow_exception(error); }
     if (telemetry_level_)
         for (const auto& w : worker_observations_) v100_compare::active->worker(telemetry_layer, w);
+    if (timing) {
+        stats.pool_timing_observed = true;
+        stats.row_sharded = row_sharded_;
+        stats.configured_workers = workers_.size();
+        stats.batch_wall_us = pool_elapsed_us(batch_started);
+        stats.phases = pool_phase_timing_;
+        double phase_wall = 0;
+        for (unsigned phase = 0; phase < 3; ++phase) {
+            phase_wall += stats.phases[phase].wall_us;
+            for (const auto& worker : pool_worker_timing_) {
+                stats.phases[phase].jobs += worker.phases[phase].jobs;
+                stats.phases[phase].worker_compute_us += worker.phases[phase].worker_compute_us;
+                stats.phases[phase].completion_lock_wait_us += worker.phases[phase].completion_lock_wait_us;
+            }
+        }
+        stats.orchestration_us = std::max(0.0, stats.batch_wall_us - phase_wall);
+    }
     return stats;
 }
 
@@ -229,6 +285,12 @@ void HostExpertWorkerPool::worker_loop(unsigned worker_id) {
             std::terminate();
         }
 
+        const auto pool_started = pool_timing_ ? PoolClock::now() : PoolClock::time_point{};
+        if (pool_timing_) {
+            const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(pool_started.time_since_epoch()).count();
+            auto first = first_job_ns_.load(std::memory_order_relaxed);
+            while (ns < first && !first_job_ns_.compare_exchange_weak(first, ns, std::memory_order_relaxed)) {}
+        }
         const auto started = telemetry_level_ >= 2 ? v100_compare::Clock::now() : v100_compare::Clock::time_point{};
         const unsigned phase = row_sharded_ ? (down_phase_ ? 2 : 1) : 0;
         try {
@@ -317,10 +379,19 @@ void HostExpertWorkerPool::worker_loop(unsigned worker_id) {
         if (telemetry_level_)
             worker_observations_[worker_id].job(phase,
                 telemetry_level_ >= 2 ? v100_compare::elapsed_us(started) : 0, telemetry_level_ >= 2);
-
+        if (pool_timing_) {
+            auto& observed = pool_worker_timing_[worker_id].phases[phase];
+            ++observed.jobs;
+            observed.worker_compute_us += pool_elapsed_us(pool_started);
+        }
+        const auto completion_started = pool_timing_ ? PoolClock::now() : PoolClock::time_point{};
         {
             // Pair completion with the wait mutex to prevent lost wakeups.
             std::lock_guard<std::mutex> done_lock(done_mutex_);
+            // All observation writes precede the release completion. The caller
+            // acquires that completion before reading/resetting the vectors.
+            if (pool_timing_)
+                pool_worker_timing_[worker_id].phases[phase].completion_lock_wait_us += pool_elapsed_us(completion_started);
             if (remaining_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
                 done_cv_.notify_one();
             }
