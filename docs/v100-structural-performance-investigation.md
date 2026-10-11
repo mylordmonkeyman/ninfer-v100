@@ -1219,3 +1219,55 @@ and native MTP differences rather than require cross-policy exact parity, since
 residency can change CPU/GPU arithmetic. This is a262K allocation test, **not**
 a full-length prompt test. Decide whether lazy/paged device KV is justified from
 this result; Step5 separately qualifies FP8KV and tests actual long prompts.
+
+
+### Step 4 complete: adaptive residency still helps at262K capacity
+
+Run [38105697912](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38105697912)
+passed all retained numerical/lifetime/cache gates and all36 fixed7111/128/no-reuse
+requests. Three alternating fresh servers per arm used dense/fused opt-ins, BF16KV,
+MTP2,262144 allocated context,2048 chunks and88 workers on32 physical cores.
+
+| Warmed median | Static64 | Adaptive (actual101) | Change |
+|---|---:|---:|---:|
+| HTTP | 36.6172 s | 34.8458 s | -4.84% |
+| Native prefill | 27.6540 s | 26.7536 s | -3.26% |
+| Native decode | 8.4167 s | 6.4425 s | -23.46% |
+| Sampled peak GPU | 25.3435 GiB | 29.9158 GiB | +4.5723 GiB |
+
+Actual capacity/seeding stayed64/3072 versus101/4848, with the2 GiB reserve intact.
+Cold HTTP medians43.8947 versus37.7933 s. Each arm had stable measured outputs,
+but cross-policy output and native MTP work differ: decode gain is confounded.
+The combined policy/capacity prefill benefit survives clipping at262K. Keep
+static64 default; adaptive remains an opt-in whose actual capacity is selected
+after context/scratch allocation. No hard-coded101 rule or reserve change.
+Because the gain persists, defer lazy/paged device-KV redesign; first qualify
+FP8 KV and measure its actual long-context feasibility/memory. This screen uses
+a7K prompt and cannot establish full262K-prompt performance or quality.
+
+### Step 5 started: software FP8 KV and actual long prompts
+
+Inspection confirms Flash-Next QSA stores raw, unscaled E4M3 key/value codes via
+software Volta conversion; the generic scaled row256 KV codec is a different
+consumer contract despite the shared storage selector name. Qualify the affected
+software E4M3 codec (every finite BF16 input against an independent nearest-even/
+saturation exact oracle), the QSA prepared-query independent FP64 attention oracle
+(including represented FP8/BF16, causal tails, noncontiguous pages, extreme scores
+and serving batch sizes), and full QSA FP8 append/decode/prefill integration.
+Retain independent dense/expert and stream/cache gates before serving. Existing
+QSA oracle criteria are preserved; no arithmetic code/default or thresholds change.
+
+Use262144 context/KV capacity, FP8, requested adaptive156 (actual reserve-clipped
+capacity observed), dense/fused opt-ins, MTP2/64output,2048chunks/88workers/physical32.
+Two manageable repeated-prose prompts (360 and361 identical records), each cold
+and measured, calibrate this artifact frontend's token increment and template
+overhead. Then construct one actual prompt at or just above131072 tokens and
+one at or just above262016, leaving64 output tokens and context headroom. Verify
+reported frontend counts against calibration; record each request/native MTP/work,
+residency/seeding and sampled peak GPU. Large requests are single cold feasibility
+observations, not a throughput comparison or long-document quality qualification.
+
+The serving harness keeps its normal900-second timeout but this mode allows5400
+seconds per request; hardware budget180minutes. Partial reports are saved after
+each cell and on failure; no completed result is erased. No prefix reuse/page-cache
+eviction or foreign tokenizer is used. Defaults remain unchanged.

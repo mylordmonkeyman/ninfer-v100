@@ -419,6 +419,8 @@ def main():
     p.add_argument('--expert-pair-expand-reference', type=Path)
     p.add_argument('--context-residency-ab', action='store_true',
                    help='Step 4: static64 versus allocator-clipped adaptive156 at 262K BF16 capacity')
+    p.add_argument('--fp8-long-context', action='store_true',
+                   help='Step 5: qualified FP8 KV calibration then actual 128K/near-262K prompts')
     p.add_argument('--comparison-reference', type=Path)
     a = p.parse_args()
     if a.controlled_strata_followup:
@@ -437,11 +439,14 @@ def main():
         '--prefill-chunk', '2048', '--kv-dtype', 'bf16', '--no-prefix-reuse', '--no-thinking',
         '--no-cuda-graph', '--no-qsa-prefill-mma',
         '--spec', 'mtp', '--draft-tokens', '2', '--lm-head-draft']
-    if a.context_residency_ab:
+    if a.context_residency_ab or a.fp8_long_context:
         a.ninfer_flags = ab.option(a.ninfer_flags, '--max-context', '262144')
         a.ninfer_flags = ab.option(a.ninfer_flags, '--kv-capacity', '262144')
+    if a.fp8_long_context:
+        a.ninfer_flags = ab.option(a.ninfer_flags, '--kv-dtype', 'fp8')
+        a.request_timeout = 5400
     a.long_prompt = LONG
-    a.max_output_tokens = 128
+    a.max_output_tokens = 64 if a.fp8_long_context else 128
     a.warmups = 4; a.repeats = 1; a.telemetry_level = 0
     a.request_schedule = [('cold', 'long')]+[('warmup', 'long')]*4+[('measured', 'long')]
     gemm_arms = [('simt', dict(ARMS[0][2], NINFER_V100_PREFILL_EXPERT_GEMM='simt')),
@@ -484,19 +489,21 @@ def main():
     context_arms=[(engine,arm,dict(flags,NINFER_V100_FP8_PREFILL_GEMM='1',
                                   NINFER_V100_EXPERT_PAIR_EXPAND='1'))
                   for engine,arm,flags in residency_arms()]
-    manifest_arms = (context_arms if a.context_residency_ab else pair_arms if a.expert_pair_expand_ab else [dense_arms[1]] if a.moe_work_breakdown else dense_arms if a.dense_prefill_gemm_ab else [('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
+    manifest_arms = ([context_arms[1]] if a.fp8_long_context else context_arms if a.context_residency_ab else pair_arms if a.expert_pair_expand_ab else [dense_arms[1]] if a.moe_work_breakdown else dense_arms if a.dense_prefill_gemm_ab else [('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
                      [default_arm] if a.qualified_default_smoke else
                      [("ninfer", "adaptive156-qualified", residency_arms()[1][2]), ARMS[1]] if (a.final_comparison or a.controlled_comparison) else
                      residency_arms() if a.residency_gemm_ab else
                      [('ninfer', backend, flags) for backend, flags in gemm_arms]
                      if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab) else ARMS)
-    (a.output/'manifest.json').write_text(json.dumps(dict(prompt=LONG, short_prompt=ab.SHORT,
+    (a.output/'manifest.json').write_text(json.dumps(dict(prompt=None if a.fp8_long_context else LONG, short_prompt=ab.SHORT,
+        prompt_definition='Serving-calibrated repeated prose; actual per-cell payloads in requests.jsonl' if a.fp8_long_context else 'fixed 360 numbered records',
         output_limit=32 if (a.stream_attribution_only or a.qualified_default_smoke) else a.max_output_tokens,
         physical_cpus=cpus,
         arms=[ARMS[0]] if a.stream_attribution_only else manifest_arms,
-        fresh_servers_per_arm=2 if (a.prefill_breakdown or a.moe_work_breakdown) else 1 if (a.stream_attribution_only or a.qualified_default_smoke) else 3,
+        fresh_servers_per_arm=4 if a.fp8_long_context else 2 if (a.prefill_breakdown or a.moe_work_breakdown) else 1 if (a.stream_attribution_only or a.qualified_default_smoke) else 3,
         moe_work_breakdown=a.moe_work_breakdown,
         expert_pair_expand_ab=a.expert_pair_expand_ab, context_residency_ab=a.context_residency_ab,
+        fp8_long_context=a.fp8_long_context, request_timeout=getattr(a,'request_timeout',900),
         prefill_breakdown=a.prefill_breakdown, dense_prefill_gemm_ab=a.dense_prefill_gemm_ab,
         stream_attribution_only=a.stream_attribution_only, expert_gemm_ab=a.expert_gemm_ab, resident_gemm_ab=a.resident_gemm_ab, cpu_stream_overlap_ab=a.cpu_stream_overlap_ab,
         qualified_default_smoke=a.qualified_default_smoke,
@@ -519,8 +526,9 @@ def main():
             result = ab.run_case(a, engine, tag, overrides)
             folder = a.output/(engine+'-'+tag)
             cell = dict(engine=engine, arm=arm, mode=mode, folder=str(folder), result=result)
-            if a.residency_gemm_ab or a.context_residency_ab:
-                cell['residency'] = residency_observation(folder, a.max_output_tokens)
+            if a.residency_gemm_ab or a.context_residency_ab or a.fp8_long_context:
+                cell['residency'] = residency_observation(folder, a.max_output_tokens,
+                    None if a.fp8_long_context else 7111)
             if a.final_comparison or a.prefill_breakdown or a.controlled_comparison or a.dense_prefill_gemm_ab or a.moe_work_breakdown or a.expert_pair_expand_ab:
                 samples=[json.loads(line) for line in (folder/'system.jsonl').read_text().splitlines()]
                 peaks=[r.get('gpu',{}).get('metrics',{}).get('memory_used_bytes') for r in samples
@@ -541,6 +549,57 @@ def main():
         finally:
             (a.output/'summary.json').write_text(json.dumps(dict(cells=cells, timing=summarize(cells)), indent=2)+'\n')
         ab.release_gpu()
+    if a.fp8_long_context:
+        # Calibrate repeated prose using this artifact's serving frontend, rather
+        # than estimate large token counts from characters or a foreign tokenizer.
+        paragraph='The solar station stores energy during daylight and supplies the village after sunset. '
+        suffix='In at least 500 words, explain how the battery storage works and its limitations.'
+        engine,arm,flags=context_arms[1]
+        a.max_output_tokens=64
+        report=dict(step=5,status='running',context_capacity=262144,kv_dtype='fp8',cells=[],
+            limits=['Synthetic repeated-prose capacity screen, not a long-document quality test.',
+                    'Single cold request at each full size; no throughput comparison claim.',
+                    'Flash-Next QSA uses unscaled E4M3 storage; no arithmetic default promotion.'])
+        path=a.output/'fp8-long-context-report.json'
+        def save():
+            path.write_text(json.dumps(report,indent=2)+'\n')
+        def prompt_count(cell):
+            rows=[json.loads(l) for l in (Path(cell['folder'])/'requests.jsonl').read_text().splitlines()]
+            counts={r['response']['usage']['prompt_tokens'] for r in rows}
+            if len(counts)!=1:raise ValueError('calibration prompt count changed between requests')
+            return counts.pop()
+        save()
+        try:
+            calibration=[]
+            for records in (360,361):
+                a.long_prompt=paragraph*records+suffix
+                a.request_schedule=[('cold','long'),('measured','long')]
+                run(engine,arm,flags,'fp8-calibrate-'+str(records),'capacity')
+                cell=cells[-1]; cell['prompt_tokens']=prompt_count(cell)
+                report['cells'].append(cell);calibration.append(cell['prompt_tokens']);save()
+            slope=calibration[1]-calibration[0]
+            if not 1<=slope<=64:raise ValueError('unexpected repeated-prose token increment')
+            intercept=calibration[0]-360*slope
+            report['calibration']=dict(tokens_per_record=slope,intercept=intercept)
+            for target in (131072,262016):
+                records=math.ceil((target-intercept)/slope)
+                predicted=records*slope+intercept
+                if predicted+64>=262144:raise ValueError('insufficient context headroom')
+                a.long_prompt=paragraph*records+suffix
+                a.request_schedule=[('cold','long')]
+                run(engine,arm,flags,'fp8-prompt-'+str(target),'capacity')
+                cell=cells[-1];cell.update(prompt_tokens=prompt_count(cell),target_prompt_tokens=target,
+                                           predicted_prompt_tokens=predicted)
+                report['cells'].append(cell);save()
+                if cell['prompt_tokens']!=predicted or not target<=cell['prompt_tokens']<target+slope:
+                    raise ValueError('actual large prompt tokens did not match calibrated target')
+                if cell['prompt_tokens']+64>=262144:raise ValueError('actual context headroom failed')
+            report['status']='full_prompt_capacity_complete';save()
+        except Exception as error:
+            report['status']='failed';report['error']=str(error);save()
+            raise
+        print(json.dumps(report,indent=2),flush=True)
+        return
     if a.context_residency_ab:
         for repeat in range(3):
             for engine,arm,flags in (context_arms if repeat!=1 else list(reversed(context_arms))):

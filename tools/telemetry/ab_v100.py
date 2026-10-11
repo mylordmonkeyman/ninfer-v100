@@ -321,7 +321,9 @@ def run_case(args, engine, variant, overrides):
             k.startswith(('NINFER_', 'V100_', 'CUDA_', 'STRATA_'))}),
         indent=2)+'\n')
     rows, sampler = [], None
-    from qualify_v100 import api as query
+    from qualify_v100 import api
+    from functools import partial
+    query = partial(api, timeout=getattr(args, 'request_timeout', 900))
     import signal
     with (folder/'server.log').open('w') as log:
         proc = subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT,

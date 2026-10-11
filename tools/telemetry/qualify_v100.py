@@ -24,10 +24,10 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def api(base, path, payload=None):
+def api(base, path, payload=None, timeout=900):
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(base+path, data=data, headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(req, timeout=900) as response:
+    with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.load(response)
 
 

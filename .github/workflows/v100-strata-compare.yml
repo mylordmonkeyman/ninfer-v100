@@ -1,5 +1,5 @@
 name: V100 Structural Engine Comparison
-# Step 4: context-capacity-aware cache policy screening; no default changes.
+# Step 5: qualify software FP8 KV, then actual 128K/near-262K prompts.
 on:
   workflow_dispatch:
   push:
@@ -31,7 +31,7 @@ jobs:
     concurrency:
       group: v100-sv0-hardware
       cancel-in-progress: false
-    timeout-minutes: 90
+    timeout-minutes: 180
     env:
       CUDA_VISIBLE_DEVICES: '0'
       NINFER_WEIGHTS: /models/qwen3-8b-flash-next
@@ -83,14 +83,20 @@ jobs:
           run-id: 37270512213
           github-token: ${{ github.token }}
           path: structural-profile-source
-      - name: Step 4 retain dense and fused expert qualification
+      - name: Step 5 qualify FP8 KV and retained performance routes
         shell: bash
         run: |
           set -euo pipefail
           cmake -S . -B build-structural-comparison -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70 \
             -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-structural-comparison --target ninfer-serve ninfer_fp8_f32_prefill_sm70_test ninfer_qwen3_8_flash_next_expert_gemm_test ninfer_qwen3_8_flash_next_expert_stream_test ninfer_qwen3_8_flash_next_expert_cache_test
+          cmake --build build-structural-comparison --target ninfer-serve ninfer_volta_nvfp4_codec_test ninfer_volta_qsa_scores_test ninfer_qwen3_8_flash_next_qsa_attention_test ninfer_fp8_f32_prefill_sm70_test ninfer_qwen3_8_flash_next_expert_gemm_test ninfer_qwen3_8_flash_next_expert_stream_test ninfer_qwen3_8_flash_next_expert_cache_test
+          build-structural-comparison/tests/ninfer_volta_nvfp4_codec_test 2>&1 \
+            | tee "$QUALIFICATION_RESULTS/software-fp8-codec-oracle.log"
+          build-structural-comparison/tests/ninfer_volta_qsa_scores_test 2>&1 \
+            | tee "$QUALIFICATION_RESULTS/qsa-fp64-attention-oracle.log"
+          build-structural-comparison/tests/ninfer_qwen3_8_flash_next_qsa_attention_test 2>&1 \
+            | tee "$QUALIFICATION_RESULTS/qsa-fp8-append-integration.log"
           build-structural-comparison/tests/ninfer_fp8_f32_prefill_sm70_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/dense-public-dispatch-oracle.log"
           NINFER_V100_EXPERT_PAIR_EXPAND=0 \
@@ -120,11 +126,11 @@ jobs:
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/cache-join-oracle.log"
           cp build-structural-comparison/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
-      - name: Step 4 static64 versus adaptive residency at 262K capacity
+      - name: Step 5 actual FP8 KV long-context requests
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --context-residency-ab \
+          python3 tools/telemetry/structural_v100.py --fp8-long-context \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \
