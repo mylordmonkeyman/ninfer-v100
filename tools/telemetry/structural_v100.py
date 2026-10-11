@@ -597,11 +597,14 @@ def main():
                         NINFER_FLASH_NEXT_STAGE_LEDGER='1')
         run('ninfer','qsa-late-half-mma',diagnostic,'qsa-late-half-dispatch','diagnostic')
         events=cells[-1]['work']['qsa_score_dispatch']
-        if (len(events),sum(bool(e.get('mma')) for e in events))!=(12,6):
-            raise ValueError(f'late-half serving dispatch coverage changed: {len(events)} events, '
-                             f'{sum(bool(e.get("mma")) for e in events)} MMA')
-        if not all(e.get('fp8') and e.get('tokens')==7111 for e in events):
-            raise ValueError('late-half dispatch did not use the intended 7111-token FP8 path')
+        prompt_events=[e for e in events if e.get('tokens')==7111]
+        if (len(prompt_events),sum(bool(e.get('mma')) for e in prompt_events))!=(12,6):
+            raise ValueError(f'late-half prompt dispatch coverage changed: {len(prompt_events)} '
+                             f'7111-token events, {sum(bool(e.get("mma")) for e in prompt_events)} MMA')
+        if not all(e.get('fp8') for e in prompt_events):
+            raise ValueError('late-half prompt dispatch did not use FP8 KV')
+        if sum(bool(e.get('mma')) for e in events)!=6:
+            raise ValueError('MMA escaped the admitted six late-half prompt dispatches')
         a.request_schedule=[('cold','long')]+[('warmup','long')]*4+[('measured','long')]
         a.max_output_tokens=128
         a.telemetry_level=0
@@ -617,7 +620,10 @@ def main():
                     raise ValueError('QSA race output/reuse work changed')
         report=dict(status='qsa_late_half_race_complete',timing=summarize(cells),
             dispatch=dict(events=len(events),mma=sum(bool(e['mma']) for e in events),
-                          simt=sum(not bool(e['mma']) for e in events)),
+                          simt=sum(not bool(e['mma']) for e in events),
+                          prompt_events=len(prompt_events),
+                          prompt_mma=sum(bool(e['mma']) for e in prompt_events),
+                          prompt_simt=sum(not bool(e['mma']) for e in prompt_events)),
             observations=[dict(engine=c['engine'],arm=c['arm'],peak=c.get('sampled_peak_gpu_bytes'),
                                residency=c.get('residency')) for c in cells if c['mode']=='timing'],
             limits=['The unchanged late-half candidate has bounded prior paired numerical admission, not default-on qualification.',
