@@ -1051,3 +1051,13 @@ establish whole-device idle or the prefill critical path, and nsys was unavailab
 Use this result to decide whether grouped launches, fewer expansion/staging bytes,
 or a better GEMM kernel is worth an implementation, rather than repeat scheduling
 experiments. Step 3 is not complete merely because this reference is measured.
+
+
+The initial reference job [38102068248](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38102068248)
+built both targets and passed every production expert gate before its existing
+cost screen. The new resident reference stopped on nonfinite output before any
+reference timing. Its host input generator mixed an unsigned token index with
+subtraction, turning intended negative inputs into large positive values that
+overflowed FP16 conversion. Correct the generator to signed token arithmetic;
+its intended input range is [-0.875,0.875]. No production arithmetic, numerical
+threshold or benchmark geometry changes. Re-run only the bounded operator job.

@@ -1,5 +1,5 @@
 name: V100 Structural Engine Comparison
-# Step 3: same-shape resident GEMM reference; no serving or default changes.
+# Step 3: signed finite fixture input correction; bounded resident reference.
 on:
   workflow_dispatch:
   push:

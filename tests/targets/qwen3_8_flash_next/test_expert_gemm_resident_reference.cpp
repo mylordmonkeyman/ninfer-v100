@@ -39,7 +39,7 @@ struct Matrix {
         for(int row=0;row<m;++row)for(int col=0;col<k;++col)
             host_w[row*k+col]=__float2half_rn(float(((row%31)*7+col*3)%23-11)/32);
         for(unsigned t=0;t<FlashNextExpertGemm::tile_routes;++t)for(int col=0;col<k;++col)
-            host_x[t*k+col]=__float2half_rn(float(((t%17)*5+col*7)%29-14)/16);
+            host_x[t*k+col]=__float2half_rn(float((int(t%17)*5+col*7)%29-14)/16);
         w.copy_from_host(host_w.data(),host_w.size()*2);
         x.copy_from_host(host_x.data(),host_x.size()*2);
     }
