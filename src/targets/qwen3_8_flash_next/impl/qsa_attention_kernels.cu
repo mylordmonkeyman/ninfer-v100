@@ -219,6 +219,10 @@ __device__ int selected_token(int ordinal, int selected_count, int complete_bloc
     return complete_blocks * 4 + ordinal - selected_tokens;
 }
 
+#if defined(NINFER_VOLTA_BUILD)
+#include "qsa_volta_full_mma.cuh"
+#endif
+
 __global__ void gate_output_kernel(const __nv_bfloat16* __restrict__ attended,
                                    const __nv_bfloat16* __restrict__ gate,
                                    __nv_bfloat16* __restrict__ gated, int elements) {
@@ -1064,8 +1068,29 @@ void flash_next_qsa_attention_store_launch(const Tensor& projected, const Tensor
 #if defined(NINFER_VOLTA_BUILD)
 void flash_next_qsa_volta_attend_launch(const Tensor& query, const Tensor& token_indices,
     std::int32_t table_row, const Tensor& selected_blocks, const Tensor& selected_counts,
-    QsaAttentionCacheView cache, Tensor& attended, cudaStream_t stream, bool use_mma) {
+    QsaAttentionCacheView cache, Tensor& attended, cudaStream_t stream, bool use_mma, bool full_mma) {
     const int tokens = token_indices.ne[0];
+    if (full_mma) {
+        if (cache.key_pages.dtype != DType::FP8_E4M3FN)
+            throw std::runtime_error("Volta full QSA MMA requires raw FP8 KV");
+        static const bool configured = [] {
+            CUDA_CHECK(cudaFuncSetAttribute(qsa_prefill_volta_full_mma_kernel,
+                cudaFuncAttributeMaxDynamicSharedMemorySize, sizeof(QsaVoltaFullSmem)));
+            return true;
+        }();
+        (void)configured;
+        qsa_prefill_volta_full_mma_kernel<<<dim3(kKvHeads, tokens), 128, sizeof(QsaVoltaFullSmem), stream>>>(
+            static_cast<const __nv_bfloat16*>(query.data),
+            static_cast<const std::int32_t*>(token_indices.data), table_row,
+            static_cast<const std::int32_t*>(selected_blocks.data),
+            static_cast<const std::int32_t*>(selected_counts.data),
+            static_cast<const std::int32_t*>(cache.block_tables.data), cache.block_tables.ne[0],
+            static_cast<const __nv_fp8_e4m3*>(cache.key_pages.data),
+            static_cast<const __nv_fp8_e4m3*>(cache.value_pages.data),
+            static_cast<__nv_bfloat16*>(attended.data));
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
     const auto launch = [&]<typename StorageT, bool ScoreMma>() {
         constexpr int warps = 4;
         if constexpr (ScoreMma) {
@@ -1125,18 +1150,20 @@ void flash_next_qsa_attention_prefill_launch(
 #if defined(NINFER_VOLTA_BUILD)
     const char* mode = std::getenv("NINFER_V100_QSA_SCORE_MMA");
     const bool experimental = mode != nullptr && std::strcmp(mode, "1") == 0;
-    const bool score_mma = use_mma && experimental && is_fp8 && tokens >= 512;
+    const char* full_mode = std::getenv("NINFER_V100_QSA_FULL_MMA");
+    const bool full_mma = full_mode && std::strcmp(full_mode, "1") == 0 && is_fp8 && tokens >= 512;
+    const bool score_mma = !full_mma && use_mma && experimental && is_fp8 && tokens >= 512;
     if (v100_perf_telemetry_enabled()) {
         std::fprintf(stderr,
-            "{\"kind\":\"qsa_score_dispatch\",\"tokens\":%d,\"fp8\":%s,\"mma\":%s}\n",
-            tokens, is_fp8 ? "true" : "false", score_mma ? "true" : "false");
+            "{\"kind\":\"qsa_score_dispatch\",\"tokens\":%d,\"fp8\":%s,\"mma\":%s,\"full_mma\":%s}\n",
+            tokens, is_fp8 ? "true" : "false", score_mma ? "true" : "false", full_mma ? "true" : "false");
     }
     flash_next_qsa_volta_attend_launch(scratch.query, token_indices, table_row,
-        selected_blocks, selected_counts, cache, scratch.attended, stream, score_mma);
+        selected_blocks, selected_counts, cache, scratch.attended, stream, score_mma, full_mma);
     const char* compare = std::getenv("NINFER_V100_QSA_SCORE_COMPARE");
     if (compare && std::strcmp(compare, "1") == 0 && is_fp8 && tokens >= 512) {
         compare_real_qsa_scores(scratch.query, token_indices, table_row,
-            selected_blocks, selected_counts, cache, scratch.attended, stream, score_mma);
+            selected_blocks, selected_counts, cache, scratch.attended, stream, score_mma, full_mma);
     }
 #else
     if (is_fp8) {

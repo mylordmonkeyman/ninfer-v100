@@ -35,7 +35,7 @@ inline double qsa_reference_rounded(double value) {
 inline void compare_real_qsa_scores(const Tensor& query, const Tensor& indices,
     int table_row, const Tensor& selected, const Tensor& counts,
     QsaAttentionCacheView cache, const Tensor& actual, cudaStream_t stream,
-    bool actual_mma) {
+    bool actual_mma, bool actual_full_mma = false) {
     constexpr int heads = 24, dim = 256, kv_heads = 2, page_tokens = 64;
     const int tokens = indices.ne[0];
     if (cache.key_pages.dtype != DType::FP8_E4M3FN || tokens < 512)
@@ -44,7 +44,7 @@ inline void compare_real_qsa_scores(const Tensor& query, const Tensor& indices,
     DeviceBuffer alternate(elements * 2);
     Tensor other(alternate.p, DType::BF16, {dim, heads, tokens});
     flash_next_qsa_volta_attend_launch(query, indices, table_row, selected, counts,
-                                      cache, other, stream, !actual_mma);
+                                      cache, other, stream, actual_full_mma ? false : !actual_mma);
     std::vector<std::uint16_t> q(elements), a(elements), b(elements);
     std::vector<int> positions(tokens), selected_counts(tokens), blocks(tokens * 512);
     std::vector<int> table(cache.block_tables.ne[0]);
@@ -63,8 +63,8 @@ inline void compare_real_qsa_scores(const Tensor& query, const Tensor& indices,
     copy(table.data(), static_cast<const int*>(cache.block_tables.data) +
          table_row * table.size(), table.size() * 4);
     CUDA_CHECK(cudaStreamSynchronize(stream));
-    const auto& simt = actual_mma ? b : a;
-    const auto& mma = actual_mma ? a : b;
+    const auto& simt = (actual_mma || actual_full_mma) ? b : a;
+    const auto& mma = (actual_mma || actual_full_mma) ? a : b;
     double error = 0, norm = 0, max_abs = 0;
     std::size_t mismatches = 0;
     for (std::size_t i = 0; i < elements; ++i) {
@@ -146,10 +146,10 @@ inline void compare_real_qsa_scores(const Tensor& query, const Tensor& indices,
                         pointwise[0] <= 1 && pointwise[1] <= 1;
     std::fprintf(stderr,
         "{\"kind\":\"qsa_real_comparison\",\"tokens\":%d,\"sample_queries\":3,\"sample_heads\":24,"
-        "\"elements\":%zu,\"bit_mismatches\":%zu,\"max_absolute_difference\":%.9g,"
+        "\"full_mma\":%s,\"elements\":%zu,\"bit_mismatches\":%zu,\"max_absolute_difference\":%.9g,"
         "\"relative_l2_difference\":%.9g,\"simt_fp64_relative_l2\":%.9g,\"mma_fp64_relative_l2\":%.9g,"
         "\"simt_pointwise_ratio\":%.9g,\"mma_pointwise_ratio\":%.9g,\"sample_oracle_pass\":%s}\n",
-        tokens, elements, mismatches, max_abs, std::sqrt(error/std::max(norm, 1e-300)),
+        tokens, actual_full_mma ? "true" : "false", elements, mismatches, max_abs, std::sqrt(error/std::max(norm, 1e-300)),
         relative[0], relative[1], pointwise[0], pointwise[1], passes ? "true" : "false");
     if (!passes) throw std::runtime_error("real QSA sampled independent FP64 threshold failed");
 }

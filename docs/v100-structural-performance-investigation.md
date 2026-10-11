@@ -1714,5 +1714,81 @@ in `architecture-breakdown-report.json`. This is attribution, not a speedup clai
 Local verification:60 telemetry tests, including byte-window ownership, all48
 prefill layers, verification exclusion, route conservation and installed timer
 parsing; Python compilation/help, workflow YAML/bash syntax and diff checks pass.
-CUDA build and live attribution are pending the target runner. No arithmetic,
-model asset or production-default change is introduced by the audit.
+CUDA build and live attribution passed in run38149949134. No arithmetic,
+model asset or production-default change was introduced by the audit.
+
+
+### Completed source-directed attribution and full QSA MMA candidate
+
+Run [38149949134](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38149949134)
+passed all operator/lifetime/cache gates and completed one clean and one diagnostic
+fresh server per engine, each cold +4 warmups + measured7111/128/0reuse. This is
+attribution, not a repeated performance-win comparison. Clean measured HTTP was
+27.9829s NInfer versus10.5498s Strata; native prefill/decode20.4618/6.8464 versus
+7.8014/2.6848s. NInfer diagnostic retained exact corresponding output/usage/MTP at
+all six ordinals. Measured diagnostic overhead was-.1922s HTTP/-.0726s prefill;
+Strata+.3247s HTTP. Fresh-server noise remains, but this collection did not repeat
+the earlier7.5s measured prefill perturbation.
+
+| Measured diagnostic component | NInfer CUDA stage seconds | Strata native timer seconds |
+|---|---:|---:|
+| Main QSA attention |6.2250|.451|
+| QSA indexer / select |.1783|.049 select; indexer rounds to0|
+| QSA projection |1.2354|.257|
+| Hyper prepare attention + MLP |2.8587|.325 hc read|
+| Shared gate/up + down/merge |1.0627|.088 router + shared, differently charged|
+| PLE |.6503|.012|
+| GDN projection/control/output components |1.1680|separate native components recorded in artifact|
+| Final norm/head including final hyper mix |1.3597|not separately matched|
+
+These phase boundaries and representations differ. CUDA stage intervals include
+host gaps/dependencies; native timer rounding/coverage differs. They identify
+architecture leads rather than exact matched-quality causal shares. Installed
+Strata timer GPU timeline6.584s versus wall6.868s is separate from HTTP/native
+prompt8.1418s in that diagnostic. Compiled MMQ symbols are present, which proves
+build inclusion only, not active sm70 dispatch.
+
+NInfer prefill host spans: rendezvous14.1044s (includes waiting for earlier GPU
+work/shared/D2H), grouping.4283s, stream submission4.1269s, resident submission
+.1713s, CPU join.000385s, cache join.0572s. They overlap CUDA intervals and must not
+be summed. Routes conserve3,413,280=691,482resident+2,686,869stream+34,929CPU.
+Verification CPU join is3.2084s across2,976layer calls, with17,943CPU routes; it
+remains a separate decode lead. Effective residency/configuration differs:
+NInfer4,896 seeded compact experts/full262K FP8 KV/graphs off versus Strata8,082
+native experts/1,144 borrowed prefill slots/32K resident KV/verify graphs.
+
+The source audit resolves the main QSA algorithm difference. NInfer's existing
+Volta score-MMA candidate tensorizes QK but leaves PV as scalar FP32 loops, and
+splits12 grouped heads into8+4. Strata's `qsa_prompt_attn.cu` tensorizes both QK
+and PV, stages32 K/V cells once for12 heads and splits power-of-two-scaled query
+and probability operands into FP16 hi+lo with FP32 accumulation/online softmax.
+This is a substantive work reduction to test before another expert schedule change.
+
+`NINFER_V100_QSA_FULL_MMA=1` introduces an opt-in target-private Volta adaptation
+with the Strata MIT notice preserved. It consumes NInfer's represented BF16 Q,
+raw unscaled E4M3 KV, selected4-token blocks/causal tail and BF16 output; it does
+not adopt Strata INT8 scales or selection. Finite E4M3 K/V are exact FP16 operands.
+Power-of-two Q scaling, FP16 hi+lo Q/probabilities, FP32 MMA accumulation and online
+normalization cover both QK and PV. The four unused padded heads and duplicate
+Volta computations remain inside shared-memory bounds. Shared scratch is per CTA,
+not a new persistent KV allocation. Only FP8 prompt batches>=512 opt in; BF16 and
+smaller serving work retain their existing routes. All arithmetic defaults stay off.
+
+The existing independent full FP64 attention oracle now also checks this route,
+including causal tails, noncontiguous pages, all finite FP8 code magnitudes,
+full512 selected blocks, dense2048-cell context and sparse8191-position context,
+large queries and batches1..8192. Single/batched output guards are checked.
+Public rounded BF16 relativeL2<=.001 and pointwise criteria are unchanged.
+`--qsa-full-mma-race` additionally checks all12 real7111-token prompt layers,
+all24 heads at beginning/middle/end against the independent complete FP64 formula
+before clean serving timing. A failed operator or real-layer gate stops timing.
+On admission, three rotated fresh servers per arm compare late-half score MMA,
+full QK/PV MMA and unchanged installed native Strata with cold+4warmups+measured.
+Best pinned-source/102-slot/8192-chunk/full262K-FP8/dense+pair/MTP2 settings are
+shared by both NInfer arms. Outputs/MTP can differ across arithmetic arms; all
+actual request/native work, residency and memory are retained. This does not
+close historical full-model drift or establish matched-quality equivalence.
+
+Local61 telemetry tests, Python compilation/help, YAML/bash syntax and diff
+checks pass. CUDA build, independent kernel/real-layer qualification and practical
+performance are pending the target V100 run; no gain is claimed for this candidate.

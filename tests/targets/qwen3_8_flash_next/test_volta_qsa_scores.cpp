@@ -37,20 +37,21 @@ int main() {
                 throw std::runtime_error("independent BF16 reference rounding mismatch");
         std::cout<<"PASS: independent reference FP8 decoder and BF16 rounding\n";
         DeviceContext device;
-        constexpr int P = 33, H = 24, D = 256, T = 6;
-        const std::vector<int> positions{0, 2, 30, 254, 510, 2054};
-        const std::vector<int> counts{0, 0, 7, 63, 127, 257};
+        constexpr int P = 129, H = 24, D = 256, T = 6;
+        const std::vector<int> positions{0, 2, 30, 254, 2047, 8190};
+        const std::vector<int> counts{0, 0, 7, 63, 512, 512};
         std::vector<int> table(P), blocks(T * 512);
         for (int p = 0; p < P; ++p) table[p] = (p * 13) % P;
         for (int t = 0; t < T; ++t)
-            for (int b = 0; b < counts[t]; ++b) blocks[t * 512 + b] = t == T-1 ? b * 2 : b;
+            for (int b = 0; b < counts[t]; ++b) blocks[t * 512 + b] = t == T-1 ? b * 3 : b;
         std::mt19937 rng(317);
         std::uniform_real_distribution<float> random(-0.6F, 0.6F);
         std::vector<std::uint16_t> q(T * H * D), keys(P * 2 * 64 * D), values(keys.size());
         for (auto& x : q) x = bf(random(rng));
         for (auto& x : keys) x = bf(random(rng));
         for (auto& x : values) x = bf(random(rng));
-        DeviceBuffer dq(q.size()*2), di(T*4), dc(T*4), db(blocks.size()*4), dt(P*4), out(q.size()*2);
+        DeviceBuffer dq(q.size()*2), di(T*4), dc(T*4), db(blocks.size()*4), dt(P*4), out(q.size()*2+128);
+        std::vector<std::uint8_t> guard(out.bytes,0xa5);out.copy_from_host(guard.data(),guard.size());
         di.copy_from_host(positions.data(), T*4); dc.copy_from_host(counts.data(), T*4);
         db.copy_from_host(blocks.data(), blocks.size()*4); dt.copy_from_host(table.data(), P*4);
         Tensor query(dq.p,DType::BF16,{D,H,T}), indices(di.p,DType::I32,{T});
@@ -58,12 +59,11 @@ int main() {
         Tensor attended(out.p,DType::BF16,{D,H,T});
         for (bool fp8 : {false,true}) {
             std::vector<std::uint8_t> k8(keys.size()), v8(keys.size());
-            const std::uint8_t codes[]{0x20,0x28,0x30,0xa0,0xa8,0xb0};
-            const float decoded[]{0.125F,0.25F,0.5F,-0.125F,-0.25F,-0.5F};
             std::vector<float> kf(keys.size()), vf(keys.size());
             for (std::size_t i=0;i<keys.size();++i) {
-                const int a=rng()%6,b=rng()%6; k8[i]=codes[a];v8[i]=codes[b];
-                kf[i]=fp8?decoded[a]:value(keys[i]);vf[i]=fp8?decoded[b]:value(values[i]);
+                int a=rng()%256,b=rng()%256; if((a&127)==127)a=0; if((b&127)==127)b=0;
+                k8[i]=a;v8[i]=b;
+                kf[i]=fp8?qsa_reference_fp8(a):value(keys[i]);vf[i]=fp8?qsa_reference_fp8(b):value(values[i]);
             }
             DeviceBuffer dk(keys.size()*(fp8?1:2)),dv(values.size()*(fp8?1:2));
             dk.copy_from_host(fp8?static_cast<void*>(k8.data()):static_cast<void*>(keys.data()),dk.bytes);
@@ -103,16 +103,20 @@ int main() {
                     double sum=0;for(auto& score:scores){score=std::exp(score-maximum);sum+=score;}
                     for(std::size_t c=0;c<candidates.size();++c){const int pos=candidates[c];const auto base=((table[pos/64]*2+h/12)*64+pos%64)*D;for(int j=0;j<D;++j)reference[(t*H+h)*D+j]+=scores[c]/sum*vf[base+j];}
                 }
-                for(bool mma:{false,true}) {
-                    flash_next_qsa_volta_attend_launch(query,indices,0,selected,count,cache,attended,device.stream,mma);
-                    device.synchronize();std::vector<std::uint16_t> actual(q.size());out.copy_to_host(actual.data(),out.bytes);
+                for(int route=0;route<(fp8?3:2);++route) {
+                    const bool mma=route==1,full_mma=route==2;
+                    flash_next_qsa_volta_attend_launch(query,indices,0,selected,count,cache,attended,device.stream,mma,full_mma);
+                    device.synchronize();std::vector<std::uint16_t> actual(q.size());out.copy_to_host(actual.data(),actual.size()*2);
+                    std::vector<std::uint8_t> guarded(out.bytes);out.copy_to_host(guarded.data(),out.bytes);
+                    if(!std::all_of(guarded.begin()+q.size()*2,guarded.end(),[](auto x){return x==0xa5;}))
+                        throw std::runtime_error("QSA output guard overwritten");
                     double max_reference=0;
                     for (double x : reference) max_reference=std::max(max_reference,std::abs(x));
                     double squared=0,norm=0;for(std::size_t i=0;i<actual.size();++i){const double expected=value(bf(float(reference[i])));const double diff=value(actual[i])-expected;if(!std::isfinite(value(actual[i])))throw std::runtime_error("nonfinite attended value");if(std::abs(diff)>1e-3*max_reference+1e-2*std::abs(expected))
                         throw std::runtime_error("QSA independent pointwise threshold failed");
                     squared+=diff*diff;norm+=expected*expected;}
                     const double relative=std::sqrt(squared/norm);
-                    std::cout<<"FP64 oracle fp8="<<fp8<<" overflow="<<overflow<<" mma="<<mma<<" relative_l2="<<relative<<'\n';
+                    std::cout<<"FP64 oracle fp8="<<fp8<<" overflow="<<overflow<<" mma="<<mma<<" full_mma="<<full_mma<<" relative_l2="<<relative<<'\n';
                     if(relative>1e-3)throw std::runtime_error("QSA independent oracle threshold failed");
                 }
                 if (!overflow) {
@@ -126,23 +130,28 @@ int main() {
                             batch_positions[t]=positions[source];batch_counts[t]=counts[source];
                             std::copy_n(blocks.data()+source*512,512,batch_blocks.data()+t*512);
                         }
-                        DeviceBuffer bq(batch_q.size()*2),bo(batch_q.size()*2),bi(batch*4),bc(batch*4),bs(batch_blocks.size()*4);
+                        DeviceBuffer bq(batch_q.size()*2),bo(batch_q.size()*2+128),bi(batch*4),bc(batch*4),bs(batch_blocks.size()*4);
+                        std::vector<std::uint8_t> batch_guard(bo.bytes,0xa5);bo.copy_from_host(batch_guard.data(),batch_guard.size());
                         bq.copy_from_host(batch_q.data(),bq.bytes);bi.copy_from_host(batch_positions.data(),bi.bytes);
                         bc.copy_from_host(batch_counts.data(),bc.bytes);bs.copy_from_host(batch_blocks.data(),bs.bytes);
                         Tensor tq(bq.p,DType::BF16,{D,H,batch}),to(bo.p,DType::BF16,{D,H,batch});
                         Tensor ti(bi.p,DType::I32,{batch}),tc(bc.p,DType::I32,{batch}),ts(bs.p,DType::I32,{512,batch});
                         const int iterations=batch<1024?20:5;
-                        for(bool mma:{false,true}) {
-                            for(int i=0;i<3;++i)flash_next_qsa_volta_attend_launch(tq,ti,0,ts,tc,cache,to,device.stream,mma);
+                        for(int route=0;route<(fp8?3:2);++route) {
+                    const bool mma=route==1,full_mma=route==2;
+                            for(int i=0;i<3;++i)flash_next_qsa_volta_attend_launch(tq,ti,0,ts,tc,cache,to,device.stream,mma,full_mma);
                             CUDA_CHECK(cudaEventRecord(a,device.stream));
-                            for(int i=0;i<iterations;++i)flash_next_qsa_volta_attend_launch(tq,ti,0,ts,tc,cache,to,device.stream,mma);
+                            for(int i=0;i<iterations;++i)flash_next_qsa_volta_attend_launch(tq,ti,0,ts,tc,cache,to,device.stream,mma,full_mma);
                             CUDA_CHECK(cudaEventRecord(b,device.stream));CUDA_CHECK(cudaEventSynchronize(b));
                             float ms;CUDA_CHECK(cudaEventElapsedTime(&ms,a,b));
-                            std::cout<<"Score-path timing fp8="<<fp8<<" T="<<batch<<" mma="<<mma<<" us="<<ms*1000/iterations<<'\n';
+                            std::cout<<"Score-path timing fp8="<<fp8<<" T="<<batch<<" mma="<<mma<<" full_mma="<<full_mma<<" us="<<ms*1000/iterations<<'\n';
                             // Every represented input repeats an independently computed FP64
                             // case. Check ALL rows, including the production crossover sizes.
                             std::vector<std::uint16_t> batch_actual(batch_q.size());
-                            bo.copy_to_host(batch_actual.data(),bo.bytes);
+                            bo.copy_to_host(batch_actual.data(),batch_actual.size()*2);
+                            bo.copy_to_host(batch_guard.data(),bo.bytes);
+                            if(!std::all_of(batch_guard.begin()+batch_q.size()*2,batch_guard.end(),[](auto x){return x==0xa5;}))
+                                throw std::runtime_error("batched QSA output guard overwritten");
                             double squared=0,norm=0;
                             for (std::size_t i=0;i<batch_actual.size();++i) {
                                 const double expected=value(bf(float(reference[i%reference.size()])));
@@ -159,7 +168,7 @@ int main() {
                                     throw std::runtime_error("batched QSA independent pointwise threshold failed");
                             }
                             const double relative=std::sqrt(squared/norm);
-                            std::cout<<"Batch FP64 oracle fp8="<<fp8<<" T="<<batch<<" mma="<<mma<<" relative_l2="<<relative<<'\n';
+                            std::cout<<"Batch FP64 oracle fp8="<<fp8<<" T="<<batch<<" mma="<<mma<<" full_mma="<<full_mma<<" relative_l2="<<relative<<'\n';
                             if(relative>1e-3)throw std::runtime_error("batched QSA independent oracle threshold failed");
                         }
                     }

@@ -1,6 +1,6 @@
 name: V100 Structural Engine Comparison
-# Source audit: separate host-backed shared/routed MoE and installed Strata timers.
-# Attribution only; no new arithmetic candidate or default promotion.
+# Source-directed full QK/PV Volta MMA: independent oracles before a serving race.
+# Explicit opt-in candidate; no arithmetic default promotion.
 on:
   workflow_dispatch:
   push:
@@ -32,7 +32,7 @@ jobs:
     concurrency:
       group: v100-sv0-hardware
       cancel-in-progress: false
-    timeout-minutes: 90
+    timeout-minutes: 180
     env:
       CUDA_VISIBLE_DEVICES: '0'
       NINFER_WEIGHTS: /models/qwen3-8b-flash-next
@@ -131,11 +131,11 @@ jobs:
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/cache-join-oracle.log"
           cp build-structural-comparison/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
-      - name: Attribute whole serving paths using source-directed lightweight timers
+      - name: Qualify real-layer QSA and compare full QK/PV MMA with native Strata
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --architecture-breakdown \
+          python3 tools/telemetry/structural_v100.py --qsa-full-mma-race \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \
