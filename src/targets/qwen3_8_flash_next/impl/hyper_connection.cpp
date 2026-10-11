@@ -48,9 +48,22 @@ void validate_common(const Tensor& hidden, const Tensor& block_input,
         !scratch.normalized.is_contiguous() || !scratch.low_rank.is_contiguous() ||
         !scratch.injection.is_contiguous() || !scratch.up_gemm.is_contiguous() ||
         !scratch.down_split.is_contiguous() ||
+#if defined(NINFER_VOLTA_BUILD)
+        scratch.mixed_fp32.dtype != DType::FP32 || scratch.mixed_fp32.ne[0] != 2'560 ||
+        scratch.mixed_fp32.ne[1] != tokens || !scratch.mixed_fp32.is_contiguous() ||
+        scratch.projection_weight_fp16.dtype != DType::FP16 ||
+        scratch.projection_weight_fp16.ne[0] != 10'240 ||
+        scratch.projection_weight_fp16.ne[1] != 320 ||
+        !scratch.projection_weight_fp16.is_contiguous() ||
+#endif
         !aligned_to(scratch.normalized.data, 16) ||
         !aligned_to(scratch.low_rank.data, 16) || !aligned_to(scratch.injection.data, 16) ||
-        !aligned_to(scratch.up_gemm.data, 16) || !aligned_to(scratch.down_split.data, 16)) {
+        !aligned_to(scratch.up_gemm.data, 16) || !aligned_to(scratch.down_split.data, 16)
+#if defined(NINFER_VOLTA_BUILD)
+        || !aligned_to(scratch.mixed_fp32.data, 16) ||
+        !aligned_to(scratch.projection_weight_fp16.data, 16)
+#endif
+        ) {
         throw std::invalid_argument("Flash-Next hyper connection received invalid exact tensors");
     }
 }

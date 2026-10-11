@@ -1790,5 +1790,51 @@ actual request/native work, residency and memory are retained. This does not
 close historical full-model drift or establish matched-quality equivalence.
 
 Local61 telemetry tests, Python compilation/help, YAML/bash syntax and diff
-checks pass. CUDA build, independent kernel/real-layer qualification and practical
-performance are pending the target V100 run; no gain is claimed for this candidate.
+checks passed before the target run.
+
+### Full QK/PV MMA qualifies but leaves a structural hyper projection gap
+
+[Run 38152208578](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38152208578)
+passed all synthetic codec/QSA/dense/expert/lifetime/cache gates and the real-layer
+admission. All12 real prompt QSA layers used the full route; every sampled
+beginning/middle/end query across24 heads passed the independent complete FP64
+attention oracle. The largest sampled relative L2 error was approximately5.0e-5,
+well below the unchanged1e-3 public BF16 threshold.
+
+Across three rotated fresh servers per arm, full QK/PV MMA reduced median warmed
+HTTP from27.4564 to26.8416seconds (-2.24%) and median native prefill from20.4074
+to19.4308seconds (-4.79%). Decode changed6.8046 to6.3910seconds, but outputs and
+MTP work changed from62rounds/123drafts/65accepts to58/116/69, so no isolated
+decode claim follows. Both NInfer arms retained102 slots/layer,4,896 seeded
+experts,13,537,714,176 cache bytes and29.9763GiB sampled peak.
+
+Installed native Strata measured11.0485seconds HTTP,8.3619seconds prompt and
+2.6665seconds predicted work in the same campaign. Thus the admitted NInfer route
+remains2.43x slower end to end and about2.32x slower in prefill. Keep
+`NINFER_V100_QSA_FULL_MMA=1` opt-in/default off; this result is practical rather
+than matched-quality because weights, KV representation and speculative arithmetic
+differ.
+
+The next implementation follows the other large measured source difference rather
+than another isolated GEMM guess. NInfer's Volta hyper prefill kernel divides the
+10,240x320 down/up projections into eight-token tiles. Every tile rereads and
+BF16-to-FP16 converts the complete6.25MiB matrix K-slices and executes two warp
+barriers per K=4 step. At7,111 tokens that repeats matrix staging about889 times.
+Strata instead converts each BF16 matrix once and submits a large FP16-input,
+FP32-accumulating cuBLAS projection.
+
+`NINFER_V100_HYPER_CUBLAS=1` is a default-off Volta candidate with that topology.
+It converts each down/up matrix once into one reused6.25MiB FP16 workspace, converts
+the represented BF16 activations once, and uses cuBLAS FP16 tensor-core inputs with
+FP32 output/accumulation. The down epilogue preserves FP32 scaling/SiLU then BF16;
+the up projection is issued one2,560-row stream at a time, rounds each FP32 result
+to the existing BF16 stage boundary, and performs the original ordered four-stream
+sigmoid/average into the existing FP32 mixed buffer. It adds no model conversion
+or persistent per-layer repack.
+
+The existing independent full hyper formula must pass with the candidate selected.
+A same-process target-GPU admission additionally compares the old tiled and new
+cuBLAS routes at the actual7,111-token geometry, requiring at least20% median
+operator improvement before any serving timing. Only an admitted candidate proceeds
+to three rotated fresh-server baseline/candidate/installed-Strata arms on the
+qualified full-QSA, pinned-source,8192-chunk,FP8-KV,262K-allocation profile.

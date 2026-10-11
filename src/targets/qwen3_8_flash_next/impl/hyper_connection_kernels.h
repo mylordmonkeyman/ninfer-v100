@@ -17,9 +17,19 @@ namespace ninfer::targets::qwen3_8_flash_next::detail {
 // The prefill route (T > 8) ignores the selector.
 enum class FlashNextHyperDecodeRoute : std::uint8_t { Fused, Legacy };
 
+#if defined(NINFER_VOLTA_BUILD)
+// Large-token projection backend. The default tiled route is preserved; the
+// cuBLAS route is an explicitly qualified V100 candidate selected by
+// NINFER_V100_HYPER_CUBLAS=1.
+enum class FlashNextHyperPrefillRoute : std::uint8_t { TiledMma, Cublas };
+#endif
+
 // Process-wide route, resolved once on first use and cached:
 // NINFER_FLASH_NEXT_HYPER_LEGACY=1 selects Legacy, anything else selects Fused.
 [[nodiscard]] FlashNextHyperDecodeRoute flash_next_hyper_decode_route();
+#if defined(NINFER_VOLTA_BUILD)
+[[nodiscard]] FlashNextHyperPrefillRoute flash_next_hyper_prefill_route();
+#endif
 
 // Production entry points: route = flash_next_hyper_decode_route().
 void flash_next_hyper_prepare_launch(const Tensor& hidden, const HyperConnectionWeights& weights,
@@ -54,6 +64,18 @@ void flash_next_hyper_prepare_route_launch(const Tensor& hidden,
 void flash_next_hyper_mix_route_launch(const Tensor& hidden, const HyperMixerWeights& weights,
                                        FlashNextHyperWorkspace& scratch, Tensor& block_input,
                                        cudaStream_t stream, FlashNextHyperDecodeRoute route);
+#if defined(NINFER_VOLTA_BUILD)
+// Route-explicit prefill forms let the independent operator fixture compare both
+// backends in one process. They require tokens > 8.
+void flash_next_hyper_prepare_prefill_route_launch(
+    const Tensor& hidden, const HyperConnectionWeights& weights,
+    FlashNextHyperWorkspace& scratch, Tensor& block_input, cudaStream_t stream,
+    FlashNextHyperPrefillRoute route);
+void flash_next_hyper_mix_prefill_route_launch(
+    const Tensor& hidden, const HyperMixerWeights& weights,
+    FlashNextHyperWorkspace& scratch, Tensor& block_input, cudaStream_t stream,
+    FlashNextHyperPrefillRoute route);
+#endif
 
 void flash_next_hyper_inject_launch(const Tensor& block_output, const Tensor& injection,
                                     Tensor& hidden, cudaStream_t stream);

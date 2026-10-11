@@ -14,12 +14,16 @@
 
 #include <cuda_bf16.h>
 #if defined(NINFER_VOLTA_BUILD)
+#include <cublas_v2.h>
 #include <cuda_fp16.h>
 #endif
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <stdexcept>
+#include <string>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 namespace {
@@ -1113,6 +1117,145 @@ void launch_up_prefill_dispatch(const __nv_bfloat16* low_rank, const __nv_bfloat
         low_rank, weight, up_gemm, tokens, stream);
 }
 
+void hyper_blas_check(cublasStatus_t status) {
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        throw std::runtime_error("Flash-Next hyper cuBLAS status " +
+                                 std::to_string(static_cast<int>(status)));
+    }
+}
+
+struct HyperCublasHandle {
+    cublasHandle_t handle = nullptr;
+
+    HyperCublasHandle() {
+        hyper_blas_check(cublasCreate(&handle));
+        try {
+            hyper_blas_check(cublasSetMathMode(
+                handle, static_cast<cublasMath_t>(
+                            CUBLAS_TENSOR_OP_MATH |
+                            CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION)));
+        } catch (...) {
+            cublasDestroy(handle);
+            handle = nullptr;
+            throw;
+        }
+    }
+
+    ~HyperCublasHandle() {
+        if (handle != nullptr) { (void)cublasDestroy(handle); }
+    }
+};
+
+HyperCublasHandle& hyper_cublas_handle(cudaStream_t stream) {
+    // The target owns one GPU. Per-thread ownership avoids sharing mutable cuBLAS
+    // stream state while amortizing handle creation across all 96 prompt projections.
+    static thread_local HyperCublasHandle state;
+    hyper_blas_check(cublasSetStream(state.handle, stream));
+    return state;
+}
+
+__global__ void hyper_bf16_to_fp16_kernel(const __nv_bfloat16* input, __half* output,
+                                          std::int64_t elements) {
+    const std::int64_t index = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index < elements) { output[index] = __float2half_rn(__bfloat162float(input[index])); }
+}
+
+void stage_hyper_bf16(const __nv_bfloat16* input, __half* output,
+                      std::int64_t elements, cudaStream_t stream) {
+    constexpr int kThreads = 256;
+    hyper_bf16_to_fp16_kernel<<<static_cast<unsigned>((elements + kThreads - 1) / kThreads),
+                                kThreads, 0, stream>>>(input, output, elements);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void hyper_cublas_projection(const __half* weight, const __half* input, float* output,
+                             int rows, int columns, int tokens, cudaStream_t stream) {
+    auto& state = hyper_cublas_handle(stream);
+    const float alpha = 1.0F;
+    const float beta  = 0.0F;
+    // Row-major W[rows,columns] is column-major W^T[columns,rows]. Input and output
+    // token-major buffers are column-major [columns,tokens] and [rows,tokens].
+    hyper_blas_check(cublasGemmEx(
+        state.handle, CUBLAS_OP_T, CUBLAS_OP_N, rows, tokens, columns, &alpha,
+        weight, CUDA_R_16F, columns, input, CUDA_R_16F, columns, &beta,
+        output, CUDA_R_32F, rows, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+}
+
+__global__ void hyper_down_cublas_epilogue_kernel(const float* input,
+                                                   __nv_bfloat16* low_rank,
+                                                   std::int64_t elements) {
+    const std::int64_t index = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index < elements) {
+        low_rank[index] = __float2bfloat16_rn(ops::silu(input[index] * 0.25F));
+    }
+}
+
+__global__ void hyper_up_cublas_accumulate_kernel(
+    const float* projection, const __nv_bfloat16* normalized, float* accumulator,
+    __nv_bfloat16* block_input, int stream_index, std::int64_t elements) {
+    const std::int64_t index = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= elements) { return; }
+    const std::int64_t token = index / kHidden;
+    const int row = static_cast<int>(index - token * kHidden);
+    // Preserve the public stage boundary: the existing route writes BF16 up_gemm
+    // before sigmoid/reduction, so round each cuBLAS projection to BF16 here too.
+    const float projected = __bfloat162float(__float2bfloat16_rn(projection[index]));
+    const float value = ops::sigmoid(projected) *
+                        __bfloat162float(normalized[token * kConcat +
+                                                    stream_index * kHidden + row]);
+    float sum = stream_index == 0 ? value : accumulator[index] + value;
+    if (stream_index == kStreams - 1) {
+        sum *= 0.25F;
+        block_input[index] = __float2bfloat16_rn(sum);
+    }
+    accumulator[index] = sum;
+}
+
+void launch_down_prefill_cublas(const __nv_bfloat16* x, const __nv_bfloat16* weight,
+                                FlashNextHyperWorkspace& scratch, int tokens,
+                                cudaStream_t stream) {
+    auto* staged_weight = static_cast<__half*>(scratch.projection_weight_fp16.data);
+    auto* staged_input = reinterpret_cast<__half*>(scratch.up_gemm.data);
+    auto* output = static_cast<float*>(scratch.down_split.data);
+    stage_hyper_bf16(weight, staged_weight,
+                     static_cast<std::int64_t>(kLowRank) * kConcat, stream);
+    stage_hyper_bf16(x, staged_input, static_cast<std::int64_t>(tokens) * kConcat, stream);
+    hyper_cublas_projection(staged_weight, staged_input, output,
+                            kLowRank, kConcat, tokens, stream);
+    constexpr int kThreads = 256;
+    const std::int64_t elements = static_cast<std::int64_t>(tokens) * kLowRank;
+    hyper_down_cublas_epilogue_kernel
+        <<<static_cast<unsigned>((elements + kThreads - 1) / kThreads), kThreads, 0, stream>>>(
+            output, static_cast<__nv_bfloat16*>(scratch.low_rank.data), elements);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_up_prefill_cublas(const __nv_bfloat16* low_rank,
+                              const __nv_bfloat16* weight,
+                              const __nv_bfloat16* normalized,
+                              FlashNextHyperWorkspace& scratch, Tensor& block_input,
+                              int tokens, cudaStream_t stream) {
+    auto* staged_weight = static_cast<__half*>(scratch.projection_weight_fp16.data);
+    auto* staged_input = reinterpret_cast<__half*>(scratch.down_split.data);
+    auto* output = reinterpret_cast<float*>(scratch.up_gemm.data);
+    auto* accumulator = static_cast<float*>(scratch.mixed_fp32.data);
+    stage_hyper_bf16(weight, staged_weight,
+                     static_cast<std::int64_t>(kLowRank) * kConcat, stream);
+    stage_hyper_bf16(low_rank, staged_input,
+                     static_cast<std::int64_t>(tokens) * kLowRank, stream);
+    constexpr int kThreads = 256;
+    const std::int64_t elements = static_cast<std::int64_t>(tokens) * kHidden;
+    for (int stream_index = 0; stream_index < kStreams; ++stream_index) {
+        hyper_cublas_projection(staged_weight + stream_index * kHidden * kLowRank,
+                                staged_input, output, kHidden, kLowRank, tokens, stream);
+        hyper_up_cublas_accumulate_kernel
+            <<<static_cast<unsigned>((elements + kThreads - 1) / kThreads), kThreads, 0,
+               stream>>>(output, normalized, accumulator,
+                         static_cast<__nv_bfloat16*>(block_input.data), stream_index, elements);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
 #else
 
 // Blackwell prefill retains its measured BF16 tensor-core schedules.
@@ -1213,6 +1356,60 @@ void launch_decode_norm_low_rank(FlashNextHyperDecodeRoute route, const __nv_bfl
     CUDA_CHECK(cudaGetLastError());
 }
 
+#if defined(NINFER_VOLTA_BUILD)
+void launch_volta_prefill_body(const Tensor& hidden, const Tensor& norm,
+                               const Weight& down_weight, const Weight& up_weight,
+                               const Weight* inject_weight, FlashNextHyperWorkspace& scratch,
+                               Tensor& block_input, cudaStream_t stream,
+                               FlashNextHyperPrefillRoute route) {
+    const int tokens = static_cast<int>(hidden.ne[1]);
+    group_norm_prefill_kernel<<<tokens, 256, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(hidden.data),
+        static_cast<const __nv_bfloat16*>(norm.data),
+        static_cast<__nv_bfloat16*>(scratch.normalized.data), tokens);
+    CUDA_CHECK(cudaGetLastError());
+
+    if (route == FlashNextHyperPrefillRoute::Cublas) {
+        launch_down_prefill_cublas(
+            static_cast<const __nv_bfloat16*>(scratch.normalized.data),
+            static_cast<const __nv_bfloat16*>(down_weight.qdata), scratch, tokens, stream);
+    } else {
+        launch_down_prefill_dispatch(
+            static_cast<const __nv_bfloat16*>(scratch.normalized.data),
+            static_cast<const __nv_bfloat16*>(down_weight.qdata),
+            static_cast<float*>(scratch.down_split.data),
+            static_cast<__nv_bfloat16*>(scratch.low_rank.data), tokens, stream);
+    }
+
+    if (inject_weight != nullptr) {
+        injection_gate_prefill_kernel<<<tokens, 128, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.normalized.data),
+            static_cast<const __nv_bfloat16*>(inject_weight->qdata),
+            static_cast<float*>(scratch.injection.data), tokens);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    if (route == FlashNextHyperPrefillRoute::Cublas) {
+        launch_up_prefill_cublas(
+            static_cast<const __nv_bfloat16*>(scratch.low_rank.data),
+            static_cast<const __nv_bfloat16*>(up_weight.qdata),
+            static_cast<const __nv_bfloat16*>(scratch.normalized.data),
+            scratch, block_input, tokens, stream);
+    } else {
+        launch_up_prefill_dispatch(
+            static_cast<const __nv_bfloat16*>(scratch.low_rank.data),
+            static_cast<const __nv_bfloat16*>(up_weight.qdata),
+            static_cast<__nv_bfloat16*>(scratch.up_gemm.data), tokens, stream);
+        up_reduction_vectorized_kernel<<<tokens, 256, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scratch.up_gemm.data),
+            static_cast<const __nv_bfloat16*>(scratch.normalized.data),
+            static_cast<__nv_bfloat16*>(block_input.data),
+            static_cast<float*>(scratch.mixed_fp32.data), tokens);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+#endif
+
 } // namespace
 
 FlashNextHyperDecodeRoute flash_next_hyper_decode_route() {
@@ -1225,6 +1422,24 @@ FlashNextHyperDecodeRoute flash_next_hyper_decode_route() {
     }();
     return route;
 }
+
+#if defined(NINFER_VOLTA_BUILD)
+FlashNextHyperPrefillRoute flash_next_hyper_prefill_route() {
+    static const FlashNextHyperPrefillRoute route = [] {
+        const char* env = std::getenv("NINFER_V100_HYPER_CUBLAS");
+        if (env == nullptr || env[0] == '\0' || (env[0] == '0' && env[1] == '\0')) {
+            return FlashNextHyperPrefillRoute::TiledMma;
+        }
+        if (env[0] != '1' || env[1] != '\0') {
+            throw std::invalid_argument("NINFER_V100_HYPER_CUBLAS must be 0 or 1");
+        }
+        std::fprintf(stderr,
+                     "Flash-Next V100 hyper prefill backend: staged FP16 cuBLAS\n");
+        return FlashNextHyperPrefillRoute::Cublas;
+    }();
+    return route;
+}
+#endif
 
 void flash_next_hyper_prepare_launch(const Tensor& hidden, const HyperConnectionWeights& weights,
                                      FlashNextHyperWorkspace& scratch, Tensor& block_input,
@@ -1382,6 +1597,11 @@ void flash_next_hyper_prepare_route_launch(const Tensor& hidden,
             tokens);
         CUDA_CHECK(cudaGetLastError());
     } else {
+#if defined(NINFER_VOLTA_BUILD)
+        launch_volta_prefill_body(hidden, weights.norm, weights.input_mix_down,
+                                  weights.input_mix_up, &weights.block_inject, scratch,
+                                  block_input, stream, flash_next_hyper_prefill_route());
+#else
         // Prefill route (T >= 16) - Weight-Stationary & Tensor Core Accelerated
         // 1. Group Norm
         group_norm_prefill_kernel<<<tokens, 256, 0, stream>>>(
@@ -1423,6 +1643,7 @@ void flash_next_hyper_prepare_route_launch(const Tensor& hidden,
 #endif
             tokens);
         CUDA_CHECK(cudaGetLastError());
+#endif
     }
 }
 
@@ -1461,6 +1682,11 @@ void flash_next_hyper_mix_route_launch(const Tensor& hidden, const HyperMixerWei
             tokens);
         CUDA_CHECK(cudaGetLastError());
     } else {
+#if defined(NINFER_VOLTA_BUILD)
+        launch_volta_prefill_body(hidden, weights.norm, weights.input_mix_down,
+                                  weights.input_mix_up, nullptr, scratch, block_input,
+                                  stream, flash_next_hyper_prefill_route());
+#else
         // Prefill route (T >= 16)
         // 1. Group Norm
         group_norm_prefill_kernel<<<tokens, 256, 0, stream>>>(
@@ -1494,8 +1720,35 @@ void flash_next_hyper_mix_route_launch(const Tensor& hidden, const HyperMixerWei
 #endif
             tokens);
         CUDA_CHECK(cudaGetLastError());
+#endif
     }
 }
+
+#if defined(NINFER_VOLTA_BUILD)
+void flash_next_hyper_prepare_prefill_route_launch(
+    const Tensor& hidden, const HyperConnectionWeights& weights,
+    FlashNextHyperWorkspace& scratch, Tensor& block_input, cudaStream_t stream,
+    FlashNextHyperPrefillRoute route) {
+    if (hidden.ne[1] <= 8) {
+        throw std::invalid_argument("Flash-Next explicit hyper prefill route requires tokens > 8");
+    }
+    launch_volta_prefill_body(hidden, weights.norm, weights.input_mix_down,
+                              weights.input_mix_up, &weights.block_inject, scratch,
+                              block_input, stream, route);
+}
+
+void flash_next_hyper_mix_prefill_route_launch(
+    const Tensor& hidden, const HyperMixerWeights& weights,
+    FlashNextHyperWorkspace& scratch, Tensor& block_input, cudaStream_t stream,
+    FlashNextHyperPrefillRoute route) {
+    if (hidden.ne[1] <= 8) {
+        throw std::invalid_argument("Flash-Next explicit hyper prefill route requires tokens > 8");
+    }
+    launch_volta_prefill_body(hidden, weights.norm, weights.input_mix_down,
+                              weights.input_mix_up, nullptr, scratch, block_input,
+                              stream, route);
+}
+#endif
 
 void flash_next_hyper_inject_launch(const Tensor& block_output, const Tensor& injection,
                                     Tensor& hidden, cudaStream_t stream) {

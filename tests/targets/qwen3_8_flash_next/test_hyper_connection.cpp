@@ -912,6 +912,96 @@ int test_decode_route_bit_exact(ninfer::DeviceContext& device) {
     return 0;
 }
 
+#if defined(NINFER_VOLTA_BUILD)
+int test_prefill_backend_admission(ninfer::DeviceContext& device) {
+    using namespace ninfer::targets::qwen3_8_flash_next::detail;
+    constexpr int kTokens = 7'111;
+    constexpr int kTrials = 3;
+
+    ninfer::DeviceBuffer d_norm(10'240 * 2);
+    ninfer::DeviceBuffer d_down(320ULL * 10'240 * 2);
+    ninfer::DeviceBuffer d_up(10'240ULL * 320 * 2);
+    ninfer::DeviceBuffer d_inject(4ULL * 10'240 * 2);
+    d_norm.fill(0);
+    d_down.fill(0);
+    d_up.fill(0);
+    d_inject.fill(0);
+    const HyperConnectionWeights weights{
+        .block_inject   = bf16_weight(d_inject.p, 4, 10'240),
+        .norm           = ninfer::Tensor(d_norm.p, ninfer::DType::BF16, {10'240}),
+        .input_mix_down = bf16_weight(d_down.p, 320, 10'240),
+        .input_mix_up   = bf16_weight(d_up.p, 10'240, 320),
+    };
+
+    ninfer::DeviceBuffer d_hidden(static_cast<std::size_t>(kTokens) * 10'240 * 2);
+    ninfer::DeviceBuffer d_block_input(static_cast<std::size_t>(kTokens) * 2'560 * 2);
+    d_hidden.fill(0);
+    d_block_input.fill(0);
+    ninfer::WorkspaceArena workspace(flash_next_hyper_workspace_capacity_bytes(1, kTokens));
+    auto scope = workspace.scope();
+    FlashNextHyperWorkspace scratch = allocate_flash_next_hyper_workspace(workspace, kTokens);
+    ninfer::Tensor hidden_view(d_hidden.p, ninfer::DType::BF16, {10'240, kTokens});
+    ninfer::Tensor input_view(d_block_input.p, ninfer::DType::BF16, {2'560, kTokens});
+
+    auto launch = [&](FlashNextHyperPrefillRoute route) {
+        flash_next_hyper_prepare_prefill_route_launch(
+            hidden_view, weights, scratch, input_view, device.stream, route);
+    };
+    // Initialize lazy cuBLAS state and warm both code paths before measuring.
+    launch(FlashNextHyperPrefillRoute::TiledMma);
+    launch(FlashNextHyperPrefillRoute::Cublas);
+    device.synchronize();
+
+    auto time_once = [&](FlashNextHyperPrefillRoute route) {
+        cudaEvent_t start = nullptr;
+        cudaEvent_t stop = nullptr;
+        CUDA_CHECK(cudaEventCreate(&start));
+        CUDA_CHECK(cudaEventCreate(&stop));
+        CUDA_CHECK(cudaEventRecord(start, device.stream));
+        launch(route);
+        CUDA_CHECK(cudaEventRecord(stop, device.stream));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        float elapsed_ms = 0.0F;
+        CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start, stop));
+        CUDA_CHECK(cudaEventDestroy(start));
+        CUDA_CHECK(cudaEventDestroy(stop));
+        return elapsed_ms;
+    };
+
+    std::array<float, kTrials> tiled{};
+    std::array<float, kTrials> cublas{};
+    for (int trial = 0; trial < kTrials; ++trial) {
+        if ((trial & 1) == 0) {
+            tiled[trial] = time_once(FlashNextHyperPrefillRoute::TiledMma);
+            cublas[trial] = time_once(FlashNextHyperPrefillRoute::Cublas);
+        } else {
+            cublas[trial] = time_once(FlashNextHyperPrefillRoute::Cublas);
+            tiled[trial] = time_once(FlashNextHyperPrefillRoute::TiledMma);
+        }
+    }
+    auto median = [](std::array<float, kTrials> values) {
+        std::sort(values.begin(), values.end());
+        return values[kTrials / 2];
+    };
+    const float tiled_ms = median(tiled);
+    const float cublas_ms = median(cublas);
+    const float ratio = cublas_ms / tiled_ms;
+    std::cout << "HYPER_PREFILL_ADMISSION {\"tokens\":" << kTokens
+              << ",\"tiled_mma_ms\":" << tiled_ms
+              << ",\"cublas_ms\":" << cublas_ms
+              << ",\"ratio\":" << ratio << "}\n";
+
+    const char* armed = std::getenv("NINFER_V100_HYPER_CUBLAS_ADMISSION");
+    if (armed != nullptr && std::strcmp(armed, "1") == 0 &&
+        (!std::isfinite(ratio) || ratio > 0.80F)) {
+        std::cerr << "FAILED: staged hyper cuBLAS did not beat tiled MMA by at least 20% at T="
+                  << kTokens << " (ratio=" << ratio << ")\n";
+        return 1;
+    }
+    return 0;
+}
+#endif
+
 int test_kernel_timing_benchmark(ninfer::DeviceContext& device) {
     using namespace ninfer::targets::qwen3_8_flash_next::detail;
 
@@ -1107,6 +1197,9 @@ int main() {
     if (test_basic_unit_injection(device) != 0) { return 1; }
     if (test_synthetic_stage_equivalence(device) != 0) { return 1; }
     if (test_decode_route_bit_exact(device) != 0) { return 1; }
+#if defined(NINFER_VOLTA_BUILD)
+    if (test_prefill_backend_admission(device) != 0) { return 1; }
+#endif
     if (test_kernel_timing_benchmark(device) != 0) { return 1; }
 
     std::cout << "OK Flash-Next Hyper Connection\n";

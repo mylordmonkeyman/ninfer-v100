@@ -17,6 +17,7 @@ struct FlashNextHyperWorkspace {
     Tensor down_split;
 #if defined(NINFER_VOLTA_BUILD)
     Tensor mixed_fp32;
+    Tensor projection_weight_fp16;
 #endif
 };
 
@@ -29,7 +30,10 @@ FlashNextHyperWorkspace allocate_flash_next_hyper_workspace(Arena& arena, std::i
         .up_gemm    = arena.alloc(DType::BF16, {10'240, tokens}, 256),
         .down_split = arena.alloc(DType::FP32, {320, tokens * kHyperDownSplitK}, 256),
 #if defined(NINFER_VOLTA_BUILD)
-        .mixed_fp32 = arena.alloc(DType::FP32, {2'560, tokens}, 256),
+        .mixed_fp32             = arena.alloc(DType::FP32, {2'560, tokens}, 256),
+        // Down and up contain the same number of elements. The optional Volta
+        // cuBLAS route converts one matrix at a time and reuses this 6.25 MiB stage.
+        .projection_weight_fp16 = arena.alloc(DType::FP16, {10'240, 320}, 256),
 #endif
     };
 }
