@@ -367,6 +367,10 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     }
     const bool use_shared_fp32_intermediate =
         resolve_shared_fp32_intermediate_diagnostic();
+    const bool shared_cublas = prefill &&
+        tokens >= kFlashNextMoeMmaPrefillThreshold &&
+        !use_shared_expert_input_fp32 && !use_shared_fp32_intermediate &&
+        flash_next_moe_shared_cublas_enabled();
     if (use_shared_fp32_intermediate && use_shared_expert_input_fp32) {
         throw std::invalid_argument(
             "shared FP32-intermediate diagnostic requires the production BF16 shared input");
@@ -458,7 +462,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     flash_next_moe_host_shared_launch(
         input, resident_weights, scratch, stream,
         use_shared_expert_input_fp32 ? shared_expert_input_fp32 : nullptr,
-        use_shared_fp32_intermediate);
+        use_shared_fp32_intermediate, shared_cublas);
     stage_ledger_record(stream, FlashNextStageId::MoE_SharedGateUp);
 
     if (stream_experts && !device_route_combine) {
@@ -873,7 +877,7 @@ void flash_next_moe_host_backed(const Tensor& input, const MoeWeights& resident_
     stage_ledger_record(stream, FlashNextStageId::MoE_Reduce);
     flash_next_moe_host_routed_merge_launch(
         resident_weights, scratch, output, tokens, stream,
-        use_shared_fp32_intermediate, output_fp32);
+        use_shared_fp32_intermediate, output_fp32, shared_cublas);
     if (arch_timing) {
         std::ostringstream out;
         out.imbue(std::locale::classic());

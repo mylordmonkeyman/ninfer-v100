@@ -1838,3 +1838,63 @@ cuBLAS routes at the actual7,111-token geometry, requiring at least20% median
 operator improvement before any serving timing. Only an admitted candidate proceeds
 to three rotated fresh-server baseline/candidate/installed-Strata arms on the
 qualified full-QSA, pinned-source,8192-chunk,FP8-KV,262K-allocation profile.
+
+### Hyper cuBLAS result and source-directed shared expert qualification
+
+[Run38157410945](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38157410945)
+passed all retained independent numerical, integration and lifetime/cache gates.
+The actual7,111-token hyper operator fell from32.6144ms to4.4943ms, approximately
+7.26x faster. The889 token tiles describe repeated matrix staging in the old
+implementation; they are not an expected operator or request speedup.
+
+Three rotated fresh servers per arm, each cold+4warmups+measured7111prompt/128output/
+0reuse, produced these warmed medians:
+
+| Engine / hyper route | HTTP seconds | Native prefill seconds | Native decode seconds |
+|---|---:|---:|---:|
+| NInfer tiled control |26.1488|19.4235|6.4274|
+| NInfer staged cuBLAS |24.8066|16.9382|6.8978|
+| Installed native Strata |10.9584|8.2518|2.6796|
+
+The candidate improved HTTP5.13% and prefill12.80%; HTTP ranges26.1218–26.6358
+versus23.8099–25.8394 did not overlap. Strata ranged10.8983–12.4934. NInfer still
+trails2.26x in HTTP and2.05x in prefill. Both NInfer arms retained102slots/layer,
+4,896seeded experts,13,537,714,176cache bytes and the2GiB reserve; sampled GPU peaks
+were approximately29.988/29.996GiB. Measured output hashes were stable within each
+arm, but changed across arms, and MTP moved58rounds/116drafts/69accepts to62/124/65.
+Decode is therefore confounded. Keep `NINFER_V100_HYPER_CUBLAS=1` default off.
+The installed Strata representation and speculative arithmetic differ, so this is
+a practical serving comparison rather than matched quality.
+
+The next candidate follows another verified code difference: host-backed NInfer
+uses scalar FP32 dot products for the always-on shared expert, whereas Strata
+submits large native projections. The previous low-overhead attribution charged
+1.0627seconds to shared gate/up plus down/merge; this is a bounded lead rather
+than an explanation for the entire remaining gap.
+
+`NINFER_V100_SHARED_CUBLAS=1` is a default-off Volta prompt route for batches>=256.
+It stages represented BF16 inputs and one BF16 matrix at a time into FP16, uses
+cuBLAS FP32 accumulation/output for gate/up/down, preserves the BF16 SwiGLU
+activation boundary and the original FP32 gated/routed merge followed by BF16.
+Router, expert weights/routing, verification and small batches are unchanged.
+Temporary staging borrows the existing routed FP32 output buffer before expert
+dispatch and after routed join/reduction; the main-stream rendezvous protects the
+first reuse, and down restages everything after the routed values are consumed.
+This adds no device allocation or cache-capacity reduction.
+
+The target fixture checks independent complete FP64 formulas from represented
+public inputs at256/257/7111tokens, including stronger signed gates/cancellation,
+BF16 activation, down, FP32 merge and BF16 output; relativeL2<=1e-3 is unchanged.
+Output guards and repeated output after overwriting the entire borrowed staging
+region protect lifetime/reuse. An alternating three-trial7,111-token operator
+admission must improve by at least20% before serving. Retained codec/QSA/dense/
+expert/lifetime/cache and hyper gates also precede timing.
+
+On admission, `--shared-cublas-race` rotates three fresh servers per arm for shared
+SIMT, shared cuBLAS and installed native Strata on the existing full-QSA/hyper/
+pinned-source/8192chunk/FP8KV/262Kcapacity profile. Every server retains cold+
+4warmups+measured7111/128/0reuse. Actual residency, memory, output and native MTP
+work are recorded; real candidate dispatch and equal NInfer cache capacity are
+required. No arithmetic default promotion or speedup claim precedes hardware
+results. Local61 telemetry tests, Python compilation/help, YAML/bash syntax and
+diff checks pass; new CUDA qualification awaits the target runner.

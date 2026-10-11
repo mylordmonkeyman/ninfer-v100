@@ -17,6 +17,10 @@
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
+#if defined(NINFER_VOLTA_BUILD)
+#include <cuda_fp16.h>
+#include <cublas_v2.h>
+#endif
 
 #include <cstdint>
 // The staging switch below reads the environment; these were relied on
@@ -24,6 +28,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <cstdio>
+#include <string>
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 namespace {
@@ -2600,12 +2606,188 @@ void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weight
     }
 }
 
+namespace {
+#if defined(NINFER_VOLTA_BUILD)
+void shared_blas_check(cublasStatus_t status) {
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        throw std::runtime_error("Flash-Next shared cuBLAS status " +
+                                 std::to_string(static_cast<int>(status)));
+    }
+}
+
+struct SharedCublasHandle {
+    cublasHandle_t handle = nullptr;
+    SharedCublasHandle() {
+        shared_blas_check(cublasCreate(&handle));
+        try {
+            shared_blas_check(cublasSetMathMode(handle, static_cast<cublasMath_t>(
+                CUBLAS_TENSOR_OP_MATH | CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION)));
+        } catch (...) {
+            cublasDestroy(handle);
+            throw;
+        }
+    }
+    ~SharedCublasHandle() { if (handle) { (void)cublasDestroy(handle); } }
+};
+
+void shared_projection(const __half* weight, const __half* input, float* output,
+                       int rows, int columns, int tokens, cudaStream_t stream) {
+    static thread_local SharedCublasHandle state;
+    shared_blas_check(cublasSetStream(state.handle, stream));
+    const float alpha = 1.0F, beta = 0.0F;
+    shared_blas_check(cublasGemmEx(state.handle, CUBLAS_OP_T, CUBLAS_OP_N,
+        rows, tokens, columns, &alpha, weight, CUDA_R_16F, columns,
+        input, CUDA_R_16F, columns, &beta, output, CUDA_R_32F, rows,
+        CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+}
+
+__global__ void shared_stage_bf16_kernel(const __nv_bfloat16* input, __half* output,
+                                        std::int64_t elements) {
+    const std::int64_t index = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index < elements) { output[index] = __float2half_rn(__bfloat162float(input[index])); }
+}
+
+void shared_stage_bf16(const void* input, void* output,
+                       std::int64_t elements, cudaStream_t stream) {
+    shared_stage_bf16_kernel<<<static_cast<unsigned>((elements + 255) / 256), 256, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(input), static_cast<__half*>(output), elements);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+__global__ void shared_gate_up_epilogue_kernel(const float* gate, const float* up,
+                                              __nv_bfloat16* activations,
+                                              std::int64_t elements) {
+    const std::int64_t index = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= elements) { return; }
+    const auto token = index / kIntermediate;
+    const auto row = index % kIntermediate;
+    activations[(token * kPaths + kTopK) * kIntermediate + row] =
+        __float2bfloat16_rn(ops::silu(gate[index]) * up[index]);
+}
+
+__global__ void shared_stage_activation_kernel(const __nv_bfloat16* activations,
+                                               __half* input, std::int64_t elements) {
+    const std::int64_t index = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= elements) { return; }
+    const auto token = index / kIntermediate;
+    const auto row = index % kIntermediate;
+    input[index] = __float2half_rn(__bfloat162float(
+        activations[(token * kPaths + kTopK) * kIntermediate + row]));
+}
+
+__global__ void shared_cublas_merge_kernel(const float* down, const float* scale,
+                                          const __nv_bfloat16* activations,
+                                          __nv_bfloat16* output, float* output_fp32,
+                                          std::int64_t elements) {
+    const std::int64_t index = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= elements) { return; }
+    const auto token = index / kHidden;
+    const auto row = index % kHidden;
+    const float routed = reinterpret_cast<const float*>(activations + token * kPaths * kIntermediate)[row];
+    const float combined = fmaf(scale[token], down[index], routed);
+    output[index] = __float2bfloat16_rn(combined);
+    if (output_fp32) { output_fp32[index] = combined; }
+}
+
+void shared_cublas_workspace_check(const FlashNextMoeWorkspace& scratch, int tokens) {
+    if (tokens < kFlashNextMoeMmaPrefillThreshold ||
+        scratch.shared_weight_fp16.data == nullptr ||
+        scratch.shared_input_fp16.data == nullptr ||
+        scratch.shared_projection_fp32.data == nullptr ||
+        scratch.shared_weight_fp16.dtype != DType::FP16 ||
+        scratch.shared_weight_fp16.ne[0] != kHidden || scratch.shared_weight_fp16.ne[1] != kIntermediate ||
+        scratch.shared_input_fp16.dtype != DType::FP16 ||
+        scratch.shared_input_fp16.ne[0] != kHidden || scratch.shared_input_fp16.ne[1] != tokens ||
+        scratch.shared_projection_fp32.dtype != DType::FP32 ||
+        scratch.shared_projection_fp32.ne[0] != kHidden || scratch.shared_projection_fp32.ne[1] != tokens) {
+        throw std::invalid_argument("Flash-Next shared cuBLAS requires its exact prompt workspace");
+    }
+}
+
+void shared_cublas_gate_up(const Tensor& input, const MoeWeights& weights,
+                          const FlashNextMoeWorkspace& scratch, int tokens,
+                          cudaStream_t stream) {
+    shared_cublas_workspace_check(scratch, tokens);
+    // Every GEMM stages one matrix once. These views borrow the routed-output
+    // buffer before routed execution. After join/reduction, down restages them;
+    // no value in the borrowed views survives the routed-output live interval.
+    auto* weight = static_cast<__half*>(scratch.shared_weight_fp16.data);
+    auto* x = static_cast<__half*>(scratch.shared_input_fp16.data);
+    auto* gate = static_cast<float*>(scratch.shared_projection_fp32.data);
+    auto* up = gate + static_cast<std::int64_t>(kIntermediate) * tokens;
+    shared_stage_bf16(input.data, x, static_cast<std::int64_t>(kHidden) * tokens, stream);
+    shared_stage_bf16(weights.shared_gate.qdata, weight, kIntermediate * kHidden, stream);
+    shared_projection(weight, x, gate, kIntermediate, kHidden, tokens, stream);
+    shared_stage_bf16(weights.shared_up.qdata, weight, kIntermediate * kHidden, stream);
+    shared_projection(weight, x, up, kIntermediate, kHidden, tokens, stream);
+    const auto elements = static_cast<std::int64_t>(kIntermediate) * tokens;
+    shared_gate_up_epilogue_kernel<<<static_cast<unsigned>((elements + 255) / 256), 256, 0, stream>>>(
+        gate, up, static_cast<__nv_bfloat16*>(scratch.activations.data), elements);
+    CUDA_CHECK(cudaGetLastError());
+    static thread_local bool reported = false;
+    if (!reported) {
+        std::fprintf(stderr, "v100.shared_cublas=1 tokens=%d gate_up_and_down=1\n", tokens);
+        reported = true;
+    }
+}
+
+void shared_cublas_down_merge(const MoeWeights& weights, const FlashNextMoeWorkspace& scratch,
+                             Tensor& output, int tokens, cudaStream_t stream, Tensor* output_fp32) {
+    shared_cublas_workspace_check(scratch, tokens);
+    auto* weight = static_cast<__half*>(scratch.shared_weight_fp16.data);
+    auto* x = static_cast<__half*>(scratch.shared_input_fp16.data);
+    auto* down = static_cast<float*>(scratch.shared_projection_fp32.data);
+    shared_stage_bf16(weights.shared_down.qdata, weight, kHidden * kIntermediate, stream);
+    const auto intermediate_elements = static_cast<std::int64_t>(kIntermediate) * tokens;
+    shared_stage_activation_kernel<<<static_cast<unsigned>((intermediate_elements + 255) / 256), 256, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(scratch.activations.data), x, intermediate_elements);
+    CUDA_CHECK(cudaGetLastError());
+    shared_projection(weight, x, down, kHidden, kIntermediate, tokens, stream);
+    const auto elements = static_cast<std::int64_t>(kHidden) * tokens;
+    shared_cublas_merge_kernel<<<static_cast<unsigned>((elements + 255) / 256), 256, 0, stream>>>(
+        down, static_cast<const float*>(scratch.shared_scale.data),
+        static_cast<const __nv_bfloat16*>(scratch.activations.data),
+        static_cast<__nv_bfloat16*>(output.data),
+        output_fp32 ? static_cast<float*>(output_fp32->data) : nullptr, elements);
+    CUDA_CHECK(cudaGetLastError());
+}
+#endif
+} // namespace
+
+bool flash_next_moe_shared_cublas_enabled() {
+#if defined(NINFER_VOLTA_BUILD)
+    static const bool enabled = [] {
+        const char* env = std::getenv("NINFER_V100_SHARED_CUBLAS");
+        if (env == nullptr || env[0] == '\0' || std::strcmp(env, "0") == 0) { return false; }
+        if (std::strcmp(env, "1") == 0) { return true; }
+        throw std::invalid_argument("NINFER_V100_SHARED_CUBLAS must be 0 or 1");
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+}
+
 void flash_next_moe_host_shared_launch(const Tensor& input, const MoeWeights& weights,
                                        const FlashNextMoeWorkspace& workspace,
                                        cudaStream_t stream,
                                        const Tensor* input_fp32,
-                                       bool fp32_intermediate) {
+                                       bool fp32_intermediate,
+                                       bool shared_cublas) {
     const int tokens = static_cast<int>(input.ne[1]);
+
+    if (shared_cublas) {
+#if defined(NINFER_VOLTA_BUILD)
+        if (fp32_intermediate || (input_fp32 && input_fp32->data)) {
+            throw std::invalid_argument("shared cuBLAS requires represented BF16 input and activation");
+        }
+        shared_cublas_gate_up(input, weights, workspace, tokens, stream);
+        stage_ledger_record(stream, FlashNextStageId::MoE_SharedGateUp);
+        return;
+#else
+        throw std::invalid_argument("shared cuBLAS is a Volta prompt route");
+#endif
+    }
 
     // Keep the Phase-10 bring-up path independent of the inherited shared-MMA backend.
     const dim3 gate_grid(kIntermediate / 8, (static_cast<unsigned>(tokens) + 7U) / 8U);
@@ -2641,9 +2823,22 @@ void flash_next_moe_host_routed_merge_launch(const MoeWeights& weights,
                                              Tensor& output, int tokens,
                                              cudaStream_t stream,
                                              bool shared_fp32_intermediate,
-                                             Tensor* output_fp32) {
+                                             Tensor* output_fp32,
+                                             bool shared_cublas) {
     if (tokens <= 0) {
         throw std::invalid_argument("Flash-Next host routed merge requires positive tokens");
+    }
+    if (shared_cublas) {
+#if defined(NINFER_VOLTA_BUILD)
+        if (shared_fp32_intermediate) {
+            throw std::invalid_argument("shared cuBLAS requires represented BF16 activation");
+        }
+        shared_cublas_down_merge(weights, workspace, output, tokens, stream, output_fp32);
+        stage_ledger_record(stream, FlashNextStageId::MoE_SharedDown);
+        return;
+#else
+        throw std::invalid_argument("shared cuBLAS is a Volta prompt route");
+#endif
     }
     const dim3 grid(kHidden / kDownWarps, static_cast<unsigned>(tokens));
     if (shared_fp32_intermediate) {

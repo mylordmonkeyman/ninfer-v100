@@ -535,6 +535,8 @@ def main():
                    help='Independent real-input admission of full QK/PV MMA then best-profile practical race')
     p.add_argument('--hyper-cublas-race', action='store_true',
                    help='Qualified staged-FP16 cuBLAS hyper projections versus tiled Volta MMA and native Strata')
+    p.add_argument('--shared-cublas-race', action='store_true',
+                   help='Source-directed shared expert SIMT versus large cuBLAS projections and native Strata')
     p.add_argument('--qsa-late-half-race', action='store_true',
                    help='Bounded 8192-profile SIMT versus admitted late-half score-MMA and native Strata')
     p.add_argument('--pinned-expert-source-race', action='store_true',
@@ -561,15 +563,15 @@ def main():
         '--prefill-chunk', '2048', '--kv-dtype', 'bf16', '--no-prefix-reuse', '--no-thinking',
         '--no-cuda-graph', '--no-qsa-prefill-mma',
         '--spec', 'mtp', '--draft-tokens', '2', '--lm-head-draft']
-    if a.context_residency_ab or a.fp8_long_context or a.large_prefill_race or a.large_profile_breakdown or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race:
+    if a.context_residency_ab or a.fp8_long_context or a.large_prefill_race or a.large_profile_breakdown or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race or a.shared_cublas_race:
         a.ninfer_flags = ab.option(a.ninfer_flags, '--max-context', '262144')
         a.ninfer_flags = ab.option(a.ninfer_flags, '--kv-capacity', '262144')
-    if a.fp8_long_context or a.large_prefill_race or a.large_profile_breakdown or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race:
+    if a.fp8_long_context or a.large_prefill_race or a.large_profile_breakdown or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race or a.shared_cublas_race:
         a.ninfer_flags = ab.option(a.ninfer_flags, '--kv-dtype', 'fp8')
         a.request_timeout = 5400
-    if a.large_profile_breakdown or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race:
+    if a.large_profile_breakdown or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race or a.shared_cublas_race:
         a.ninfer_flags=ab.option(a.ninfer_flags,'--prefill-chunk','8192')
-    if a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race:
+    if a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race or a.shared_cublas_race:
         a.ninfer_flags=[f for f in a.ninfer_flags if f!='--no-qsa-prefill-mma']+['--qsa-prefill-mma']
     a.long_prompt = LONG
     a.max_output_tokens = 64 if a.fp8_long_context else 128
@@ -632,7 +634,9 @@ def main():
                ('ninfer','qsa-full-mma-pinned',dict(pinned_arms[1][2],NINFER_V100_QSA_FULL_MMA='1')),ARMS[1]]
     hyper_arms=[('ninfer','hyper-tiled-mma',dict(full_arms[1][2],NINFER_V100_HYPER_CUBLAS='0')),
                 ('ninfer','hyper-staged-cublas',dict(full_arms[1][2],NINFER_V100_HYPER_CUBLAS='1')),ARMS[1]]
-    manifest_arms = (hyper_arms if a.hyper_cublas_race else full_arms if a.qsa_full_mma_race else pinned_arms if a.pinned_expert_source_race else qsa_arms if a.qsa_late_half_race else [context_arms[1]] if a.large_profile_breakdown else race_arms if a.large_prefill_race else [context_arms[1]] if a.fp8_long_context else context_arms if a.context_residency_ab else pair_arms if a.expert_pair_expand_ab else [dense_arms[1]] if a.moe_work_breakdown else dense_arms if a.dense_prefill_gemm_ab else [('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
+    shared_arms=[('ninfer',name,dict(hyper_arms[1][2],NINFER_V100_SHARED_CUBLAS=value))
+                 for name,value in [('shared-simt','0'),('shared-staged-cublas','1')]]+[ARMS[1]]
+    manifest_arms = (shared_arms if a.shared_cublas_race else hyper_arms if a.hyper_cublas_race else full_arms if a.qsa_full_mma_race else pinned_arms if a.pinned_expert_source_race else qsa_arms if a.qsa_late_half_race else [context_arms[1]] if a.large_profile_breakdown else race_arms if a.large_prefill_race else [context_arms[1]] if a.fp8_long_context else context_arms if a.context_residency_ab else pair_arms if a.expert_pair_expand_ab else [dense_arms[1]] if a.moe_work_breakdown else dense_arms if a.dense_prefill_gemm_ab else [('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
                      [default_arm] if a.qualified_default_smoke else
                      [("ninfer", "adaptive156-qualified", residency_arms()[1][2]), ARMS[1]] if (a.final_comparison or a.controlled_comparison) else
                      residency_arms() if a.residency_gemm_ab else
@@ -652,6 +656,7 @@ def main():
         large_profile_breakdown=a.large_profile_breakdown,
         qsa_late_half_race=a.qsa_late_half_race, qsa_full_mma_race=a.qsa_full_mma_race,
         hyper_cublas_race=a.hyper_cublas_race,
+        shared_cublas_race=a.shared_cublas_race,
         pinned_expert_source_race=a.pinned_expert_source_race,
         architecture_breakdown=a.architecture_breakdown,
         request_timeout=getattr(a,'request_timeout',900),
@@ -680,7 +685,7 @@ def main():
             if a.residency_gemm_ab or a.context_residency_ab or a.fp8_long_context:
                 cell['residency'] = residency_observation(folder, a.max_output_tokens,
                     None if a.fp8_long_context else 7111)
-            if a.final_comparison or a.prefill_breakdown or a.controlled_comparison or a.dense_prefill_gemm_ab or a.moe_work_breakdown or a.expert_pair_expand_ab or a.large_prefill_race or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race:
+            if a.final_comparison or a.prefill_breakdown or a.controlled_comparison or a.dense_prefill_gemm_ab or a.moe_work_breakdown or a.expert_pair_expand_ab or a.large_prefill_race or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race or a.shared_cublas_race:
                 samples=[json.loads(line) for line in (folder/'system.jsonl').read_text().splitlines()]
                 peaks=[r.get('gpu',{}).get('metrics',{}).get('memory_used_bytes') for r in samples
                        if r.get('kind')=='system_sample']
@@ -688,7 +693,7 @@ def main():
                 if engine=='ninfer':
                     cell['residency']=residency_observation(folder,a.max_output_tokens,
                                                          7111 if mode=='timing' else None)
-                    if a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race:
+                    if a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race or a.shared_cublas_race:
                         log=(folder/'server.log').read_text(errors='replace')
                         match=re.search(r'v100\.expert_source_pinned=1 ranges=(\d+) registered_bytes=(\d+)',log)
                         cell['expert_source_registration']=(dict(ranges=int(match.group(1)),
@@ -769,6 +774,42 @@ def main():
         report['reference_timing'] = summarize(cells)
         output.write_text(json.dumps(report, indent=2)+'\n')
         print('Architecture attribution complete; no arithmetic candidate/default change.', flush=True)
+        return
+    if a.shared_cublas_race:
+        # Independent shared-expert gate/up, represented activation, down and
+        # merged-output oracles plus actual-shape operator admission precede this.
+        for repeat in range(3):
+            for engine,arm,flags in shared_arms[repeat:]+shared_arms[:repeat]:
+                run(engine,arm,flags,arm+'-r'+str(repeat),'timing')
+                cell=cells[-1]
+                folder=Path(cell['folder'])
+                rows=[json.loads(l) for l in (folder/'requests.jsonl').read_text().splitlines()]
+                if [r['phase'] for r in rows]!=['cold']+['warmup']*4+['measured']:
+                    raise ValueError('shared cuBLAS race request schedule incomplete')
+                if any(r['response']['usage'].get('prompt_tokens')!=7111 or
+                       r['response']['usage']['completion_tokens']!=128 or
+                       r['response']['usage'].get('prompt_tokens_details',{}).get('cached_tokens',0)!=0
+                       for r in rows):
+                    raise ValueError('shared cuBLAS race prompt/output/reuse work changed')
+                if engine=='ninfer':
+                    marker='v100.shared_cublas=1 tokens=7111 gate_up_and_down=1'
+                    log=folder/'server.log'
+                    text=log.read_text() if log.exists() else gzip.open(str(log)+'.gz','rt').read()
+                    selected=marker in text
+                    cell['shared_cublas_selected']=selected
+                    if selected!=(arm=='shared-staged-cublas'):
+                        raise ValueError('shared cuBLAS real serving dispatch changed')
+        residency=[c['residency'] for c in cells if c['engine']=='ninfer']
+        if len({r['actual_cache']['slots_per_layer'] for r in residency})!=1:
+            raise ValueError('shared projection arms did not retain matched expert residency')
+        report=dict(status='shared_cublas_race_complete',timing=summarize(cells),
+            observations=[dict(engine=c['engine'],arm=c['arm'],peak=c.get('sampled_peak_gpu_bytes'),
+                               residency=c.get('residency'),selected=c.get('shared_cublas_selected')) for c in cells],
+            limits=['Independent affected operator qualification does not close historical full-model drift.',
+                    'Shared projections remain opt-in; cross-arm output and MTP work can change.',
+                    'Strata weights, KV codec, residency and speculative arithmetic differ; practical comparison is not matched quality.'])
+        (a.output/'shared-cublas-race-report.json').write_text(json.dumps(report,indent=2)+'\n')
+        print(json.dumps(report,indent=2),flush=True)
         return
     if a.hyper_cublas_race:
         # The target-GPU hyper fixture has already admitted the represented-BF16

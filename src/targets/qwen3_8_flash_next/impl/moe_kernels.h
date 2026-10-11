@@ -9,6 +9,11 @@
 
 namespace ninfer::targets::qwen3_8_flash_next::detail {
 
+// Default-off Volta prompt route; verification and diagnostic precision paths
+// keep their existing arithmetic. Explicit route arguments support independent
+// oracle and same-process performance qualification.
+bool flash_next_moe_shared_cublas_enabled();
+
 void flash_next_moe_kernels_launch(const Tensor& input, const MoeWeights& weights,
                                    const FlashNextMoeWorkspace& workspace, Tensor& output,
                                    cudaStream_t stream);
@@ -21,13 +26,15 @@ void flash_next_moe_host_shared_launch(const Tensor& input, const MoeWeights& we
                                        const FlashNextMoeWorkspace& workspace,
                                        cudaStream_t stream,
                                        const Tensor* input_fp32 = nullptr,
-                                       bool fp32_intermediate = false);
+                                       bool fp32_intermediate = false,
+                                       bool shared_cublas = false);
 void flash_next_moe_host_routed_merge_launch(const MoeWeights& weights,
                                              const FlashNextMoeWorkspace& workspace,
                                              Tensor& output, int tokens,
                                              cudaStream_t stream,
                                              bool shared_fp32_intermediate = false,
-                                             Tensor* output_fp32 = nullptr);
+                                             Tensor* output_fp32 = nullptr,
+                                             bool shared_cublas = false);
 
 // Decode-arm (tokens <= 8) down-projection kernels. Both produce bitwise-identical BF16 output;
 // they differ only in how the eleven per-row partials are spread over warps and CTAs.

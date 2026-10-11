@@ -1,5 +1,5 @@
 name: V100 Structural Engine Comparison
-# Source-directed hyper projection backend: independent oracle and actual-shape
+# Source-directed shared expert projections: independent oracles and actual-shape
 # operator admission before a serving race.
 # Explicit opt-in candidate; no arithmetic default promotion.
 on:
@@ -89,14 +89,14 @@ jobs:
           run-id: 37270512213
           github-token: ${{ github.token }}
           path: structural-profile-source
-      - name: Qualify large dense shapes, FP8 KV and retained expert routes
+      - name: Qualify shared projections, FP8 KV and retained expert routes
         shell: bash
         run: |
           set -euo pipefail
           cmake -S . -B build-structural-comparison -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70 \
             -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-structural-comparison --target ninfer-serve ninfer_volta_nvfp4_codec_test ninfer_volta_qsa_scores_test ninfer_qwen3_8_flash_next_qsa_attention_test ninfer_fp8_f32_prefill_sm70_test ninfer_qwen3_8_flash_next_expert_gemm_test ninfer_qwen3_8_flash_next_expert_stream_test ninfer_qwen3_8_flash_next_expert_cache_test ninfer_qwen3_8_flash_next_hyper_connection_test
+          cmake --build build-structural-comparison --target ninfer-serve ninfer_volta_nvfp4_codec_test ninfer_volta_qsa_scores_test ninfer_qwen3_8_flash_next_qsa_attention_test ninfer_fp8_f32_prefill_sm70_test ninfer_qwen3_8_flash_next_expert_gemm_test ninfer_qwen3_8_flash_next_expert_stream_test ninfer_qwen3_8_flash_next_expert_cache_test ninfer_qwen3_8_flash_next_hyper_connection_test ninfer_qwen3_8_flash_next_moe_shared_volta_test
           build-structural-comparison/tests/ninfer_volta_nvfp4_codec_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/software-fp8-codec-oracle.log"
           build-structural-comparison/tests/ninfer_volta_qsa_scores_test 2>&1 \
@@ -134,12 +134,14 @@ jobs:
           NINFER_V100_HYPER_CUBLAS=1 NINFER_V100_HYPER_CUBLAS_ADMISSION=1 \
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_hyper_connection_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/hyper-cublas-independent-oracle-and-admission.log"
+          build-structural-comparison/tests/ninfer_qwen3_8_flash_next_moe_shared_volta_test 2>&1 \
+            | tee "$QUALIFICATION_RESULTS/shared-cublas-independent-oracle-and-admission.log"
           cp build-structural-comparison/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
-      - name: Compare qualified hyper projection backends with native Strata
+      - name: Compare qualified shared expert projections with native Strata
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --hyper-cublas-race \
+          python3 tools/telemetry/structural_v100.py --shared-cublas-race \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \

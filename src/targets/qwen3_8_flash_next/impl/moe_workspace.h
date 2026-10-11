@@ -35,6 +35,15 @@ struct FlashNextMoeWorkspace {
     Tensor down_act_scales;
     // Packed BF16 [1280, T] = gate[640,T] | shared-act[640,T] for the MMA shared path.
     Tensor shared_gemm;
+#if defined(NINFER_VOLTA_BUILD)
+    // Non-owning views of down_intermediate, whose routed values are dead before
+    // routed execution starts and after its reduction completes. Shared gate/up
+    // consumes these views before dispatch; shared down restages them after join
+    // and reduction. No additional device allocation or cache-capacity change.
+    Tensor shared_weight_fp16;
+    Tensor shared_input_fp16;
+    Tensor shared_projection_fp32;
+#endif
 };
 
 template <class Arena>
@@ -84,6 +93,19 @@ FlashNextMoeWorkspace allocate_flash_next_moe_workspace(Arena& arena, std::int32
         out.down_act_codes    = arena.alloc(DType::U8, {320, 11 * tokens}, 256);
         out.down_act_scales   = arena.alloc(DType::U8, {40, 11 * tokens}, 256);
         out.shared_gemm       = arena.alloc(DType::BF16, {640, 2 * tokens}, 256);
+#if defined(NINFER_VOLTA_BUILD)
+        if (tokens >= kFlashNextMoeMmaPrefillThreshold) {
+            constexpr std::size_t weight_bytes = 2'560 * 640 * 2;
+            const auto input_bytes = static_cast<std::size_t>(2'560) * tokens * 2;
+            auto* base = static_cast<std::uint8_t*>(out.down_intermediate.data);
+            // Layout-only arena passes have null data; avoid null pointer arithmetic.
+            out.shared_weight_fp16 = Tensor(base, DType::FP16, {2'560, 640});
+            out.shared_input_fp16 = Tensor(base ? base + weight_bytes : nullptr,
+                                            DType::FP16, {2'560, tokens});
+            out.shared_projection_fp32 = Tensor(base ? base + weight_bytes + input_bytes : nullptr,
+                                                 DType::FP32, {2'560, tokens});
+        }
+#endif
     }
     return out;
 }

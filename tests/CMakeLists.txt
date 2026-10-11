@@ -302,6 +302,11 @@ ninfer_add_test(ninfer_qwen3_8_flash_next_moe_test
   LIBRARIES ninfer_qwen3_8_flash_next)
 set_tests_properties(ninfer_qwen3_8_flash_next_moe_test
   PROPERTIES SKIP_RETURN_CODE 77)
+ninfer_add_test(ninfer_qwen3_8_flash_next_moe_shared_volta_test
+  SOURCES targets/qwen3_8_flash_next/test_moe_shared_volta.cpp
+  LIBRARIES ninfer_qwen3_8_flash_next)
+set_tests_properties(ninfer_qwen3_8_flash_next_moe_shared_volta_test
+  PROPERTIES SKIP_RETURN_CODE 77)
 ninfer_add_test(ninfer_qwen3_8_flash_next_fp8_f32_test
   SOURCES targets/qwen3_8_flash_next/test_fp8_f32.cpp
   LIBRARIES ninfer_ops)
