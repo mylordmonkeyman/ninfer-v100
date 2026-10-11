@@ -146,4 +146,76 @@ void fp8_cutlass_sm70_launch(const Tensor& x, const Weight& w, Tensor& out, Work
     CUDA_CHECK(cudaGetLastError());
 }
 
+
+// Experimental Flash-Next F32-scale operator. Keep accumulation and row scaling
+// in FP32 until the public BF16 output; the older BF16-scale path rounds earlier.
+namespace {
+using F32Gemm = cutlass::gemm::device::Gemm<
+    ElementInput, cutlass::layout::RowMajor, ElementInput, cutlass::layout::ColumnMajor,
+    float, cutlass::layout::RowMajor, float, cutlass::arch::OpClassTensorOp,
+    cutlass::arch::Sm70, cutlass::gemm::GemmShape<128,128,32>,
+    cutlass::gemm::GemmShape<64,64,32>, cutlass::gemm::GemmShape<8,8,4>,
+    cutlass::epilogue::thread::LinearCombination<float,4,float,float>,
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,2>;
+std::size_t f32_gemm_bytes(int n,int k,int t) {
+    F32Gemm::Arguments args{{t,n,k},{nullptr,k},{nullptr,k},{nullptr,n},{nullptr,n},{1.F,0.F},1};
+    return F32Gemm::get_workspace_size(args);
+}
+template<class Allocator>
+struct F32Scratch { Tensor weight,input,accumulator; DeviceSpan gemm; };
+template<class Allocator>
+F32Scratch<Allocator> f32_scratch(Allocator& ws,int n,int k,int t) {
+    F32Scratch<Allocator> s;
+    s.weight=ws.alloc(DType::FP16,{k,n});
+    s.input=ws.alloc(DType::FP16,{k,t});
+    s.accumulator=ws.alloc(DType::FP32,{n,t});
+    const auto bytes=f32_gemm_bytes(n,k,t);
+    if(bytes) s.gemm=ws.alloc_bytes(bytes);
+    return s;
+}
+__global__ void f32_scale_output(const float* values,const float* scales,
+                                  __nv_bfloat16* out,std::int64_t count,int n) {
+    const std::int64_t i=static_cast<std::int64_t>(blockIdx.x)*blockDim.x+threadIdx.x;
+    if(i<count)out[i]=__float2bfloat16_rn(values[i]*scales[i%n]);
+}
+}
+std::size_t fp8_f32_cutlass_sm70_workspace_bytes(int n,int k,int t) {
+    if(n<=0 || k<=0 || t<=0 || k%2)throw std::invalid_argument("fp8 F32 CUTLASS: invalid shape");
+    WorkspaceLayoutBuilder layout;
+    (void)f32_scratch(layout,n,k,t);
+    return layout.peak_bytes(1);
+}
+void fp8_f32_cutlass_sm70_launch(const Tensor& x,const Weight& w,Tensor& out,
+                                  WorkspaceArena& ws,cudaStream_t stream) {
+    if(w.qtype!=QType::FP8_E4M3FN_ROW_F32S || w.layout!=QuantLayout::RowScale ||
+       w.scale_dtype!=DType::FP32 || x.dtype!=DType::BF16 || out.dtype!=DType::BF16 ||
+       w.n<=0 || w.k<=0 || !x.is_contiguous() || !out.is_contiguous() ||
+       x.ne[0]!=w.k || out.ne[0]!=w.n || out.ne[1]!=x.ne[1] || w.k%2 || x.ne[1]<=0)
+        throw std::invalid_argument("fp8 F32 CUTLASS: invalid represented inputs");
+    const int n=w.n,k=w.k,t=x.ne[1];
+    auto scope=ws.scope();
+    auto s=f32_scratch(ws,n,k,t);
+    auto* weights=static_cast<cutlass::half_t*>(s.weight.data);
+    auto* inputs=static_cast<cutlass::half_t*>(s.input.data);
+    auto* values=static_cast<float*>(s.accumulator.data);
+    dequant_fp8_row_to_fp16<<<dim3((k/2+255)/256,n),256,0,stream>>>(
+        static_cast<const std::uint8_t*>(w.qdata),n,k,false,weights);
+    CUDA_CHECK(cudaGetLastError());
+    const std::int64_t count=static_cast<std::int64_t>(t)*k;
+    bf16_to_fp16_kernel<<<(count+255)/256,256,0,stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data),inputs,count);
+    CUDA_CHECK(cudaGetLastError());
+    F32Gemm::Arguments args{{t,n,k},{inputs,k},{weights,k},{values,n},{values,n},{1.F,0.F},1};
+    F32Gemm gemm;
+    if(gemm.can_implement(args)!=cutlass::Status::kSuccess ||
+       gemm.initialize(args,s.gemm.data,stream)!=cutlass::Status::kSuccess ||
+       gemm(stream)!=cutlass::Status::kSuccess)
+        throw std::runtime_error("fp8 F32 CUTLASS: GEMM failed");
+    CUDA_CHECK(cudaGetLastError());
+    const std::int64_t output_count=static_cast<std::int64_t>(t)*n;
+    f32_scale_output<<<(output_count+255)/256,256,0,stream>>>(
+        values,static_cast<const float*>(w.scales),static_cast<__nv_bfloat16*>(out.data),output_count,n);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace ninfer::ops::detail

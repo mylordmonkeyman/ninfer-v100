@@ -1,5 +1,5 @@
 name: V100 Structural Engine Comparison
-# Six-step follow-up, Step 6 corrected Strata budget and speculation controls.
+# Six-step follow-up, Step 2 GDN large-prefill operator qualification and screening.
 on:
   workflow_dispatch:
   push:
@@ -76,64 +76,22 @@ jobs:
           lscpu > "$results/cpu.txt"
           /usr/local/cuda-12.8/bin/nvcc --version > "$results/cuda.txt"
           nvidia-smi --id=0 --query-gpu=uuid --format=csv,noheader | tr -d '[:space:]' > "$results/gpu-uuid.txt"
-      - name: Download existing validated resident profile
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: v100-sv2-37270512213-1
-          run-id: 37270512213
-          github-token: ${{ github.token }}
-          path: structural-profile-source
-      - name: Build NInfer once and check qualified expert paths
+      - name: Step 2 build and qualify dense GDN projection candidate
         shell: bash
         run: |
           set -euo pipefail
           cmake -S . -B build-structural-comparison -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70 \
             -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-structural-comparison --target ninfer-serve ninfer_qwen3_8_flash_next_expert_stream_test ninfer_qwen3_8_flash_next_expert_gemm_test ninfer_qwen3_8_flash_next_expert_cache_test
-          # Direct invocation makes no-GPU return77 a failure, not a skipped gate.
-          build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_gemm_test 2>&1 \
-            | tee "$QUALIFICATION_RESULTS/expert-gemm-fp32-oracle.log"
-          NINFER_V100_PREFILL_EXPERT_GEMM=fp16 NINFER_V100_PREFILL_RESIDENT_GEMM=1 \
-            NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=1 \
-            build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_stream_test 2>&1 \
-            | tee "$QUALIFICATION_RESULTS/qualified-stream-coexistence-fixture.log"
-          NINFER_V100_PREFILL_EXPERT_GEMM=fp16 NINFER_V100_PREFILL_RESIDENT_GEMM=1 \
-            NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=1 \
-            build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
-            | tee "$QUALIFICATION_RESULTS/qualified-cache-join-fixture.log"
+          cmake --build build-structural-comparison --target ninfer_fp8_f32_prefill_sm70_test ninfer_qwen3_8_flash_next_fp8_f32_test
+          # No dispatch/default change. Direct invocation makes no-GPU return77 fail.
+          build-structural-comparison/tests/ninfer_qwen3_8_flash_next_fp8_f32_test 2>&1 \
+            | tee "$QUALIFICATION_RESULTS/fp8-f32-existing-route.log"
+          # Every independent oracle and lifetime gate runs before operator timing.
+          build-structural-comparison/tests/ninfer_fp8_f32_prefill_sm70_test 2>&1 \
+            | tee "$QUALIFICATION_RESULTS/fp8-f32-prefill-oracle-and-screen.log"
           cp build-structural-comparison/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
-      - name: Record profiler availability without changing permissions
-        shell: bash
-        run: |
-          set -euo pipefail
-          { command -v nsys || true; nsys --version 2>&1 || true; } > "$QUALIFICATION_RESULTS/profiler-availability.txt"
-          # Existing bounded CUDA event ledgers are used in separate diagnostics.
-          # No profiler installation, ptrace changes, or security changes.
-      - name: Reuse valid NInfer serving comparison evidence
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: v100-structural-comparison-38090951809-1
-          run-id: 38090951809
-          github-token: ${{ github.token }}
-          path: controlled-comparison-reference
-      - name: Step 6 corrected Strata controls
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --controlled-strata-followup \
-            --comparison-reference controlled-comparison-reference/matrix/controlled-comparison-report.json \
-            --ninfer build-structural-comparison/apps/ninfer-serve \
-            --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
-            --profile structural-profile-source/sv2-static-profile.json \
-            --strata-python /opt/ai/strata/.venv/bin/python \
-            --strata-server /opt/ai/strata/serve/server.py \
-            --strata-config /opt/ai/strata/strata-unsloth-ud-q4_k_xl.json \
-            --strata-binary /opt/ai/strata/engine/strata \
-            --gpu-uuid "$(cat "$QUALIFICATION_RESULTS/gpu-uuid.txt")" \
-            --output "$QUALIFICATION_RESULTS/matrix" \
-            | tee "$QUALIFICATION_RESULTS/matrix-summary.log"
-          cat "$QUALIFICATION_RESULTS/matrix-summary.log" >> "$GITHUB_STEP_SUMMARY"
+          cat "$QUALIFICATION_RESULTS/fp8-f32-prefill-oracle-and-screen.log" >> "$GITHUB_STEP_SUMMARY"
       - name: Compress completed or partial native logs
         if: always()
         shell: bash

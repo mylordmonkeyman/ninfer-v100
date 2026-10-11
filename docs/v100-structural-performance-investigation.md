@@ -836,3 +836,56 @@ CLI as well as serving. A no-speculation comparison is unavailable with the
 preserved installed engine/pack. Do not launch a known-invalid CLI or claim draft
 acceptance disabled is speculation disabled. The initial assumption that CLI could
 provide this baseline was wrong; this concrete limitation bounds Step 6.
+
+## Six-step Step 6 completed; Step 2 GDN operator screening
+
+Corrected follow-up [38094038959](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38094038959)
+passed all gates. Three changed Strata servers (six requests each) allocated 6608
+ranked expert slots / 19.28 GiB, matching NInfer's 19.28 GiB byte budget to the
+native log's precision. Generated config limits MTP to two drafts and disables
+suffix drafting/min-p truncation. Installed assets remain unchanged.
+
+| Warmed medians | NInfer reference | Corrected Strata |
+|---|---:|---:|
+| HTTP | 36.9234 s | 24.4306 s |
+| Native prefill / response prompt | 31.0262 s | 21.0356 s |
+| Native decode / response predicted | 5.7742 s | 3.5515 s |
+| Sampled GPU peak | 29.83 GiB | 26.70 GiB |
+
+The HTTP gap is 1.51x, not the unmatched native-profile 3.45x gap. This does not
+establish equal quality or isolate any changed control: NInfer's valid reference
+is reused from run38090951809, BF16/FP16 KV values and expert representations differ,
+and native accepted/drafted work remains unequal (NInfer71/112, Strata69/118 or
+73/112). Strata warmed outputs also vary across fresh servers. The preserved
+installed engine cannot disable speculation for this native pack. Step 6 is
+complete as a bounded controlled comparison, with that unresolved limitation;
+NInfer has not beaten Strata.
+
+Step 2 source attribution identifies the largest dense component, GDN's FP8/F32
+projections (16384x2560 input, 2560x6144 output). Their current Volta QPN route
+already uses fused FP16 Tensor Core MMA, but breaks every large prefill into at
+most 32-token calls, repeatedly reading packed weights. The old SV7 BF16 selector
+does not own these projections. Re-enabling it would not address this cost.
+
+The next protected job screens a directly invoked alternative operator: expand
+E4M3 weights once per full chunk, convert BF16 activations to FP16, CUTLASS Sm70
+full-chunk GEMM with FP32 accumulation/output scratch, then multiply the represented
+FP32 row scale before final BF16 rounding. This preserves F32 scales rather than
+reusing the older BF16-scale operator's early output rounding. It is deliberately
+not integrated into dispatch or a production selector yet. Repacking is temporary,
+not a model/source-pack conversion. At T2048 the larger input projection requires
+218 MiB temporary scratch (80 MiB weights, 10 MiB inputs, 128 MiB FP32 outputs),
+which must enter the planner before a request-level candidate is considered.
+
+Qualification checks the baseline and candidate directly against the independent
+sequential FP32 mathematical dot product from E4M3 codes, BF16 inputs and stored
+F32 row scales. Full outputs at both model shapes and T128/257/2048 are checked;
+129-token extreme fixtures include signed finite top/subnormal codes, zeros,
+large/small finite activations and scales. Repeated independently generated
+row/token prototypes bound oracle cost without reducing device shape or output
+coverage. Input values are within finite FP16 range; arbitrary BF16 overflow and
+sub-FP16 values are not qualified by this screening. NRMSE<=0.002 and cosine>=0.99999,
+output/workspace guards and scope reuse must all pass before event-timed operator
+screening (three warmups/seven alternating repetitions including all expansion/cast/scaling
+work). Operator gains alone will not establish request gains or authorize a default
+change; full-model qualification remains required before arithmetic promotion.

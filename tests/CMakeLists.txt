@@ -791,3 +791,9 @@ add_test(NAME ninfer_qwen3_8_flash_next_perf_telemetry_test
 ninfer_add_test(ninfer_qwen3_8_flash_next_expert_gemm_test
   SOURCES targets/qwen3_8_flash_next/test_expert_gemm.cpp
   LIBRARIES ninfer_qwen3_8_flash_next)
+
+if(NINFER_VOLTA_BUILD)
+  ninfer_add_op_test(ninfer_fp8_f32_prefill_sm70_test
+    SOURCES ops/linear/test_fp8_f32_prefill_sm70.cpp
+    LIBRARIES ninfer_ops)
+endif()
