@@ -1515,3 +1515,42 @@ fused-expansion profile; first it requires exactly six MMA and six SIMT QSA
 dispatches on the real 7,111-token request, then rotates three fresh-server
 SIMT, late-half-MMA and installed-native-Strata arms.  No new layer mask,
 arithmetic relaxation or default promotion is part of this screen.
+
+### Late-half QSA MMA helps modestly; direct packed expert MMA is next
+
+Corrected run [38126105152](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38126105152)
+passed every codec, independent FP64 QSA, append, dense, expert, lifetime and cache
+gate. The real diagnostic emitted24 QSA events: the twelve7,111-token prompt events
+split exactly six late-half MMA and six SIMT, while all twelve smaller serving events
+remained SIMT. This is the intended dispatch scope.
+
+Three rotated fresh servers per arm ran cold/four warmups/measured with7,111 prompt
+tokens,128 generated tokens and zero reuse. The admitted late-half route improved
+warmed HTTP from30.9362 to29.6559 seconds (4.14%) and native prefill from23.7444 to
+22.6272 seconds (4.70%). Decode was effectively flat at6.8211 versus6.8322 seconds.
+The HTTP ranges were30.9038–33.0087 and29.4183–29.9965 seconds. Both NInfer arms
+retained103 resident slots/layer and29.9763GiB sampled peak. Outputs and MTP work
+differed across arithmetic arms; each arm was stable internally. Keep
+`NINFER_V100_QSA_SCORE_MMA=1` with minimum-QSA6 as an explicit profile option, not
+a default promotion.
+
+The same run measured installed native Strata at10.5476 seconds warmed HTTP
+(10.3767–11.8524 seconds). The improved NInfer arm is still2.81x slower. Different
+weights, KV codecs and speculative arithmetic preclude a matched-quality claim.
+
+MoE remains the largest measured stage, and the current expert GEMM writes expanded
+FP16 gate/up and down matrices to global memory before cuBLAS. The next candidate
+reuses NInfer's existing qualified wide-token Volta NVFP4 MMA substrate: compact
+checkpoint codes/scales are decoded into shared memory and consumed directly by
+`mma.sync.m8n8k4`. An expert-specific FP16-activation/FP32-output wrapper keeps the
+existing FP32 post-GEMM weight-divisor placement, input scaling, SiLU/up activation
+and scatter. It changes neither compact weights nor H2D bytes and removes the modeled
+88.552GB of global FP16 expansion writes from the diagnostic workload.
+
+The candidate is controlled by `NINFER_V100_EXPERT_PACKED_MMA=1`, default off. A
+target-host admission first requires the independent represented-NVFP4 expert oracle,
+expanded-cuBLAS numerical comparison, guard/lifetime/ownership/cache gates, at least
+10% aggregate operator improvement for route counts32 and above, and no tested route
+count more than5% slower. Only an admitted candidate proceeds to three rotated fresh
+servers each for expanded cuBLAS, packed MMA and installed Strata on the best8192/FP8/
+late-half-QSA profile. No arithmetic default is promoted by this screen.

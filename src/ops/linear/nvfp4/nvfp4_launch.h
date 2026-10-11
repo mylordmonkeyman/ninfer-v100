@@ -27,6 +27,12 @@ void launch_nvfp4_volta_qpn(const Tensor&, const Weight&, Tensor&, cudaStream_t)
 // once per K-pass instead of QPN2's small-T-chunked re-streaming. Prefill's route.
 void launch_nvfp4_volta_mma(const Tensor& x, const Weight& w, Tensor& out, WorkspaceArena& ws,
                             cudaStream_t stream, int splits_override = 0);
+// Expert companion: checkpoint-native compact NVFP4 x FP16, with raw-weight FP32 output.
+// Weight divisors deliberately remain in the expert activation/scatter epilogues.
+void launch_nvfp4_volta_mma_fp16_f32(const void* codes, const void* scales, const void* x,
+                                     float* out, std::int32_t n, std::int32_t k,
+                                     std::int32_t t, cudaStream_t stream,
+                                     int splits_override = 0);
 [[nodiscard]] bool nvfp4_volta_mma_supported(std::int32_t n, std::int32_t k,
                                              std::int32_t t) noexcept;
 [[nodiscard]] std::size_t nvfp4_volta_mma_workspace_bytes(std::int32_t n, std::int32_t k,

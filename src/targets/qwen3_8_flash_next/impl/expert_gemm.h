@@ -25,6 +25,8 @@ private:
 [[nodiscard]] bool flash_next_expert_gemm_requested();
 // Experimental work reduction; default off on every architecture.
 [[nodiscard]] bool flash_next_expert_pair_expand_requested();
+// Direct compact-weight tensor-core path; experimental and default-off.
+[[nodiscard]] bool flash_next_expert_packed_mma_requested();
 // These selectors default on only for the Volta build. Their environment
 // variables remain explicit rollback controls (simt/0) and opt-in controls on
 // other architectures (fp16/1).

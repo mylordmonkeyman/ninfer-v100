@@ -443,6 +443,8 @@ def main():
                    help='Attribute the tested 8192/FP8/262K/dense+fused profile with paired reference and diagnostics')
     p.add_argument('--qsa-late-half-race', action='store_true',
                    help='Bounded 8192-profile SIMT versus admitted late-half score-MMA and native Strata')
+    p.add_argument('--packed-expert-race', action='store_true',
+                   help='Best-profile expanded cuBLAS versus direct compact-NVFP4 expert MMA and native Strata')
     p.add_argument('--comparison-reference', type=Path)
     a = p.parse_args()
     if a.large_profile_breakdown:
@@ -463,14 +465,16 @@ def main():
         '--prefill-chunk', '2048', '--kv-dtype', 'bf16', '--no-prefix-reuse', '--no-thinking',
         '--no-cuda-graph', '--no-qsa-prefill-mma',
         '--spec', 'mtp', '--draft-tokens', '2', '--lm-head-draft']
-    if a.context_residency_ab or a.fp8_long_context or a.large_prefill_race or a.large_profile_breakdown or a.qsa_late_half_race:
+    if a.context_residency_ab or a.fp8_long_context or a.large_prefill_race or a.large_profile_breakdown or a.qsa_late_half_race or a.packed_expert_race:
         a.ninfer_flags = ab.option(a.ninfer_flags, '--max-context', '262144')
         a.ninfer_flags = ab.option(a.ninfer_flags, '--kv-capacity', '262144')
-    if a.fp8_long_context or a.large_prefill_race or a.large_profile_breakdown or a.qsa_late_half_race:
+    if a.fp8_long_context or a.large_prefill_race or a.large_profile_breakdown or a.qsa_late_half_race or a.packed_expert_race:
         a.ninfer_flags = ab.option(a.ninfer_flags, '--kv-dtype', 'fp8')
         a.request_timeout = 5400
-    if a.large_profile_breakdown or a.qsa_late_half_race:
+    if a.large_profile_breakdown or a.qsa_late_half_race or a.packed_expert_race:
         a.ninfer_flags=ab.option(a.ninfer_flags,'--prefill-chunk','8192')
+    if a.packed_expert_race:
+        a.ninfer_flags=[f for f in a.ninfer_flags if f!='--no-qsa-prefill-mma']+['--qsa-prefill-mma']
     a.long_prompt = LONG
     a.max_output_tokens = 64 if a.fp8_long_context else 128
     a.warmups = 4; a.repeats = 1; a.telemetry_level = 0
@@ -521,7 +525,12 @@ def main():
               ('ninfer','qsa-late-half-mma',dict(context_arms[1][2],NINFER_V100_QSA_SCORE_MMA='1',
                                                 NINFER_V100_QSA_SCORE_MMA_MIN_QSA='6')),
               ARMS[1]]
-    manifest_arms = (qsa_arms if a.qsa_late_half_race else [context_arms[1]] if a.large_profile_breakdown else race_arms if a.large_prefill_race else [context_arms[1]] if a.fp8_long_context else context_arms if a.context_residency_ab else pair_arms if a.expert_pair_expand_ab else [dense_arms[1]] if a.moe_work_breakdown else dense_arms if a.dense_prefill_gemm_ab else [('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
+    packed_base=dict(context_arms[1][2],NINFER_V100_QSA_SCORE_MMA='1',
+                     NINFER_V100_QSA_SCORE_MMA_MIN_QSA='6',NINFER_V100_EXPERT_PACKED_MMA='0')
+    packed_arms=[('ninfer','expanded-cublas',packed_base),
+                 ('ninfer','packed-nvfp4-mma',dict(packed_base,NINFER_V100_EXPERT_PACKED_MMA='1')),
+                 ARMS[1]]
+    manifest_arms = (packed_arms if a.packed_expert_race else qsa_arms if a.qsa_late_half_race else [context_arms[1]] if a.large_profile_breakdown else race_arms if a.large_prefill_race else [context_arms[1]] if a.fp8_long_context else context_arms if a.context_residency_ab else pair_arms if a.expert_pair_expand_ab else [dense_arms[1]] if a.moe_work_breakdown else dense_arms if a.dense_prefill_gemm_ab else [('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
                      [default_arm] if a.qualified_default_smoke else
                      [("ninfer", "adaptive156-qualified", residency_arms()[1][2]), ARMS[1]] if (a.final_comparison or a.controlled_comparison) else
                      residency_arms() if a.residency_gemm_ab else
@@ -538,6 +547,7 @@ def main():
         fp8_long_context=a.fp8_long_context, large_prefill_race=a.large_prefill_race,
         large_profile_breakdown=a.large_profile_breakdown,
         qsa_late_half_race=a.qsa_late_half_race,
+        packed_expert_race=a.packed_expert_race,
         request_timeout=getattr(a,'request_timeout',900),
         prefill_breakdown=a.prefill_breakdown, dense_prefill_gemm_ab=a.dense_prefill_gemm_ab,
         stream_attribution_only=a.stream_attribution_only, expert_gemm_ab=a.expert_gemm_ab, resident_gemm_ab=a.resident_gemm_ab, cpu_stream_overlap_ab=a.cpu_stream_overlap_ab,
@@ -564,7 +574,7 @@ def main():
             if a.residency_gemm_ab or a.context_residency_ab or a.fp8_long_context:
                 cell['residency'] = residency_observation(folder, a.max_output_tokens,
                     None if a.fp8_long_context else 7111)
-            if a.final_comparison or a.prefill_breakdown or a.controlled_comparison or a.dense_prefill_gemm_ab or a.moe_work_breakdown or a.expert_pair_expand_ab or a.large_prefill_race or a.qsa_late_half_race:
+            if a.final_comparison or a.prefill_breakdown or a.controlled_comparison or a.dense_prefill_gemm_ab or a.moe_work_breakdown or a.expert_pair_expand_ab or a.large_prefill_race or a.qsa_late_half_race or a.packed_expert_race:
                 samples=[json.loads(line) for line in (folder/'system.jsonl').read_text().splitlines()]
                 peaks=[r.get('gpu',{}).get('metrics',{}).get('memory_used_bytes') for r in samples
                        if r.get('kind')=='system_sample']
@@ -630,6 +640,26 @@ def main():
                     'Cross-arm output and MTP work may differ because score arithmetic changes.',
                     'Native Strata uses different weights, KV codec and speculative algorithm; this is practical, not matched-quality performance.'])
         (a.output/'qsa-late-half-race-report.json').write_text(json.dumps(report,indent=2)+'\n')
+        print(json.dumps(report,indent=2),flush=True)
+        return
+    if a.packed_expert_race:
+        for repeat in range(3):
+            for engine,arm,flags in packed_arms[repeat:]+packed_arms[:repeat]:
+                run(engine,arm,flags,arm+'-r'+str(repeat),'timing')
+                rows=[json.loads(l) for l in (Path(cells[-1]['folder'])/'requests.jsonl').read_text().splitlines()]
+                if [r['phase'] for r in rows]!=['cold']+['warmup']*4+['measured']:
+                    raise ValueError('packed expert race request schedule incomplete')
+                if any(r['response']['usage']['completion_tokens']!=128 or
+                       r['response']['usage'].get('prompt_tokens_details',{}).get('cached_tokens',0)!=0
+                       for r in rows):
+                    raise ValueError('packed expert race output/reuse work changed')
+        report=dict(status='packed_expert_race_complete',timing=summarize(cells),
+            observations=[dict(engine=c['engine'],arm=c['arm'],peak=c.get('sampled_peak_gpu_bytes'),
+                               residency=c.get('residency')) for c in cells],
+            limits=['The direct packed expert route is experimental and remains default-off.',
+                    'Cross-arm output and MTP work may differ because tensor-core accumulation association changes.',
+                    'Native Strata uses different weights, KV codec and speculative algorithm; this is practical, not matched-quality performance.'])
+        (a.output/'packed-expert-race-report.json').write_text(json.dumps(report,indent=2)+'\n')
         print(json.dumps(report,indent=2),flush=True)
         return
     if a.large_prefill_race:
