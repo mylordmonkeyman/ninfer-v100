@@ -276,13 +276,9 @@ bool test_prefill_vs_decode_equivalence(ninfer::DeviceContext& device) {
                 key_nan++;
                 continue;
             }
-            if (T < 16) {
-                if (kp_a[i] != kp_b[i]) {
-                    std::cerr << "Key cache bitwise mismatch at T=" << T << ", idx=" << i << ": seq=0x"
-                              << std::hex << kp_a[i] << ", chunk=0x" << kp_b[i] << std::dec << "\n";
-                    return false;
-                }
-            }
+            // Sequential and batched FP32 reductions may round differently to
+            // BF16. This supplementary cross-schedule comparison uses the
+            // finite/nonvacuous normwise gate below; exact codec gates are separate.
             double d = f_a - f_b;
             key_diff_sq += d * d;
             key_base_sq += static_cast<double>(f_a) * f_a;
@@ -311,13 +307,9 @@ bool test_prefill_vs_decode_equivalence(ninfer::DeviceContext& device) {
                 val_nan++;
                 continue;
             }
-            if (T < 16) {
-                if (vp_a[i] != vp_b[i]) {
-                    std::cerr << "Value cache bitwise mismatch at T=" << T << ", idx=" << i << ": seq=0x"
-                              << std::hex << vp_a[i] << ", chunk=0x" << vp_b[i] << std::dec << "\n";
-                    return false;
-                }
-            }
+            // Sequential and batched FP32 reductions may round differently to
+            // BF16. This supplementary cross-schedule comparison uses the
+            // finite/nonvacuous normwise gate below; exact codec gates are separate.
             double d = f_a - f_b;
             val_diff_sq += d * d;
             val_base_sq += static_cast<double>(f_a) * f_a;

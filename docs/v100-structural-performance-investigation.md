@@ -1271,3 +1271,23 @@ The serving harness keeps its normal900-second timeout but this mode allows5400
 seconds per request; hardware budget180minutes. Partial reports are saved after
 each cell and on failure; no completed result is erased. No prefix reuse/page-cache
 eviction or foreign tokenizer is used. Defaults remain unchanged.
+
+
+### Step 5 qualification stop: cross-schedule BF16 fixture correction
+
+Run [38109293993](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38109293993)
+built successfully and passed the exact unscaled-E4M3 conversion oracle for all
+65,280 finite BF16 inputs. The independent QSA FP64 oracle passed FP8/BF16,
+extreme scores and all tested batches through8192; maximum reported normwise
+error was2.42387e-6 against the independently rounded public BF16 oracle.
+
+The full QSA integration fixture then stopped before any server/timing cell at
+T=2: sequential value-cache0xbeeb versus batched0xbeec. That fixture required
+bit-exact equality for independently reduced floating-point projections at T<16,
+in addition to its numerical gate. Such cross-schedule equality is not the
+floating-point Op contract. Remove only that redundant bitwise assertion for
+key/value projections; retain finite/nonvacuous checks and all existing numerical
+tolerances (including1e-3 for these small cases). The exact conversion oracle and
+independent attention oracle are unchanged. No production arithmetic or default
+changes. Resume qualification and long requests; no completed serving cells exist
+to reuse or rerun from this stopped job.

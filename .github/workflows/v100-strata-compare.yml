@@ -1,5 +1,5 @@
 name: V100 Structural Engine Comparison
-# Step 5: qualify software FP8 KV, then actual 128K/near-262K prompts.
+# Step 5: resume after correcting floating-point cross-schedule fixture; gates retained.
 on:
   workflow_dispatch:
   push:
