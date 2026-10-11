@@ -7,6 +7,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <random>
 #include <stdexcept>
@@ -57,11 +58,14 @@ void run(DeviceContext& device,int n,int k,int t,bool extreme,bool measure){
     w.shape[0]=w.padded_shape[0]=n;w.shape[1]=w.padded_shape[1]=k;
     w.scale_ne[0]=n;w.scale_nb[0]=4;w.scale_nb[1]=w.scale_nb[2]=w.scale_nb[3]=n*4LL;
     Tensor x(xd.p,DType::BF16,{k,t}),y(yd.p,DType::BF16,{n,t});
-    const auto capacity=ops::detail::fp8_f32_cutlass_sm70_workspace_bytes(n,k,t);
+    require(setenv("NINFER_V100_GDN_PREFILL_GEMM","1",1)==0,"setenv failed");
+    const auto capacity=ops::linear_workspace_capacity_bytes(w.qtype,n,k,ops::LinearPolicy::A16Only,1,t);
+    require(capacity==(t>=128?ops::detail::fp8_f32_cutlass_sm70_workspace_bytes(n,k,t):0),
+            "public workspace planner omitted candidate scratch");
     WorkspaceArena ws(capacity+256);auto guard=ws.alloc_bytes(256);CUDA_CHECK(cudaMemset(guard.data,0xa5,256));
     auto launch=[&](bool expanded){
-        if(expanded)ops::detail::fp8_f32_cutlass_sm70_launch(x,w,y,ws,device.stream);
-        else ops::linear(x,w,y,ops::LinearPolicy::A16Only,ws,device.stream);
+        require(setenv("NINFER_V100_GDN_PREFILL_GEMM",expanded?"1":"0",1)==0,"setenv failed");
+        ops::linear(x,w,y,ops::LinearPolicy::A16Only,ws,device.stream);
         require(ws.used()==256,"scratch lifetime leaked");
     };
     if(!measure)for(bool expanded:{false,true}){
@@ -121,7 +125,7 @@ int main(){try{
     int count=0;if(cudaGetDeviceCount(&count)!=cudaSuccess||!count)return 77;
     DeviceContext device(0);
     for(auto shape:{std::array<int,2>{16384,2560},std::array<int,2>{2560,6144}}){
-        for(int t:{128,257,2048})run(device,shape[0],shape[1],t,false,false);
+        for(int t:{127,128,257,2048})run(device,shape[0],shape[1],t,false,false);
         run(device,shape[0],shape[1],129,true,false);
     }
     std::cout<<"fp8_f32.all_numerical_lifetime_gates=pass"<<std::endl;

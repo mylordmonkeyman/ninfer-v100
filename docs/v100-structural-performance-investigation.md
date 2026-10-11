@@ -910,3 +910,43 @@ Report the ideal rounding floor as well as per-token BF16-reference error. No
 production arithmetic or aggregate thresholds change. Re-run only this bounded
 operator qualification/screen; a serving comparison remains conditional on its
 result.
+
+
+### Step 2 operator screening passed; opt-in request comparison started
+
+Run [38098702122](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38098702122)
+passed every baseline/candidate numerical and lifetime gate after the output
+criterion correction. Aggregate NRMSE ranged 0.00160–0.00170, cosine>=0.999999;
+maximum per-token BF16-reference NRMSE was 0.00156828. Operator medians include
+weight expansion, activation conversion, GEMM and row scaling:
+
+| GDN shape / tokens | QPN | Full-chunk GEMM |
+|---|---:|---:|
+| 16384x2560 / 128 | 2.02957 ms | 0.616416 ms |
+| 16384x2560 / 257 | 4.30182 ms | 0.834560 ms |
+| 16384x2560 / 2048 | 29.5281 ms | 2.64499 ms |
+| 2560x6144 / 128 | 0.536576 ms | 0.355328 ms |
+| 2560x6144 / 257 | 1.17146 ms | 0.353280 ms |
+| 2560x6144 / 2048 | 8.53504 ms | 0.931840 ms |
+
+This establishes an operator case, not an end-to-end result. The implementation
+now has **opt-in** `NINFER_V100_GDN_PREFILL_GEMM=1` (default0), restricted to these
+two F32-scale GDN shapes at T>=128. QSA/vocabulary projections, smaller batches,
+and non-Volta routes retain their existing path. The public Linear workspace
+capacity includes the candidate's maximum scratch over the requested interval;
+GDN and runtime planners already consume that capacity. No hidden allocation or
+persistent expanded weights are introduced. The public dispatcher qualification
+also covers T127 below the crossover and planned arena scope/guard reuse.
+
+The protected request comparison uses three alternating fresh servers per arm,
+each cold + four warmups + measured 7111 prompt/128 output/zero reuse requests.
+Both request adaptive156, qualified expert paths, BF16KV, MTP2, 8K context,
+2048 chunks and 88 workers on 32 physical cores. Actual clipped expert capacity,
+profile seeding and sampled GPU peak are observed; the extra scratch may change
+residency and cannot be assumed free. Report HTTP/native prefill/decode and
+outputs/usage/accepted work separately. Arithmetic changes can alter routes/output
+and MTP acceptance, so cross-arm exact output/work parity is not a gate or a
+quality claim. Two separate diagnostic requests per arm validate real GDN dispatch
+and both shapes' 36-layer/7111-token conservation without instrumenting timing.
+The opt-in remains experimental; full-model qualification is required before a
+production arithmetic default change.

@@ -104,7 +104,8 @@ class StructuralTests(unittest.TestCase):
                 kind='early_cpu_stream', eligible=True, cpu_routes=7, cpu_ms=5,
                 stream_submit_ms=8, overlap_ms=4))+'\n'+json.dumps(dict(
                 kind='early_cpu_stream', eligible=False, cpu_routes=3, cpu_ms=2,
-                stream_submit_ms=0, overlap_ms=0))+'\n')
+                stream_submit_ms=0, overlap_ms=0))+'\n'+json.dumps(dict(
+                kind='gdn_prefill_gemm', n=16384, k=2560, tokens=2048, expanded=True))+'\n')
             r = native_work(folder, 'ninfer')
             self.assertEqual(r['phases'][record['phase']]['host_spans_us'], {'moe':10, 'cpu_expert':8})
             self.assertEqual(r['ninfer_prefill_chunks'][0]['tokens'], 2048)
@@ -116,6 +117,8 @@ class StructuralTests(unittest.TestCase):
             self.assertFalse(r['early_cpu_stream'][1]['eligible'])
             self.assertEqual(r['early_cpu_stream'][1]['overlap_ms'],0)
             self.assertEqual(r['expert_stream_timing'][0]['kernel_interval_ms'], 5)
+            self.assertEqual(r['gdn_prefill_gemm'], [dict(kind='gdn_prefill_gemm',
+                n=16384, k=2560, tokens=2048, expanded=True)])
 
     def test_real_http_schedule_and_native_phase_timing_are_persisted(self):
         with tempfile.TemporaryDirectory() as tmp:

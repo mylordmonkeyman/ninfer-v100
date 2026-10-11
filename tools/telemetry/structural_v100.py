@@ -126,7 +126,7 @@ def native_work(folder, engine):
             if layer.get('cache_windows'):
                 end = layer['cache_windows'][-1]['end']
                 dst['cache_last_by_layer'][str(layer['layer'])] = {k:v for k,v in end.items() if k != 'resident_ids'}
-    ledger, dispatch, stream_timing, resident_gemm, early_cpu = [], [], [], [], []
+    ledger, dispatch, stream_timing, resident_gemm, early_cpu, gdn_gemm = [], [], [], [], [], []
     for line in log.read_text().splitlines():
         if '"prefill_stage_ledger"' in line:
             ledger.append(json.loads(line))
@@ -134,6 +134,8 @@ def native_work(folder, engine):
             stream_timing.append(json.loads(line))
         elif '"expert_resident_gemm"' in line:
             resident_gemm.append(json.loads(line))
+        elif '"gdn_prefill_gemm"' in line:
+            gdn_gemm.append(json.loads(line))
         elif '"early_cpu_stream"' in line:
             early_cpu.append(json.loads(line))
         elif engine == 'strata' and any(s in line.lower() for s in
@@ -141,7 +143,7 @@ def native_work(folder, engine):
             dispatch.append(line)
     return dict(phases=dict(phases), ninfer_prefill_chunks=ledger,
         strata_dispatch_and_phase_lines=dispatch, expert_stream_timing=stream_timing,
-        expert_resident_gemm=resident_gemm, early_cpu_stream=early_cpu,
+        expert_resident_gemm=resident_gemm, early_cpu_stream=early_cpu, gdn_prefill_gemm=gdn_gemm,
         limits=['Host spans are inclusive, not additive critical-path components.',
                 'CUDA stage intervals include stream waits and host gaps.',
                 'CPU weight-read counters are modeled reads, not hardware DRAM counters.',
@@ -284,6 +286,8 @@ def main():
                    help='step 6 initial serving controls: 8K capacity, 16-bit KV, 2048 chunk, MTP2, physical cores')
     p.add_argument('--controlled-strata-followup', action='store_true',
                    help='correct Strata byte budget/draft controls; reuse valid NInfer comparison reference')
+    p.add_argument('--gdn-prefill-gemm-ab', action='store_true',
+                   help='Step 2: qualified QPN versus full-chunk FP16 GDN projection GEMM')
     p.add_argument('--comparison-reference', type=Path)
     a = p.parse_args()
     if a.controlled_strata_followup:
@@ -339,7 +343,9 @@ def main():
         path = a.output/'controlled-strata-config.json'
         path.write_text(json.dumps(cfg,indent=2)+'\n')
         a.strata_config = path
-    manifest_arms = ([('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
+    gdn_arms=[('ninfer',name,dict(residency_arms()[1][2],NINFER_V100_GDN_PREFILL_GEMM=value))
+              for name,value in [('gdn-qpn','0'),('gdn-full-chunk','1')]]
+    manifest_arms = (gdn_arms if a.gdn_prefill_gemm_ab else [('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
                      [default_arm] if a.qualified_default_smoke else
                      [("ninfer", "adaptive156-qualified", residency_arms()[1][2]), ARMS[1]] if (a.final_comparison or a.controlled_comparison) else
                      residency_arms() if a.residency_gemm_ab else
@@ -350,7 +356,7 @@ def main():
         physical_cpus=cpus,
         arms=[ARMS[0]] if a.stream_attribution_only else manifest_arms,
         fresh_servers_per_arm=2 if a.prefill_breakdown else 1 if (a.stream_attribution_only or a.qualified_default_smoke) else 3,
-        prefill_breakdown=a.prefill_breakdown,
+        prefill_breakdown=a.prefill_breakdown, gdn_prefill_gemm_ab=a.gdn_prefill_gemm_ab,
         stream_attribution_only=a.stream_attribution_only, expert_gemm_ab=a.expert_gemm_ab, resident_gemm_ab=a.resident_gemm_ab, cpu_stream_overlap_ab=a.cpu_stream_overlap_ab,
         qualified_default_smoke=a.qualified_default_smoke,
         residency_gemm_ab=a.residency_gemm_ab, final_comparison=a.final_comparison,
@@ -359,7 +365,7 @@ def main():
         timing_telemetry_level=0, diagnostic_telemetry_level=2,
         cache_budget='actual allocations logged; requested maxima are not equal-memory controls',
         cold_definition='first request after fresh server; host file cache preserved',
-        cross_quant_comparison='same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.residency_gemm_ab or a.prefill_breakdown)
+        cross_quant_comparison='same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.residency_gemm_ab or a.prefill_breakdown or a.gdn_prefill_gemm_ab)
             else 'descriptive; source artifacts and frontend token counts differ',
         ninfer_flags=a.ninfer_flags), indent=2)+'\n')
     cells = []
@@ -374,7 +380,7 @@ def main():
             cell = dict(engine=engine, arm=arm, mode=mode, folder=str(folder), result=result)
             if a.residency_gemm_ab:
                 cell['residency'] = residency_observation(folder, a.max_output_tokens)
-            if a.final_comparison or a.prefill_breakdown or a.controlled_comparison:
+            if a.final_comparison or a.prefill_breakdown or a.controlled_comparison or a.gdn_prefill_gemm_ab:
                 samples=[json.loads(line) for line in (folder/'system.jsonl').read_text().splitlines()]
                 peaks=[r.get('gpu',{}).get('metrics',{}).get('memory_used_bytes') for r in samples
                        if r.get('kind')=='system_sample']
@@ -394,6 +400,34 @@ def main():
         finally:
             (a.output/'summary.json').write_text(json.dumps(dict(cells=cells, timing=summarize(cells)), indent=2)+'\n')
         ab.release_gpu()
+    if a.gdn_prefill_gemm_ab:
+        for repeat in range(3):
+            for engine,arm,flags in (gdn_arms if repeat!=1 else list(reversed(gdn_arms))):
+                run(engine,arm,flags,arm+'-r'+str(repeat),'timing')
+        report=dict(step=2,status='timing_complete',timing=summarize(cells),
+            observations=[dict(arm=c['arm'],**c['residency']) for c in cells],
+            limits=['Same represented weights; arithmetic changes may alter output/routes/MTP work.',
+                    'Request/native phase gains must be measured; operator gains are not request gains.',
+                    'No default promotion without full-model numerical qualification.'])
+        path=a.output/'gdn-prefill-gemm-report.json'
+        path.write_text(json.dumps(report,indent=2)+'\n')
+        a.max_output_tokens=32;a.telemetry_level=2
+        a.request_schedule=[('diagnostic','long'),('diagnostic','long')]
+        for engine,arm,flags in gdn_arms:
+            run(engine,arm,dict(flags,NINFER_FLASH_NEXT_STAGE_LEDGER='1'),arm+'-diagnostic','diagnostic')
+            observed=cells[-1]['work']['gdn_prefill_gemm']
+            for n,k in [(16384,2560),(2560,6144)]:
+                rows=[r for r in observed if (r['n'],r['k'])==(n,k)]
+                if (not rows or sum(r['tokens'] for r in rows)!=2*7111*36 or
+                    any(r['expanded']!=(arm=='gdn-full-chunk') for r in rows)):
+                    raise ValueError('missing GDN prefill dispatch or token/layer conservation')
+        report['status']='complete'
+        report['diagnostics']=[dict(arm=c['arm'],residency=c['residency'],work=c['work'])
+                               for c in cells if c['mode']=='diagnostic']
+        path.write_text(json.dumps(report,indent=2)+'\n')
+        print(json.dumps(report['timing'],indent=2),flush=True)
+        print('Step 2 request comparison complete; arithmetic defaults unchanged.',flush=True)
+        return
     if a.controlled_comparison:
         arms=([ARMS[1]] if a.controlled_strata_followup else
               [('ninfer','adaptive156-qualified',residency_arms()[1][2]),ARMS[1]])

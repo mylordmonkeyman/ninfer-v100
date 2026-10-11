@@ -8,11 +8,27 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <string_view>
+#if defined(NINFER_VOLTA_BUILD)
+#include "ops/linear/fp8/fp8_cutlass_sm70.h"
+#endif
 #include <optional>
 #include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
+
+#if defined(NINFER_VOLTA_BUILD)
+bool gdn_prefill_gemm_selected(int n, int k, int t) {
+    if(t<128 || !((n==16384 && k==2560)||(n==2560 && k==6144)))return false;
+    const char* value=std::getenv("NINFER_V100_GDN_PREFILL_GEMM");
+    if(!value || !*value || std::string_view(value)=="0")return false;
+    if(std::string_view(value)=="1")return true;
+    throw std::invalid_argument("NINFER_V100_GDN_PREFILL_GEMM must be 0 or 1");
+}
+#endif
 
 enum class Fp8LinearRoute : std::uint8_t {
     A16,
@@ -180,6 +196,10 @@ std::size_t fp8_linear_workspace_capacity_bytes(std::int32_t output_rows, std::i
     if (is_fp8_f32_linear_problem(output_rows, input_rows)) {
         (void)resolve_route(output_rows, input_rows, policy, min_tokens);
         (void)resolve_route(output_rows, input_rows, policy, max_tokens);
+#if defined(NINFER_VOLTA_BUILD)
+        if(gdn_prefill_gemm_selected(output_rows,input_rows,max_tokens))
+            return fp8_f32_cutlass_sm70_workspace_bytes(output_rows,input_rows,max_tokens);
+#endif
         return 0;
     }
     const Fp8Problem problem = resolve_fp8_problem(output_rows, input_rows);
@@ -203,6 +223,19 @@ void fp8_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPoli
                   WorkspaceArena* workspace, cudaStream_t stream) {
     validate_fp8_weight(weight, "fp8 linear");
     if (weight.qtype == QType::FP8_E4M3FN_ROW_F32S) {
+#if defined(NINFER_VOLTA_BUILD)
+        const bool expanded=gdn_prefill_gemm_selected(weight.n,weight.k,x.ne[1]);
+        const char* diagnostic=std::getenv("NINFER_FLASH_NEXT_STAGE_LEDGER");
+        if(diagnostic && std::string_view(diagnostic)=="1" && x.ne[1]>=128 &&
+           ((weight.n==16384 && weight.k==2560)||(weight.n==2560 && weight.k==6144)))
+            std::fprintf(stderr,"{\"kind\":\"gdn_prefill_gemm\",\"n\":%d,\"k\":%d,\"tokens\":%d,\"expanded\":%s}\n",
+                         weight.n,weight.k,x.ne[1],expanded?"true":"false");
+        if(expanded){
+            if(!workspace)throw std::invalid_argument("GDN prefill GEMM requires planned workspace");
+            fp8_f32_cutlass_sm70_launch(x,weight,out,*workspace,stream);
+            return;
+        }
+#endif
         launch_flash_next_a16(x, weight, out, stream);
         return;
     }
