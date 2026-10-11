@@ -1,0 +1,346 @@
+{
+  "run": 38177809887,
+  "commit": "1b0ffaa14827993ffa09bd3789a773894a286aee",
+  "workload": {
+    "prompt": 7111,
+    "output": 128,
+    "cached": 0,
+    "cold_then_warmups": 4
+  },
+  "status": "complete",
+  "limits": [
+    "One clean and one diagnostic fresh server per engine; attribution, not a new win claim.",
+    "Different weights, KV representation, residency and speculative algorithms remain.",
+    "CUDA intervals include waits/host gaps; host spans must not be added to them.",
+    "No per-layer expert stream drain or worker telemetry; overhead is still measured.",
+    "The current admitted full-QSA, hyper-cuBLAS and shared-cuBLAS routes are included.",
+    "Packed-reduce candidate is operator-admitted but is not part of this audit."
+  ],
+  "engines": [
+    {
+      "engine": "ninfer",
+      "measured_comparison": {
+        "index": 5,
+        "phase": "measured",
+        "exact_output_usage_mtp": true,
+        "http_overhead_seconds": 1.3326776329999994,
+        "baseline_speculative_work": {
+          "accepted_per_position": [
+            39,
+            29
+          ],
+          "accepted_tokens": 68,
+          "backend": "mtp",
+          "draft_window": 2,
+          "drafted_tokens": 116,
+          "fallback_steps": 0,
+          "rounds": 59
+        },
+        "diagnostic_speculative_work": {
+          "accepted_per_position": [
+            39,
+            29
+          ],
+          "accepted_tokens": 68,
+          "backend": "mtp",
+          "draft_window": 2,
+          "drafted_tokens": 116,
+          "fallback_steps": 0,
+          "rounds": 59
+        },
+        "baseline_native_timing": {
+          "decode": 6.835463031,
+          "prefill": 15.854135183,
+          "prepare": 0.005480592,
+          "total": 22.697510084,
+          "ttft": 15.862047053,
+          "vision": 0.0
+        },
+        "diagnostic_native_timing": {
+          "decode": 6.978270124999998,
+          "prefill": 17.042979378000002,
+          "prepare": 0.007247809,
+          "total": 24.030830427999998,
+          "ttft": 17.052560303,
+          "vision": 0.0
+        },
+        "baseline_output_hash": "7acd2c9f7e39f364ed5ea72d8b5a29da92a3affedab504e77a4af6921e770145",
+        "diagnostic_output_hash": "7acd2c9f7e39f364ed5ea72d8b5a29da92a3affedab504e77a4af6921e770145"
+      },
+      "all_requests_exact_output_usage_mtp": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "residency": [
+        {
+          "actual_cache": {
+            "slots_per_layer": 102,
+            "bytes": 13537714176,
+            "transfer_bytes": 998049792,
+            "reserve_bytes": 2147483648
+          },
+          "seeded_experts": 4896,
+          "sampled_peak_gpu_bytes": 32216186880
+        },
+        {
+          "actual_cache": {
+            "slots_per_layer": 102,
+            "bytes": 13537714176,
+            "transfer_bytes": 998049792,
+            "reserve_bytes": 2147483648
+          },
+          "seeded_experts": 4896,
+          "sampled_peak_gpu_bytes": 32216186880
+        }
+      ],
+      "peak_bytes": [
+        32216186880,
+        32216186880
+      ],
+      "stages_seconds": {
+        "Preamble: embedding & staging": 0.003068928003311157,
+        "PLE injection": 0.6502881469726562,
+        "Hyper prepare (attention side)": 0.20719395446777344,
+        "Attention: QSA projection": 1.2353912353515626,
+        "Attention: QSA indexer score+select": 0.17828463745117187,
+        "Attention: QSA main attention": 5.17789599609375,
+        "Attention: QSA output projection": 0.06095359802246094,
+        "Attention: GDN qkvz projection": 0.32331362915039064,
+        "Attention: GDN conv+extracts": 0.07067139434814453,
+        "Attention: GDN controls": 0.04910809326171875,
+        "Attention: GDN output gate": 0.5334107055664062,
+        "Attention: GDN output projection": 0.18476441955566406,
+        "Hyper inject (attention side)": 0.019262596130371092,
+        "Hyper prepare (mlp side)": 0.20656539916992187,
+        "MoE: router": 0.40030810546875,
+        "MoE: grouping": 0.36421224975585936,
+        "MoE: shared gate-up": 0.043186058044433595,
+        "MoE: shared down": 0.03821372985839844,
+        "MoE: reduce": 0.1739384307861328,
+        "MoE: host rendezvous": 0.3062365417480469,
+        "MoE: routed submission timeline": 4.3101689453125,
+        "MoE: host join timeline": 1.15110302734375,
+        "Hyper inject (mlp side)": 0.019296482086181642,
+        "Final norm + head": 1.3339443359375
+      },
+      "architecture_phases": {
+        "prefill": {
+          "layers": 48,
+          "host_us": {
+            "rendezvous": 9729793.248000002,
+            "grouping": 363612.8219999999,
+            "resident_submit": 158285.76599999997,
+            "stream_submit": 4092617.635999998,
+            "cpu_join": 1150258.2079999999,
+            "cache_join": 52026.258999999984
+          },
+          "routes": {
+            "routes": 3413280,
+            "resident_routes": 680813,
+            "stream_routes": 2696848,
+            "cpu_routes": 35619,
+            "stream_experts": 10169
+          }
+        },
+        "verify": {
+          "layers": 2832,
+          "host_us": {
+            "rendezvous": 1476230.201,
+            "grouping": 426624.5639999991,
+            "resident_submit": 0,
+            "stream_submit": 0,
+            "cpu_join": 3058239.314000004,
+            "cache_join": 618261.580999999
+          },
+          "routes": {
+            "routes": 84000,
+            "resident_routes": 67252,
+            "stream_routes": 0,
+            "cpu_routes": 16748,
+            "stream_experts": 0
+          }
+        }
+      }
+    },
+    {
+      "engine": "strata",
+      "measured_comparison": {
+        "index": 5,
+        "phase": "measured",
+        "exact_output_usage_mtp": false,
+        "http_overhead_seconds": 0.6663228300000004,
+        "baseline_speculative_work": {
+          "draft_n": 117,
+          "draft_n_accepted": 70
+        },
+        "diagnostic_speculative_work": {
+          "draft_n": 115,
+          "draft_n_accepted": 69
+        },
+        "baseline_native_timing": {
+          "cache_n": 0,
+          "prompt_n": 7111,
+          "prompt_ms": 7946.9,
+          "prompt_per_token_ms": 1.118,
+          "prompt_per_second": 894.8,
+          "predicted_n": 128,
+          "predicted_ms": 2652.7,
+          "predicted_per_token_ms": 20.724,
+          "predicted_per_second": 48.3,
+          "draft_n": 117,
+          "draft_n_accepted": 70
+        },
+        "diagnostic_native_timing": {
+          "cache_n": 0,
+          "prompt_n": 7111,
+          "prompt_ms": 8707.7,
+          "prompt_per_token_ms": 1.225,
+          "prompt_per_second": 816.6,
+          "predicted_n": 128,
+          "predicted_ms": 2551.2,
+          "predicted_per_token_ms": 19.931,
+          "predicted_per_second": 50.2,
+          "draft_n": 115,
+          "draft_n_accepted": 69
+        },
+        "baseline_output_hash": "d29a4fd82e99a7a4cb8b14cc3a2e800d5e159b6bc93551ba99c5357b2f02e1dc",
+        "diagnostic_output_hash": "8cf86773d923d47a4cf34fb7e0aa79b8ff791473d29b24ee58929027f70816d9"
+      },
+      "all_requests_exact_output_usage_mtp": [
+        true,
+        true,
+        true,
+        false,
+        false,
+        false
+      ],
+      "residency": [
+        null,
+        null
+      ],
+      "peak_bytes": [
+        34047000576,
+        34047000576
+      ],
+      "phases_ms": {
+        "embed+steps": 38.0,
+        "hc read": 325.0,
+        "gdn": 307.0,
+        "qsa proj": 257.0,
+        "qsa indexer": 0.0,
+        "qsa select": 49.0,
+        "qsa attn": 450.0,
+        "router+shared": 88.0,
+        "host grouping": 251.0,
+        "gather": 0.0,
+        "wait copy": 435.0,
+        "dequant": 1324.0,
+        "gemm gate/up": 1719.0,
+        "gemm down": 862.0,
+        "combine": 155.0,
+        "ple": 12.0,
+        "kv stage": 0.0,
+        "gdn conv+gates": 45.0,
+        "gdn recurrence": 253.0,
+        "gdn out proj": 173.0
+      },
+      "gpu_timeline_ms": 6747.0,
+      "timer_wall_ms": 7031.0,
+      "decode_lines": [
+        "strata decode timing: 59 windows, avg T 2.95, 2.17 tokens/window, 43.24 ms/window = verify 32.66 (GPU-reach wait 24.44 + per-layer host 4.48 [plan 0.19 actq 0.23 jobs 0.03 CPU 3.90] + stage 0.86) + commit/emit 0.15 + draft 3.40; per layer-window: CPU experts 1.22 (1.34 entries), VRAM hits 28.09, PCIe 0.07"
+      ],
+      "native_work_lines": [
+        "strata serve: prompt 7111 tokens = 0 reused + 7111 read in 8708 ms (816.6 tok/s), 128 generated in 2551 ms (50.2 tok/s), drafts accepted 69 of 115, 0 checkpoints",
+        "strata serve: decode expert cache hit rate: 95.5% (79543 hits / 83328 lookups)",
+        "strata serve: resident RAM: 48.14 GiB of experts in RAM, 4749 exchanged with the VRAM tier, 6198 blob reads from the file",
+        "strata serve: expert tiers: GPU 79543 hits this request; since the start RAM 142048 blobs, files 6198 blobs 64076.6 MB read (the GGUF in place)",
+        "strata serve: KV streaming: 98.23% of 1072212 block reads hit VRAM, 76.3 MiB read from RAM"
+      ]
+    }
+  ],
+  "clean_timing": {
+    "ninfer/shared-staged-cublas/measured": {
+      "samples": [
+        {
+          "wall_seconds": 22.701355742,
+          "usage": {
+            "completion_tokens": 128,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_tokens": 7111,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 7239
+          },
+          "native_timing": {
+            "decode": 6.835463031,
+            "prefill": 15.854135183,
+            "prepare": 0.005480592,
+            "total": 22.697510084,
+            "ttft": 15.862047053,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [
+              39,
+              29
+            ],
+            "accepted_tokens": 68,
+            "backend": "mtp",
+            "draft_window": 2,
+            "drafted_tokens": 116,
+            "fallback_steps": 0,
+            "rounds": 59
+          },
+          "response_timing": null,
+          "output_hash": "7acd2c9f7e39f364ed5ea72d8b5a29da92a3affedab504e77a4af6921e770145"
+        }
+      ],
+      "median_wall_seconds": 22.701355742,
+      "min_wall_seconds": 22.701355742,
+      "max_wall_seconds": 22.701355742,
+      "unique_outputs": 1
+    },
+    "strata/native/measured": {
+      "samples": [
+        {
+          "wall_seconds": 10.655176314,
+          "usage": {
+            "prompt_tokens": 7111,
+            "completion_tokens": 128,
+            "total_tokens": 7239,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "native_timing": null,
+          "speculative": null,
+          "response_timing": {
+            "cache_n": 0,
+            "prompt_n": 7111,
+            "prompt_ms": 7946.9,
+            "prompt_per_token_ms": 1.118,
+            "prompt_per_second": 894.8,
+            "predicted_n": 128,
+            "predicted_ms": 2652.7,
+            "predicted_per_token_ms": 20.724,
+            "predicted_per_second": 48.3,
+            "draft_n": 117,
+            "draft_n_accepted": 70
+          },
+          "output_hash": "d29a4fd82e99a7a4cb8b14cc3a2e800d5e159b6bc93551ba99c5357b2f02e1dc"
+        }
+      ],
+      "median_wall_seconds": 10.655176314,
+      "min_wall_seconds": 10.655176314,
+      "max_wall_seconds": 10.655176314,
+      "unique_outputs": 1
+    }
+  }
+}

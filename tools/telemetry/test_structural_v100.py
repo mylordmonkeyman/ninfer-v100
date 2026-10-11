@@ -14,6 +14,20 @@ from test_schema import fixture
 
 
 class StructuralTests(unittest.TestCase):
+    def test_quad_admission_requires_candidate_on_all_prompt_layers_and_no_decode(self):
+        work=dict(qsa_score_dispatch=[dict(tokens=7111,fp8=True,full_mma=True,quad_mma=True)
+                                      for _ in range(12)],
+                  qsa_real_comparison=[dict(tokens=7111,full_mma=True,sample_oracle_pass=True)
+                                       for _ in range(12)])
+        self.assertEqual(qualify_full_qsa_dispatch(work,quad=True)['sampled_heads'],864)
+        work['qsa_score_dispatch'][4]['quad_mma']=False
+        with self.assertRaisesRegex(ValueError,'quad QSA'):
+            qualify_full_qsa_dispatch(work,quad=True)
+        work['qsa_score_dispatch'][4]['quad_mma']=True
+        work['qsa_score_dispatch'].append(dict(tokens=2,fp8=True,full_mma=False,quad_mma=True))
+        with self.assertRaisesRegex(ValueError,'quad QSA'):
+            qualify_full_qsa_dispatch(work,quad=True)
+
     def test_full_qsa_admission_requires_every_real_layer_and_no_decode_escape(self):
         work=dict(qsa_score_dispatch=[dict(tokens=7111,fp8=True,full_mma=True) for _ in range(12)],
                   qsa_real_comparison=[dict(tokens=7111,full_mma=True,sample_oracle_pass=True) for _ in range(12)])

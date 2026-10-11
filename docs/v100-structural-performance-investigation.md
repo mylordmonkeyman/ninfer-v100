@@ -1935,3 +1935,61 @@ Existing host spans, CUDA stage intervals and installed Strata native timers wil
 identify the next largest source-directed implementation target; overlapping
 intervals remain non-additive. This is a fresh attribution after structural
 changes, not an unchanged performance sweep or a speedup claim.
+
+### Current-stack attribution identifies the dedicated Volta attention layout
+
+[Run38177809887](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38177809887)
+completed the retained numerical/lifetime gates and the current-stack attribution.
+The clean measured request was22.7014s NInfer (15.8541s prefill/6.8355s decode)
+versus10.6552s Strata (7.9469s prompt/2.6527s predicted work). These are one-server
+attribution references, not a replacement for the repeated shared-cuBLAS medians.
+All six corresponding NInfer clean/diagnostic requests had identical output,
+usage and native MTP. Measured diagnostic overhead was1.3327s HTTP/1.1888s prefill;
+Strata measured+.6663s HTTP, with changed outputs/MTP in the last three requests.
+Do not treat the diagnostic phase difference as a matched-quality causal share.
+Compact evidence is in `v100-current-stack-attribution-38177809887.json`.
+
+Current NInfer diagnostic QSA main attention remains5.1779s versus Strata's.450s
+native interval; QSA projections are1.2963s versus.257s. Hyper prepares are now
+.4138s, and shared gate/up+down.0814s, versus Strata's.325s hc-read and.088s combined
+router+shared. NInfer routed submission timeline is4.3102s and prefill CPU join
+1.1503s; verification CPU join is3.0582s across2,832 layer calls and16,748 CPU
+routes. These host spans overlap GPU stages. Both NInfer servers retained102
+slots/layer,4,896 seeds,13,537,714,176 cache bytes and the2GiB reserve. No cache-size
+sweep follows from these observations.
+
+Source inspection found that the prior full-attention adaptation follows Strata's
+older layout, whereas its sm70 dispatcher selects `prompt_attn_v70_kernel`. The
+old adaptation discards independent products2/3 in each Volta MMA instruction:
+each warp computes all256 QK dimensions for eight cells and repeats eight PV
+dimension tiles. Strata's dedicated V100 layout instead assigns each warp64
+dimensions, uses all four quad-pair products for32 distinct cells, and reduces
+the four QK partials in a fixed order. PV assigns each quad pair16 distinct output
+dimensions and two head tiles, reducing unused arithmetic and accumulator storage.
+This is an instruction/work topology difference, not an asserted speedup factor.
+
+`NINFER_V100_QSA_QUAD_MMA=1` is a new default-off candidate, requiring the existing
+full-MMA selector and an eligible FP8 prompt batch>=512. It adapts that dedicated
+sm70 layout while preserving NInfer BF16 queries/output, raw unscaled E4M3 KV,
+selected four-token blocks, causal tails, paged addressing, FP16 hi+lo operands
+and FP32 accumulation/online softmax. It also stages four adjacent FP8 bytes into
+four exact half bit patterns, avoiding scalar FP8-to-FP32-to-FP16 conversion.
+The MIT notice is retained. There is no new persistent KV storage or model pack;
+verification, BF16 KV and smaller batches retain their existing paths.
+
+Qualification adds all finite signed FP8 codes against the native half codec,
+the existing complete independent FP64 attention formulas/pointwise thresholds,
+guarded full output at batches1..8192 including7111, sparse pages and large queries.
+The7111-token operator must improve by at least20% before serving. The independent
+real-input oracle then checks all12 prompt QSA layers, all24 heads and beginning/
+middle/end queries, with explicit quad dispatch on precisely those12 layers and
+none in verification. No gate is relaxed. On admission, three rotated fresh
+servers per arm compare the existing full-attention layout, the quad layout and
+unchanged installed native Strata on the complete admitted shared/hyper/pinned/
+8192/262K/FP8 profile. Actual cache capacities must match; outputs and native MTP
+are retained because arithmetic can change them. Full-model accuracy remains
+unclosed, and no default promotion or speedup claim precedes hardware evidence.
+
+Local62 telemetry tests, Python compilation/help, workflow YAML/bash syntax and
+diff checks pass. CUDA build, affected numerical qualification and serving timing
+await the target V100 runner.

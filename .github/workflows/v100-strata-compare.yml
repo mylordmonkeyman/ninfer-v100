@@ -1,6 +1,6 @@
 name: V100 Structural Engine Comparison
-# Re-attribute the complete current best stack after three source-directed
-# structural changes. Existing arithmetic remains explicitly opt-in.
+# Dedicated Volta quad-pair attention: independent affected oracles and target
+# operator admission, then real-layer admission before repeated serving timing.
 on:
   workflow_dispatch:
   push:
@@ -98,7 +98,7 @@ jobs:
           cmake --build build-structural-comparison --target ninfer-serve ninfer_volta_nvfp4_codec_test ninfer_volta_qsa_scores_test ninfer_qwen3_8_flash_next_qsa_attention_test ninfer_fp8_f32_prefill_sm70_test ninfer_qwen3_8_flash_next_expert_gemm_test ninfer_qwen3_8_flash_next_expert_stream_test ninfer_qwen3_8_flash_next_expert_cache_test ninfer_qwen3_8_flash_next_hyper_connection_test ninfer_qwen3_8_flash_next_moe_shared_volta_test
           build-structural-comparison/tests/ninfer_volta_nvfp4_codec_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/software-fp8-codec-oracle.log"
-          build-structural-comparison/tests/ninfer_volta_qsa_scores_test 2>&1 \
+          NINFER_V100_QSA_QUAD_ADMISSION=1 build-structural-comparison/tests/ninfer_volta_qsa_scores_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/qsa-fp64-attention-oracle.log"
           build-structural-comparison/tests/ninfer_qwen3_8_flash_next_qsa_attention_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/qsa-fp8-append-integration.log"
@@ -136,11 +136,11 @@ jobs:
           build-structural-comparison/tests/ninfer_qwen3_8_flash_next_moe_shared_volta_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/shared-cublas-independent-oracle-and-admission.log"
           cp build-structural-comparison/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
-      - name: Attribute current best NInfer and native Strata
+      - name: Qualify real-layer quad attention and compare with native Strata
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --architecture-breakdown \
+          python3 tools/telemetry/structural_v100.py --qsa-quad-mma-race \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \

@@ -4,10 +4,13 @@
 #include <cuda_fp8.h>
 #if defined(NINFER_VOLTA_BUILD)
 #include "targets/qwen3_8_flash_next/impl/qsa_score_comparison.h"
+#include "targets/qwen3_8_flash_next/impl/qsa_volta_fp8.h"
 #endif
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <random>
 #include <vector>
@@ -29,6 +32,9 @@ int main() {
         for (int bits=0;bits<256;++bits) {
             if ((bits&127)==127) continue;
             __nv_fp8_e4m3 code;code.__x=static_cast<unsigned char>(bits);
+            const auto native = __float2half_rn(float(code));
+            if (qsa_volta_fp8_half_bits(bits) != __half_as_ushort(native))
+                throw std::runtime_error("exact raw FP8-to-half bits mismatch");
             if(qsa_reference_fp8(bits)!=double(float(code)))
                 throw std::runtime_error("independent FP8 reference decoder mismatch");
         }
@@ -103,9 +109,9 @@ int main() {
                     double sum=0;for(auto& score:scores){score=std::exp(score-maximum);sum+=score;}
                     for(std::size_t c=0;c<candidates.size();++c){const int pos=candidates[c];const auto base=((table[pos/64]*2+h/12)*64+pos%64)*D;for(int j=0;j<D;++j)reference[(t*H+h)*D+j]+=scores[c]/sum*vf[base+j];}
                 }
-                for(int route=0;route<(fp8?3:2);++route) {
-                    const bool mma=route==1,full_mma=route==2;
-                    flash_next_qsa_volta_attend_launch(query,indices,0,selected,count,cache,attended,device.stream,mma,full_mma);
+                for(int route=0;route<(fp8?4:2);++route) {
+                    const bool mma=route==1,full_mma=route>=2,quad_mma=route==3;
+                    flash_next_qsa_volta_attend_launch(query,indices,0,selected,count,cache,attended,device.stream,mma,full_mma,quad_mma);
                     device.synchronize();std::vector<std::uint16_t> actual(q.size());out.copy_to_host(actual.data(),actual.size()*2);
                     std::vector<std::uint8_t> guarded(out.bytes);out.copy_to_host(guarded.data(),out.bytes);
                     if(!std::all_of(guarded.begin()+q.size()*2,guarded.end(),[](auto x){return x==0xa5;}))
@@ -116,12 +122,12 @@ int main() {
                         throw std::runtime_error("QSA independent pointwise threshold failed");
                     squared+=diff*diff;norm+=expected*expected;}
                     const double relative=std::sqrt(squared/norm);
-                    std::cout<<"FP64 oracle fp8="<<fp8<<" overflow="<<overflow<<" mma="<<mma<<" full_mma="<<full_mma<<" relative_l2="<<relative<<'\n';
+                    std::cout<<"FP64 oracle fp8="<<fp8<<" overflow="<<overflow<<" mma="<<mma<<" full_mma="<<full_mma<<" quad_mma="<<quad_mma<<" relative_l2="<<relative<<'\n';
                     if(relative>1e-3)throw std::runtime_error("QSA independent oracle threshold failed");
                 }
                 if (!overflow) {
                     cudaEvent_t a,b;CUDA_CHECK(cudaEventCreate(&a));CUDA_CHECK(cudaEventCreate(&b));
-                    for (int batch : {1,2,4,8,32,128,512,1024,4096,8192}) {
+                    for (int batch : {1,2,4,8,32,128,512,1024,4096,7111,8192}) {
                         std::vector<std::uint16_t> batch_q(batch*H*D);
                         std::vector<int> batch_positions(batch),batch_counts(batch),batch_blocks(batch*512);
                         for (int t=0;t<batch;++t) {
@@ -137,14 +143,23 @@ int main() {
                         Tensor tq(bq.p,DType::BF16,{D,H,batch}),to(bo.p,DType::BF16,{D,H,batch});
                         Tensor ti(bi.p,DType::I32,{batch}),tc(bc.p,DType::I32,{batch}),ts(bs.p,DType::I32,{512,batch});
                         const int iterations=batch<1024?20:5;
-                        for(int route=0;route<(fp8?3:2);++route) {
-                    const bool mma=route==1,full_mma=route==2;
-                            for(int i=0;i<3;++i)flash_next_qsa_volta_attend_launch(tq,ti,0,ts,tc,cache,to,device.stream,mma,full_mma);
+                        float full_ms = 0;
+                        for(int route=0;route<(fp8?4:2);++route) {
+                            const bool mma=route==1,full_mma=route>=2,quad_mma=route==3;
+                            for(int i=0;i<3;++i)flash_next_qsa_volta_attend_launch(tq,ti,0,ts,tc,cache,to,device.stream,mma,full_mma,quad_mma);
                             CUDA_CHECK(cudaEventRecord(a,device.stream));
-                            for(int i=0;i<iterations;++i)flash_next_qsa_volta_attend_launch(tq,ti,0,ts,tc,cache,to,device.stream,mma,full_mma);
+                            for(int i=0;i<iterations;++i)flash_next_qsa_volta_attend_launch(tq,ti,0,ts,tc,cache,to,device.stream,mma,full_mma,quad_mma);
                             CUDA_CHECK(cudaEventRecord(b,device.stream));CUDA_CHECK(cudaEventSynchronize(b));
                             float ms;CUDA_CHECK(cudaEventElapsedTime(&ms,a,b));
-                            std::cout<<"Score-path timing fp8="<<fp8<<" T="<<batch<<" mma="<<mma<<" full_mma="<<full_mma<<" us="<<ms*1000/iterations<<'\n';
+                            std::cout<<"Score-path timing fp8="<<fp8<<" T="<<batch<<" mma="<<mma<<" full_mma="<<full_mma<<" quad_mma="<<quad_mma<<" us="<<ms*1000/iterations<<'\n';
+                            if (route==2) full_ms=ms;
+                            if (quad_mma && batch==7111) {
+                                const double ratio=ms/full_ms;
+                                std::cout<<"QSA_QUAD_ADMISSION {\"tokens\":7111,\"ratio\":"<<ratio<<"}\n";
+                                const char* gate=std::getenv("NINFER_V100_QSA_QUAD_ADMISSION");
+                                if (gate && std::strcmp(gate,"1")==0 && !(ratio<=.8))
+                                    throw std::runtime_error("quad attention operator did not improve at least 20%");
+                            }
                             // Every represented input repeats an independently computed FP64
                             // case. Check ALL rows, including the production crossover sizes.
                             std::vector<std::uint16_t> batch_actual(batch_q.size());
@@ -168,7 +183,7 @@ int main() {
                                     throw std::runtime_error("batched QSA independent pointwise threshold failed");
                             }
                             const double relative=std::sqrt(squared/norm);
-                            std::cout<<"Batch FP64 oracle fp8="<<fp8<<" T="<<batch<<" mma="<<mma<<" full_mma="<<full_mma<<" relative_l2="<<relative<<'\n';
+                            std::cout<<"Batch FP64 oracle fp8="<<fp8<<" T="<<batch<<" mma="<<mma<<" full_mma="<<full_mma<<" quad_mma="<<quad_mma<<" relative_l2="<<relative<<'\n';
                             if(relative>1e-3)throw std::runtime_error("batched QSA independent oracle threshold failed");
                         }
                     }

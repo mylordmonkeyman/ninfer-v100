@@ -475,13 +475,16 @@ def compress_logs(folder):
         path.unlink()
 
 
-def qualify_full_qsa_dispatch(work):
+def qualify_full_qsa_dispatch(work, quad=False):
     events=work['qsa_score_dispatch']
     prompt=[e for e in events if e.get('tokens')==7111]
     if len(prompt)!=12 or not all(e.get('fp8') and e.get('full_mma') for e in prompt):
         raise ValueError('full QSA prompt dispatch coverage changed')
     if sum(bool(e.get('full_mma')) for e in events)!=12:
         raise ValueError('full MMA escaped the twelve prompt dispatches')
+    if quad and (not all(e.get('quad_mma') for e in prompt) or
+                 sum(bool(e.get('quad_mma')) for e in events)!=12):
+        raise ValueError('quad QSA escaped or missed the twelve prompt dispatches')
     comparisons=[r for r in work['qsa_real_comparison'] if r.get('tokens')==7111]
     if len(comparisons)!=12 or not all(r.get('full_mma') and r.get('sample_oracle_pass') for r in comparisons):
         raise ValueError('full QSA real-layer independent oracle admission failed')
@@ -531,6 +534,8 @@ def main():
                    help='Renewed optimization: 2048/8192 NInfer chunks and contemporary native Strata')
     p.add_argument('--large-profile-breakdown', action='store_true',
                    help='Attribute the tested 8192/FP8/262K/dense+fused profile with paired reference and diagnostics')
+    p.add_argument('--qsa-quad-mma-race', action='store_true',
+                   help='Dedicated four-product Volta attention: real-input qualification then current-stack race')
     p.add_argument('--qsa-full-mma-race', action='store_true',
                    help='Independent real-input admission of full QK/PV MMA then best-profile practical race')
     p.add_argument('--hyper-cublas-race', action='store_true',
@@ -563,15 +568,15 @@ def main():
         '--prefill-chunk', '2048', '--kv-dtype', 'bf16', '--no-prefix-reuse', '--no-thinking',
         '--no-cuda-graph', '--no-qsa-prefill-mma',
         '--spec', 'mtp', '--draft-tokens', '2', '--lm-head-draft']
-    if a.context_residency_ab or a.fp8_long_context or a.large_prefill_race or a.large_profile_breakdown or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race or a.shared_cublas_race:
+    if a.context_residency_ab or a.fp8_long_context or a.large_prefill_race or a.large_profile_breakdown or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race or a.shared_cublas_race or a.qsa_quad_mma_race:
         a.ninfer_flags = ab.option(a.ninfer_flags, '--max-context', '262144')
         a.ninfer_flags = ab.option(a.ninfer_flags, '--kv-capacity', '262144')
-    if a.fp8_long_context or a.large_prefill_race or a.large_profile_breakdown or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race or a.shared_cublas_race:
+    if a.fp8_long_context or a.large_prefill_race or a.large_profile_breakdown or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race or a.shared_cublas_race or a.qsa_quad_mma_race:
         a.ninfer_flags = ab.option(a.ninfer_flags, '--kv-dtype', 'fp8')
         a.request_timeout = 5400
-    if a.large_profile_breakdown or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race or a.shared_cublas_race:
+    if a.large_profile_breakdown or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race or a.shared_cublas_race or a.qsa_quad_mma_race:
         a.ninfer_flags=ab.option(a.ninfer_flags,'--prefill-chunk','8192')
-    if a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race or a.shared_cublas_race:
+    if a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race or a.shared_cublas_race or a.qsa_quad_mma_race:
         a.ninfer_flags=[f for f in a.ninfer_flags if f!='--no-qsa-prefill-mma']+['--qsa-prefill-mma']
     a.long_prompt = LONG
     a.max_output_tokens = 64 if a.fp8_long_context else 128
@@ -636,7 +641,9 @@ def main():
                 ('ninfer','hyper-staged-cublas',dict(full_arms[1][2],NINFER_V100_HYPER_CUBLAS='1')),ARMS[1]]
     shared_arms=[('ninfer',name,dict(hyper_arms[1][2],NINFER_V100_SHARED_CUBLAS=value))
                  for name,value in [('shared-simt','0'),('shared-staged-cublas','1')]]+[ARMS[1]]
-    manifest_arms = (shared_arms if a.shared_cublas_race else hyper_arms if a.hyper_cublas_race else full_arms if a.qsa_full_mma_race else pinned_arms if a.pinned_expert_source_race else qsa_arms if a.qsa_late_half_race else [context_arms[1]] if a.large_profile_breakdown else race_arms if a.large_prefill_race else [context_arms[1]] if a.fp8_long_context else context_arms if a.context_residency_ab else pair_arms if a.expert_pair_expand_ab else [dense_arms[1]] if a.moe_work_breakdown else dense_arms if a.dense_prefill_gemm_ab else [('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
+    quad_arms=[('ninfer',name,dict(shared_arms[1][2],NINFER_V100_QSA_QUAD_MMA=value))
+               for name,value in [('qsa-full-old-layout','0'),('qsa-quad-layout','1')]]+[ARMS[1]]
+    manifest_arms = (quad_arms if a.qsa_quad_mma_race else shared_arms if a.shared_cublas_race else hyper_arms if a.hyper_cublas_race else full_arms if a.qsa_full_mma_race else pinned_arms if a.pinned_expert_source_race else qsa_arms if a.qsa_late_half_race else [context_arms[1]] if a.large_profile_breakdown else race_arms if a.large_prefill_race else [context_arms[1]] if a.fp8_long_context else context_arms if a.context_residency_ab else pair_arms if a.expert_pair_expand_ab else [dense_arms[1]] if a.moe_work_breakdown else dense_arms if a.dense_prefill_gemm_ab else [('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
                      [default_arm] if a.qualified_default_smoke else
                      [("ninfer", "adaptive156-qualified", residency_arms()[1][2]), ARMS[1]] if (a.final_comparison or a.controlled_comparison) else
                      residency_arms() if a.residency_gemm_ab else
@@ -655,7 +662,7 @@ def main():
         fp8_long_context=a.fp8_long_context, large_prefill_race=a.large_prefill_race,
         large_profile_breakdown=a.large_profile_breakdown,
         qsa_late_half_race=a.qsa_late_half_race, qsa_full_mma_race=a.qsa_full_mma_race,
-        hyper_cublas_race=a.hyper_cublas_race,
+        hyper_cublas_race=a.hyper_cublas_race, qsa_quad_mma_race=a.qsa_quad_mma_race,
         shared_cublas_race=a.shared_cublas_race,
         pinned_expert_source_race=a.pinned_expert_source_race,
         architecture_breakdown=a.architecture_breakdown,
@@ -685,7 +692,7 @@ def main():
             if a.residency_gemm_ab or a.context_residency_ab or a.fp8_long_context:
                 cell['residency'] = residency_observation(folder, a.max_output_tokens,
                     None if a.fp8_long_context else 7111)
-            if a.final_comparison or a.prefill_breakdown or a.controlled_comparison or a.dense_prefill_gemm_ab or a.moe_work_breakdown or a.expert_pair_expand_ab or a.large_prefill_race or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race or a.shared_cublas_race:
+            if a.final_comparison or a.prefill_breakdown or a.controlled_comparison or a.dense_prefill_gemm_ab or a.moe_work_breakdown or a.expert_pair_expand_ab or a.large_prefill_race or a.qsa_late_half_race or a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race or a.shared_cublas_race or a.qsa_quad_mma_race:
                 samples=[json.loads(line) for line in (folder/'system.jsonl').read_text().splitlines()]
                 peaks=[r.get('gpu',{}).get('metrics',{}).get('memory_used_bytes') for r in samples
                        if r.get('kind')=='system_sample']
@@ -693,7 +700,7 @@ def main():
                 if engine=='ninfer':
                     cell['residency']=residency_observation(folder,a.max_output_tokens,
                                                          7111 if mode=='timing' else None)
-                    if a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race or a.shared_cublas_race:
+                    if a.pinned_expert_source_race or a.architecture_breakdown or a.qsa_full_mma_race or a.hyper_cublas_race or a.shared_cublas_race or a.qsa_quad_mma_race:
                         log=(folder/'server.log').read_text(errors='replace')
                         match=re.search(r'v100\.expert_source_pinned=1 ranges=(\d+) registered_bytes=(\d+)',log)
                         cell['expert_source_registration']=(dict(ranges=int(match.group(1)),
@@ -833,6 +840,42 @@ def main():
                     'The cuBLAS hyper backend is explicitly opt-in; cross-arm output and MTP work can change.',
                     'Strata differs in weights, KV codec, residency and speculative work; practical comparison is not matched quality.'])
         (a.output/'hyper-cublas-race-report.json').write_text(json.dumps(report,indent=2)+'\n')
+        print(json.dumps(report,indent=2),flush=True)
+        return
+    if a.qsa_quad_mma_race:
+        # Real represented query/KV/selection qualification for every prompt QSA
+        # layer precedes clean timing. Independent complete FP64 formula for all
+        # heads at beginning/middle/end; unchanged public BF16 output thresholds.
+        a.request_schedule=[('cold','long')]
+        a.max_output_tokens=32
+        a.telemetry_level=2
+        diagnostic=dict(quad_arms[1][2],NINFER_V100_TELEMETRY='1',
+                        NINFER_FLASH_NEXT_STAGE_LEDGER='1',NINFER_V100_QSA_SCORE_COMPARE='1')
+        run('ninfer','qsa-quad-layout',diagnostic,'qsa-quad-mma-admission','diagnostic')
+        admission=qualify_full_qsa_dispatch(cells[-1]['work'], quad=True)
+        a.request_schedule=[('cold','long')]+[('warmup','long')]*4+[('measured','long')]
+        a.max_output_tokens=128
+        a.telemetry_level=0
+        for repeat in range(3):
+            for engine,arm,flags in quad_arms[repeat:]+quad_arms[:repeat]:
+                run(engine,arm,flags,arm+'-r'+str(repeat),'timing')
+                rows=[json.loads(l) for l in (Path(cells[-1]['folder'])/'requests.jsonl').read_text().splitlines()]
+                if [r['phase'] for r in rows]!=['cold']+['warmup']*4+['measured']:
+                    raise ValueError('quad QSA race request schedule incomplete')
+                if any(r['response']['usage']['completion_tokens']!=128 or
+                       r['response']['usage'].get('prompt_tokens_details',{}).get('cached_tokens',0)!=0
+                       for r in rows):
+                    raise ValueError('quad QSA race output/reuse work changed')
+        residency=[c['residency'] for c in cells if c['engine']=='ninfer' and c['mode']=='timing']
+        if len({r['actual_cache']['slots_per_layer'] for r in residency})!=1:
+            raise ValueError('quad attention arms did not retain matched expert residency')
+        report=dict(status='qsa_quad_mma_race_complete',timing=summarize(cells),admission=admission,
+            observations=[dict(engine=c['engine'],arm=c['arm'],peak=c.get('sampled_peak_gpu_bytes'),
+                               residency=c.get('residency')) for c in cells if c['mode']=='timing'],
+            limits=['Independent operator and sampled real-layer admission do not close historical full-model drift.',
+                    'Quad-layout attention is explicitly opt-in; cross-arm output and MTP work can change.',
+                    'Strata differs in weights, KV codec, residency and speculative work; practical comparison is not matched quality.'])
+        (a.output/'qsa-quad-mma-race-report.json').write_text(json.dumps(report,indent=2)+'\n')
         print(json.dumps(report,indent=2),flush=True)
         return
     if a.qsa_full_mma_race:
