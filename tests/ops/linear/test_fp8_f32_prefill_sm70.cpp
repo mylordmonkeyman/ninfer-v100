@@ -125,7 +125,7 @@ int main(){try{
     int count=0;if(cudaGetDeviceCount(&count)!=cudaSuccess||!count)return 77;
     DeviceContext device(0);
     for(auto shape:{std::array<int,2>{16384,2560},std::array<int,2>{2560,6144}}){
-        for(int t:{127,128,257,2048})run(device,shape[0],shape[1],t,false,false);
+        for(int t:{127,128,257,2048,7111,8192})run(device,shape[0],shape[1],t,false,false);
         run(device,shape[0],shape[1],129,true,false);
     }
     std::cout<<"fp8_f32.all_numerical_lifetime_gates=pass"<<std::endl;

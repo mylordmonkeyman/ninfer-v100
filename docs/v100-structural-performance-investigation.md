@@ -1,7 +1,8 @@
 # V100 structural performance investigation
 
-Current status: six-step performance screening completed October 11, 2026.
-See the final checkpoint below for retained opt-ins, long-context feasibility and limits.
+Current status: prior six-step screening completed October 11, 2026; renewed
+user-authorized objective to exceed Strata performance is active. See the renewed
+optimization section below, alongside the completed checkpoint and its limits.
 
 Initial checkpoint: October 9, 2026. NInfer baseline `293e6bc0fe85bcf3f85c39958aab651adbe52895`;
 Strata comparison source `0430d397d907032fc9ab83c8bb7acff48a935b53`.
@@ -1353,3 +1354,38 @@ All authorized six-step screens are complete. Stop this test campaign and its
 automatic continuation instead of starting unrequested wider tuning. Arithmetic
 default promotion still requires full-model qualification; historical drift and
 matched-representation/quality comparison remain unresolved limitations.
+
+### Renewed objective: exceed native Strata, not finish another checklist
+
+On October11 the user explicitly authorized continued implementation and testing
+until the NInfer performance branch is better than Strata. This supersedes the
+completed campaign's stop instruction. Preserve all earlier model, minimum4-bit,
+installed-Strata, no-Phase18/SV8 and shared-hardware safety constraints. Resume the
+existing hourly continuation; do not create duplicate timers or healthy jobs.
+
+The immediate primary measure is contemporary native serving performance on the
+same7K text/128-output/no-reuse workload: prefill, decode and HTTP, native speculative
+work, actual frontend token counts and peak memory. A practical speed win must be
+measured directly across fresh repeated servers, not inferred from operator gains
+or compared only with deliberately restricted Strata. Representations remain
+different; performance superiority would not itself establish quality equivalence.
+
+Pinned Strata source inspection atad5206f confirms `src/program/generate.cpp`
+documents automatic prefill chunks up to8192: each routed expert is streamed once
+per chunk, reducing weight bytes per token as chunk size grows. Its native profile
+uses automatic prefill, while prior NInfer serving screens used2048. This is a
+material work-amortization hypothesis, not another ordering/ring sweep. Wider
+expert groups may improve narrow GEMM utilization and reduce repeated expansion,
+but larger workspace may reduce resident experts. Measure both effects.
+
+The next bounded job compares NInfer2048 versus8192 chunks, both with FP8KV,
+262144 context/KV capacity, requested adaptive156, retained dense/fused opt-ins,
+MTP2/88 workers/physical32 and unchanged represented weights. Add independent dense
+operator qualification at actual7111 and planned8192 token shapes; preserve FP8
+codec/QSA attention and expert/lifetime/cache gates. Rotate three fresh servers
+per arm plus three installed native-Strata servers, each cold/four warmups/measured.
+No historical control reuse or Strata profile/build retuning. Record actual
+residency and GPU peak, outputs/usage/native MTP work; chunk changes can alter
+arithmetic, so do not invent an exact cross-chunk parity requirement. Results in
+`large-prefill-race-report.json` will determine the next implementation, rather
+than repeat an unchanged sweep. No production arithmetic defaults are promoted.

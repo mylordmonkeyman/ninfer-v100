@@ -1,5 +1,5 @@
 name: V100 Structural Engine Comparison
-# Step 5: resume after correcting floating-point cross-schedule fixture; gates retained.
+# Renewed objective: large-chunk NInfer work amortization versus contemporary native Strata.
 on:
   workflow_dispatch:
   push:
@@ -83,7 +83,7 @@ jobs:
           run-id: 37270512213
           github-token: ${{ github.token }}
           path: structural-profile-source
-      - name: Step 5 qualify FP8 KV and retained performance routes
+      - name: Qualify large dense shapes, FP8 KV and retained expert routes
         shell: bash
         run: |
           set -euo pipefail
@@ -126,11 +126,11 @@ jobs:
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/cache-join-oracle.log"
           cp build-structural-comparison/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
-      - name: Step 5 actual FP8 KV long-context requests
+      - name: Compare 2048 versus 8192 NInfer prefill and native Strata
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --fp8-long-context \
+          python3 tools/telemetry/structural_v100.py --large-prefill-race \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \
