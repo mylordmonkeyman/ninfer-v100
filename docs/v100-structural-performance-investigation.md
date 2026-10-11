@@ -1389,3 +1389,71 @@ residency and GPU peak, outputs/usage/native MTP work; chunk changes can alter
 arithmetic, so do not invent an exact cross-chunk parity requirement. Results in
 `large-prefill-race-report.json` will determine the next implementation, rather
 than repeat an unchanged sweep. No production arithmetic defaults are promoted.
+
+### Larger chunks: request gain confirmed, native Strata still ahead
+
+Run [38115776941](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38115776941)
+at8c1b687b completed all independent large-shape dense, FP8 codec/QSA attention,
+expert numerical, lifetime/ownership and cache gates. Three fresh servers per arm
+ran cold/four warmups/measured, rotating the three arms with no historical reuse.
+Every request processed7111 prompt tokens, generated128 and reused zero tokens.
+
+| Arm | Warmed HTTP median | Native prefill median | Native decode median | Sampled GPU peak |
+|---|---:|---:|---:|---:|
+| NInfer2048 chunk | 39.0515 s | 32.1750 s | 6.4548 s | 30.0037 GiB |
+| NInfer8192 chunk | 31.3942 s | 24.1856 s | 6.7842 s | 29.9763 GiB |
+| Installed native Strata | 10.7962 s | 8.0844 s | 2.6798 s | 31.7087 GiB |
+
+8192 improved HTTP19.61% and prefill24.83% over2048 in this campaign. Measured HTTP
+ranges were38.6006–39.2903s and30.9913–31.9508s respectively, versus native Strata
+10.6189–10.9520s. Cold HTTP medians were64.9997/36.1960/15.9372s; cold NInfer
+samples varied substantially, so warmed request results support the chunk decision.
+NInfer8192 remains2.91x slower in warmed HTTP and2.99x in native prefill than Strata.
+No claim that Strata has been beaten, nor matched-quality equivalence.
+
+The allocator actually provided128 slots/layer (6144 seeded,16,988,504,064 bytes)
+at2048 versus103 (4944 seeded,13,670,436,864 bytes) at8192, preserving the2GiB
+reserve. Transfer/staging allocations increased264,210,432 to998,049,792 bytes.
+Retain8192 as the tested explicit performance profile, rather than promote a
+universal chunk default or repeat an unchanged sweep. Full long-prompt feasibility
+was qualified at2048; this run establishes8192's7K serving behavior and allocation,
+not a new full262K prompt result.
+
+Outputs were stable within each arm at matching cold/measured ordinals but differed
+across arms. Warmed NInfer MTP changed59 rounds/117 drafted/68 accepted to63/123/64;
+Strata reported117 drafted/70 accepted. Decode comparisons are work-confounded.
+NInfer retained FP8 KV/262K capacity/dense and fused opt-ins/MTP2/physical32;
+installed Strata retained its native int8 KV, speculative settings and placement.
+Representations, persistent state codecs and arithmetic remain different.
+
+### Next bounded candidate: exact-block CPU integer dots
+
+Pinned Strata code uses integer AVX2 dot products while NInfer's CPU miss path
+expands packed codes into FP32/FMA vectors. `NINFER_V100_CPU_EXACT_S16=1` is a new
+default-off screening candidate for singleton and grouped/row-sharded experts.
+For each K16 input block, choose a power-of-two scale and use signed16-bit codes
+only if every reconstructed value equals the represented BF16-derived FP32 input.
+Wider exponent spans, nonfinite or tiny scales fall back to floating-point block
+products. This adds no activation quantization error and changes no stored weights,
+weight divisors, routing order, worker budget or BF16 SiLU/up boundary. Integer
+pair sums are bounded by2*12*32767; FP32 association differs and needs qualification.
+Down shards prepare private read-only block views after all gate rows complete.
+
+The local probe passed independent scalar full-formula gates at actual2560/640
+dimensions (NRMSE<=.002/cosine>=.99999), mixed signed codes and scale extremes,
+zeros/small values/wide exponent fallback, widths1–4, and grouped/pool row parity.
+Local timing is mixed and does not establish a target-host or serving gain.
+The next workflow first compares both routes on the actual host, alternating three
+probe processes per route, rotating32 synthetic canonical expert pairs (~84MiB)
+outside target LLC. Require at least5% aggregate median operator improvement and
+no width regressing over5% before admitting a serving campaign. An admission
+failure is a negative operator screen, not a workflow error; remove the candidate
+and advance rather than spend a full repeated serving campaign on it.
+
+If admitted, full CPU group/unit and retained GPU numerical/lifetime/cache gates
+precede three alternating fresh servers per route at the tested8192 FP8/262K
+profile, cold/four warmups/measured7111/128/noReuse. Record HTTP/native phases,
+output/native MTP, actual residency and sampled GPU peaks in
+`cpu-exact-s16-report.json`. Do not force cross-route exact request output, promote
+the arithmetic default, or declare a native-Strata win from an operator result.
+The original model, source packs and installed Strata remain untouched.

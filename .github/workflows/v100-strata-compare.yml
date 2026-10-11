@@ -1,5 +1,5 @@
 name: V100 Structural Engine Comparison
-# Renewed objective: large-chunk NInfer work amortization versus contemporary native Strata.
+# Renewed objective: screen exact CPU integer dots, time serving only if the target host gains.
 on:
   workflow_dispatch:
   push:
@@ -83,14 +83,66 @@ jobs:
           run-id: 37270512213
           github-token: ${{ github.token }}
           path: structural-profile-source
+      - name: Qualify and screen exact CPU integer blocks on the target host
+        id: cpu-probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S bench/cpu_nvfp4_routed_replay -B build-cpu-integer -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-cpu-integer --target ninfer_cpu_integer_probe
+          probe_cpu=$(python3 - <<'PY_CPU'
+          import json, os, subprocess, sys
+          sys.path.insert(0,'tools/diagnostics')
+          from v100_sv2_serve import physical_core_cpus
+          topology=json.loads(subprocess.check_output(['lscpu','--json','--extended=CPU,CORE,SOCKET'],text=True))['cpus']
+          print(physical_core_cpus(topology,os.sched_getaffinity(0))[0])
+          PY_CPU
+          )
+          for repeat in 0 1 2; do
+            if (( repeat % 2 == 0 )); then modes="0 1"; else modes="1 0"; fi
+            for mode in $modes; do
+              NINFER_V100_CPU_EXACT_S16="$mode" taskset --cpu-list "$probe_cpu" \
+                build-cpu-integer/ninfer_cpu_integer_probe \
+                | tee "$QUALIFICATION_RESULTS/cpu-integer-$mode-$repeat.log"
+            done
+          done
+          python3 - <<'PY_ADMIT'
+          import json, os, pathlib, statistics
+          root=pathlib.Path(os.environ['QUALIFICATION_RESULTS'])
+          modes={}
+          for mode in (0,1):
+              widths={w:[] for w in (1,2,3,4)}
+              for repeat in range(3):
+                  rows=[json.loads(l) for l in (root/f'cpu-integer-{mode}-{repeat}.log').read_text().splitlines() if l.startswith('{')]
+                  assert len(rows)==4 and {r['width'] for r in rows}==set(widths),rows
+                  for r in rows:
+                      assert r['exact_s16']==mode and r['median_us']>0,r
+                      widths[r['width']].append(r['median_us'])
+              modes[mode]={w:statistics.median(v) for w,v in widths.items()}
+          # Avoid a serving campaign unless improvement is robust across widths.
+          ratios={w:modes[1][w]/modes[0][w] for w in modes[0]}
+          aggregate=sum(modes[1].values())/sum(modes[0].values())
+          admit=aggregate<=.95 and all(r<=1.05 for r in ratios.values())
+          report=dict(status='admitted' if admit else 'rejected_operator_screen',median_us=modes,
+                      ratios=ratios,aggregate_ratio=aggregate,
+                      limits='32 synthetic canonical expert pairs, pinned target CPU, single-thread operator cost; not serving speedup')
+          (root/'cpu-integer-admission.json').write_text(json.dumps(report,indent=2)+'\n')
+          print(json.dumps(report,indent=2))
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write(f'admit={str(admit).lower()}\n')
+          PY_ADMIT
       - name: Qualify large dense shapes, FP8 KV and retained expert routes
+        if: steps.cpu-probe.outputs.admit == 'true'
         shell: bash
         run: |
           set -euo pipefail
           cmake -S . -B build-structural-comparison -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70 \
             -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-structural-comparison --target ninfer-serve ninfer_volta_nvfp4_codec_test ninfer_volta_qsa_scores_test ninfer_qwen3_8_flash_next_qsa_attention_test ninfer_fp8_f32_prefill_sm70_test ninfer_qwen3_8_flash_next_expert_gemm_test ninfer_qwen3_8_flash_next_expert_stream_test ninfer_qwen3_8_flash_next_expert_cache_test
+          cmake --build build-structural-comparison --target ninfer-serve ninfer_qwen3_8_flash_next_cpu_expert_group_test ninfer_qwen3_8_flash_next_cpu_expert_reference_test ninfer_volta_nvfp4_codec_test ninfer_volta_qsa_scores_test ninfer_qwen3_8_flash_next_qsa_attention_test ninfer_fp8_f32_prefill_sm70_test ninfer_qwen3_8_flash_next_expert_gemm_test ninfer_qwen3_8_flash_next_expert_stream_test ninfer_qwen3_8_flash_next_expert_cache_test
+          NINFER_V100_CPU_EXACT_S16=1 build-structural-comparison/tests/ninfer_qwen3_8_flash_next_cpu_expert_group_test \
+            | tee "$QUALIFICATION_RESULTS/cpu-integer-group-lifetime.log"
+          NINFER_V100_CPU_EXACT_S16=1 build-structural-comparison/tests/ninfer_qwen3_8_flash_next_cpu_expert_reference_test \
+            | tee "$QUALIFICATION_RESULTS/cpu-integer-unit-reference.log"
           build-structural-comparison/tests/ninfer_volta_nvfp4_codec_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/software-fp8-codec-oracle.log"
           build-structural-comparison/tests/ninfer_volta_qsa_scores_test 2>&1 \
@@ -126,11 +178,12 @@ jobs:
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/cache-join-oracle.log"
           cp build-structural-comparison/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
-      - name: Compare 2048 versus 8192 NInfer prefill and native Strata
+      - name: Compare CPU integer dots with FMA at the tested 8192 profile
+        if: steps.cpu-probe.outputs.admit == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --large-prefill-race \
+          python3 tools/telemetry/structural_v100.py --cpu-exact-s16-ab \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \

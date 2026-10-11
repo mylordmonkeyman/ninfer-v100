@@ -423,6 +423,8 @@ def main():
                    help='Step 5: qualified FP8 KV calibration then actual 128K/near-262K prompts')
     p.add_argument('--large-prefill-race', action='store_true',
                    help='Renewed optimization: 2048/8192 NInfer chunks and contemporary native Strata')
+    p.add_argument('--cpu-exact-s16-ab', action='store_true',
+                   help='Qualified exact-block CPU integer dots versus FMA at the tested 8192 profile')
     p.add_argument('--comparison-reference', type=Path)
     a = p.parse_args()
     if a.controlled_strata_followup:
@@ -441,12 +443,14 @@ def main():
         '--prefill-chunk', '2048', '--kv-dtype', 'bf16', '--no-prefix-reuse', '--no-thinking',
         '--no-cuda-graph', '--no-qsa-prefill-mma',
         '--spec', 'mtp', '--draft-tokens', '2', '--lm-head-draft']
-    if a.context_residency_ab or a.fp8_long_context or a.large_prefill_race:
+    if a.context_residency_ab or a.fp8_long_context or a.large_prefill_race or a.cpu_exact_s16_ab:
         a.ninfer_flags = ab.option(a.ninfer_flags, '--max-context', '262144')
         a.ninfer_flags = ab.option(a.ninfer_flags, '--kv-capacity', '262144')
-    if a.fp8_long_context or a.large_prefill_race:
+    if a.fp8_long_context or a.large_prefill_race or a.cpu_exact_s16_ab:
         a.ninfer_flags = ab.option(a.ninfer_flags, '--kv-dtype', 'fp8')
         a.request_timeout = 5400
+    if a.cpu_exact_s16_ab:
+        a.ninfer_flags = ab.option(a.ninfer_flags, '--prefill-chunk', '8192')
     a.long_prompt = LONG
     a.max_output_tokens = 64 if a.fp8_long_context else 128
     a.warmups = 4; a.repeats = 1; a.telemetry_level = 0
@@ -493,7 +497,9 @@ def main():
                   for engine,arm,flags in residency_arms()]
     race_arms=[('ninfer','chunk2048',context_arms[1][2]),
                ('ninfer','chunk8192',context_arms[1][2]),ARMS[1]]
-    manifest_arms = (race_arms if a.large_prefill_race else [context_arms[1]] if a.fp8_long_context else context_arms if a.context_residency_ab else pair_arms if a.expert_pair_expand_ab else [dense_arms[1]] if a.moe_work_breakdown else dense_arms if a.dense_prefill_gemm_ab else [('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
+    cpu_integer_arms=[('ninfer',name,dict(context_arms[1][2],NINFER_V100_CPU_EXACT_S16=value))
+                      for name,value in [('cpu-fma','0'),('cpu-exact-s16','1')]]
+    manifest_arms = (cpu_integer_arms if a.cpu_exact_s16_ab else race_arms if a.large_prefill_race else [context_arms[1]] if a.fp8_long_context else context_arms if a.context_residency_ab else pair_arms if a.expert_pair_expand_ab else [dense_arms[1]] if a.moe_work_breakdown else dense_arms if a.dense_prefill_gemm_ab else [('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
                      [default_arm] if a.qualified_default_smoke else
                      [("ninfer", "adaptive156-qualified", residency_arms()[1][2]), ARMS[1]] if (a.final_comparison or a.controlled_comparison) else
                      residency_arms() if a.residency_gemm_ab else
@@ -508,6 +514,7 @@ def main():
         moe_work_breakdown=a.moe_work_breakdown,
         expert_pair_expand_ab=a.expert_pair_expand_ab, context_residency_ab=a.context_residency_ab,
         fp8_long_context=a.fp8_long_context, large_prefill_race=a.large_prefill_race,
+        cpu_exact_s16_ab=a.cpu_exact_s16_ab,
         request_timeout=getattr(a,'request_timeout',900),
         prefill_breakdown=a.prefill_breakdown, dense_prefill_gemm_ab=a.dense_prefill_gemm_ab,
         stream_attribution_only=a.stream_attribution_only, expert_gemm_ab=a.expert_gemm_ab, resident_gemm_ab=a.resident_gemm_ab, cpu_stream_overlap_ab=a.cpu_stream_overlap_ab,
@@ -518,7 +525,7 @@ def main():
         timing_telemetry_level=0, diagnostic_telemetry_level=2,
         cache_budget='actual allocations logged; requested maxima are not equal-memory controls',
         cold_definition='first request after fresh server; host file cache preserved',
-        cross_quant_comparison='same represented artifact; exact-output expansion work reduction' if a.expert_pair_expand_ab else 'same represented artifact; cache residency can change CPU/GPU arithmetic' if a.context_residency_ab else 'same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.residency_gemm_ab or a.prefill_breakdown or a.dense_prefill_gemm_ab or a.moe_work_breakdown)
+        cross_quant_comparison='same represented artifact; exact-block integer execution with changed FP32 association' if a.cpu_exact_s16_ab else 'same represented artifact; exact-output expansion work reduction' if a.expert_pair_expand_ab else 'same represented artifact; cache residency can change CPU/GPU arithmetic' if a.context_residency_ab else 'same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.residency_gemm_ab or a.prefill_breakdown or a.dense_prefill_gemm_ab or a.moe_work_breakdown)
             else 'descriptive; source artifacts and frontend token counts differ',
         ninfer_flags=a.ninfer_flags), indent=2)+'\n')
     cells = []
@@ -534,7 +541,7 @@ def main():
             if a.residency_gemm_ab or a.context_residency_ab or a.fp8_long_context:
                 cell['residency'] = residency_observation(folder, a.max_output_tokens,
                     None if a.fp8_long_context else 7111)
-            if a.final_comparison or a.prefill_breakdown or a.controlled_comparison or a.dense_prefill_gemm_ab or a.moe_work_breakdown or a.expert_pair_expand_ab or a.large_prefill_race:
+            if a.final_comparison or a.prefill_breakdown or a.controlled_comparison or a.dense_prefill_gemm_ab or a.moe_work_breakdown or a.expert_pair_expand_ab or a.large_prefill_race or a.cpu_exact_s16_ab:
                 samples=[json.loads(line) for line in (folder/'system.jsonl').read_text().splitlines()]
                 peaks=[r.get('gpu',{}).get('metrics',{}).get('memory_used_bytes') for r in samples
                        if r.get('kind')=='system_sample']
@@ -577,6 +584,20 @@ def main():
                     'Chunk size may change residency and floating-point/MTP behavior.',
                     'No arithmetic default promotion or full-model accuracy equivalence claim.'])
         (a.output/'large-prefill-race-report.json').write_text(json.dumps(report,indent=2)+'\n')
+        print(json.dumps(report,indent=2),flush=True)
+    elif a.cpu_exact_s16_ab:
+        for repeat in range(3):
+            for engine,arm,flags in (cpu_integer_arms if repeat%2==0 else list(reversed(cpu_integer_arms))):
+                run(engine,arm,flags,arm+'-r'+str(repeat),'timing')
+                rows=[json.loads(l) for l in (Path(cells[-1]['folder'])/'requests.jsonl').read_text().splitlines()]
+                if [r['phase'] for r in rows]!=['cold']+['warmup']*4+['measured']:
+                    raise ValueError('CPU integer comparison schedule incomplete')
+        report=dict(status='cpu_exact_s16_complete',timing=summarize(cells),
+            observations=[dict(arm=c['arm'],peak=c['sampled_peak_gpu_bytes'],residency=c['residency']) for c in cells],
+            limits=['Same represented BF16 inputs and canonical NVFP4 weights; FP32 reduction association differs.',
+                    'Outputs and native MTP work may differ; decode must be interpreted with work counts.',
+                    'No arithmetic default promotion. Native Strata must be compared contemporaneously before a win claim.'])
+        (a.output/'cpu-exact-s16-report.json').write_text(json.dumps(report,indent=2)+'\n')
         print(json.dumps(report,indent=2),flush=True)
         return
     if a.fp8_long_context:

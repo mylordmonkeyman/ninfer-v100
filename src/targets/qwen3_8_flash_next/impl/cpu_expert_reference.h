@@ -53,6 +53,9 @@ void flash_next_cpu_nvfp4_expert_pair_reference_fp32_input(
 // Production AVX2/FMA implementation of the same compact-NVFP4 contract.
 // It preserves the BF16_RNE activation boundary and returns the unweighted FP32
 // down vector. Callers must retain deterministic routing-alpha accumulation order.
+// Experimental NINFER_V100_CPU_EXACT_S16=1 (default 0) uses exact power-of-two
+// S16 input blocks and integer pair dots, falling back for wider exponent spans.
+// Represented inputs/weights stay unchanged; FP32 reduction association differs.
 [[nodiscard]] bool flash_next_cpu_nvfp4_avx2_available() noexcept;
 void flash_next_cpu_nvfp4_expert_pair_avx2(
     const HostNvfp4ExpertPairView& expert,
@@ -61,8 +64,8 @@ void flash_next_cpu_nvfp4_expert_pair_avx2(
     CpuNvfp4ExpertReferenceScratch& scratch);
 
 // Row-sharded production entry points. Prepare completes before gate/up shards;
-// all gate/up shards complete before down shards. Each row keeps the same FMA
-// reduction and BF16 boundary as the complete-pair kernel.
+// all gate/up shards complete before down shards. Each row keeps the selected
+// complete-pair kernel's reduction and BF16 boundary.
 void flash_next_cpu_nvfp4_expert_prepare_avx2(
     const HostNvfp4ExpertPairView& expert, std::span<const std::uint16_t> input,
     CpuNvfp4ExpertReferenceScratch& scratch);
@@ -75,7 +78,7 @@ void flash_next_cpu_nvfp4_expert_down_rows_avx2(
 
 // Grouped AVX2/FMA execution for 2--4 activations routed to the same expert.
 // Packed weights and scales are decoded once per K16 block, while every token
-// retains the single-token kernel's independent accumulator and reduction order.
+// retains the selected single-token kernel's independent reduction order.
 void flash_next_cpu_nvfp4_expert_group_prepare_avx2(
     const HostNvfp4ExpertPairView& expert,
     std::span<const std::uint16_t* const> inputs,

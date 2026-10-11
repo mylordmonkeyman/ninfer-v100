@@ -1,6 +1,8 @@
 #include "targets/qwen3_8_flash_next/impl/cpu_expert_reference.h"
 
 #include <bit>
+#include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -88,6 +90,89 @@ struct ScaleTable {
 
 const ScaleTable kScaleTable;
 
+bool integer_blocks_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NINFER_V100_CPU_EXACT_S16");
+        if (!value || !*value || std::string(value) == "0") return false;
+        if (std::string(value) == "1") return true;
+        throw std::invalid_argument("NINFER_V100_CPU_EXACT_S16 must be 0 or 1");
+    }();
+    return enabled;
+}
+
+// A power-of-two block scale represents BF16 exactly when its exponent range
+// fits signed 16 bits. Wider blocks retain the original floating-point input.
+// This is an execution representation, never an activation quantization.
+struct IntegerInput {
+    const float* input = nullptr;
+    std::array<std::int16_t, kFlashNextExpertHidden> codes{};
+    std::array<float, kFlashNextExpertHidden / 16> scales{};
+    std::array<bool, kFlashNextExpertHidden / 16> exact{};
+
+    IntegerInput() = default;
+    IntegerInput(const float* values, std::size_t columns) : input(values) {
+        for (std::size_t group = 0; group < columns / 16; ++group) {
+            float maximum = 0;
+            bool finite = true;
+            for (std::size_t i = 0; i < 16; ++i) {
+                const float x = values[group * 16 + i];
+                finite &= std::isfinite(x);
+                maximum = std::max(maximum, std::abs(x));
+            }
+            if (!finite) continue;
+            if (maximum == 0) { exact[group] = true; continue; }
+            int exponent = 0;
+            std::frexp(maximum, &exponent);
+            const float scale = std::ldexp(1.0F, exponent - 15);
+            if (scale < std::numeric_limits<float>::min() || !std::isfinite(scale)) continue;
+            bool representable = true;
+            for (std::size_t i = 0; i < 16; ++i) {
+                const float x = values[group * 16 + i];
+                const float integer = x / scale;
+                // Bounds make the cast defined even for unsupported inputs.
+                if (!(integer >= -32767 && integer <= 32767)) {
+                    representable = false; break;
+                }
+                const auto q = static_cast<std::int16_t>(integer);
+                codes[group * 16 + i] = q;
+                representable &= static_cast<float>(q) * scale == x;
+            }
+            scales[group] = scale;
+            exact[group] = representable;
+        }
+    }
+};
+
+__attribute__((target("avx2,fma")))
+__m256i signed_codes16(const std::byte* packed) {
+    const __m128i bytes = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(packed));
+    const __m128i mask = _mm_set1_epi8(15);
+    const __m128i indices = _mm_unpacklo_epi8(_mm_and_si128(bytes, mask),
+        _mm_and_si128(_mm_srli_epi16(bytes, 4), mask));
+    const __m128i lut = _mm_setr_epi8(0,1,2,3,4,6,8,12,0,-1,-2,-3,-4,-6,-8,-12);
+    return _mm256_cvtepi8_epi16(_mm_shuffle_epi8(lut, indices));
+}
+
+__attribute__((target("avx2,fma")))
+__m256 block_product(__m256i weights, const IntegerInput& input, int group,
+                     float coefficient) {
+    if (input.exact[group]) {
+        const __m256i x = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(
+            input.codes.data() + group * 16));
+        // Each pair sum is bounded by 2*12*32767, well within signed int32.
+        const __m256 pairs = _mm256_cvtepi32_ps(_mm256_madd_epi16(weights, x));
+        return _mm256_mul_ps(pairs, _mm256_set1_ps(coefficient * .5F * input.scales[group]));
+    }
+    const __m128i low = _mm256_castsi256_si128(weights);
+    const __m128i high = _mm256_extracti128_si256(weights, 1);
+    const __m256 scale = _mm256_set1_ps(coefficient * .5F);
+    const __m256 w0 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(low)), scale);
+    const __m256 w1 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(high)), scale);
+    const __m256 p0 = _mm256_mul_ps(w0, _mm256_loadu_ps(input.input + group * 16));
+    const __m256 p1 = _mm256_mul_ps(w1, _mm256_loadu_ps(input.input + group * 16 + 8));
+    return _mm256_hadd_ps(p0, p1);
+}
+
 struct DecodedWeights16 {
     __m256 lo;
     __m256 hi;
@@ -123,6 +208,64 @@ float hsum256(__m256 value) {
     sum = _mm_hadd_ps(sum, sum);
     sum = _mm_hadd_ps(sum, sum);
     return _mm_cvtss_f32(sum);
+}
+
+__attribute__((target("avx2,fma")))
+void integer_gate_rows(const Nvfp4ExpertMatrixView& matrix,
+    CpuNvfp4ExpertReferenceScratch* scratch, std::size_t count,
+    std::size_t begin, std::size_t end) {
+    std::array<IntegerInput, kFlashNextCpuExpertGroupMax> inputs;
+    for (std::size_t t = 0; t < count; ++t)
+        inputs[t] = IntegerInput(scratch[t].input.data(), matrix.columns);
+    const float inverse = 1.0F / *matrix.weight_scale_divisor;
+    for (std::size_t row = begin; row < end; ++row) {
+        __m256 gate[kFlashNextCpuExpertGroupMax], up[kFlashNextCpuExpertGroupMax];
+        for (std::size_t t = 0; t < count; ++t) gate[t] = up[t] = _mm256_setzero_ps();
+        const std::size_t up_row = row + kFlashNextExpertIntermediate;
+        const auto gate_base = scale_row_base(row, matrix.columns);
+        const auto up_base = scale_row_base(up_row, matrix.columns);
+        for (int group = 0; group < matrix.columns / 16; ++group) {
+            const auto gw = signed_codes16(matrix.codes + row * (matrix.columns / 2) + group * 8);
+            const auto uw = signed_codes16(matrix.codes + up_row * (matrix.columns / 2) + group * 8);
+            const float gs = kScaleTable.values[static_cast<std::uint8_t>(
+                matrix.scales[scale_byte_offset_from_base(gate_base, group)])] * inverse;
+            const float us = kScaleTable.values[static_cast<std::uint8_t>(
+                matrix.scales[scale_byte_offset_from_base(up_base, group)])] * inverse;
+            for (std::size_t t = 0; t < count; ++t) {
+                gate[t] = _mm256_add_ps(gate[t], block_product(gw, inputs[t], group, gs));
+                up[t] = _mm256_add_ps(up[t], block_product(uw, inputs[t], group, us));
+            }
+        }
+        for (std::size_t t = 0; t < count; ++t) {
+            const float g = hsum256(gate[t]), u = hsum256(up[t]);
+            scratch[t].intermediate[row] = round_to_bf16_rne(g / (1.0F + std::exp(-g)) * u);
+        }
+    }
+}
+
+__attribute__((target("avx2,fma")))
+void integer_down_rows(const Nvfp4ExpertMatrixView& matrix,
+    const CpuNvfp4ExpertReferenceScratch* scratch, std::span<float* const> outputs,
+    std::size_t begin, std::size_t end) {
+    std::array<IntegerInput, kFlashNextCpuExpertGroupMax> inputs;
+    // All gate rows complete before this phase. Each down shard owns its
+    // prepared blocks, so there is no mutation/race on shared intermediate state.
+    for (std::size_t t = 0; t < outputs.size(); ++t)
+        inputs[t] = IntegerInput(scratch[t].intermediate.data(), matrix.columns);
+    const float inverse = 1.0F / *matrix.weight_scale_divisor;
+    for (std::size_t row = begin; row < end; ++row) {
+        __m256 acc[kFlashNextCpuExpertGroupMax];
+        for (std::size_t t = 0; t < outputs.size(); ++t) acc[t] = _mm256_setzero_ps();
+        const auto base = scale_row_base(row, matrix.columns);
+        for (int group = 0; group < matrix.columns / 16; ++group) {
+            const auto w = signed_codes16(matrix.codes + row * (matrix.columns / 2) + group * 8);
+            const float s = kScaleTable.values[static_cast<std::uint8_t>(
+                matrix.scales[scale_byte_offset_from_base(base, group)])] * inverse;
+            for (std::size_t t = 0; t < outputs.size(); ++t)
+                acc[t] = _mm256_add_ps(acc[t], block_product(w, inputs[t], group, s));
+        }
+        for (std::size_t t = 0; t < outputs.size(); ++t) outputs[t][row] = hsum256(acc[t]);
+    }
 }
 
 __attribute__((target("avx2,fma")))
@@ -329,6 +472,10 @@ void flash_next_cpu_nvfp4_expert_gate_up_rows_avx2(
     const HostNvfp4ExpertPairView& expert, CpuNvfp4ExpertReferenceScratch& scratch,
     std::size_t begin, std::size_t end) {
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+    if (integer_blocks_enabled()) {
+        integer_gate_rows(expert.gate_up, &scratch, 1, begin, end);
+        return;
+    }
     for (std::size_t row = begin; row < end; ++row) {
         const auto [gate, up] =
             gate_up_rows_avx2(expert.gate_up, static_cast<std::int32_t>(row), scratch.input.data());
@@ -345,6 +492,11 @@ void flash_next_cpu_nvfp4_expert_down_rows_avx2(
     const HostNvfp4ExpertPairView& expert, const CpuNvfp4ExpertReferenceScratch& scratch,
     std::span<float> output, std::size_t begin, std::size_t end) {
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+    if (integer_blocks_enabled()) {
+        float* pointer = output.data();
+        integer_down_rows(expert.down, &scratch, {&pointer, 1}, begin, end);
+        return;
+    }
     for (std::size_t row = begin; row < end; ++row) {
         output[row] = down_row_avx2(expert.down, static_cast<std::int32_t>(row), scratch.intermediate.data());
     }
@@ -391,6 +543,10 @@ void flash_next_cpu_nvfp4_expert_group_gate_up_rows_avx2(
         throw std::invalid_argument("CPU NVFP4 AVX2: invalid grouped gate/up range");
     }
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+    if (integer_blocks_enabled()) {
+        integer_gate_rows(expert.gate_up, scratch.tokens.data(), token_count, begin, end);
+        return;
+    }
     for (std::size_t row = begin; row < end; ++row) {
         gate_up_row_group_avx2(expert.gate_up, static_cast<std::int32_t>(row), scratch, token_count);
     }
@@ -413,6 +569,10 @@ void flash_next_cpu_nvfp4_expert_group_down_rows_avx2(
         }
     }
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+    if (integer_blocks_enabled()) {
+        integer_down_rows(expert.down, scratch.tokens.data(), outputs, begin, end);
+        return;
+    }
     for (std::size_t row = begin; row < end; ++row) {
         down_row_group_avx2(expert.down, static_cast<std::int32_t>(row), scratch, outputs);
     }
