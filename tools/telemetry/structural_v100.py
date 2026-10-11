@@ -643,7 +643,7 @@ def main():
                      [('ninfer', backend, flags) for backend, flags in gemm_arms]
                      if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab) else ARMS)
     if a.architecture_breakdown:
-        manifest_arms=[pinned_arms[1], ARMS[1]]
+        manifest_arms=[shared_arms[1], ARMS[1]]
     (a.output/'manifest.json').write_text(json.dumps(dict(prompt=None if a.fp8_long_context else LONG, short_prompt=ab.SHORT,
         prompt_definition='Serving-calibrated repeated prose; actual per-cell payloads in requests.jsonl' if a.fp8_long_context else 'fixed 360 numbered records',
         output_limit=32 if (a.stream_attribution_only or a.qualified_default_smoke) else a.max_output_tokens,
@@ -718,7 +718,7 @@ def main():
             (a.output/'summary.json').write_text(json.dumps(dict(cells=cells, timing=summarize(cells)), indent=2)+'\n')
         ab.release_gpu()
     if a.architecture_breakdown:
-        paired = [(pinned_arms[1], dict(NINFER_V100_MOE_ARCH_TIMING='1',
+        paired = [(shared_arms[1], dict(NINFER_V100_MOE_ARCH_TIMING='1',
                       NINFER_FLASH_NEXT_STAGE_LEDGER='1', NINFER_FLASH_NEXT_STAGE_LEDGER_JSON='1')),
                   (ARMS[1], dict(STRATA_PREFILL_TIMING='1', STRATA_DECODE_TIMING='1'))]
         report = dict(status='in_progress', telemetry_level=0, comparisons=[],
@@ -727,6 +727,7 @@ def main():
                     'Different weights, KV representation, residency and speculative algorithms remain.',
                     'CUDA intervals include waits/host gaps; host spans must not be added to them.',
                     'No per-layer expert stream drain or worker telemetry; overhead is still measured.',
+                    'The current admitted full-QSA, hyper-cuBLAS and shared-cuBLAS routes are included.',
                     'Packed-reduce candidate is operator-admitted but is not part of this audit.'])
         output = a.output/'architecture-breakdown-report.json'
         output.write_text(json.dumps(report, indent=2)+'\n')

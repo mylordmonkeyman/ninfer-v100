@@ -1898,3 +1898,40 @@ work are recorded; real candidate dispatch and equal NInfer cache capacity are
 required. No arithmetic default promotion or speedup claim precedes hardware
 results. Local61 telemetry tests, Python compilation/help, YAML/bash syntax and
 diff checks pass; new CUDA qualification awaits the target runner.
+
+### Shared expert cuBLAS qualifies and improves serving
+
+[Run38173973504](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38173973504)
+passed every retained qualification and the new independent shared-expert
+formulas/lifetime checks. At the actual7,111-token shape, shared gate/up/down fell
+from22.2515ms to1.7613ms (0.0792ratio, approximately12.63x faster). This is an
+isolated operator result, not the request gain.
+
+Three rotated fresh servers per arm, each cold+4warmups+measured7111prompt/
+128output/0reuse, produced:
+
+| Engine / shared route | HTTP seconds | Native prefill seconds | Native decode seconds |
+|---|---:|---:|---:|
+| NInfer shared SIMT |24.8474|17.0427|6.9408|
+| NInfer shared cuBLAS |23.6827|16.0337|6.8531|
+| Installed native Strata |10.8372|8.0885|2.6734|
+
+The candidate improved HTTP4.69% and prefill5.92%. NInfer remains2.19x slower in
+HTTP and1.98x slower in prefill. Both NInfer arms retained102slots/layer,
+4,896seeded experts,13,537,714,176cache bytes and the2GiB reserve. Sampled peaks
+were approximately29.996/30.004GiB, confirming the borrowed staging did not reduce
+cache capacity. Every measured output and MTP tuple was stable within its arm;
+arithmetic changed the output and moved62rounds/124drafts/65accepts to59/116/68,
+so no isolated decode gain is claimed. Keep `NINFER_V100_SHARED_CUBLAS=1` opt-in.
+
+The prior architecture attribution predates full QK/PV MMA, hyper cuBLAS and
+shared cuBLAS, which together materially changed the prefill profile. The next
+`--architecture-breakdown` therefore reuses the low-overhead clean/diagnostic
+pair design on the complete current best stack: FP8KV/full262K allocation,
+8192chunk, dense+pair, pinned source, full QSA, hyper cuBLAS and shared cuBLAS.
+It requires corresponding NInfer output/usage/MTP identity between clean and
+instrumented requests and records instrumentation overhead, residency and memory.
+Existing host spans, CUDA stage intervals and installed Strata native timers will
+identify the next largest source-directed implementation target; overlapping
+intervals remain non-additive. This is a fresh attribution after structural
+changes, not an unchanged performance sweep or a speedup claim.

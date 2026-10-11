@@ -1,7 +1,6 @@
 name: V100 Structural Engine Comparison
-# Source-directed shared expert projections: independent oracles and actual-shape
-# operator admission before a serving race.
-# Explicit opt-in candidate; no arithmetic default promotion.
+# Re-attribute the complete current best stack after three source-directed
+# structural changes. Existing arithmetic remains explicitly opt-in.
 on:
   workflow_dispatch:
   push:
@@ -137,11 +136,11 @@ jobs:
           build-structural-comparison/tests/ninfer_qwen3_8_flash_next_moe_shared_volta_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/shared-cublas-independent-oracle-and-admission.log"
           cp build-structural-comparison/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
-      - name: Compare qualified shared expert projections with native Strata
+      - name: Attribute current best NInfer and native Strata
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --shared-cublas-race \
+          python3 tools/telemetry/structural_v100.py --architecture-breakdown \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \
