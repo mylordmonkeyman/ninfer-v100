@@ -986,3 +986,68 @@ its evidence. Measure the remaining two QPN and three candidate fresh servers,
 then two diagnostic requests per arm. The report identifies the reused source
 run; it is not claimed to be wholly contemporaneous. No additional tuning sweep,
 weight conversion, cache eviction or default promotion is involved.
+
+
+### Step 2 request screening complete: retain dense projection opt-in
+
+Run [38099919154](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38099919154)
+passed the public-dispatch/independent operator, expert arithmetic, stream lifetime
+and cache join gates, and completed the resumed three-server-per-arm comparison.
+Each fresh server received cold + four warmups + measured 7111 prompt/128 output,
+zero reuse requests. The first unchanged QPN control was reused from the earlier
+partial run; the other five timing servers were measured after the planner fix.
+
+| Warmed median | QPN control | Full-chunk dense GEMM | Change |
+|---|---:|---:|---:|
+| HTTP | 36.4730 s | 31.8961 s | -12.55% |
+| Native prefill | 30.3650 s | 25.6655 s | -15.48% |
+| Native decode | 5.7614 s | 6.0977 s | +5.84% |
+| Sampled peak GPU | 29.8337 GiB | 29.9177 GiB | +0.0840 GiB |
+| Actual experts/layer | 156 | 155 | -1 |
+
+HTTP ranges were 36.3911–36.6983 s and 31.7557–32.3774 s respectively.
+Both arms produced 7111/128 tokens with no reuse. Within each arm the warmed
+outputs and native MTP work were consistent across fresh servers; cross-arm
+outputs differed. MTP acceptance changed from 71/112 drafted tokens (56 rounds)
+to 68/116 (59 rounds), so decode differences are confounded by changed work.
+The candidate seeded 7440 experts versus 7488 for the control. Separate diagnostic
+requests passed input36/output48-layer and per-prompt7111-token conservation,
+with the expected selector dispatch. Inclusive diagnostic spans remain unsuitable
+for adding up exclusive GPU cost.
+
+This is a measured prefill and request improvement with the same represented
+weights, not a model-quality equivalence result. Keep
+`NINFER_V100_FP8_PREFILL_GEMM=1` opt-in and default0; full-model numerical
+qualification is still required before arithmetic default promotion. No further
+SV7 attention sweep is justified before addressing the larger MoE share.
+Step 2 performance screening is complete. Steps 3–5 remain open; the bounded
+controlled Strata comparison in Step 6 is already complete with its documented
+representation and speculative-work limits. NInfer has not been shown to beat Strata.
+
+### Step 3 started: resident same-shape GEMM throughput reference
+
+Measure the production expert pair (including compact-weight expansion, gather,
+activation/scaling and scatter) alongside a resident synthetic FP16 reference
+for its two GEMM geometries: gate/up1280x2560 and down2560x640. The reference
+uses the same cuBLAS transpose/layout, FP32 accumulation/math mode, algorithm,
+4 MiB workspace, 256-route tile and eight-route padding. Its two inputs are
+independent resident operands; it does not reproduce the expert pair's SiLU or
+route joins and is not a production implementation.
+
+Before timing, qualify all reference outputs against independent sequential FP32
+dots from represented FP16 operands at the relevant padded sizes, with output
+canaries. Retain NRMSE<=0.002/cosine>=0.99999. Existing expert-pair qualification
+also retains extreme represented inputs/divisors, guard checks and exact zero
+behavior before its timing. Report pure GEMM gate/up, down and pair medians with
+three warmups/seven measurements at32/33/64/128/256/512 routes, both useful and
+padding-inclusive TFLOPs. The production pair's established mean-cost screen is
+reported separately; differences are headroom evidence, not exclusive additive
+phase attribution or an end-to-end speedup.
+
+This bounded job changes no production math, scheduling, model assets or defaults
+and starts no servers. Actual prefill GPU idle attributable to H2D remains an open
+measurement: existing request-wide overlapping copy/wait/kernel event sums cannot
+establish whole-device idle or the prefill critical path, and nsys was unavailable.
+Use this result to decide whether grouped launches, fewer expansion/staging bytes,
+or a better GEMM kernel is worth an implementation, rather than repeat scheduling
+experiments. Step 3 is not complete merely because this reference is measured.

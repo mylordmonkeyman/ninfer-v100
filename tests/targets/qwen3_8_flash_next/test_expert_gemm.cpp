@@ -92,11 +92,18 @@ int main() {try {
             std::cout<<"gemm.divisor="<<divisor<<" routes="<<count<<" nrmse="<<worst<<" cosine="<<min_cosine<<'\n';
         }
     }
+    // Zero input must produce exact zero, including padded GEMM columns.
+    CUDA_CHECK(cudaMemset(input.p,0,input.bytes));
+    gemm.launch(gpu,static_cast<const FlashNextCachedExpertGroup*>(groups.p),7,device.stream);
+    CUDA_CHECK(cudaStreamSynchronize(device.stream));
+    std::vector<float> zero(7*2560);output.copy_to_host(zero.data(),zero.size()*4);
+    for(float x:zero)require(x==0,"zero expert input did not produce zero output");
+    input.copy_from_host(inputs.data(),inputs.size()*2);
     // Same compact expert, inputs and destinations; expansion is included in
     // GEMM's device interval. Copies and CPU staging are excluded from both.
     cudaEvent_t begin=nullptr,end=nullptr;
     CUDA_CHECK(cudaEventCreate(&begin));CUDA_CHECK(cudaEventCreate(&end));
-    for(unsigned count:{8U,16U,20U,32U,64U,128U,256U}) {
+    for(unsigned count:{8U,16U,20U,32U,33U,64U,128U,256U,512U}) {
         for(unsigned g=0;g<descriptors.size();++g) {
             descriptors[g].count=std::min(4U,count>g*4?count-g*4:0U);
             for(auto& task:descriptors[g].tasks)task.input=input.p;
@@ -117,12 +124,6 @@ int main() {try {
         }
     }
     CUDA_CHECK(cudaEventDestroy(begin));CUDA_CHECK(cudaEventDestroy(end));
-    // Zero input must produce exact zero, including padded GEMM columns.
-    CUDA_CHECK(cudaMemset(input.p,0,input.bytes));
-    gemm.launch(gpu,static_cast<const FlashNextCachedExpertGroup*>(groups.p),7,device.stream);
-    CUDA_CHECK(cudaStreamSynchronize(device.stream));
-    std::vector<float> zero(7*2560);output.copy_to_host(zero.data(),zero.size()*4);
-    for(float x:zero)require(x==0,"zero expert input did not produce zero output");
     std::cout<<"Independent represented-NVFP4 FP32 expert GEMM qualification passed\n";
     return 0;
 } catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

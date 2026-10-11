@@ -1,5 +1,5 @@
 name: V100 Structural Engine Comparison
-# Step 2: fix full-prefill scratch composition; resume dense projection A/B.
+# Step 3: same-shape resident GEMM reference; no serving or default changes.
 on:
   workflow_dispatch:
   push:
@@ -76,63 +76,22 @@ jobs:
           lscpu > "$results/cpu.txt"
           /usr/local/cuda-12.8/bin/nvcc --version > "$results/cuda.txt"
           nvidia-smi --id=0 --query-gpu=uuid --format=csv,noheader | tr -d '[:space:]' > "$results/gpu-uuid.txt"
-      - name: Download validated resident profile
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: v100-sv2-37270512213-1
-          run-id: 37270512213
-          github-token: ${{ github.token }}
-          path: structural-profile-source
-      - name: Step 2 build and qualify dense GDN projection candidate
+      - name: Step 3 build and qualify expert arithmetic and resident reference
         shell: bash
         run: |
           set -euo pipefail
           cmake -S . -B build-structural-comparison -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=70 \
             -DNINFER_BUILD_MEDIA=OFF -DNINFER_BUILD_APPS=ON -DNINFER_BUILD_BENCHMARKS=OFF -DBUILD_TESTING=ON
-          cmake --build build-structural-comparison --target ninfer-serve ninfer_fp8_f32_prefill_sm70_test ninfer_qwen3_8_flash_next_fp8_f32_test ninfer_qwen3_8_flash_next_expert_gemm_test ninfer_qwen3_8_flash_next_expert_stream_test ninfer_qwen3_8_flash_next_expert_cache_test
-          # Default remains QPN; the new route is opt-in. No-GPU return77 fails.
-          build-structural-comparison/tests/ninfer_qwen3_8_flash_next_fp8_f32_test 2>&1 \
-            | tee "$QUALIFICATION_RESULTS/fp8-f32-existing-route.log"
-          # Every independent oracle and lifetime gate runs before operator timing.
-          build-structural-comparison/tests/ninfer_fp8_f32_prefill_sm70_test 2>&1 \
-            | tee "$QUALIFICATION_RESULTS/fp8-f32-prefill-oracle-and-screen.log"
+          cmake --build build-structural-comparison --target ninfer_qwen3_8_flash_next_expert_gemm_test ninfer_qwen3_8_flash_next_expert_gemm_resident_reference_test
+          # Each fixture qualifies its represented inputs before collecting timing.
+          # Return77 is a hardware failure, not a successful skipped qualification.
           build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_gemm_test 2>&1 \
-            | tee "$QUALIFICATION_RESULTS/expert-gemm-fp32-oracle.log"
-          NINFER_V100_PREFILL_EXPERT_GEMM=fp16 NINFER_V100_PREFILL_RESIDENT_GEMM=1 \
-            NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=1 \
-            build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_stream_test 2>&1 \
-            | tee "$QUALIFICATION_RESULTS/qualified-stream-coexistence-fixture.log"
-          NINFER_V100_PREFILL_EXPERT_GEMM=fp16 NINFER_V100_PREFILL_RESIDENT_GEMM=1 \
-            NINFER_V100_PREFILL_CPU_STREAM_OVERLAP=1 \
-            build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
-            | tee "$QUALIFICATION_RESULTS/qualified-cache-join-fixture.log"
+            | tee "$QUALIFICATION_RESULTS/expert-gemm-fp32-oracle-and-cost.log"
+          build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_gemm_resident_reference_test 2>&1 \
+            | tee "$QUALIFICATION_RESULTS/expert-gemm-resident-reference.log"
           cp build-structural-comparison/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
-          cat "$QUALIFICATION_RESULTS/fp8-f32-prefill-oracle-and-screen.log" >> "$GITHUB_STEP_SUMMARY"
-      - name: Retrieve completed QPN control without repeating its requests
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: v100-structural-comparison-38098932339-1
-          run-id: 38098932339
-          github-token: ${{ github.token }}
-          path: dense-comparison-reference
-      - name: Step 2 dense projection request-level A/B
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --dense-prefill-gemm-ab \
-            --dense-baseline-reference dense-comparison-reference/matrix \
-            --ninfer build-structural-comparison/apps/ninfer-serve \
-            --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
-            --profile structural-profile-source/sv2-static-profile.json \
-            --strata-python /opt/ai/strata/.venv/bin/python \
-            --strata-server /opt/ai/strata/serve/server.py \
-            --strata-config /opt/ai/strata/strata-unsloth-ud-q4_k_xl.json \
-            --strata-binary /opt/ai/strata/engine/strata \
-            --gpu-uuid "$(cat "$QUALIFICATION_RESULTS/gpu-uuid.txt")" \
-            --output "$QUALIFICATION_RESULTS/matrix" \
-            | tee "$QUALIFICATION_RESULTS/matrix-summary.log"
-          cat "$QUALIFICATION_RESULTS/matrix-summary.log" >> "$GITHUB_STEP_SUMMARY"
+          cat "$QUALIFICATION_RESULTS/expert-gemm-resident-reference.log" >> "$GITHUB_STEP_SUMMARY"
       - name: Compress completed or partial native logs
         if: always()
         shell: bash
