@@ -1483,3 +1483,35 @@ wait/CPU spans and summed worker jobs/durations alongside streamed expert group
 geometry/bytes/copy/dependency intervals. Worker durations and host scopes overlap;
 do not sum them or reinterpret dependency wait as whole-GPU idle. This changed
 profile measurement should choose work reduction, not another ordering sweep.
+
+## 2026-10-11: 8192-profile attribution and bounded QSA follow-up
+
+Run `38120326962` at `79d996f7` completed every retained codec, QSA, dense,
+expert, lifetime and cache gate.  Its uninstrumented 7,111-token reference was
+31.2085 s HTTP, 23.9321 s native prefill and 6.7460 s decode.  The paired
+diagnostic produced exactly matching output, usage and native MTP work but added
+7.5166 s of prefill overhead, so its inclusive timings are attribution evidence,
+not a production-latency bound.
+
+Within the 31.4487 s instrumented prefill, inclusive MoE stages were 15.9484 s
+(50.73%) and QSA attention/indexer stages were 8.1202 s (25.83%), including
+7.9418 s in main QSA attention.  Hyper/norm stages were 2.8944 s (9.21%), QSA
+projection 1.2987 s (4.13%), GDN projection/recurrence 1.1633 s combined, and
+PLE 0.6503 s.  These CUDA-event intervals contain dependencies and overlap and
+must not be summed into a critical path.
+
+The phase-owned streamed-expert evidence covered 2,653,678 GPU routes in 10,111
+expert groups, 27.957 GB H2D, 88.552 GB modeled FP16 expansion writes and
+25.816 TFLOP of modeled useful GEMM work.  Copy intervals were 2.952 s,
+compute-dependency waits 2.389 s and kernel intervals 2.441 s.  Dependency wait
+is not whole-GPU idle and overlaps other execution; this evidence rejects
+another expert ordering experiment as the next major lever.
+
+QSA is now large enough to revisit the previously admitted, unchanged SV7
+late-half score-MMA candidate.  The candidate retains its prior 4,096-position
+paired numerical evidence and stays opt-in/off by default.  The next bounded
+campaign uses the current FP8-KV, 262K-allocation, 8192-chunk, dense-GEMM and
+fused-expansion profile; first it requires exactly six MMA and six SIMT QSA
+dispatches on the real 7,111-token request, then rotates three fresh-server
+SIMT, late-half-MMA and installed-native-Strata arms.  No new layer mask,
+arithmetic relaxation or default promotion is part of this screen.

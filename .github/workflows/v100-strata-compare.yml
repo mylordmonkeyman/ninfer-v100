@@ -1,5 +1,5 @@
 name: V100 Structural Engine Comparison
-# Renewed objective: attribute the faster 8192 profile before selecting more work reduction.
+# Renewed objective: test the admitted late-half QSA score-MMA path on the faster 8192 profile.
 on:
   workflow_dispatch:
   push:
@@ -126,11 +126,11 @@ jobs:
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/cache-join-oracle.log"
           cp build-structural-comparison/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
-      - name: Attribute the tested 8192 FP8 profile with paired diagnostics
+      - name: Race admitted late-half QSA score MMA against SIMT and installed Strata
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --large-profile-breakdown \
+          python3 tools/telemetry/structural_v100.py --qsa-late-half-race \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \
