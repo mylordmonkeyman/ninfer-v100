@@ -1176,3 +1176,46 @@ exact corresponding output/usage/native MTP work across arms and request ordinal
 observe dispatch, cache capacity and GPU peak. Retain only if the request-level
 result justifies it, otherwise remove the experimental route and advance. Step 3
 is still open pending this one implementation test; Steps 4 and 5 remain pending.
+
+
+### Step 3 complete: fused expansion retained as an opt-in
+
+Run [38104175339](https://github.com/mylordmonkeyman/ninfer-v100/actions/runs/38104175339)
+passed independent numerical/extreme/guard gates, exact scalar operator parity,
+stream lifetime/ownership and cache joins. All corresponding request outputs, usage
+and native MTP work matched across the six server cells. One scalar control was
+reused from38102677923; the other five cells were fresh and alternated.
+
+| Warmed median | Scalar expansion | Fused pair expansion | Change |
+|---|---:|---:|---:|
+| HTTP | 32.4921 s | 32.0157 s | -1.47% |
+| Native prefill | 25.6397 s | 25.2293 s | -1.60% |
+| Native decode | 6.1138 s | 6.0832 s | -0.50% |
+
+HTTP ranges overlap (31.6339–32.6828 s scalar,31.5468–32.0456 s fused). This is a
+small positive screening result, not a statistically established universal win.
+Independent expert-pair mean cost improved0.132096→0.0995392 ms at32 routes and
+0.208896→0.175117 ms at256. Actual residency stayed155 slots/layer,7440 seeded,
+and peak29.9177 GiB. Retain `NINFER_V100_EXPERT_PAIR_EXPAND=1` as an opt-in with
+default0; do not promote arithmetic defaults or repeat unchanged timing sweeps.
+Step3's bounded work reduction is complete. Whole-device H2D idle was not measured;
+phase-owned dependency intervals remain instrumented evidence with the stated limits.
+
+### Step 4 started: residency benefit under 262K allocated context
+
+Existing runtime planning sizes KV by configured physical pages; expert allocation
+already clips the requested maximum against remaining memory and its2 GiB reserve.
+That clipping is a memory constraint, not a measured cache-policy recommendation.
+Keep static64 default and adaptive LRU opt-in. Compare static64 against requested
+adaptive156 at262144 max-context/KV capacity, recording actual clipped slots
+(previously101 without the new dense scratch), startup seeding and sampled GPU peak.
+The allocator remains authoritative; no hard-coded101 capacity or reserve changes.
+
+Use the same7111 prompt/128 output/zero reuse workload, BF16KV/MTP2/2048 chunks,
+88 workers on32 physical cores, dense GEMM opt-in1 and fused expansion opt-in1.
+Three alternating fresh servers per arm each receive cold/four warmups/measured.
+Independent dense/expert and lifetime/cache gates precede timing. Record output
+and native MTP differences rather than require cross-policy exact parity, since
+residency can change CPU/GPU arithmetic. This is a262K allocation test, **not**
+a full-length prompt test. Decide whether lazy/paged device KV is justified from
+this result; Step5 separately qualifies FP8KV and tests actual long prompts.

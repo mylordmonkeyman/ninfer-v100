@@ -1,5 +1,5 @@
 name: V100 Structural Engine Comparison
-# Step 3: fused packed-pair expert expansion; qualified request A/B.
+# Step 4: context-capacity-aware cache policy screening; no default changes.
 on:
   workflow_dispatch:
   push:
@@ -83,7 +83,7 @@ jobs:
           run-id: 37270512213
           github-token: ${{ github.token }}
           path: structural-profile-source
-      - name: Step 3 build and qualify fused expert expansion
+      - name: Step 4 retain dense and fused expert qualification
         shell: bash
         run: |
           set -euo pipefail
@@ -120,19 +120,11 @@ jobs:
             build-structural-comparison/tests/ninfer_qwen3_8_flash_next_expert_cache_test 2>&1 \
             | tee "$QUALIFICATION_RESULTS/cache-join-oracle.log"
           cp build-structural-comparison/CMakeCache.txt "$QUALIFICATION_RESULTS/ninfer-CMakeCache.txt"
-      - name: Retrieve completed scalar expansion control
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: v100-structural-comparison-38102677923-1
-          run-id: 38102677923
-          github-token: ${{ github.token }}
-          path: expert-expansion-reference
-      - name: Step 3 fused expert expansion request A/B
+      - name: Step 4 static64 versus adaptive residency at 262K capacity
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/telemetry/structural_v100.py --expert-pair-expand-ab \
-            --expert-pair-expand-reference expert-expansion-reference/matrix \
+          python3 tools/telemetry/structural_v100.py --context-residency-ab \
             --ninfer build-structural-comparison/apps/ninfer-serve \
             --artifact "$RUNNER_TEMP/qualified-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ninfer" \
             --profile structural-profile-source/sv2-static-profile.json \

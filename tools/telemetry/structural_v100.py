@@ -417,6 +417,8 @@ def main():
     p.add_argument('--expert-pair-expand-ab', action='store_true',
                    help='Step 3: scalar/two-launch versus packed-pair/fused expert expansion')
     p.add_argument('--expert-pair-expand-reference', type=Path)
+    p.add_argument('--context-residency-ab', action='store_true',
+                   help='Step 4: static64 versus allocator-clipped adaptive156 at 262K BF16 capacity')
     p.add_argument('--comparison-reference', type=Path)
     a = p.parse_args()
     if a.controlled_strata_followup:
@@ -435,6 +437,9 @@ def main():
         '--prefill-chunk', '2048', '--kv-dtype', 'bf16', '--no-prefix-reuse', '--no-thinking',
         '--no-cuda-graph', '--no-qsa-prefill-mma',
         '--spec', 'mtp', '--draft-tokens', '2', '--lm-head-draft']
+    if a.context_residency_ab:
+        a.ninfer_flags = ab.option(a.ninfer_flags, '--max-context', '262144')
+        a.ninfer_flags = ab.option(a.ninfer_flags, '--kv-capacity', '262144')
     a.long_prompt = LONG
     a.max_output_tokens = 128
     a.warmups = 4; a.repeats = 1; a.telemetry_level = 0
@@ -476,7 +481,10 @@ def main():
               for name,value in [('dense-qpn','0'),('dense-full-chunk','1')]]
     pair_arms=[('ninfer',name,dict(dense_arms[1][2],NINFER_V100_EXPERT_PAIR_EXPAND=value))
                for name,value in [('expand-scalar','0'),('expand-pair','1')]]
-    manifest_arms = (pair_arms if a.expert_pair_expand_ab else [dense_arms[1]] if a.moe_work_breakdown else dense_arms if a.dense_prefill_gemm_ab else [('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
+    context_arms=[(engine,arm,dict(flags,NINFER_V100_FP8_PREFILL_GEMM='1',
+                                  NINFER_V100_EXPERT_PAIR_EXPAND='1'))
+                  for engine,arm,flags in residency_arms()]
+    manifest_arms = (context_arms if a.context_residency_ab else pair_arms if a.expert_pair_expand_ab else [dense_arms[1]] if a.moe_work_breakdown else dense_arms if a.dense_prefill_gemm_ab else [('ninfer', 'adaptive156-qualified', residency_arms()[1][2])] if a.prefill_breakdown else
                      [default_arm] if a.qualified_default_smoke else
                      [("ninfer", "adaptive156-qualified", residency_arms()[1][2]), ARMS[1]] if (a.final_comparison or a.controlled_comparison) else
                      residency_arms() if a.residency_gemm_ab else
@@ -488,7 +496,7 @@ def main():
         arms=[ARMS[0]] if a.stream_attribution_only else manifest_arms,
         fresh_servers_per_arm=2 if (a.prefill_breakdown or a.moe_work_breakdown) else 1 if (a.stream_attribution_only or a.qualified_default_smoke) else 3,
         moe_work_breakdown=a.moe_work_breakdown,
-        expert_pair_expand_ab=a.expert_pair_expand_ab,
+        expert_pair_expand_ab=a.expert_pair_expand_ab, context_residency_ab=a.context_residency_ab,
         prefill_breakdown=a.prefill_breakdown, dense_prefill_gemm_ab=a.dense_prefill_gemm_ab,
         stream_attribution_only=a.stream_attribution_only, expert_gemm_ab=a.expert_gemm_ab, resident_gemm_ab=a.resident_gemm_ab, cpu_stream_overlap_ab=a.cpu_stream_overlap_ab,
         qualified_default_smoke=a.qualified_default_smoke,
@@ -498,7 +506,7 @@ def main():
         timing_telemetry_level=0, diagnostic_telemetry_level=2,
         cache_budget='actual allocations logged; requested maxima are not equal-memory controls',
         cold_definition='first request after fresh server; host file cache preserved',
-        cross_quant_comparison='same represented artifact; exact-output expansion work reduction' if a.expert_pair_expand_ab else 'same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.residency_gemm_ab or a.prefill_breakdown or a.dense_prefill_gemm_ab or a.moe_work_breakdown)
+        cross_quant_comparison='same represented artifact; exact-output expansion work reduction' if a.expert_pair_expand_ab else 'same represented artifact; cache residency can change CPU/GPU arithmetic' if a.context_residency_ab else 'same represented artifact; arithmetic-changing expert route' if (a.expert_gemm_ab or a.resident_gemm_ab or a.cpu_stream_overlap_ab or a.residency_gemm_ab or a.prefill_breakdown or a.dense_prefill_gemm_ab or a.moe_work_breakdown)
             else 'descriptive; source artifacts and frontend token counts differ',
         ninfer_flags=a.ninfer_flags), indent=2)+'\n')
     cells = []
@@ -511,7 +519,7 @@ def main():
             result = ab.run_case(a, engine, tag, overrides)
             folder = a.output/(engine+'-'+tag)
             cell = dict(engine=engine, arm=arm, mode=mode, folder=str(folder), result=result)
-            if a.residency_gemm_ab:
+            if a.residency_gemm_ab or a.context_residency_ab:
                 cell['residency'] = residency_observation(folder, a.max_output_tokens)
             if a.final_comparison or a.prefill_breakdown or a.controlled_comparison or a.dense_prefill_gemm_ab or a.moe_work_breakdown or a.expert_pair_expand_ab:
                 samples=[json.loads(line) for line in (folder/'system.jsonl').read_text().splitlines()]
@@ -533,6 +541,27 @@ def main():
         finally:
             (a.output/'summary.json').write_text(json.dumps(dict(cells=cells, timing=summarize(cells)), indent=2)+'\n')
         ab.release_gpu()
+    if a.context_residency_ab:
+        for repeat in range(3):
+            for engine,arm,flags in (context_arms if repeat!=1 else list(reversed(context_arms))):
+                run(engine,arm,flags,arm+'-262k-r'+str(repeat),'timing')
+                folder=Path(cells[-1]['folder'])
+                rows=[json.loads(l) for l in (folder/'requests.jsonl').read_text().splitlines()]
+                if [r['phase'] for r in rows]!=['cold']+['warmup']*4+['measured']:
+                    raise ValueError('context-residency schedule incomplete')
+                log=gzip.open(folder/'server.log.gz','rt').read()
+                if 'v100.expert_pair_expand=1' not in log:
+                    raise ValueError('qualified fused expansion dispatch missing')
+        report=dict(step=4,status='context_residency_screen_complete',timing=summarize(cells),
+            context_capacity=262144,prompt_tokens=7111,output_tokens=128,
+            observations=[dict(arm=c['arm'],**c['residency']) for c in cells],
+            limits=['Combined cache policy/capacity screen; allocator reserve determines actual slots.',
+                    'Full allocated 262K context, not a 262K prompt.',
+                    'Outputs and native MTP work recorded; cache policy may change arithmetic.',
+                    'Static64 remains default; adaptive residency remains opt-in.'])
+        (a.output/'context-residency-report.json').write_text(json.dumps(report,indent=2)+'\n')
+        print(json.dumps(report,indent=2),flush=True)
+        return
     if a.expert_pair_expand_ab:
         if a.expert_pair_expand_reference:
             cells.append(reuse_pair_expand_baseline(a.expert_pair_expand_reference,a.output,
